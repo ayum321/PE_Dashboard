@@ -2253,6 +2253,14 @@ function renderSlaBufferChart(k) {
                          : (k.sla?.daily_limit_hrs ?? SLA_DAILY_HRS));
   const peakLabel = isWindow ? "Window" : "Peak";
 
+  // Update subtitle text to match the active metric
+  const _subtitleEl = document.getElementById("chart-sla-subtitle");
+  if (_subtitleEl) {
+    _subtitleEl.textContent = isWindow
+      ? "Headroom between worst daily batch window and the SLA ceiling"
+      : "Headroom between worst-job peak and the daily SLA limit";
+  }
+
   // Map buffer_pct → needle angle on a 180° arc.
   // Arc spans -100% (left, 180°) through 0% (middle, 90°) to +100% (right, 0°).
   // Positive buffer = needle swings right (safe). Negative = swings left (breach).
@@ -2508,6 +2516,7 @@ function renderWindowTrendChart(winData) {
   const topNIdx = new Set(
     values.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v).slice(0, TOP_N).map(x => x.i)
   );
+  const breachCount = winData.filter(w => w.breach).length;
 
   // ── SLA zone band plugin ─────────────────────────────────────
   // Draws translucent colored bands for each SLA zone — like Grafana threshold bands.
@@ -2585,13 +2594,15 @@ function renderWindowTrendChart(winData) {
         }
 
         // Value labels
+        // Peak → ▲ marker + value + job name (always)
+        // Non-peak breach → value only when few breach days (≤5) and differs from peak
+        //   (avoids printing "11.0h" on 15 identical breach bars)
+        // Non-breach top-N → value only (gives scale context)
         ctx.textAlign = "center";
         if (isPeak) {
           ctx.fillStyle = THEME.amber;
           ctx.font = '700 7px "Sora", sans-serif';
           ctx.fillText("▲ worst", bar.x, bar.y - 18);
-        }
-        if (isTop || isPeak) {
           const jobLabel = topJobs[i]
             ? (topJobs[i].length > 13 ? topJobs[i].slice(0, 11) + "…" : topJobs[i])
             : null;
@@ -2603,9 +2614,15 @@ function renderWindowTrendChart(winData) {
             ctx.font = '600 10px "Sora", sans-serif';
             ctx.fillText(jobLabel, bar.x, bar.y + 5);
           }
-        } else if (isBreach) {
+        } else if (isBreach && breachCount <= 5 && Math.abs(v - peakVal) > 0.05) {
+          // Few distinct breach days — worth labelling individually
           ctx.fillStyle = hexA(THEME.red, 0.85);
           ctx.font = '600 10.5px "Sora", sans-serif';
+          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - 4);
+        } else if (!isBreach && isTop) {
+          // OK/AT_RISK top-N bars — show value for scale context
+          ctx.fillStyle = hexA(THEME.white, 0.80);
+          ctx.font = '600 10px "Sora", sans-serif';
           ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - 4);
         }
 
