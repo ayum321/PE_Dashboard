@@ -1,0 +1,13 @@
+.cache/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pe_config.json
+.pe_cache.json
+auth_record.json
+.msal_cache/
+$null
+__diag_out.txt
+__diag_err.txt
+desktop.ini

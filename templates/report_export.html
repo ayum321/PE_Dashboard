@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PE Audit Report — {{ customer }} {{ env }}</title>
+<style>
+/* ─── CSS VARIABLES — C_dict colors from app_v2.py ─────────────────── */
+:root, [data-theme="dark"] {
+  --bg-page:      #060914;
+  --bg-card:      #0d1526;
+  --bg-card2:     #111d36;
+  --bg-table-hd:  #1e2540;
+  --bg-table-r:   #0d1526;
+  --bg-table-rh:  #111d36;
+  --border:       #213060;
+  --text-primary: #f0f4ff;
+  --text-muted:   #6b7db3;
+  --text-head:    #a8b4d0;
+  --green:        #10d96e;
+  --amber:        #f59e0b;
+  --red:          #f43f5e;
+  --blue:         #3b82f6;
+  --purple:       #a855f7;
+  --cyan:         #22d3ee;
+  --header-bg1:   #06091a;
+  --header-bg2:   #14296a;
+}
+[data-theme="light"] {
+  --bg-page:      #f0f4fb;
+  --bg-card:      #ffffff;
+  --bg-card2:     #f3f7ff;
+  --bg-table-hd:  #e8edf8;
+  --bg-table-r:   #ffffff;
+  --bg-table-rh:  #f0f4ff;
+  --border:       #c9d4ee;
+  --text-primary: #1e293b;
+  --text-muted:   #64748b;
+  --text-head:    #334155;
+  --green:        #16a34a;
+  --amber:        #d97706;
+  --red:          #dc2626;
+  --blue:         #2563eb;
+  --purple:       #7c3aed;
+  --cyan:         #0891b2;
+  --header-bg1:   #1e3a5f;
+  --header-bg2:   #2d5a9e;
+}
+/* ─── RESET & BASE ──────────────────────────────────────────────────── */
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+body {
+  font-family:'Segoe UI','Inter',Arial,sans-serif;
+  background:var(--bg-page); color:var(--text-primary);
+  font-size:13px; line-height:1.5;
+}
+.page { max-width:1180px; margin:0 auto; padding:28px 24px; }
+
+/* ─── FIXED CONTROLS ────────────────────────────────────────────────── */
+.theme-btn {
+  position:fixed; top:18px; right:110px; z-index:999;
+  background:var(--bg-card2); border:1px solid var(--border);
+  border-radius:24px; padding:7px 16px; cursor:pointer;
+  font-size:12px; font-weight:600; color:var(--text-primary);
+  display:flex; align-items:center; gap:6px;
+}
+.print-btn {
+  position:fixed; top:18px; right:20px; z-index:999;
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  color:#fff; border:none; border-radius:24px;
+  padding:8px 18px; font-size:12px; font-weight:600;
+  cursor:pointer; box-shadow:0 4px 16px rgba(59,130,246,.4);
+}
+
+/* ─── HEADER ────────────────────────────────────────────────────────── */
+.report-header {
+  background:linear-gradient(135deg,var(--header-bg1),var(--header-bg2));
+  border:1px solid var(--border); border-radius:16px;
+  padding:28px 36px; margin-bottom:22px;
+  display:flex; justify-content:space-between; align-items:center;
+  position:relative; overflow:hidden;
+}
+.report-header::before {
+  content:""; position:absolute; top:-40px; right:-40px;
+  width:220px; height:220px; border-radius:50%;
+  background:radial-gradient(circle,rgba(59,130,246,.15),transparent 70%);
+}
+.report-header h1 { font-size:22px; font-weight:800; color:#fff; margin-bottom:4px; }
+.rh-sub  { font-size:12px; color:#94a3b8; margin-bottom:6px; }
+.rh-date { font-size:11px; color:#64748b; }
+.customer-block { text-align:right; }
+.customer-name  { font-size:19px; font-weight:700; color:#fff; margin-bottom:6px; }
+.env-badge {
+  background:rgba(59,130,246,.15); color:#7cb9ff;
+  border:1px solid rgba(59,130,246,.35);
+  padding:4px 14px; border-radius:20px;
+  font-size:11px; font-weight:700; display:inline-block;
+}
+
+/* ─── SIGN-OFF BANNER ───────────────────────────────────────────────── */
+.signoff-banner {
+  border-radius:14px; padding:20px 28px; margin-bottom:22px;
+  display:flex; justify-content:space-between; align-items:center;
+  background:{{ sign_color }}12; border:2px solid {{ sign_color }}44;
+}
+.signoff-verdict { font-size:22px; font-weight:800; color:{{ sign_color }}; }
+.signoff-meta   { font-size:12px; color:var(--text-muted); text-align:right; }
+.signoff-meta b { color:var(--text-primary); }
+
+/* ─── KPI GRID ──────────────────────────────────────────────────────── */
+.kpi-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px; }
+.kpi-box  {
+  background:var(--bg-card); border:1px solid var(--border);
+  border-radius:14px; padding:20px 18px;
+}
+.kpi-label { font-size:10px; color:var(--text-muted); text-transform:uppercase;
+  letter-spacing:.1em; font-weight:700; margin-bottom:8px; }
+.kpi-value { font-size:30px; font-weight:900; line-height:1; margin-bottom:4px; }
+.kpi-sub   { font-size:10px; color:var(--text-muted); }
+
+/* ─── SECTIONS ──────────────────────────────────────────────────────── */
+.section {
+  background:var(--bg-card); border:1px solid var(--border);
+  border-radius:14px; padding:22px 26px; margin-bottom:18px;
+}
+.section-header { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+.section-icon { font-size:20px; }
+.section-header h2 { font-size:15px; font-weight:700; margin-bottom:2px; }
+.section-header .sub { font-size:11px; color:var(--text-muted); }
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.two-col .section { margin-bottom:0; }
+
+/* ─── TABLES ────────────────────────────────────────────────────────── */
+table { width:100%; border-collapse:collapse; font-size:12px; }
+thead tr { background:var(--bg-table-hd); }
+th {
+  padding:10px 12px; text-align:left; font-size:10px;
+  color:var(--text-head); font-weight:700; text-transform:uppercase;
+  letter-spacing:.06em; border-bottom:2px solid var(--border); white-space:nowrap;
+}
+td { padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+tbody tr { background:var(--bg-table-r); }
+tbody tr:hover { background:var(--bg-table-rh); }
+.host-cell { font-size:11px; }
+.dim { color:var(--text-muted); font-size:11px; }
+
+/* ─── TAGS ──────────────────────────────────────────────────────────── */
+.tag {
+  display:inline-block; padding:2px 9px; border-radius:20px;
+  font-size:10px; font-weight:700; white-space:nowrap; border:1px solid transparent;
+}
+.tag-green  { background:rgba(16,217,110,.12); color:var(--green); border-color:rgba(16,217,110,.3); }
+.tag-amber  { background:rgba(245,158,11,.12); color:var(--amber); border-color:rgba(245,158,11,.3); }
+.tag-red    { background:rgba(244,63,94,.12);  color:var(--red);   border-color:rgba(244,63,94,.3); }
+.tag-blue   { background:rgba(59,130,246,.12); color:var(--blue);  border-color:rgba(59,130,246,.3); }
+.tag-muted  { background:var(--border); color:var(--text-muted); }
+.mtag {
+  display:inline-block; background:var(--bg-card2);
+  color:var(--text-muted); padding:1px 6px; border-radius:4px;
+  font-size:9px; margin:1px;
+}
+
+/* ─── APPROVAL ──────────────────────────────────────────────────────── */
+.approval-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+.appr-box {
+  background:var(--bg-card2); border:1px solid var(--border);
+  border-radius:10px; padding:16px 18px;
+}
+.appr-box h3 {
+  font-size:11px; font-weight:700; color:var(--text-muted);
+  text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px;
+}
+.appr-box p { font-size:12px; margin-bottom:4px; }
+.info-box {
+  background:var(--bg-card2); border:1px solid var(--border);
+  border-radius:10px; padding:14px 18px; font-size:12px;
+  color:var(--text-muted); line-height:1.7;
+}
+
+/* ─── FOOTER ────────────────────────────────────────────────────────── */
+.report-footer {
+  text-align:center; padding:20px 0 8px;
+  font-size:11px; color:var(--text-muted);
+  border-top:1px solid var(--border); margin-top:24px;
+}
+
+/* ─── PRINT ─────────────────────────────────────────────────────────── */
+@media print {
+  .print-btn,.theme-btn { display:none!important; }
+  .kpi-grid { grid-template-columns:repeat(4,1fr)!important; }
+  .two-col  { grid-template-columns:1fr 1fr!important; }
+  body { font-size:11px; }
+}
+@page { size:A4; margin:10mm; }
+</style>
+</head>
+<body>
+
+<!-- Controls -->
+<button class="theme-btn" onclick="toggleTheme()">🌓 Theme</button>
+<button class="print-btn" onclick="window.print()">🖨️ Print / PDF</button>
+<script>
+function toggleTheme(){
+  var h=document.documentElement;
+  h.dataset.theme=h.dataset.theme==='dark'?'light':'dark';
+}
+</script>
+
+<div class="page">
+
+<!-- ─── HEADER ──────────────────────────────────────────────────────── -->
+<div class="report-header">
+  <div>
+    <div style="font-size:10px;color:var(--blue);font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:6px">
+      ✦ PERFORMANCE ENGINEERING
+    </div>
+    <h1>PE Audit Control Tower</h1>
+    <div class="rh-sub">Performance Engineering Audit Report · v5.0</div>
+    <div class="rh-date">Generated: {{ gen_date }}</div>
+  </div>
+  <div class="customer-block">
+    <div class="customer-name">{{ customer }}</div>
+    <span class="env-badge">{{ env if env else "Production" }}</span>
+  </div>
+</div>
+
+<!-- ─── SIGN-OFF BANNER ──────────────────────────────────────────────── -->
+<div class="signoff-banner">
+  <div>
+    <div class="signoff-verdict">{{ sign_label }}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Go-Live Sign-Off Status</div>
+  </div>
+  <div class="signoff-meta">
+    <p>PE Engineer: <b>{{ pe_name }}</b> {{ pe_tick }}</p>
+    <p style="margin-top:4px">Customer Rep: <b>{{ cust_name }}</b> {{ cu_tick }}</p>
+    <p style="margin-top:4px">{{ customer }} · {{ env }}</p>
+  </div>
+</div>
+
+<!-- ─── KPI CARDS ────────────────────────────────────────────────────── -->
+<div class="kpi-grid">
+  <div class="kpi-box" style="border-top:3px solid {{ comp_col }}">
+    <div class="kpi-label">SLA Compliance</div>
+    <div class="kpi-value" style="color:{{ comp_col }}">{{ "%.1f"|format(comp_pct) }}%</div>
+    <div class="kpi-sub">{{ n_breach }} breach · {{ n_ok_jobs }} OK of {{ n_jobs }} jobs</div>
+  </div>
+  <div class="kpi-box" style="border-top:3px solid var(--blue)">
+    <div class="kpi-label">Total Batch Jobs</div>
+    <div class="kpi-value" style="color:var(--blue)">{{ n_jobs }}</div>
+    <div class="kpi-sub">{{ total_runs }} runs · {{ "%.1f"|format(total_hrs) }}h runtime</div>
+  </div>
+  <div class="kpi-box" style="border-top:3px solid {{ grade_color }}">
+    <div class="kpi-label">Fleet Grade</div>
+    <div class="kpi-value" style="color:{{ grade_color }}">{{ fleet_grade }}</div>
+    <div class="kpi-sub">Score {{ "%.0f"|format(fleet_score) }}/100 · {{ n_crit }}C {{ n_warn_s }}W of {{ n_srv }} servers</div>
+  </div>
+  <div class="kpi-box" style="border-top:3px solid {{ '#ef4444' if n_breach else '#10d96e' }}">
+    <div class="kpi-label">Issues Logged</div>
+    <div class="kpi-value" style="color:{{ '#ef4444' if n_issues else '#10d96e' }}">{{ n_issues }}</div>
+    <div class="kpi-sub">SLA daily {{ daily_limit }}h · monthly {{ monthly_limit }}h</div>
+  </div>
+</div>
+
+<!-- ─── BATCH PERFORMANCE TABLE ──────────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-icon">⏱️</span>
+    <div>
+      <h2>Batch Performance Detail</h2>
+      <p class="sub">Top 20 jobs by peak runtime · Buffer % = headroom before SLA breach</p>
+    </div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Job Name</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Buffer %</th><th>Status</th>
+    </tr></thead>
+    <tbody>{{ top_rows }}</tbody>
+  </table>
+</div>
+
+<!-- ─── INFRASTRUCTURE TABLE ─────────────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-icon">🖥️</span>
+    <div>
+      <h2>Infrastructure Resource Utilisation</h2>
+      <p class="sub">CPU / Memory / Disk — OK ≤75% · Warn ≤90% · Critical &gt;90%</p>
+    </div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Host</th><th>Type</th><th>CPU %</th><th>Memory %</th><th>RAM</th><th>Max Disk %</th><th>Mounts</th><th>Health</th>
+    </tr></thead>
+    <tbody>{{ srv_rows }}</tbody>
+  </table>
+</div>
+
+<!-- ─── ISSUES & WAIVERS ──────────────────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-icon">⚠️</span>
+    <div>
+      <h2>Issues &amp; Waivers Register</h2>
+      <p class="sub">{{ n_issues }} item(s) logged</p>
+    </div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Severity</th><th>Type</th><th>Status</th>
+      <th>Description</th><th>Mitigation</th><th>Owner</th><th>ETA</th>
+    </tr></thead>
+    <tbody>{{ iss_rows }}</tbody>
+  </table>
+</div>
+
+<!-- ─── PE VALIDATION CHECKLIST ──────────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-icon">📋</span>
+    <div>
+      <h2>PE Validation Checklist</h2>
+      <p class="sub">All items must be checked before dual sign-off</p>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px 24px">
+    {{ checklist_rows }}
+  </div>
+</div>
+
+<!-- ─── APPROVAL ──────────────────────────────────────────────────────── -->
+<div class="section" style="border-color:{{ sign_color }}55">
+  <div class="section-header">
+    <span class="section-icon">✍️</span>
+    <div>
+      <h2>Customer Approval Sign-Off</h2>
+      <p class="sub">Dual sign-off required for go-live clearance</p>
+    </div>
+  </div>
+  <div class="approval-grid">
+    <div class="appr-box">
+      <h3>Performance Engineering</h3>
+      <p><b>{{ pe_name }}</b></p>
+      <p style="margin-top:8px">
+        {{ pe_tick }}
+        {% if pe_approved %}
+          <span class="tag tag-green">Approved {{ pe_date }}</span>
+        {% else %}
+          <span class="tag tag-amber">Pending</span>
+        {% endif %}
+      </p>
+    </div>
+    <div class="appr-box">
+      <h3>Customer Representative</h3>
+      <p><b>{{ cust_name }}</b></p>
+      <p style="margin-top:8px">
+        {{ cu_tick }}
+        {% if cust_approved %}
+          <span class="tag tag-green">Approved {{ cust_date }}</span>
+        {% else %}
+          <span class="tag tag-amber">Pending</span>
+        {% endif %}
+      </p>
+    </div>
+  </div>
+  {% if notes %}
+  <div class="info-box" style="margin-top:14px">
+    <b>PE Notes:</b> {{ notes }}
+  </div>
+  {% endif %}
+  <div style="margin-top:14px;padding:14px 20px;border-radius:10px;text-align:center;
+              background:{{ sign_color }}15;border:1px solid {{ sign_color }}44">
+    <span style="font-size:16px;font-weight:800;color:{{ sign_color }}">
+      {{ sign_label }} — Overall Go-Live Status
+    </span>
+  </div>
+</div>
+
+<!-- ─── FOOTER ────────────────────────────────────────────────────────── -->
+<div class="report-footer">
+  <p><b>PE Control Tower v5.0</b> &nbsp;·&nbsp; Performance Engineering Team &nbsp;·&nbsp; {{ gen_date }}</p>
+  <p style="margin-top:4px">
+    Daily SLA: {{ daily_limit }}h &nbsp;|&nbsp; Monthly: {{ monthly_limit }}h &nbsp;|&nbsp;
+    CPU OK: ≤75% &nbsp;|&nbsp; CPU Warn: ≤90% &nbsp;|&nbsp;
+    Disk OK: ≤75% &nbsp;|&nbsp; Disk Warn: ≤90%
+  </p>
+</div>
+
+</div><!-- .page -->
+</body>
+</html>
