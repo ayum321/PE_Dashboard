@@ -1183,8 +1183,7 @@ function initBatchUploader() {
   const input = document.getElementById("batch-file-input");
   if (!dz || !input) return;
 
-  // Click-to-browse handled natively by the <label for="batch-file-input"> in HTML.
-  // JS only needed for drag-and-drop.
+  dz.addEventListener("click", () => input.click());
 
   input.addEventListener("change", (e) => {
     const files = Array.from(e.target.files || []);
@@ -12831,12 +12830,7 @@ function initSlaIntakeUploader() {
   const input = document.getElementById("sla-intake-file-input");
   if (!dz || !input) return;
 
-  // SLA intake zone is a <div> (rendered dynamically), keep JS click handler
-  // but guard against double-trigger from label-like bubbling.
-  dz.addEventListener("click", (e) => {
-    if (e.target === input || e.target.closest("input")) return;
-    input.click();
-  });
+  dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
     if (f) _uploadSlaIntakeFile(f);
@@ -13150,7 +13144,7 @@ function initBenchIntakeUploader() {
   const input = document.getElementById("bench-intake-file-input");
   if (!dz || !input) return;
 
-  // Click-to-browse handled natively by the <label for="bench-intake-file-input"> in HTML.
+  dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
     if (f) _uploadBenchIntakeFile(f);
@@ -13242,7 +13236,7 @@ function initBatchSlaInfoUploader() {
   const input = document.getElementById("batch-sla-info-file-input");
   if (!dz || !input) return;
 
-  // Click-to-browse handled natively by the <label for="batch-sla-info-file-input"> in HTML.
+  dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
     if (f) _uploadBatchSlaInfoFile(f);
@@ -13451,7 +13445,7 @@ function initSowUploadZone() {
   const input = document.getElementById("sow-intake-file-input");
   if (!dz || !input) return;
 
-  // Click-to-browse handled natively by the <label for="sow-intake-file-input"> in HTML.
+  dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
     if (f) _uploadSowFile(f);
