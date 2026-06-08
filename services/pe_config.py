@@ -58,7 +58,7 @@ ZERO_DUR_FLAG:    bool  = True   # Flag zero-duration jobs in findings
 # biweekly_sla_hrs, monthly_sla_hrs, custom_sla_hrs.
 SLA_DEFAULTS: dict[str, float] = {
     "daily":    6.0,
-    "weekly":   17.0,
+    "weekly":   8.0,
     "biweekly": 17.0,
     "monthly":  17.0,
     "custom":   6.0,

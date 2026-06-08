@@ -1261,6 +1261,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         _NO_SCOPE = {
             "MONTHLY", "BIMONTHLY", "DATE_SPECIFIC_MONTHLY", "QUARTERLY",
             "PIPELINE_STAGE", "ADHOC", "CYCLIC", "CYCLIC_INTERVAL", "CALENDAR_BASED",
+            "OUTBOUND",
         }
         if "Sub_Application" in df_analysis.columns:
             for _sa in df_analysis["Sub_Application"].dropna().unique():
@@ -1354,8 +1355,10 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     monthly["breach"] = monthly["total_hrs"] > monthly_lim
 
     total_d = len(daily)
-    # F4 — Job SLA Compliance (per-job-day level)
-    job_sla_comp = 0.0 if total_d == 0 else (1 - daily["breach"].sum() / total_d) * 100
+    # F4 — Job SLA Compliance is computed AFTER top_jobs is built (see below),
+    # derived from the scoped per-job buffer_status so it ALWAYS agrees with the
+    # breach / at-risk KPI tiles. Placeholder kept for any early reference.
+    job_sla_comp = 0.0
 
     # ── Daily batch window time-series ───────────────────────────
     window = (df_analysis.groupby("run_date", as_index=False)
@@ -1363,27 +1366,69 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                      job_count=("Job_Name", "nunique"))
                 .sort_values("run_date"))
 
-    elapsed_available = False
+    elapsed_available  = False
     window_breach_days = 0
+    worst_elapsed_kpi  = 0.0
+    avg_elapsed_kpi    = 0.0
+    worst_elapsed_date = ""
 
     if has_end_time:
         try:
-            # Use df_window (cyclic sub-apps excluded) so that hourly polling
-            # jobs don't anchor the window at 00:01 and 23:59 every day.
-            elap = (df_window.groupby("run_date")
-                      .agg(first_start=("Start_Time", "min"),
-                           last_end=("End_Time", "max"))
-                      .dropna())
-            if not elap.empty:
-                elap["elapsed_hrs"] = (
-                    (elap["last_end"] - elap["first_start"]).dt.total_seconds() / 3600.0
-                ).clip(lower=0)
-                window = window.merge(
-                    elap[["elapsed_hrs"]],
-                    left_on="run_date", right_index=True, how="left",
-                )
+            # Elapsed window per (Sub_Application, run_date). Grouping by run_date
+            # ALONE collapses every sub_app into one window (earliest start of ANY
+            # sub_app → latest end of ANY sub_app), which massively inflates the
+            # window for multi-sub_app customers. Group per sub_app first, then
+            # take the worst sub_app window per date.
+            if "window_agg" in dir() and not window_agg.empty:
+                # Reuse per-sub_app window already computed (out-of-scope filtered)
+                elap_sub = window_agg[["Sub_Application", "run_date", "elapsed_hrs"]].copy()
+            elif "Sub_Application" in df_window.columns:
+                elap_sub = (df_window.groupby(["Sub_Application", "run_date"], as_index=False)
+                              .agg(first_start=("Start_Time", "min"),
+                                   last_end=("End_Time", "max")))
+                elap_sub["elapsed_hrs"] = (
+                    (elap_sub["last_end"] - elap_sub["first_start"]).dt.total_seconds() / 3600.0
+                ).clip(lower=0).fillna(0.0)
+                if _out_of_scope_subs:
+                    elap_sub = elap_sub[
+                        ~elap_sub["Sub_Application"].astype(str).isin(_out_of_scope_subs)
+                    ]
+            else:
+                # No sub_app dimension — single window per date
+                elap_sub = (df_window.groupby("run_date", as_index=False)
+                              .agg(first_start=("Start_Time", "min"),
+                                   last_end=("End_Time", "max")))
+                elap_sub["Sub_Application"] = "ALL"
+                elap_sub["elapsed_hrs"] = (
+                    (elap_sub["last_end"] - elap_sub["first_start"]).dt.total_seconds() / 3600.0
+                ).clip(lower=0).fillna(0.0)
+
+            elap_sub = elap_sub.dropna(subset=["run_date"])
+            if not elap_sub.empty:
+                # Bar chart: worst sub_app window per date (max across in-scope sub_apps)
+                elap_daily = (elap_sub.groupby("run_date")["elapsed_hrs"]
+                                .max().reset_index())
+                window = window.merge(elap_daily, on="run_date", how="left")
                 window["elapsed_hrs"] = window["elapsed_hrs"].fillna(0.0).round(3)
                 elapsed_available = True
+
+                # Headline KPI: DAILY/UNKNOWN sub_apps only — WEEKLY sub_apps would
+                # inflate the "daily elapsed window" headline tile.
+                try:
+                    from services.sla_engine import classify_schedule as _cs_kpi
+                    _daily_sas = {
+                        sa for sa in elap_sub["Sub_Application"].dropna().unique()
+                        if str(sa) == "ALL" or _cs_kpi(str(sa)) in {"DAILY", "UNKNOWN"}
+                    }
+                except Exception:
+                    _daily_sas = set(elap_sub["Sub_Application"].dropna().unique())
+                _kpi_src = (elap_sub[elap_sub["Sub_Application"].isin(_daily_sas)]
+                            if _daily_sas else elap_sub)
+                _kpi_daily = _kpi_src.groupby("run_date")["elapsed_hrs"].max()
+                if not _kpi_daily.empty:
+                    worst_elapsed_kpi  = float(_kpi_daily.max())
+                    avg_elapsed_kpi    = float(_kpi_daily.mean())
+                    worst_elapsed_date = str(_kpi_daily.idxmax())
         except Exception:
             pass
     if not elapsed_available:
@@ -1428,29 +1473,54 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
              .agg(total_hrs=("run_time_hrs", "sum"),
                   jobs=("Job_Name", "nunique")))
 
-    # ── Worst-job peak (single highest peak_hrs across all jobs) ──
+    # ── Per-job frame + compliance scope ─────────────────────────
     top_jobs = build_top_jobs_df(df_analysis, sla_index=sla_index)
-    t_jobs   = int(len(top_jobs))
-    j_breach = int((top_jobs["buffer_status"] == "BREACH").sum())
 
+    # Compliance scope: drop utility jobs and out-of-scope schedule sub_apps
+    # (MONTHLY / CYCLIC / OUTBOUND / etc already collected in _out_of_scope_subs).
+    # This is the SAME scope used for the window compliance, so the breach tiles,
+    # the compliance %, and the window numbers all agree by construction.
+    _scope_jobs = top_jobs
+    if "is_utility" in top_jobs.columns:
+        _scope_jobs = _scope_jobs[~_scope_jobs["is_utility"].fillna(False)]
+    if _out_of_scope_subs and "Sub_Application" in _scope_jobs.columns:
+        _scope_jobs = _scope_jobs[
+            ~_scope_jobs["Sub_Application"].astype(str).isin(_out_of_scope_subs)
+        ]
+    if _scope_jobs.empty:
+        _scope_jobs = top_jobs   # fall back if scoping removed everything
+
+    t_jobs    = int(len(_scope_jobs))
+    j_breach  = int((_scope_jobs["buffer_status"] == "BREACH").sum())
+    j_at_risk = int((_scope_jobs["buffer_status"] == "AT_RISK").sum())
+    j_ok      = max(0, t_jobs - j_breach - j_at_risk)
+
+    # F4 — Job SLA Compliance derived from the SAME scoped frame as the tiles.
+    # Guarantees compliance% and breach / at-risk counts can never contradict.
+    job_sla_comp = round(j_ok / t_jobs * 100, 1) if t_jobs > 0 else 0.0
+
+    # Worst job = highest peak within the in-scope set (drives the SLA gauge)
     worst_job_name = ""
     worst_job_peak = 0.0
-    if not top_jobs.empty:
-        worst_idx = top_jobs["peak_hrs"].idxmax()
-        worst_row = top_jobs.loc[worst_idx]
+    worst_job_sla  = global_ceil
+    if not _scope_jobs.empty:
+        worst_idx = _scope_jobs["peak_hrs"].idxmax()
+        worst_row = _scope_jobs.loc[worst_idx]
         worst_job_peak = float(worst_row["peak_hrs"])
         worst_job_name = str(worst_row.get("Job_Name", "?"))
-
-    # F5 — At-risk: buffer_pct in [0, 15]
-    j_at_risk = int((top_jobs["buffer_pct"].between(0, 15, inclusive="both")).sum())
-    j_ok      = max(0, t_jobs - j_breach - j_at_risk)
+        _wsla = worst_row.get("sla_hrs", global_ceil)
+        worst_job_sla = float(_wsla) if pd.notna(_wsla) and float(_wsla) > 0 else global_ceil
 
     # F6 — Anomaly detection (uses raw df — anomalies in excluded jobs still matter)
     anomalies = detect_job_anomalies(df)
 
-    # F3 — Fleet-level SLA buffer (worst job)
-    peak_max = worst_job_peak
-    fleet_sla_buffer = calculate_sla_buffer(global_ceil, peak_max) if peak_max > 0 else None
+    # F3 — Fleet-level SLA buffer uses the worst job's OWN resolved SLA, not the
+    # global ceiling. A WEEKLY job must be measured against its 8h ceiling, not
+    # the 6h daily majority-vote global value.
+    fleet_sla_buffer = (
+        calculate_sla_buffer(worst_job_sla, worst_job_peak)
+        if worst_job_peak > 0 else None
+    )
 
     # ── Data coverage / confidence (raw df — full picture) ──────────────────
     unique_dates = sorted(df["run_date"].unique())
@@ -1502,6 +1572,13 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "worst_job_name":   worst_job_name,
         "worst_job_peak":   round(worst_job_peak, 3),
         "elapsed_available": elapsed_available,
+        # Headline elapsed-window KPI (DAILY/UNKNOWN sub_apps only — separate from
+        # the bar chart which shows max across ALL in-scope sub_apps per date).
+        "elapsed_window_kpi": {
+            "worst_hrs":  round(worst_elapsed_kpi, 3),
+            "avg_hrs":    round(avg_elapsed_kpi, 3),
+            "worst_date": worst_elapsed_date,
+        },
         "date_span_days":   date_span,
         "date_range":       [str(unique_dates[0]), str(unique_dates[-1])] if unique_dates else [],
         "ok_runs":          ok_count,
@@ -1818,12 +1895,25 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         # ── Separated analysis layers ────────────────────────────
         "elapsed_window": {
             "available":    m["elapsed_available"],
-            "worst_day":    _worst_elapsed(window_records),
-            "avg_elapsed_hrs": round(
-                sum(w["elapsed_hrs"] for w in window_records) / max(len(window_records), 1), 3
-            ) if m["elapsed_available"] else None,
+            # Headline = DAILY-only worst/avg (KPI). Falls back to chart-derived
+            # worst day when the DAILY-only KPI is unavailable.
+            "worst_day": (
+                {"run_date": (m.get("elapsed_window_kpi") or {}).get("worst_date", ""),
+                 "elapsed_hrs": (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0.0)}
+                if m["elapsed_available"] and (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0) > 0
+                else _worst_elapsed(window_records)
+            ),
+            "avg_elapsed_hrs": (
+                round((m.get("elapsed_window_kpi") or {}).get("avg_hrs", 0.0), 3)
+                if m["elapsed_available"] and (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0) > 0
+                else (round(
+                    sum(w["elapsed_hrs"] for w in window_records) / max(len(window_records), 1), 3
+                ) if m["elapsed_available"] else None)
+            ),
             "note": (
-                "Elapsed window = wall-clock from first Start_Time to last End_Time per day."
+                "Elapsed window = wall-clock from first Start_Time to last End_Time "
+                "per (Sub_Application, day). Headline shows DAILY sub_apps; the chart "
+                "shows the worst sub_app window per day."
                 if m["elapsed_available"]
                 else "End_Time column missing — elapsed window cannot be computed. "
                      "Showing summed runtime only."

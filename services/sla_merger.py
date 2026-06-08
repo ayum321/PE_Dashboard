@@ -1001,16 +1001,13 @@ def build_workflow_job_map(ctrlm_df, batch_sla_rows: list[dict]) -> dict:
             }
             continue
 
-        first_start = pd.to_datetime(first_runs[st_col], errors="coerce").max()
+        # Window OPENS at the EARLIEST occurrence of the start sentinel and
+        # CLOSES at the LATEST occurrence of the end sentinel. Using .min() for
+        # first_start is correct even when the start sentinel runs multiple times
+        # (parallel sub-workflows) — .max() would pick the last occurrence and
+        # make the window appear artificially short.
+        first_start = pd.to_datetime(first_runs[st_col], errors="coerce").min()
         last_end    = pd.to_datetime(last_runs[en_col],  errors="coerce").max()
-
-        # Guard: if last end < first start (jobs span midnight), try second-latest
-        if pd.notna(last_end) and pd.notna(first_start) and last_end < first_start:
-            last_ends_sorted = pd.to_datetime(
-                last_runs[en_col], errors="coerce"
-            ).dropna().sort_values(ascending=False)
-            if len(last_ends_sorted) >= 2:
-                last_end = last_ends_sorted.iloc[1]
 
         if pd.isna(first_start) or pd.isna(last_end):
             result[batch_name] = {"actual_hours": None, "status": "TIMESTAMP_ERROR"}
@@ -1018,13 +1015,38 @@ def build_workflow_job_map(ctrlm_df, batch_sla_rows: list[dict]) -> dict:
 
         actual_hours = (last_end - first_start).total_seconds() / 3600
 
+        # Midnight crossover guard: a negative window means the end sentinel's
+        # timestamp rolled past midnight relative to the start — add 24h.
+        if actual_hours < 0:
+            actual_hours += 24.0
+
+        # Sanity bounds — flag windows that are implausibly long (data spans
+        # multiple batch cycles) or implausibly short instead of trusting them.
+        try:
+            from services import pe_config
+            _max_w = float(getattr(pe_config, "SENTINEL_MAX_WINDOW_HRS", 20.0))
+            _min_w = float(getattr(pe_config, "SENTINEL_MIN_WINDOW_HRS", 0.25))
+        except Exception:
+            _max_w, _min_w = 20.0, 0.25
+
+        if actual_hours > _max_w:
+            result[batch_name] = {
+                "actual_hours":   round(actual_hours, 3),
+                "first_job_found": True,
+                "last_job_found":  True,
+                "first_start":    str(first_start),
+                "last_end":       str(last_end),
+                "status":         "SUSPECT_TOO_LONG",
+            }
+            continue
+
         result[batch_name] = {
             "actual_hours": round(actual_hours, 3),
             "first_job_found": True,
             "last_job_found":  True,
             "first_start": str(first_start),
             "last_end":    str(last_end),
-            "status": "OK",
+            "status": "SUSPECT_TOO_SHORT" if actual_hours < _min_w else "OK",
         }
 
     return result

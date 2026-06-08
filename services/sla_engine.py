@@ -283,6 +283,22 @@ def classify_schedule(text: str) -> str:
         if pat.search(t):
             return "WEEKLY"
 
+    # ── Generic structural keywords (no customer/product strings) ─────────
+    # Checked LAST so day-of-week and weekly patterns above win first
+    # (e.g. OUTBOUND_THUR → WEEKLY, not OUTBOUND).
+    #
+    # Calendar-based: 4-4-5 retail calendar codes (444 / 445 / CALENDAR_44)
+    if re.search(r"(?:^|[^0-9])44[45](?:$|[^0-9])|CALENDAR[_\-]?44", t):
+        return "CALENDAR_BASED"
+    # Morning report / AM runs → daily cadence
+    if re.search(r"(?:^|[^A-Za-z])MRNG(?:$|[^A-Za-z])|MORNING[_\-]?RPT|AM[_\-]RPT|(?:^|[^A-Za-z])MORN(?:$|[^A-Za-z])", t):
+        return "DAILY"
+    # Outbound / EDI file delivery — cyclic polling, not a batch window.
+    # Mark OUTBOUND so it is excluded from compliance; detect_cyclic_subs()
+    # still confirms genuine high-frequency cyclic behaviour via its guards.
+    if re.search(r"(?:^|[^A-Za-z])(?:OB|OUTBOUND|EDI)[_\-]", t):
+        return "OUTBOUND"
+
     return "UNKNOWN"
 
 
@@ -689,7 +705,7 @@ def classify_schedule_with_data(
     _NO_SLA_TYPES = {
         "MONTHLY", "BIMONTHLY", "DATE_SPECIFIC_MONTHLY", "QUARTERLY",
         "PIPELINE_STAGE", "ADHOC", "CYCLIC", "CYCLIC_INTERVAL",
-        "CALENDAR_BASED", "UNKNOWN",
+        "CALENDAR_BASED", "OUTBOUND", "UNKNOWN",
     }
     _SCOPE: set = set(_SLA.keys())
 

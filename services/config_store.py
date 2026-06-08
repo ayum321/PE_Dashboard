@@ -49,7 +49,7 @@ _DEFAULTS: dict[str, Any] = {
     "ai_post_upload":       True,         # generate AI summary after each upload
     # SLA
     "daily_sla_hrs":        6.0,
-    "weekly_sla_hrs":      17.0,
+    "weekly_sla_hrs":       8.0,
     "biweekly_sla_hrs":    17.0,
     "monthly_sla_hrs":     17.0,
     "custom_sla_hrs":       6.0,
