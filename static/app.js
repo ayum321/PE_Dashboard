@@ -13004,13 +13004,6 @@ function _renderSlaIntelligencePanel(intel) {
   _renderSlaIntelligenceDetail(intel);
 }
 
-function _renderSlaIntelligenceDetail(intel) {
-  const panel = document.getElementById("sla-intelligence-detail");
-  if (!panel) return;
-
-  const info = intel.intelligence || {};
-  const trace = intel.traceability || {};
-
 // ── New Engagement — wipe all server-side session data ────────────────────
 async function clearSessionData() {
   if (!confirm(
@@ -13037,6 +13030,14 @@ async function clearSessionData() {
     toast("error", "Hard reset failed", String(err).slice(0, 120));
   }
 }
+
+function _renderSlaIntelligenceDetail(intel) {
+  const panel = document.getElementById("sla-intelligence-detail");
+  if (!panel) return;
+
+  const info = intel.intelligence || {};
+  const trace = intel.traceability || {};
+
   const warnings = info.warnings || [];
   const contracts = (info.contracts || []).slice(0, 30);
 
