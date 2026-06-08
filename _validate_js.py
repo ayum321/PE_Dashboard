@@ -4,13 +4,15 @@ Run before zipping / shipping:
     py -3.14 _validate_js.py
 
 Checks:
-  1. Brace balance ({} pairs)
-  2. Bracket balance ([] pairs)
-  3. Parenthesis balance (() pairs)
-  4. Unclosed template literals
-  5. Pinpoints the exact line where balance first goes wrong
+  1. Node.js full syntax parse (catches SyntaxError: duplicate const, bad syntax, etc.)
+  2. Brace balance ({} pairs)
+  3. Bracket balance ([] pairs)
+  4. Parenthesis balance (() pairs)
+  5. Unclosed template literals
+  6. Pinpoints the exact line where balance first goes wrong
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -90,6 +92,26 @@ def main():
             continue
 
         lines = fp.read_text(encoding="utf-8").splitlines()
+
+        # ── Layer 1: Node.js full syntax parse ──────────────────────────
+        # `node --check` uses the real V8 parser — catches duplicate const,
+        # unexpected token, and every other SyntaxError that would break the
+        # browser.  This is the ONLY reliable check; brace-balance is secondary.
+        try:
+            result = subprocess.run(
+                ["node", "--check", str(fp)],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                all_ok = False
+                err_out = (result.stderr or result.stdout).strip()
+                print(f"\n[X] {js} ({len(lines)} lines) -- NODE SYNTAX ERROR:")
+                print(f"    {err_out}")
+                continue  # Skip brace balance if Node already errored
+        except FileNotFoundError:
+            print(f"\n[!] {js}: node not found in PATH — skipping Node.js check")
+
+        # ── Layer 2: Brace / bracket / paren balance ─────────────────────
         errors = _check_balance(fp)
 
         if errors:
