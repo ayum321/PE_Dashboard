@@ -184,6 +184,14 @@ def reload() -> None:
     Re-read all threshold values from config_store (disk).
     Call this after a Settings save to make the new values live immediately.
     """
+    def _f(key: str, default: float) -> float:
+        """Safe float read — returns default when stored value is not numeric."""
+        v = _cfg(key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
     global CPU_WARN, CPU_CRIT, MEM_WARN, MEM_CRIT, DISK_WARN, DISK_CRIT
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
@@ -194,28 +202,28 @@ def reload() -> None:
     global UTILITY_JOB_PATTERNS, SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
     global SENTINEL_MIN_WINDOW_HRS, SENTINEL_MAX_WINDOW_HRS, CYCLIC_MAX_RUNTIME_HRS
 
-    CPU_WARN          = float(_cfg("cpu_warning",       75.0))
-    CPU_CRIT          = float(_cfg("cpu_critical",      90.0))
-    MEM_WARN          = float(_cfg("mem_warning",       70.0))
-    MEM_CRIT          = float(_cfg("mem_critical",      80.0))
-    DISK_WARN         = float(_cfg("disk_warning",      70.0))
-    DISK_CRIT         = float(_cfg("disk_critical",     85.0))
-    BATCH_FAIL_RATE   = float(_cfg("batch_fail_rate",   5.0))
+    CPU_WARN          = _f("cpu_warning",       75.0)
+    CPU_CRIT          = _f("cpu_critical",      90.0)
+    MEM_WARN          = _f("mem_warning",       70.0)
+    MEM_CRIT          = _f("mem_critical",      80.0)
+    DISK_WARN         = _f("disk_warning",      70.0)
+    DISK_CRIT         = _f("disk_critical",     85.0)
+    BATCH_FAIL_RATE   = _f("batch_fail_rate",   5.0)
     ZERO_DUR_FLAG     = bool (_cfg("zero_dur_flag",     True))
-    SLA_DAILY_HRS     = float(_cfg("daily_sla_hrs",     SLA_DEFAULTS["daily"]))
-    SLA_WEEKLY_HRS    = float(_cfg("weekly_sla_hrs",    SLA_DEFAULTS["weekly"]))
-    SLA_BIWEEKLY_HRS  = float(_cfg("biweekly_sla_hrs",  SLA_DEFAULTS["biweekly"]))
-    SLA_MONTHLY_HRS   = float(_cfg("monthly_sla_hrs",   SLA_DEFAULTS["monthly"]))
-    SLA_CUSTOM_HRS    = float(_cfg("custom_sla_hrs",    SLA_DEFAULTS["custom"]))
-    SLA_BUFFER_WARN   = float(_cfg("sla_buffer_warn",   15.0))
-    SLA_ATRISK_PCT    = float(_cfg("sla_atrisk_pct",   15.0))
-    SLA_LONGJOB_PCT   = float(_cfg("sla_longjob_pct",  40.0))
-    BENCH_THRESHOLD_PCT = float(_cfg("benchmark_threshold", 10.0))
-    ANOMALY_Z_THRESHOLD = float(_cfg("anomaly_z_threshold", 2.0))
-    SOW_DFU           = float(_cfg("sow_dfu",           499_999.0))
-    SOW_SKU           = float(_cfg("sow_sku",           80_000.0))
-    SOW_ORDERS        = float(_cfg("sow_orders",        200_000.0))
-    SOW_BATCH_JOBS    = float(_cfg("sow_batch_jobs",    450.0))
+    SLA_DAILY_HRS     = _f("daily_sla_hrs",     SLA_DEFAULTS["daily"])
+    SLA_WEEKLY_HRS    = _f("weekly_sla_hrs",    SLA_DEFAULTS["weekly"])
+    SLA_BIWEEKLY_HRS  = _f("biweekly_sla_hrs",  SLA_DEFAULTS["biweekly"])
+    SLA_MONTHLY_HRS   = _f("monthly_sla_hrs",   SLA_DEFAULTS["monthly"])
+    SLA_CUSTOM_HRS    = _f("custom_sla_hrs",    SLA_DEFAULTS["custom"])
+    SLA_BUFFER_WARN   = _f("sla_buffer_warn",   15.0)
+    SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
+    SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
+    BENCH_THRESHOLD_PCT = _f("benchmark_threshold", 10.0)
+    ANOMALY_Z_THRESHOLD = _f("anomaly_z_threshold", 2.0)
+    SOW_DFU           = _f("sow_dfu",           499_999.0)
+    SOW_SKU           = _f("sow_sku",           80_000.0)
+    SOW_ORDERS        = _f("sow_orders",        200_000.0)
+    SOW_BATCH_JOBS    = _f("sow_batch_jobs",    450.0)
 
     _pats  = _cfg("job_type_patterns")
     if isinstance(_pats, dict) and _pats:
@@ -238,9 +246,9 @@ def reload() -> None:
     _se = _cfg("sentinel_end_patterns")
     if isinstance(_se, list) and _se:
         SENTINEL_END_PATTERNS = _se
-    SENTINEL_MIN_WINDOW_HRS = float(_cfg("sentinel_min_window_hrs", 0.25))
-    SENTINEL_MAX_WINDOW_HRS = float(_cfg("sentinel_max_window_hrs", 20.0))
-    CYCLIC_MAX_RUNTIME_HRS  = float(_cfg("cyclic_max_runtime_hrs", 0.25))
+    SENTINEL_MIN_WINDOW_HRS = _f("sentinel_min_window_hrs", 0.25)
+    SENTINEL_MAX_WINDOW_HRS = _f("sentinel_max_window_hrs", 20.0)
+    CYCLIC_MAX_RUNTIME_HRS  = _f("cyclic_max_runtime_hrs", 0.25)
 
 
 def status_label(val: float | None, warn: float, crit: float) -> str:
