@@ -115,6 +115,63 @@ CTRLM_COLUMN_MAP: dict = {
     "runtime_sec": ["runtimesec", "runtime_sec", "run_time_sec", "run_sec"],
 }
 
+# ── Utility job patterns (auto-tag for exclusion from SLA analysis) ──────────
+# Normalized job name (lowercase, spaces+hyphens→_) is substring-matched.
+# "Ctrl-M File Watcher_W" normalises to "ctrl_m_file_watcher_w" → matches "file_watcher".
+# Configurable via config_store["utility_job_patterns"]. No customer names here.
+UTILITY_JOB_PATTERNS: list = [
+    # FileWatcher (Ctrl-M native utility — marks data arrival, not batch logic)
+    "file_watcher", "filewatcher", "ctrl_m_file_watcher",
+    # DB maintenance (backup, restore, index, stats)
+    "db_backup", "database_backup", "dbbackup", "db_maint", "db_maintenance",
+    "db_restore", "dbcleanup", "db_cleanup", "purge_db", "truncate_log",
+    "archive_log", "archive_logs", "db_stats", "update_stats", "rebuild_index",
+    "index_rebuild", "shrink_db",
+    # Export / outbound file delivery (Ctrl-M job that pushes a file, not batch calc)
+    "sftp_export", "sftp_send", "ftp_export", "outbound_file",
+    # Health check / monitoring heartbeat (when combined with high frequency → cyclic)
+    "health_check", "ping_job", "heartbeat",
+]
+
+# ── Sentinel detection patterns (Stage 4 Level 2 fallback) ───────────────────
+# Normalized job name substrings indicating batch WINDOW START (first job) or
+# WINDOW END (last job). Used when XLSX sentinel pair is not configured.
+# Add customer-specific patterns to config_store["sentinel_start_patterns"].
+SENTINEL_START_PATTERNS: list = [
+    # Batch open / user disable sequences — broad-to-specific order
+    "scpo_batch_start", "batch_start_dummy", "batch_start",
+    "jbi000_disableusers", "jbi000_disable",
+    "zabbix_monitors_disable", "zabbix_disable",
+    "seq_disable_login", "seq_batch_start",
+    "on_dp_disable_users", "on_sp_disable_triggers",
+    "disable_ref_constraints", "disable_scpomgr_triggers",
+    "itp_disable_login", "io_disable_login",
+    "disable_users", "disable_login", "disable_monitors",
+    "batch_open", "start_batch", "batch_init",
+    # FileWatcher in normalized form — Ctrl-M File Watcher_W → ctrl_m_file_watcher_w
+    "ctrl_m_file_watcher",
+]
+SENTINEL_END_PATTERNS: list = [
+    # Batch close / user enable sequences — broad-to-specific order
+    "scpo_enable_users", "scpo_batch_end", "batch_end",
+    "jbi000_enableusers", "jbi000_enable",
+    "zabbix_monitors_enable", "zabbix_enable",
+    "seq_enable_users", "seq_batch_end",
+    "on_dp_enable_users", "on_sp_enable_users",
+    "enable_ref_constraints", "enable_scpomgr_triggers",
+    "enable_users", "enable_login", "enable_monitors",
+    "batch_close", "end_batch", "batch_complete",
+]
+
+# ── Sentinel window validity bounds (hours)
+SENTINEL_MIN_WINDOW_HRS: float = 0.25   # < 15 min → SUSPECT_TOO_SHORT
+SENTINEL_MAX_WINDOW_HRS: float = 20.0   # > 20h   → SUSPECT_TOO_LONG (warn, keep)
+
+# ── Cyclic detection threshold ────────────────────────────────────────────────
+# Jobs with avg_runtime_hrs below this threshold are considered cyclic candidates.
+# (Combined with frequency guard: max runs/day > 5 AND median > 3)
+CYCLIC_MAX_RUNTIME_HRS: float = 0.25   # < 15 minutes = polling/heartbeat, not batch
+
 # ── SOW baseline targets ──────────────────────────────────────────────────────
 SOW_DFU:           float = 499_999.0
 SOW_SKU:           float = 80_000.0
@@ -134,6 +191,8 @@ def reload() -> None:
     global BENCH_THRESHOLD_PCT, ANOMALY_Z_THRESHOLD
     global SOW_DFU, SOW_SKU, SOW_ORDERS, SOW_BATCH_JOBS
     global JOB_TYPE_PATTERNS, EXCLUDE_FROM_SLA, ENV_PREFIXES_TO_STRIP, CTRLM_COLUMN_MAP
+    global UTILITY_JOB_PATTERNS, SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
+    global SENTINEL_MIN_WINDOW_HRS, SENTINEL_MAX_WINDOW_HRS, CYCLIC_MAX_RUNTIME_HRS
 
     CPU_WARN          = float(_cfg("cpu_warning",       75.0))
     CPU_CRIT          = float(_cfg("cpu_critical",      90.0))
@@ -170,6 +229,18 @@ def reload() -> None:
     _cmap = _cfg("ctrlm_column_map")
     if isinstance(_cmap, dict) and _cmap:
         CTRLM_COLUMN_MAP = _cmap
+    _util = _cfg("utility_job_patterns")
+    if isinstance(_util, list) and _util:
+        UTILITY_JOB_PATTERNS = _util
+    _ss = _cfg("sentinel_start_patterns")
+    if isinstance(_ss, list) and _ss:
+        SENTINEL_START_PATTERNS = _ss
+    _se = _cfg("sentinel_end_patterns")
+    if isinstance(_se, list) and _se:
+        SENTINEL_END_PATTERNS = _se
+    SENTINEL_MIN_WINDOW_HRS = float(_cfg("sentinel_min_window_hrs", 0.25))
+    SENTINEL_MAX_WINDOW_HRS = float(_cfg("sentinel_max_window_hrs", 20.0))
+    CYCLIC_MAX_RUNTIME_HRS  = float(_cfg("cyclic_max_runtime_hrs", 0.25))
 
 
 def status_label(val: float | None, warn: float, crit: float) -> str:

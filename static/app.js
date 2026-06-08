@@ -412,13 +412,12 @@ function renderUploadResult(payload) {
   setText("kpi-server-count", String(payload.server_count ?? 0));
   setText("kpi-mode",         payload.image_only ? "Image-only" : "Text-extracted");
 
-  // Header chip + reset button
+  // Header chip
   const chip = document.getElementById("dataset-chip");
   if (chip) {
     chip.textContent = `${payload.filename} · ${payload.server_count} servers`;
     chip.classList.remove("hidden");
   }
-  document.getElementById("reset-btn")?.classList.remove("hidden");
 
   // Pre-stage the JSON dump (collapsed by default)
   const dump = document.getElementById("json-dump");
@@ -838,35 +837,9 @@ function _handleFetchError(err, label) {
 }
 
 function initResetButton() {
-  document.getElementById("reset-btn")?.addEventListener("click", () => {
-    window.appData.upload   = null;
-    window.appData.servers  = [];
-    window.appData.resource = null;
-    window.appData.loadedAt = null;
-
-    document.getElementById("upload-result")?.classList.add("hidden");
-    document.getElementById("dataset-chip")?.classList.add("hidden");
-    document.getElementById("reset-btn")?.classList.add("hidden");
-    // Clear customer name everywhere (header chip + banner + batch chip)
-    applyCustomerName("");
-    const dump = document.getElementById("json-dump");
-    if (dump) {
-      dump.textContent = "";
-      dump.classList.add("hidden");
-    }
-    document.getElementById("toggle-json").textContent = "Show raw JSON";
-
-    // Reset Resource Review panel
-    document.getElementById("resource-review-body")?.classList.add("hidden");
-    document.getElementById("resource-empty")?.classList.remove("hidden");
-    destroyChart("resourceBars");
-    const tbody = document.getElementById("resource-tbody");
-    if (tbody) tbody.innerHTML = "";
-    const heatmap = document.getElementById("resource-heatmap");
-    if (heatmap) heatmap.innerHTML = "";
-
-    toast("info", "Cleared", "Workspace has been reset.");
-  });
+  // #reset-btn now calls clearSessionData() directly via onclick in HTML.
+  // This function is kept as a no-op so the initResetButton() call at startup
+  // doesn't throw a ReferenceError.
 }
 
 function initJsonToggle() {
@@ -1565,47 +1538,98 @@ function renderBatchReview(data) {
       }
     }
 
-    if (excludedJobs.length > 0 || includedBack.length > 0 || autoUtilJobs.length > 0) {
-      const exChips = excludedJobs.map(j => {
-        const isAuto = !!j.is_utility && !_batchManualExclude.has(j.Job_Name);
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono cursor-pointer group/chip hover:opacity-80 transition"
-                      style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.25)}"
-                      data-util-include="${escapeHtml(j.Job_Name)}"
-                      title="Click to include this job back in the analysis">
-                  ${escapeHtml(j.Job_Name)}
-                  <span class="text-[7px] text-Cmuted">${isAuto ? "auto" : "manual"}</span>
-                  <span class="text-[11px] opacity-50 group-hover/chip:opacity-100">✕</span>
-                </span>`;
+    if (autoUtilJobs.length > 0 || _batchManualExclude.size > 0) {
+      const hasAnyExclusion = excludedJobs.length > 0 || _batchManualExclude.size > 0;
+
+      // Build rows for the detection table — show ALL detected utility + manually excluded
+      const manualOnlyJobs = (data.top_jobs || []).filter(
+        j => !j.is_utility && _batchManualExclude.has(j.Job_Name)
+      );
+      const tableJobs = [...autoUtilJobs, ...manualOnlyJobs];
+
+      const detectionRows = tableJobs.map(j => {
+        const isExcluded   = _isJobExcluded(j);
+        const isAuto       = !!j.is_utility;
+        const reason       = j.utility_reason || "";
+        const isManualExcl = _batchManualExclude.has(j.Job_Name);
+        const isManualIncl = _batchManualInclude.has(j.Job_Name);
+
+        const patternBadge = isAuto
+          ? `<span class="inline-flex items-center px-1.5 py-0 rounded font-mono text-[8px]"
+                  style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}"
+                  title="Matched pattern: '${escapeHtml(reason)}'">${escapeHtml(reason) || "utility"}</span>`
+          : `<span class="text-[8px] text-Cmuted font-mono">manual</span>`;
+
+        const statusBadge = isExcluded
+          ? `<span class="text-[8px] font-bold" style="color:${THEME.amber}">⊘ excluded</span>`
+          : `<span class="text-[8px] font-bold" style="color:${THEME.green}">✓ included</span>`;
+
+        const toggleBtn = isExcluded
+          ? `<button class="util-toggle-btn text-[8px] px-2 py-0.5 rounded font-semibold hover:opacity-80 transition"
+                    style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.25)}"
+                    data-util-include="${escapeHtml(j.Job_Name)}"
+                    title="Include this job back in SLA analysis">Include</button>`
+          : `<button class="util-toggle-btn text-[8px] px-2 py-0.5 rounded font-semibold hover:opacity-80 transition"
+                    style="color:${THEME.amber};background:${hexA(THEME.amber,0.1)};border:1px solid ${hexA(THEME.amber,0.25)}"
+                    data-util-exclude="${escapeHtml(j.Job_Name)}"
+                    title="Exclude this job from SLA analysis">Exclude</button>`;
+
+        const peak = typeof j.peak_hrs === "number" ? j.peak_hrs.toFixed(2) + "h" : "—";
+        const rowStyle = isExcluded
+          ? `opacity:0.55;background:${hexA(THEME.amber,0.04)}`
+          : "";
+
+        return `<tr style="${rowStyle}" class="border-t border-Cborder/30">
+          <td class="px-2 py-1 font-mono text-[10px] text-Cmuted/90"
+              style="${isExcluded ? "text-decoration:line-through" : ""}">
+            ${escapeHtml(j.Job_Name)}
+          </td>
+          <td class="px-2 py-1 text-[9px]">${patternBadge}</td>
+          <td class="px-2 py-1 text-right font-mono text-[9px] text-Cmuted">${peak}</td>
+          <td class="px-2 py-1 text-center">${statusBadge}</td>
+          <td class="px-2 py-1 text-right">${toggleBtn}</td>
+        </tr>`;
       }).join("");
 
-      const inChips = includedBack.map(j =>
-        `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono cursor-pointer group/chip hover:opacity-80 transition"
-               style="color:${THEME.green};background:${hexA(THEME.green,0.12)};border:1px solid ${hexA(THEME.green,0.25)}"
-               data-util-reexclude="${escapeHtml(j.Job_Name)}"
-               title="Click to exclude this job again">
-            ${escapeHtml(j.Job_Name)}
-            <span class="text-[7px] text-Cmuted">included</span>
-            <span class="text-[11px] opacity-50 group-hover/chip:opacity-100">↩</span>
-           </span>`
-      ).join("");
-
-      const hasAnyExclusion = excludedJobs.length > 0 || _batchManualInclude.size > 0 || _batchManualExclude.size > 0;
-      utilPanel.className = "rounded-lg px-3 py-2 space-y-1.5 mt-1";
-      utilPanel.style.cssText = `border:1px solid ${hexA(THEME.amber,0.25)};background:${hexA(THEME.amber,0.04)}`;
+      utilPanel.className = "rounded-lg mt-2 overflow-hidden";
+      utilPanel.style.cssText = `border:1px solid ${hexA(THEME.amber,0.3)};background:${hexA(THEME.amber,0.03)}`;
       utilPanel.innerHTML = `
-        <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div class="flex items-center justify-between px-3 py-2" style="background:${hexA(THEME.amber,0.07)}">
           <div class="flex items-center gap-2">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-Cmuted">Excluded from Analysis</span>
-            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">${excludedJobs.length} excluded</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
+                 class="w-3.5 h-3.5" style="color:${THEME.amber}">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+            </svg>
+            <span class="text-[10px] font-bold uppercase tracking-wider" style="color:${THEME.amber}">
+              Detected Utility / Infrastructure Jobs
+            </span>
+            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                  style="color:${THEME.amber};background:${hexA(THEME.amber,0.18)}">
+              ${excludedJobs.length} excluded · ${tableJobs.length - excludedJobs.length} included
+            </span>
           </div>
           <div class="flex items-center gap-2">
-            <span class="text-[8px] text-Cmuted">Click job chip to include · use ⊘ in table to exclude</span>
-            ${hasAnyExclusion ? `<button id="batch-util-reset" class="text-[8px] px-1.5 py-0.5 rounded hover:opacity-80 transition" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}">Reset all</button>` : ""}
+            <span class="text-[8px] text-Cmuted">Pattern-matched against ${autoUtilJobs.length} job(s) — not SLA targets</span>
+            ${hasAnyExclusion ? `<button id="batch-util-reset" class="text-[8px] px-2 py-0.5 rounded hover:opacity-80 transition"
+                style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}">Reset all</button>` : ""}
           </div>
         </div>
-        <div class="flex flex-wrap gap-1">${exChips}${inChips}</div>
+        <table class="w-full">
+          <thead>
+            <tr style="background:${hexA(THEME.amber,0.04)}">
+              <th class="px-2 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold w-1/2">Job Name</th>
+              <th class="px-2 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Detected Pattern</th>
+              <th class="px-2 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Peak</th>
+              <th class="px-2 py-1 text-center text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Status</th>
+              <th class="px-2 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Action</th>
+            </tr>
+          </thead>
+          <tbody>${detectionRows}</tbody>
+        </table>
       `;
 
+      // Wire toggle buttons
       utilPanel.querySelectorAll("[data-util-include]").forEach(el => {
         el.addEventListener("click", () => {
           const name = el.dataset.utilInclude;
@@ -1614,9 +1638,10 @@ function renderBatchReview(data) {
           _reRenderBatch();
         });
       });
-      utilPanel.querySelectorAll("[data-util-reexclude]").forEach(el => {
+      utilPanel.querySelectorAll("[data-util-exclude]").forEach(el => {
         el.addEventListener("click", () => {
-          _batchManualInclude.delete(el.dataset.utilReexclude);
+          _batchManualExclude.add(el.dataset.utilExclude);
+          _batchManualInclude.delete(el.dataset.utilExclude);
           _reRenderBatch();
         });
       });
@@ -1676,7 +1701,8 @@ function renderBatchReview(data) {
   renderTopJobsChart(filtered.top_jobs || [], filtered.kpis);
 
   // 3. Top 10 breaching jobs table
-  renderTopBreachesTable(filtered.top_breaches || [], filtered.kpis);
+  // Pass allJobs (unfiltered) as the excluded context so user can see what was detected
+  renderTopBreachesTable(filtered.top_breaches || [], filtered.kpis, data.top_jobs || []);
 
   // 4. Heatmaps (only shown when data is present)
   renderSlaHeatmap(data.sla_heatmap  || null);
@@ -2531,7 +2557,7 @@ function verticalSlaLinePlugin(slaHrs) {
 // Shows true breaches (buffer<0) when present, otherwise shows
 // top 10 jobs by peak hours as a ranked heat-map fallback.
 // ─────────────────────────────────────────────────────────────
-function renderTopBreachesTable(rows, kpis) {
+function renderTopBreachesTable(rows, kpis, allJobs) {
   const tbody    = document.getElementById("top-jobs-tbody");
   const wrap     = document.getElementById("top-jobs-wrap");
   const empty    = document.getElementById("top-jobs-empty");
@@ -2581,6 +2607,39 @@ function renderTopBreachesTable(rows, kpis) {
   empty?.classList.add("hidden");
   wrap?.classList.remove("hidden");
 
+  // Add "Show excluded" toggle button into the table header area if there are excluded jobs
+  const excludedInAll = (allJobs || []).filter(j => _isJobExcluded(j));
+  let showExcludedToggle = wrap?.querySelector("#show-excluded-toggle");
+  if (excludedInAll.length > 0) {
+    if (!showExcludedToggle) {
+      showExcludedToggle = document.createElement("button");
+      showExcludedToggle.id = "show-excluded-toggle";
+      showExcludedToggle.dataset.showExcluded = "false";
+      // Insert near the table title area
+      const titleEl = document.getElementById("top-jobs-title");
+      titleEl?.parentElement?.parentElement?.insertAdjacentElement("afterend", showExcludedToggle)
+        ?? wrap?.insertAdjacentElement("beforebegin", showExcludedToggle);
+    }
+    const showing = showExcludedToggle.dataset.showExcluded === "true";
+    showExcludedToggle.className = "text-[9px] font-semibold px-2 py-1 rounded transition mb-1";
+    showExcludedToggle.style.cssText = showing
+      ? `color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.3)}`
+      : `color:${THEME.muted || "#6b7280"};background:transparent;border:1px solid ${hexA(THEME.amber,0.2)}`;
+    showExcludedToggle.textContent = showing
+      ? `⊘ Hiding ${excludedInAll.length} excluded job(s) — click to show`
+      : `⊘ ${excludedInAll.length} excluded job(s) hidden — click to show`;
+    showExcludedToggle.onclick = () => {
+      showExcludedToggle.dataset.showExcluded =
+        showExcludedToggle.dataset.showExcluded === "true" ? "false" : "true";
+      renderTopBreachesTable(rows, kpis, allJobs);
+    };
+  } else if (showExcludedToggle) {
+    showExcludedToggle.remove();
+    showExcludedToggle = null;
+  }
+
+  const showExcluded = showExcludedToggle?.dataset.showExcluded === "true";
+
   const statusClass = (status) => {
     switch ((status || "").toUpperCase()) {
       case "BREACH":    return "metric-badge metric-badge-red";
@@ -2595,9 +2654,14 @@ function renderTopBreachesTable(rows, kpis) {
     }
   };
 
-  for (const row of displayRows) {
+  const renderRow = (row, isExcluded) => {
     const tr = document.createElement("tr");
-    tr.className = "hover:bg-Cblue/5 transition-colors";
+    tr.className = isExcluded
+      ? "border-t border-Cborder/20 transition-colors"
+      : "hover:bg-Cblue/5 transition-colors";
+    if (isExcluded) {
+      tr.style.cssText = `opacity:0.45;background:${hexA(THEME.amber,0.04)}`;
+    }
 
     const bufPct  = typeof row.buffer_pct   === "number" ? row.buffer_pct   : null;
     const slaUsed = typeof row.sla_used_pct === "number" ? row.sla_used_pct : null;
@@ -2605,24 +2669,45 @@ function renderTopBreachesTable(rows, kpis) {
     const avg     = typeof row.avg_hrs      === "number" ? row.avg_hrs      : 0;
     const status  = row.buffer_status || (bufPct < 0 ? "BREACH" : "HEALTHY");
     const jobName = row.Job_Name || row.job_name || "—";
+    const reason  = row.utility_reason || "";
 
     const bufferClass =
+      isExcluded    ? "text-Cmuted"  :
       bufPct === null   ? "text-Cmuted"  :
       bufPct < 0        ? "text-Cred font-bold"   :
       bufPct < 10       ? "text-Camber font-bold"  :
       bufPct < 30       ? "text-Camber" : "text-Cgreen";
 
     const slaBarPct   = Math.min(100, slaUsed ?? (peak / (row.sla_hrs ?? defaultSla) * 100));
-    const slaBarColor = slaBarPct >= 100 ? "#f43f5e" : slaBarPct >= 80 ? "#f59e0b" : "#3b82f6";
+    const slaBarColor = isExcluded ? "#6b7280" : slaBarPct >= 100 ? "#f43f5e" : slaBarPct >= 80 ? "#f59e0b" : "#3b82f6";
     const jobSla = row.sla_hrs ?? defaultSla;
 
+    const nameCell = isExcluded
+      ? `<div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}" style="text-decoration:line-through">
+           ${escapeHtml(jobName)}
+         </div>
+         <div class="text-[8px] font-mono mt-0.5" style="color:${THEME.amber}">
+           ⊘ excluded${reason ? ` · ${escapeHtml(reason)}` : ""}
+         </div>`
+      : `<div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}">${escapeHtml(jobName)}</div>`;
+
+    const actionBtn = isExcluded
+      ? `<button class="batch-include-btn text-[10px] px-1.5 py-0.5 rounded hover:opacity-80 transition"
+                 style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}"
+                 data-include-job="${escapeHtml(jobName)}"
+                 title="Include '${escapeHtml(jobName)}' back in analysis">↩ Include</button>`
+      : `<button class="batch-exclude-btn text-[11px] px-1 py-0.5 rounded opacity-40 hover:opacity-100 transition cursor-pointer"
+                 style="color:${THEME.amber};background:${hexA(THEME.amber,0.08)};border:1px solid transparent"
+                 data-exclude-job="${escapeHtml(jobName)}"
+                 title="Exclude '${escapeHtml(jobName)}' from analysis">⊘</button>`;
+
     tr.innerHTML = `
-      <td class="px-3 py-2 font-mono text-Cwhite text-[11px]">
-        <div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}">${escapeHtml(jobName)}</div>
+      <td class="px-3 py-2 font-mono text-[11px]" style="color:${isExcluded ? '#9ca3af' : ''}">
+        ${nameCell}
       </td>
-      <td class="px-3 py-2 text-right font-mono font-bold text-Cwhite text-[11px]">
+      <td class="px-3 py-2 text-right font-mono font-bold text-[11px]" style="color:${isExcluded ? '#6b7280' : ''}">
         ${peak.toFixed(2)}h
-        ${peak > jobSla ? '<span class="ml-1 text-[9px] text-Cred font-bold">▲SLA</span>' : ""}
+        ${!isExcluded && peak > jobSla ? '<span class="ml-1 text-[9px] text-Cred font-bold">▲SLA</span>' : ""}
       </td>
       <td class="px-3 py-2 text-right font-mono text-Cmuted text-[11px]">${avg.toFixed(2)}h</td>
       <td class="px-3 py-2 text-right font-mono text-[11px] ${bufferClass}">
@@ -2637,22 +2722,40 @@ function renderTopBreachesTable(rows, kpis) {
         </div>
       </td>
       <td class="px-3 py-2">
-        <span class="${statusClass(status)}">${escapeHtml(status)}</span>
+        ${isExcluded ? `<span class="metric-badge" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">excluded</span>` : `<span class="${statusClass(status)}">${escapeHtml(status)}</span>`}
       </td>
-      <td class="px-1 py-2 text-center">
-        <button class="batch-exclude-btn text-[11px] px-1 py-0.5 rounded opacity-40 hover:opacity-100 transition cursor-pointer"
-                style="color:${THEME.amber};background:${hexA(THEME.amber,0.08)};border:1px solid transparent"
-                data-exclude-job="${escapeHtml(jobName)}"
-                title="Exclude '${escapeHtml(jobName)}' from analysis">⊘</button>
-      </td>
+      <td class="px-1 py-2 text-center">${actionBtn}</td>
     `;
+
     tr.querySelector(".batch-exclude-btn")?.addEventListener("click", (e) => {
       e.stopPropagation();
       _batchManualExclude.add(jobName);
       _batchManualInclude.delete(jobName);
       _reRenderBatch();
     });
+    tr.querySelector(".batch-include-btn")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _batchManualExclude.delete(jobName);
+      if ((allJobs || []).find(j => j.Job_Name === jobName)?.is_utility) {
+        _batchManualInclude.add(jobName);
+      }
+      _reRenderBatch();
+    });
+
     tbody.appendChild(tr);
+  };
+
+  for (const row of displayRows) renderRow(row, false);
+
+  // Append excluded rows when toggle is on
+  if (showExcluded && excludedInAll.length > 0) {
+    const sepRow = document.createElement("tr");
+    sepRow.innerHTML = `<td colspan="7" class="px-3 py-1 text-[9px] font-bold uppercase tracking-wider"
+                                         style="color:${THEME.amber};background:${hexA(THEME.amber,0.06)}">
+                         ⊘ Excluded from SLA analysis — detected as utility / infrastructure jobs
+                        </td>`;
+    tbody.appendChild(sepRow);
+    for (const row of excludedInAll) renderRow(row, true);
   }
 }
 

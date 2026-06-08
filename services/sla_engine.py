@@ -95,7 +95,9 @@ _QUARTERLY_PATTERNS = [
     r"(?:^|[^A-Za-z])QUATERLY(?:$|[^A-Za-z])",
     r"(?:^|[^A-Za-z])QTR(?:$|[^A-Za-z])",
     r"\bEVERY\s+(?:THREE|3)\s+MONTHS?\b",
-    r"(?:^|[^A-Za-z])QTREND(?:YEAR)?(?:$|[^A-Za-z])",
+    # QTRENDYEAR / QTREND → quarterly trend run
+    r"(?:^|[^A-Za-z])QTRENDYEAR(?:$|[^A-Za-z])",
+    r"(?:^|[^A-Za-z])QTREND(?:$|[^A-Za-z])",
 ]
 
 # Cyclic/intraday keywords — should be caught before WEEKLY/DAILY name matching.
@@ -158,18 +160,38 @@ _PIPELINE_STAGE_PATTERN = re.compile(r"(?:^|[^A-Za-z])DP0[1-9](?:$|[^A-Za-z0-9])
 
 # Additional weekly patterns with underscore-safe boundaries
 _WEEKLY_EXTRA_PATTERNS = [
-    re.compile(r"(?:^|[^A-Za-z0-9])WKLY(?:[0-9]|$|[^A-Za-z0-9])", re.I),  # WKLY, WKLY1, WKLY2
+    # WKLY without trailing digit → standard WEEKLY
+    re.compile(r"(?:^|[^A-Za-z0-9])WKLY(?![0-9])", re.I),
+    # WKLY[N] (1-9) → PARALLEL_WEEKLY classification (each N is an independent stream)
+    # Still uses WEEKLY SLA ceiling — parallel streams share the same window target.
+    re.compile(r"(?:^|[^A-Za-z0-9])WKLY[0-9]", re.I),
     re.compile(r"(?:^|[^A-Za-z])THURSDAY(?:$|[^A-Za-z])", re.I),            # THURSDAY
     re.compile(r"(?:^|[^A-Za-z])THUR(?:$|[^A-Za-z])", re.I),                # THUR
     re.compile(r"OUTBOUND[_\-]THUR", re.I),                                   # OUTBOUND_THUR
 ]
 
+# WKLY[N] parallel weekly — separate compile for metadata enrichment
+_PARALLEL_WKLY_PATTERN = re.compile(r"(?:^|[^A-Za-z0-9])WKLY([0-9])", re.I)
+
+# WEEKEND keyword — schedule depends on run data:
+#   gap > 14d → MONTHLY_WEEKEND (monthly with weekend timing)
+#   cyclic    → CYCLIC
+#   default   → WEEKLY_SPECIFIC_DAY (Saturday or Sunday)
+_WEEKEND_PATTERN = re.compile(r"(?:^|[^A-Za-z])WEEKEND(?:$|[^A-Za-z])", re.I)
+
 # Additional daily patterns with underscore-safe boundaries
 _DAILY_EXTRA_PATTERNS = [
     re.compile(r"(?:^|[^A-Za-z0-9])MON[_\-]FRI(?:$|[^A-Za-z0-9])", re.I),  # MON_FRI
     re.compile(r"OB[_\-]MON[_\-]FRI", re.I),                                  # OB_MON_FRI
-    re.compile(r"(?:^|[^A-Za-z])MIDWEEK(?:$|[^A-Za-z])|(?:^|[^A-Za-z])MID[_\-]WEEK(?:$|[^A-Za-z])", re.I),  # MIDWEEK
+    # MIDWEEK / MID_WEEK → Mon/Wed/Thu runs, SLA ceiling 8h (treated as DAILY in name tier,
+    # but ceiling overridden to 8h in Stage 6 via MIDWEEK entry in _SLA map)
+    re.compile(r"(?:^|[^A-Za-z])MIDWEEK(?:$|[^A-Za-z])|(?:^|[^A-Za-z])MID[_\-]WEEK(?:$|[^A-Za-z])", re.I),
 ]
+
+# MIDWEEK-specific pattern for returning MIDWEEK type instead of DAILY
+_MIDWEEK_PATTERN = re.compile(
+    r"(?:^|[^A-Za-z])MIDWEEK(?:$|[^A-Za-z])|(?:^|[^A-Za-z])MID[_\-]WEEK(?:$|[^A-Za-z])", re.I
+)
 
 
 def classify_schedule(text: str) -> str:
@@ -203,8 +225,25 @@ def classify_schedule(text: str) -> str:
         if pat.search(t):
             return stype
 
-    # Extra daily patterns with underscore-safe boundaries — check BEFORE DOW patterns
-    # so MON_FRI → DAILY, not accidentally caught as _FRI → WEEKLY_SPECIFIC_DAY
+    # MIDWEEK / MID_WEEK → return MIDWEEK type (8h SLA ceiling, Mon/Wed/Thu pattern)
+    if _MIDWEEK_PATTERN.search(t):
+        return "MIDWEEK"
+
+    # MON_FRI / OB_MON_FRI → DAILY_EXCEPT_WEEKEND — check BEFORE DOW patterns
+    # so MON_FRI → DAILY_EXCEPT_WEEKEND, not caught as _FRI → WEEKLY_SPECIFIC_DAY
+    _mon_fri_pat = re.compile(r"(?:^|[^A-Za-z0-9])MON[_\-]FRI(?:$|[^A-Za-z0-9])|OB[_\-]MON[_\-]FRI", re.I)
+    if _mon_fri_pat.search(t):
+        return "DAILY_EXCEPT_WEEKEND"
+
+    # WEEKEND keyword — ambiguous without data; return WEEKLY (data inference resolves further)
+    if _WEEKEND_PATTERN.search(t):
+        return "WEEKLY"   # data inference will distinguish MONTHLY_WEEKEND / CYCLIC / WEEKLY
+
+    # WKLY[N] → PARALLEL_WEEKLY (multiple independent weekly streams)
+    if _PARALLEL_WKLY_PATTERN.search(t):
+        return "PARALLEL_WEEKLY"
+
+    # Extra daily patterns with underscore-safe boundaries
     for pat in _DAILY_EXTRA_PATTERNS:
         if pat.search(t):
             return "DAILY"
@@ -226,11 +265,11 @@ def classify_schedule(text: str) -> str:
             return stype
 
     # Stage 3 Tier 4: Standard keyword patterns
-    # Compound WEEKLY+MONTHLY in same name → defer to data inference
+    # Compound WEEKLY+MONTHLY in same name → defer to data inference (Addition 3)
     _has_weekly  = bool(re.search(r"(?:^|[^A-Za-z])WEEKLY(?:$|[^A-Za-z])", t))
     _has_monthly = bool(re.search(r"(?:^|[^A-Za-z])MONTHLY(?:$|[^A-Za-z])", t))
     if _has_weekly and _has_monthly:
-        return "UNKNOWN"   # Let classify_schedule_with_data decide via Signal 1 (gap)
+        return "UNKNOWN"   # classify_schedule_with_data resolves via Signal 1 gap analysis
 
     for sched_type, patterns in _COMPILED_SCHED.items():
         if sched_type == "CYCLIC":   # already handled above
@@ -239,7 +278,7 @@ def classify_schedule(text: str) -> str:
             if pat.search(text):
                 return sched_type
 
-    # Extra weekly patterns (underscore-boundary-safe — WKLY, THUR, OUTBOUND_THUR)
+    # Extra weekly patterns (underscore-boundary-safe — WKLY without number, THUR, OUTBOUND_THUR)
     for pat in _WEEKLY_EXTRA_PATTERNS:
         if pat.search(t):
             return "WEEKLY"
@@ -291,6 +330,12 @@ def classify_schedule_meta(text: str) -> dict:
             if pat.search(t):
                 result["expected_day"] = day
                 break
+
+    # Enrich PARALLEL_WEEKLY with stream number
+    elif stype == "PARALLEL_WEEKLY":
+        m_pw = _PARALLEL_WKLY_PATTERN.search(t)
+        if m_pw:
+            result["parallel_stream_num"] = int(m_pw.group(1))
 
     # Enrich BIMONTHLY
     elif stype == "BIMONTHLY":
@@ -631,13 +676,14 @@ def classify_schedule_with_data(
         "DAILY":                _DAILY_H,
         "TWICE_DAILY":          _DAILY_H,
         "DAILY_EXCEPT":         _DAILY_H,
-        "DAILY_EXCEPT_WEEKEND": _DAILY_H,
-        "MIDWEEK":              _DAILY_H,   # Mon/Wed/Thu pattern
+        "DAILY_EXCEPT_WEEKEND": _DAILY_H,   # MON_FRI / OB_MON_FRI
+        "MIDWEEK":              _WEEKLY_H,  # Mon/Wed/Thu pattern — 8h ceiling (not 6h)
         "WEEKLY":               _WEEKLY_H,
         "WEEKLY_SPECIFIC_DAY":  _WEEKLY_H,
         "FORTNIGHTLY":          _WEEKLY_H,  # Stage 6: FORTNIGHTLY → 8h (not None)
         "BIWEEKLY":             _WEEKLY_H,
         "PARALLEL_WORKFLOW":    _WEEKLY_H,
+        "PARALLEL_WEEKLY":      _WEEKLY_H,  # WKLY[N] streams — each gets 8h ceiling
     }
     # Types excluded from compliance (ceiling = None)
     _NO_SLA_TYPES = {
@@ -664,6 +710,56 @@ def classify_schedule_with_data(
     # Level 2 — name keyword
     meta = classify_schedule_meta(text or "")
     name_type = meta["schedule_type"]
+
+    # Addition 3 — Compound WEEKLY+MONTHLY name resolution via data gap analysis.
+    # classify_schedule() returns UNKNOWN when name contains both WEEKLY and MONTHLY.
+    # Here we use Signal 1 (median gap) to pick the correct type.
+    # WEEKLY is the safe default when data is ambiguous (lower SLA ceiling).
+    _t_upper = (text or "").upper()
+    _both_wm = (
+        bool(re.search(r"(?:^|[^A-Za-z])WEEKLY(?:$|[^A-Za-z])", _t_upper)) and
+        bool(re.search(r"(?:^|[^A-Za-z])MONTHLY(?:$|[^A-Za-z])", _t_upper))
+    )
+    if name_type == "UNKNOWN" and _both_wm and run_dates and len(run_dates) >= 4:
+        try:
+            import statistics as _stats
+            from datetime import date as _dt
+            _dates = sorted({
+                d if hasattr(d, "day") else _dt.fromisoformat(str(d)[:10])
+                for d in run_dates if d is not None
+            })
+            _gaps = [(_dates[i] - _dates[i - 1]).days for i in range(1, len(_dates))]
+            if _gaps:
+                _median_gap = _stats.median(_gaps)
+                if _median_gap <= 10:
+                    name_type = "WEEKLY"   # data shows weekly cadence
+                elif _median_gap >= 20:
+                    name_type = "MONTHLY"  # data shows monthly cadence
+                else:
+                    name_type = "WEEKLY"   # ambiguous → safer WEEKLY default (lower SLA)
+            else:
+                name_type = "WEEKLY"
+        except Exception:
+            name_type = "WEEKLY"   # fallback: safe default
+
+    # Addition 2 — WEEKEND keyword: resolve to specific type using data
+    # classify_schedule() returns WEEKLY for WEEKEND; refine here if data available
+    if name_type == "WEEKLY" and _WEEKEND_PATTERN.search(text or "") and run_dates and len(run_dates) >= 4:
+        try:
+            import statistics as _stats_w
+            from datetime import date as _dtw
+            _wdates = sorted({
+                d if hasattr(d, "day") else _dtw.fromisoformat(str(d)[:10])
+                for d in run_dates if d is not None
+            })
+            _wgaps = [(_wdates[i] - _wdates[i - 1]).days for i in range(1, len(_wdates))]
+            if _wgaps:
+                _wmed = _stats_w.median(_wgaps)
+                if _wmed >= 20:
+                    name_type = "MONTHLY"   # WEEKEND but monthly cadence
+                # else: stays WEEKLY (weekend-of-week pattern)
+        except Exception:
+            pass  # keep WEEKLY
 
     # Fast exit for types that don't need conflict checking
     _CONFLICT_CHECK_TYPES = {"WEEKLY", "DAILY"}

@@ -576,11 +576,25 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
         # detection to distinguish timeout/wait jobs from genuinely slow execution.
         df["_orig_zero_runtime"] = False
         df.loc[mask, "_orig_zero_runtime"] = True
-        diff = (df.loc[mask, "End_Time"] - df.loc[mask, "Start_Time"]).dt.total_seconds()
-        df.loc[mask, "Run_Sec"] = diff.clip(lower=0)
+        diff_raw = (df.loc[mask, "End_Time"] - df.loc[mask, "Start_Time"]).dt.total_seconds()
+        # Stage 1C: midnight crossover — job ran past midnight → End_Time < Start_Time
+        # Fix: add 86400s when diff is negative (single-job crossover, not multi-day)
+        diff_corrected = diff_raw.where(diff_raw >= 0, diff_raw + 86400.0)
+        # Cap at 168h (1 week) — prevents corrupt timestamp pairs from creating absurd runtimes
+        df.loc[mask, "Run_Sec"] = diff_corrected.clip(lower=0, upper=168 * 3600)
     else:
         df["Start_Time"] = _parse_dt(df["Start_Time"])
 
+    # Stage 1B: NaT > 5% warning — surface before rows are silently dropped
+    _nat_total = len(df)
+    _nat_count = int(df["Start_Time"].isna().sum()) if "Start_Time" in df.columns else 0
+    if _nat_total > 0 and _nat_count / _nat_total > 0.05:
+        logger.warning(
+            "load_ctrlm_bytes '%s': %.0f%% of rows (%d/%d) have unparseable Start_Time "
+            "— these rows are dropped and metrics will be incomplete. "
+            "Check date format in source file.",
+            filename, _nat_count / _nat_total * 100, _nat_count, _nat_total,
+        )
     df.dropna(subset=["Start_Time"], inplace=True)
     df["run_time_hrs"] = df["Run_Sec"] / 3600.0
     df["run_date"]     = df["Start_Time"].dt.date
@@ -821,6 +835,28 @@ def build_top_jobs_df(df: pd.DataFrame,
     # Round floats for JSON cleanliness
     for col in ("peak_hrs", "avg_hrs", "total_hrs", "sla_hrs"):
         top_jobs[col] = top_jobs[col].round(3)
+
+    # ── Tag utility jobs (FileWatcher, DB backup, export, health-check) ──────
+    # is_utility=True → frontend can filter these out of the SLA buffer table
+    # by toggling the "Exclude utility jobs" switch.  Backend keeps them in
+    # the dataset so their run counts and fail counts are still tracked.
+    # utility_reason = first matched pattern substring (for frontend tooltip).
+    _util_patterns = [str(p).lower() for p in getattr(pe_config, "UTILITY_JOB_PATTERNS", [])]
+    if _util_patterns and "Job_Name" in top_jobs.columns:
+        import re as _re_util
+        def _util_check(name: str) -> tuple:
+            norm = _re_util.sub(r"[\s\-]+", "_", str(name)).lower()
+            for pat in _util_patterns:
+                if pat in norm:
+                    return True, pat
+            return False, ""
+        _util_results = top_jobs["Job_Name"].apply(_util_check)
+        top_jobs["is_utility"]     = _util_results.apply(lambda t: t[0])
+        top_jobs["utility_reason"] = _util_results.apply(lambda t: t[1])
+    else:
+        top_jobs["is_utility"]     = False
+        top_jobs["utility_reason"] = ""
+
     return top_jobs
 
 
@@ -1048,46 +1084,101 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
 # detect_cyclic_subs — generic cyclic/polling sub-app filter
 # ─────────────────────────────────────────────────────────────────
 def detect_cyclic_subs(df: pd.DataFrame, threshold: int = 20) -> set:
-    """Return a set of Sub_Application names that average more than `threshold`
-    runs per calendar day.
+    """Return a set of Sub_Application names that match cyclic/polling behaviour.
 
-    These are cyclic/polling jobs that run throughout the day (e.g. hourly
-    data feeds, monitoring heartbeats, CDC pipelines).  Including them in
-    the batch-window elapsed measurement inflates min(Start_Time)→max(End_Time)
-    to ~24h even when the real batch window runs for only 4-8h.
+    Uses a TWO-GUARD algorithm (both must pass — neither alone is sufficient):
 
-    The >20 runs/day heuristic is generic and customer-agnostic:
-      - A standard daily batch job runs once per day → 1 run/day
-      - A weekly job runs once per week → 0.14 runs/day
-      - A CDC/polling job running hourly → 24 runs/day  ← excluded
+    Guard 1 — Frequency (MEDIAN-based, not max-based):
+      median(runs_per_day) > 5 on active dates
+      AND avg_runs_per_job > 3 (repetition per individual job, not just high total count)
 
-    Customers may also document this explicitly in the XLSX comment
-    "No breach (cyclic jobs run throughout the day)" — this function
-    captures that pattern programmatically without needing XLSX comments.
+    Using MEDIAN (not max) is critical:
+      max > 5 alone catches retry storms — a batch job failing 1435 times on one
+      date creates max=1435 while median=1 (normal). That's NOT cyclic, it's a
+      RETRY STORM (automated job retry cascade after failure).
+
+      cyclic:      median=24, max=26  → both guards fire → CYCLIC
+      retry storm: median=1,  max=1435 → Guard 1 fails (median ≤5) → NOT CYCLIC
+
+    Guard 2 — Duration:
+      avg_runtime_hrs < CYCLIC_MAX_RUNTIME_HRS (default 0.25h / 15 min)
+      Real batch jobs rarely complete in under 15 minutes.
+      CDC/polling loops typically complete in seconds.
+
+    Returns (cyclic_subs, retry_storm_info) — retry_storm_info is a list of
+    {"sub_app", "job_name", "date", "run_count"} for warning surface.
+    Use detect_cyclic_subs.retry_storms attribute for warnings.
     """
     if "Sub_Application" not in df.columns or "run_date" not in df.columns:
+        detect_cyclic_subs.retry_storms = []
         return set()
+
     runs_per_day = (
         df.groupby(["Sub_Application", "run_date"])
           .size()
           .reset_index(name="daily_runs")
     )
-    avg_per_day = runs_per_day.groupby("Sub_Application")["daily_runs"].mean()
 
-    # Guard: high total runs/day alone is NOT cyclic if driven by many unique
-    # jobs each running once.  A daily batch of 120 jobs is normal; a single
-    # CDC feed running 24×/day IS cyclic.  Require avg runs-per-job-per-day > 3
-    # to confirm cyclic behaviour.
+    # Guard 1 — Frequency: MEDIAN > 5 (not max) to exclude retry storms
+    med_per_day = runs_per_day.groupby("Sub_Application")["daily_runs"].median()
+    freq_candidates = set(med_per_day[med_per_day > 5].index)
+
+    # ── Retry storm detection (separate from cyclic) ──────────────────────────
+    # max >> median (ratio > 20×) on dates NOT in freq_candidates → retry storm
+    max_per_day   = runs_per_day.groupby("Sub_Application")["daily_runs"].max()
+    retry_storms: list = []
+    for sa in runs_per_day["Sub_Application"].unique():
+        sa_str = str(sa)
+        med = float(med_per_day.get(sa, 0))
+        mx  = float(max_per_day.get(sa, 0))
+        if med < 5 and mx > 0 and mx / max(med, 1) >= 20:
+            # Retry storm: find the spike dates
+            sa_daily = runs_per_day[runs_per_day["Sub_Application"] == sa]
+            spike_rows = sa_daily[sa_daily["daily_runs"] >= max(mx * 0.5, 20)]
+            for _, row in spike_rows.iterrows():
+                # Find the most frequent job on that date
+                day_jobs = df[
+                    (df["Sub_Application"] == sa) &
+                    (df["run_date"] == row["run_date"]) &
+                    ("Job_Name" in df.columns)
+                ]
+                top_job = ""
+                if "Job_Name" in day_jobs.columns and not day_jobs.empty:
+                    top_job = str(day_jobs["Job_Name"].value_counts().index[0])
+                retry_storms.append({
+                    "sub_app":   sa_str,
+                    "job_name":  top_job,
+                    "date":      str(row["run_date"]),
+                    "run_count": int(row["daily_runs"]),
+                })
+    # Expose retry storms as function attribute so compute_metrics can surface them
+    detect_cyclic_subs.retry_storms = retry_storms
+
+    if not freq_candidates:
+        return set()
+
+    # Guard 1b: avg runs-per-unique-job-per-day > 3
     jobs_per_day = (
         df.groupby(["Sub_Application", "run_date"])["Job_Name"]
           .nunique()
           .reset_index(name="daily_jobs")
     )
-    avg_jobs = jobs_per_day.groupby("Sub_Application")["daily_jobs"].mean()
+    avg_per_day      = runs_per_day.groupby("Sub_Application")["daily_runs"].mean()
+    avg_jobs         = jobs_per_day.groupby("Sub_Application")["daily_jobs"].mean()
     avg_runs_per_job = avg_per_day / avg_jobs.clip(lower=1)
+    freq_confirmed   = {s for s in freq_candidates if avg_runs_per_job.get(s, 0) > 3}
 
-    candidates = set(avg_per_day[avg_per_day > threshold].index)
-    return {s for s in candidates if avg_runs_per_job.get(s, 0) > 3}
+    if not freq_confirmed:
+        return set()
+
+    # Guard 2 — Duration: avg_runtime_hrs < CYCLIC_MAX_RUNTIME_HRS (15 min)
+    if "run_time_hrs" in df.columns:
+        avg_runtime = df.groupby("Sub_Application")["run_time_hrs"].mean()
+        _min_hrs    = float(getattr(pe_config, "CYCLIC_MAX_RUNTIME_HRS", 0.25))
+        return {s for s in freq_confirmed if avg_runtime.get(s, 999.0) < _min_hrs}
+
+    # run_time_hrs not yet computed — fall back to frequency guard only
+    return freq_confirmed
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1105,10 +1196,31 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     specific values.  Falls back to schedule-type ceiling, then pe_config
     default.  Source is tagged on every resolved value.
     """
+    # ── Stage 2A: User-specified job exclusions (config_store["exclude_jobs"]) ─
+    # Jobs the analyst has explicitly excluded from SLA/buffer analysis.
+    # Applied to the ANALYSIS copy only — raw df is preserved for fail_count,
+    # heatmap, and time-series charts so excluded jobs remain visible there.
+    _user_excl_jobs: set = set()
+    try:
+        from services import config_store as _cfg_excl
+        _excl_list = _cfg_excl.get("exclude_jobs") or []
+        if isinstance(_excl_list, list):
+            _user_excl_jobs = {str(j).strip() for j in _excl_list if j and str(j).strip()}
+    except Exception:
+        pass
+
+    df_analysis = df
+    if _user_excl_jobs and "Job_Name" in df.columns:
+        df_analysis = df[~df["Job_Name"].isin(_user_excl_jobs)].copy()
+        logger.debug(
+            "compute_metrics: %d user-excluded jobs removed from SLA analysis",
+            len(_user_excl_jobs),
+        )
+
     # ── Build SLA index once (per-job ceiling from uploaded contracts) ───────
-    sla_index     = build_sla_index(df)
+    sla_index     = build_sla_index(df_analysis)
     job_sla_map   = sla_index.get("job_sla", {})
-    global_ceil   = sla_index.get("global_ceiling", _detect_sla_ceiling(df))
+    global_ceil   = sla_index.get("global_ceiling", _detect_sla_ceiling(df_analysis))
     sla_src_type  = sla_index.get("source", "default")
 
     # ── Cyclic sub-app detection (Fix 1) ─────────────────────────────────────
@@ -1120,15 +1232,44 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # Job-level stats (peak_hrs, buffer, SLA breach per individual job) are NOT
     # affected — we still count cyclic jobs for compliance/anomaly purposes.
     # Only the wall-clock elapsed window measurement excludes them.
-    cyclic_subs = detect_cyclic_subs(df) if "Sub_Application" in df.columns else set()
+    cyclic_subs = detect_cyclic_subs(df_analysis) if "Sub_Application" in df_analysis.columns else set()
+    # Surface retry storm warnings — spike dates with automated retry cascades
+    _retry_storms: list = getattr(detect_cyclic_subs, "retry_storms", [])
+    if _retry_storms:
+        for _rs in _retry_storms:
+            logger.warning(
+                "compute_metrics: RETRY STORM detected — sub_app=%s job=%s date=%s runs=%d. "
+                "This is NOT a cyclic job. Investigate failure root cause.",
+                _rs["sub_app"], _rs["job_name"], _rs["date"], _rs["run_count"],
+            )
     # df_window: dataframe used for wall-clock elapsed window computation only.
     df_window = (
-        df[~df["Sub_Application"].isin(cyclic_subs)].copy()
-        if cyclic_subs and "Sub_Application" in df.columns
-        else df
+        df_analysis[~df_analysis["Sub_Application"].isin(cyclic_subs)].copy()
+        if cyclic_subs and "Sub_Application" in df_analysis.columns
+        else df_analysis
     )
 
-    # ── Per-job SLA breach counting ──────────────────────────────────────────
+    # ── Stage 2B: Compliance scope — exclude out-of-scope schedule types ─────
+    # Sub_Apps classified as MONTHLY, QUARTERLY, ADHOC, or CYCLIC have no
+    # SLA window target → including them in compliance % inflates the denominator
+    # with "never breach" rows that were never tracked.
+    # UNKNOWN is intentionally KEPT in scope (Level 4 fallback → 6h default SLA).
+    _out_of_scope_subs: set = set(_user_excl_jobs)   # start with manually excluded
+    _out_of_scope_subs.update(cyclic_subs)           # cyclic = never had batch SLA
+    try:
+        from services.sla_engine import classify_schedule as _classify_sched
+        _NO_SCOPE = {
+            "MONTHLY", "BIMONTHLY", "DATE_SPECIFIC_MONTHLY", "QUARTERLY",
+            "PIPELINE_STAGE", "ADHOC", "CYCLIC", "CYCLIC_INTERVAL", "CALENDAR_BASED",
+        }
+        if "Sub_Application" in df_analysis.columns:
+            for _sa in df_analysis["Sub_Application"].dropna().unique():
+                if _classify_sched(str(_sa)) in _NO_SCOPE:
+                    _out_of_scope_subs.add(str(_sa))
+    except Exception:
+        pass  # classification unavailable — keep all sub_apps in scope
+
+    # Per-job SLA breach counting ──────────────────────────────────────────────
     # Breach = Sub_Application window (wall-clock: last End_Time − first Start_Time
     # per Sub_App per run_date) > per-job SLA ceiling resolved from SLA matrix.
     #
@@ -1137,13 +1278,13 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # G20a: require ≥30% End_Time coverage to avoid misleading elapsed windows
     # when only a handful of rows have End_Time populated.
     _end_coverage = 0.0
-    if "End_Time" in df.columns and len(df) > 0:
-        _end_coverage = df["End_Time"].notna().sum() / len(df)
-    has_end_time = "End_Time" in df.columns and _end_coverage >= 0.30
+    if "End_Time" in df_analysis.columns and len(df_analysis) > 0:
+        _end_coverage = df_analysis["End_Time"].notna().sum() / len(df_analysis)
+    has_end_time = "End_Time" in df_analysis.columns and _end_coverage >= 0.30
 
-    if has_end_time and "Sub_Application" in df.columns:
+    if has_end_time and "Sub_Application" in df_analysis.columns:
         # Primary: wall-clock window per Sub_Application per run_date.
-        # Use df_window (cyclic sub-apps excluded) to avoid 24h elapsed inflation.
+        # Use df_window (cyclic + excluded sub-apps removed) to avoid 24h elapsed inflation.
         window_agg = (
             df_window.groupby(["Sub_Application", "run_date"], as_index=False)
               .agg(
@@ -1152,6 +1293,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                   job_name=("Job_Name", "first"),  # representative job name
               )
         )
+        # Filter out-of-scope sub_apps from compliance denominator
+        if _out_of_scope_subs:
+            window_agg = window_agg[
+                ~window_agg["Sub_Application"].isin(_out_of_scope_subs)
+            ].copy()
+
         window_agg["elapsed_hrs"] = (
             (window_agg["last_end"] - window_agg["first_start"])
             .dt.total_seconds() / 3600.0
@@ -1170,7 +1317,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         window_agg["breach"]  = window_agg["elapsed_hrs"] > window_agg["sla_hrs"]
 
         # Merge back to daily (Job_Name level) for compatibility with heatmap
-        daily = (df.groupby(["Job_Name", "run_date"], as_index=False)
+        daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
                    .agg(total_hrs=("run_time_hrs", "sum"), runs=("run_time_hrs", "count")))
         # Carry the per-Sub_App breach flags into the daily Job_Name frame
         sub_breach = (window_agg.groupby("run_date")["breach"].any().reset_index()
@@ -1187,7 +1334,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
     else:
         # Fallback: per-Job_Name per-day sum vs per-job SLA
-        daily = (df.groupby(["Job_Name", "run_date"], as_index=False)
+        daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
                    .agg(total_hrs=("run_time_hrs", "sum"), runs=("run_time_hrs", "count")))
 
         def _job_sla_for_row(row) -> float:
@@ -1202,7 +1349,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         job_breach_map   = {}
 
     monthly_lim = pe_config.SLA_MONTHLY_HRS
-    monthly = (df.groupby(["Job_Name", "month"], as_index=False)
+    monthly = (df_analysis.groupby(["Job_Name", "month"], as_index=False)
                  .agg(total_hrs=("run_time_hrs", "sum")))
     monthly["breach"] = monthly["total_hrs"] > monthly_lim
 
@@ -1211,7 +1358,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     job_sla_comp = 0.0 if total_d == 0 else (1 - daily["breach"].sum() / total_d) * 100
 
     # ── Daily batch window time-series ───────────────────────────
-    window = (df.groupby("run_date", as_index=False)
+    window = (df_analysis.groupby("run_date", as_index=False)
                 .agg(total_hrs=("run_time_hrs", "sum"),
                      job_count=("Job_Name", "nunique"))
                 .sort_values("run_date"))
@@ -1277,12 +1424,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         batch_window_comp = 0.0
 
     # Sub-application rollup
-    sub = (df.groupby("Sub_Application", as_index=False)
+    sub = (df_analysis.groupby("Sub_Application", as_index=False)
              .agg(total_hrs=("run_time_hrs", "sum"),
                   jobs=("Job_Name", "nunique")))
 
     # ── Worst-job peak (single highest peak_hrs across all jobs) ──
-    top_jobs = build_top_jobs_df(df, sla_index=sla_index)
+    top_jobs = build_top_jobs_df(df_analysis, sla_index=sla_index)
     t_jobs   = int(len(top_jobs))
     j_breach = int((top_jobs["buffer_status"] == "BREACH").sum())
 
@@ -1298,14 +1445,14 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     j_at_risk = int((top_jobs["buffer_pct"].between(0, 15, inclusive="both")).sum())
     j_ok      = max(0, t_jobs - j_breach - j_at_risk)
 
-    # F6 — Anomaly detection
+    # F6 — Anomaly detection (uses raw df — anomalies in excluded jobs still matter)
     anomalies = detect_job_anomalies(df)
 
     # F3 — Fleet-level SLA buffer (worst job)
     peak_max = worst_job_peak
     fleet_sla_buffer = calculate_sla_buffer(global_ceil, peak_max) if peak_max > 0 else None
 
-    # ── Data coverage / confidence ───────────────────────────────
+    # ── Data coverage / confidence (raw df — full picture) ──────────────────
     unique_dates = sorted(df["run_date"].unique())
     date_span = (max(unique_dates) - min(unique_dates)).days + 1 if len(unique_dates) >= 2 else 1
     has_start   = "Start_Time" in df.columns and df["Start_Time"].notna().sum() > 0
@@ -1367,6 +1514,8 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "sla_detected_mode": _detect_sla_mode(df),
         # ── SLA index for downstream (e.g. _build_sla_source_payload) ───────
         "_sla_index":       sla_index,
+        # ── Retry storm warnings (job failure→cascade retries, NOT cyclic) ──
+        "_retry_storms":    _retry_storms,
     }
 
 
@@ -1542,6 +1691,40 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     window_df:   pd.DataFrame = m["window"]
     sub_df:      pd.DataFrame = m["sub_stats"]
 
+    # Addition 4 — Multi-application-per-folder detection
+    # When a single Folder contains 2+ distinct Application values, each
+    # Application should be analyzed independently for window compliance.
+    # Surface this as a warning in the payload so the analyst can split if needed.
+    _multi_app_folders: list = []
+    if "Folder" in df.columns and "Application" in df.columns:
+        _folder_apps = (
+            df.dropna(subset=["Folder", "Application"])
+              .groupby("Folder")["Application"]
+              .nunique()
+        )
+        _split_folders = _folder_apps[_folder_apps >= 2].index.tolist()
+        for _fld in _split_folders:
+            _apps = sorted(df[df["Folder"] == _fld]["Application"].dropna().unique().tolist())
+            _multi_app_folders.append({
+                "folder":       _fld,
+                "applications": _apps,
+                "app_count":    len(_apps),
+                "note": (
+                    f"Folder '{_fld}' contains {len(_apps)} distinct Applications "
+                    f"({', '.join(str(a) for a in _apps[:5])}). "
+                    "Window compliance should be measured per Application, not per Folder. "
+                    "Consider splitting the Ctrl-M export by Application for accurate analysis."
+                ),
+            })
+        if _multi_app_folders:
+            logger.info(
+                "build_batch_payload: %d multi-app folder(s) detected: %s",
+                len(_multi_app_folders),
+                [f["folder"] for f in _multi_app_folders],
+            )
+    # Inject into metrics dict so _build_data_warnings can surface them
+    m["_multi_app_folders"] = _multi_app_folders
+
     # Top 10 breaching jobs (buffer < 0); fall back to worst 10 by peak if none breaching
     breaches_df = top_jobs_df[top_jobs_df["buffer_pct"] < 0].head(10)
     if breaches_df.empty:
@@ -1597,10 +1780,11 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
 
     # RULE 6 — include Sub_Application so findings engine can use composite key
     # sla_hrs / sla_source must be included so the frontend can show per-job ceiling
+    # is_utility must be included so the frontend utility-exclusion toggle works
     _job_cols = [c for c in ["Sub_Application", "Job_Name", "peak_hrs", "avg_hrs",
                               "total_hrs", "sla_hrs", "sla_source",
                               "buffer_pct", "sla_used_pct", "buffer_status",
-                              "fail_count"]
+                              "fail_count", "is_utility", "utility_reason"]
                  if c in top_jobs_df.columns]
 
     return {
@@ -1675,6 +1859,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             ),
             "warnings":         _build_data_warnings(m),
         },
+        "multi_app_folders": _multi_app_folders,
         "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,
@@ -1781,6 +1966,31 @@ def _build_data_warnings(m: dict) -> list:
             "text": f"Using default SLA of {pe_config.SLA_DAILY_HRS:.1f}h. "
                     "Upload customer SLA matrix for accurate compliance measurement.",
             "severity": "info",
+        })
+    # Retry storm warnings — distinct from cyclic jobs
+    for rs in m.get("_retry_storms", []):
+        warnings.append({
+            "code": "RETRY_STORM",
+            "text": (
+                f"Retry storm detected: {rs['sub_app']} had {rs['run_count']} runs on "
+                f"{rs['date']}"
+                + (f" (top job: {rs['job_name']})" if rs.get("job_name") else "")
+                + " — job failure triggered automated retry cascade. "
+                "Investigate root cause; this is not normal cyclic behaviour."
+            ),
+            "severity": "warning",
+            "sub_app":  rs["sub_app"],
+            "date":     rs["date"],
+            "run_count": rs["run_count"],
+        })
+    # Multi-application-per-folder detection warnings
+    for maf in m.get("_multi_app_folders", []):
+        warnings.append({
+            "code":       "MULTI_APP_FOLDER",
+            "text":       maf["note"],
+            "severity":   "info",
+            "folder":     maf["folder"],
+            "app_count":  maf["app_count"],
         })
     return warnings
 

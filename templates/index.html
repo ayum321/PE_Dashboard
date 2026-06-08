@@ -680,10 +680,14 @@
                     class="hidden text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-Cpurple/40 text-Cpurple hover:bg-Cpurple/10 transition-colors">
               Verify
             </button>
-            <!-- Reset button -->
-            <button id="reset-btn"
-                    class="hidden text-[13px] font-bold px-3.5 py-1.5 rounded-lg border border-Corange/50 text-Corange bg-Corange/5 hover:bg-Corange/20 hover:border-Corange/70 hover:text-white transition-all shadow-[0_0_12px_rgba(251,146,60,0.22)]">
-              ↺ Reset
+            <!-- Hard Reset button — always visible, wipes server session + client state -->
+            <button id="reset-btn" onclick="clearSessionData()"
+                    title="Hard reset: wipe all session data and start fresh for a new customer"
+                    class="flex items-center gap-1.5 text-[11px] font-semibold px-3 py-1.5 rounded-lg border border-Cred/40 text-Cred/80 bg-Cred/5 hover:bg-Cred/15 hover:border-Cred/70 hover:text-Cred transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+              </svg>
+              Hard Reset
             </button>
           </div>
         </div>
