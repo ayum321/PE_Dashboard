@@ -1532,9 +1532,17 @@ function renderBatchReview(data) {
       const _srcWm = document.getElementById("batch-source-watermark");
       const insertTarget = _srcWm?.parentElement || document.getElementById("batch-review-body");
       if (insertTarget) {
-        const afterEl = chip;
-        if (afterEl?.nextSibling) insertTarget.insertBefore(utilPanel, afterEl.nextSibling);
-        else insertTarget.appendChild(utilPanel);
+        // IMPORTANT: chip (#batch-dataset-chip) is a nested <span> inside
+        // #batch-loaded-chip — it is NOT a direct child of insertTarget.
+        // Using chip.nextSibling as a reference node causes the
+        // "Child to insert before is not a child of this node" crash.
+        // Use #batch-review-body instead — it IS a direct child of insertTarget.
+        const _batchBody = document.getElementById("batch-review-body");
+        if (_batchBody && _batchBody.parentNode === insertTarget) {
+          insertTarget.insertBefore(utilPanel, _batchBody);
+        } else {
+          insertTarget.appendChild(utilPanel);
+        }
       }
     }
 
@@ -12617,10 +12625,10 @@ function _renderSlaIntelligenceDetail(intel) {
 // ── New Engagement — wipe all server-side session data ────────────────────
 async function clearSessionData() {
   if (!confirm(
-    "Clear all session data?\n\n" +
-    "This removes the current customer's SOW, findings, resource data and " +
-    "batch results so the next engagement starts clean.\n\n" +
-    "The server will NOT restart — only the in-memory session is cleared."
+    "Hard Reset — clear everything?\n\n" +
+    "This wipes the current customer's batch data, resource data, SOW, " +
+    "findings, and all session state on both server and browser.\n\n" +
+    "The page will reload automatically."
   )) return;
 
   try {
@@ -12629,39 +12637,15 @@ async function clearSessionData() {
       body: JSON.stringify({}) });
     if (!res.ok) throw new Error(await res.text());
 
-    // Wipe browser-side app state
-    window.appData        = {};
-    window._lastFindings  = [];
-    window._execCache     = null;
-    window._execCacheHash = null;
+    // Delete persisted SOW baseline from backend config store
+    await fetch("/api/sow/baseline", { method: "DELETE" }).catch(() => {});
 
-    // Clear manual SOW override form fields
-    ["sow-dfu-baseline","sow-dfu-actual","sow-sku-baseline","sow-sku-actual"].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.value = "";
-    });
-    // Clear volume comparison panel
-    const sowCmp = document.getElementById("sow-volume-comparison");
-    if (sowCmp) sowCmp.classList.add("hidden");
-    // Clear stored SOW baseline from backend config
-    fetch("/api/sow/baseline", { method: "DELETE" }).catch(() => {});
-    // Reset SOW contract grid to empty state
-    document.getElementById("sow-empty")?.classList.remove("hidden");
-    document.getElementById("sow-contract-grid")?.classList.add("hidden");
-
-    // Reset all data-source status dots
-    ["ds-batch","ds-resource","ds-issues","ds-sow","ds-gemini"].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) { el.className = "w-2 h-2 rounded-full status-dot-muted shrink-0 transition-all duration-300"; }
-    });
-    ["ds-batch-label","ds-resource-label"].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = "";
-    });
-
-    toast("success", "Session cleared", "Ready for a new engagement. Re-upload all files.");
+    // Full page reload — this is the only reliable way to wipe ALL state:
+    // charts, panels, exclusion sets, file inputs, app globals, DOM nodes.
+    // Trying to individually reset every element always misses something.
+    window.location.reload();
   } catch (err) {
-    toast("error", "Clear failed", String(err).slice(0, 120));
+    toast("error", "Hard reset failed", String(err).slice(0, 120));
   }
 }
   const warnings = info.warnings || [];
