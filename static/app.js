@@ -11445,14 +11445,14 @@ function _renderSlaMatrix(data) {
       + ` · formula: (OK+LONG_JOB+AT_RISK) ÷ eligible × 100`
       + (data.failed_runs ? ` · ${data.failed_runs} FAILED excluded from denominator` : ``)
       + (data.window_total_days != null
-           ? ` · window: ${(data.window_total_days||0)-(data.window_breach_days||0)}/${data.window_total_days} days OK`
+           ? ` · window: ${(data.window_total_days||0)-(data.window_breach_days||0)}/${data.window_total_days} windows OK`
            : ``);
   }
-  // Show window context if available (X of Y days breached)
+  // Show window context if available (X of Y sub-app windows breached)
   const compSubEl = document.getElementById("slak-compliance-sub");
   if (compSubEl && data.window_total_days != null && data.window_breach_days != null) {
     const pass = data.window_total_days - data.window_breach_days;
-    compSubEl.textContent = `${pass}/${data.window_total_days} days pass · Window`;
+    compSubEl.textContent = `${pass}/${data.window_total_days} windows pass · Window`;
     compSubEl.className = `text-[10px] ${data.window_breach_days > 0 ? "text-Cred" : "text-Cmuted"}`;
   }
 
@@ -11465,7 +11465,7 @@ function _renderSlaMatrix(data) {
       // Classic "window failed but no single job breached" — explain why
       compNote.classList.remove("hidden");
       compNote.textContent = `ℹ Window = total elapsed time (first job start → last job end). `
-        + `${wbDays} day(s) where the batch collectively ran late, even though no individual job `
+        + `${wbDays} sub-app window(s) where the batch collectively ran late, even though no individual job `
         + `exceeded its own SLA ceiling. Possible causes: late job start, queue delays, or too many `
         + `jobs running sequentially without overlap.`;
     } else if (wbDays === 0 && breachCount === 0) {

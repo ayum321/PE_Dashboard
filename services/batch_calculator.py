@@ -1300,6 +1300,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         _end_coverage = df_analysis["End_Time"].notna().sum() / len(df_analysis)
     has_end_time = "End_Time" in df_analysis.columns and _end_coverage >= 0.30
 
+    # Canonical per-(sub_app, run_date) window records for the shared compliance
+    # engine. Populated only when wall-clock windows can be measured.
+    _win_records: list = []
+    _win_ceiling_map: dict = {}
+
     if has_end_time and "Sub_Application" in df_analysis.columns:
         # Primary: wall-clock window per Sub_Application per run_date.
         # Use df_window (cyclic + excluded sub-apps removed) to avoid 24h elapsed inflation.
@@ -1333,6 +1338,27 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
         window_agg["sla_hrs"] = window_agg.apply(_sub_sla, axis=1)
         window_agg["breach"]  = window_agg["elapsed_hrs"] > window_agg["sla_hrs"]
+
+        # ── Canonical window records (one per (sub_app, run_date)) ───────────
+        # Feeds the SHARED compliance_engine so the Batch Review and SLA Matrix
+        # tabs compute window compliance with one identical algorithm. The
+        # per-sub_app resolved sla_hrs IS the ceiling (Area 2 — no global float).
+        try:
+            from services.sla_engine import classify_schedule as _cs_win
+        except Exception:
+            _cs_win = lambda _n: "DAILY"   # noqa: E731
+        for _sa in window_agg["Sub_Application"].dropna().unique():
+            _win_ceiling_map[str(_sa)] = float(
+                window_agg.loc[window_agg["Sub_Application"] == _sa, "sla_hrs"].min()
+            )
+        for _, _r in window_agg.iterrows():
+            _win_records.append({
+                "sub_app":       str(_r["Sub_Application"]),
+                "run_date":      str(_r["run_date"]),
+                "elapsed_hrs":   float(_r["elapsed_hrs"]),
+                "schedule_type": _cs_win(str(_r["Sub_Application"])),
+                "sla_ceil":      float(_r["sla_hrs"]),
+            })
 
         # Merge back to daily (Job_Name level) for compatibility with heatmap
         daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
@@ -1485,6 +1511,26 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     else:
         batch_window_comp = 0.0
 
+    # ── Canonical window compliance via SHARED engine (Areas 4 + 5) ──────────
+    # The (sub_app, date)-granular compliance that BOTH the Batch Review and the
+    # SLA Matrix tabs report. compliance_engine is the single definition so the
+    # two screens can never diverge for the same data.
+    window_compliance = {
+        "compliance_pct": float(round(batch_window_comp, 1)),
+        "breach_count": int(window_breach_days),
+        "ok_count": 0, "at_risk_count": 0,
+        "total_windows": int(n_window_days), "excluded_windows": 0,
+        "granularity": "day",
+    }
+    if _win_records:
+        try:
+            from services import compliance_engine as _ce
+            _wc = _ce.compute_window_compliance(_win_records, _win_ceiling_map)
+            _wc["granularity"] = "sub_app_date"
+            window_compliance = _wc
+        except Exception:
+            pass
+
     # Sub-application rollup
     sub = (df_analysis.groupby("Sub_Application", as_index=False)
              .agg(total_hrs=("run_time_hrs", "sum"),
@@ -1575,6 +1621,8 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "batch_window_compliance": float(round(batch_window_comp, 1)),
         "window_breach_days":      window_breach_days,
         "window_total_days":       n_window_days,
+        # Canonical (sub_app, date)-granular window compliance from the shared engine
+        "window_compliance":       window_compliance,
         "total_jobs":       t_jobs,
         "jobs_ok":          int(j_ok),
         "jobs_breach":      int(j_breach),
@@ -1893,11 +1941,18 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "kpis": {
             "compliance_pct":             m["compliance"],
             "job_sla_compliance_pct":      m["job_sla_compliance"],
-            "window_compliance_pct":       m["batch_window_compliance"],
+            # Headline window compliance = shared-engine (sub_app, date) value so it
+            # matches the SLA Matrix tab exactly. Falls back to the day-level number
+            # (carried inside window_compliance) when no elapsed window is available.
+            "window_compliance_pct":       (m.get("window_compliance") or {}).get(
+                                               "compliance_pct", m["batch_window_compliance"]),
             "job_sla_compliance":          m["job_sla_compliance"],
             "batch_window_compliance":     m["batch_window_compliance"],
             "window_breach_days":      m["window_breach_days"],
             "window_total_days":       m["window_total_days"],
+            # Canonical (sub_app, date)-granular window compliance (shared engine).
+            # Both Batch Review and SLA Matrix read the same definition.
+            "window_compliance":           m.get("window_compliance"),
             "total_runs":         m["total_runs"],
             "total_jobs":         m["total_jobs"],
             "total_hrs":          m["total_hrs"],

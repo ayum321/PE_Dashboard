@@ -171,9 +171,11 @@ SENTINEL_MAX_WINDOW_HRS: float = 20.0   # > 20h   → SUSPECT_TOO_LONG (warn, ke
 # Used by compliance_engine.compute_window_compliance(). These schedule classes
 # either have no daily SLA window (CYCLIC/ADHOC) or run on a non-daily cadence
 # that the daily-window compliance metric must not penalize.
+# NOTE: UNKNOWN is NOT excluded — an unclassified sub_app defaults to a daily
+# batch window and must be counted, else compliance collapses to 0 windows.
 COMPLIANCE_EXCLUDED_TYPES: set = {
     "CYCLIC", "CYCLIC_INTERVAL", "ADHOC", "CALENDAR_BASED", "OUTBOUND",
-    "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY", "QUARTERLY", "ANNUAL", "UNKNOWN",
+    "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY", "QUARTERLY", "ANNUAL",
 }
 
 # ── Cyclic detection threshold ────────────────────────────────────────────────

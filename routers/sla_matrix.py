@@ -735,7 +735,13 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     # DAILY ≤ 48h, WEEKLY ≤ 200h, MONTHLY/BIWEEKLY ≤ 400h.
                     # Old fixed 48h cap silently dropped valid 50h+ monthly batches,
                     # reporting RUNTIME_MISSING instead of an actionable AT_RISK finding.
-                    _bt_cap = batch_type_wf if batch_type_wf else "DAILY"
+                    # Detect inline — batch_type_wf is assigned later in this loop, so
+                    # referencing it here would be unbound (first sub_app) or stale.
+                    try:
+                        from services.sla_merger import detect_batch_type as _dbt_cap
+                        _bt_cap = _dbt_cap(sub_app, "") or "DAILY"
+                    except Exception:
+                        _bt_cap = "DAILY"
                     _MAX_ELAPSED: dict[str, float] = {
                         "DAILY": 48.0, "WEEKLY": 200.0,
                         "BIWEEKLY": 400.0, "MONTHLY": 400.0,
@@ -1035,6 +1041,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
             # Per-Sub_Application window: group by (Sub_Application, run_date), then
             # compare elapsed to the sub_app-specific SLA. Roll up to per-run_date
             # compliance: a run_date is breached if ANY sub_app breached on that day.
+            wgrp_sub = pd.DataFrame()
             if "Sub_Application" in wdf.columns and _sub_sla_lookup:
                 wgrp_sub = (wdf.groupby(["Sub_Application", "run_date"])
                                .agg(first_start=("Start_Time", "min"),
@@ -1085,6 +1092,29 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                      "sla_hrs": float(r.get("sla_hrs", global_sla_hrs))}
                     for idx, r in wgrp.iterrows()
                 ]
+
+                # ── Canonical window compliance via SHARED engine ───────────
+                # Identical (sub_app, date)-granular definition used by the Batch
+                # Review tab (batch_calculator). Guarantees the two tabs agree.
+                if not wgrp_sub.empty:
+                    try:
+                        from services import compliance_engine as _ce
+                        _win_recs = [
+                            {"sub_app":     str(r["Sub_Application"]),
+                             "run_date":    str(r["run_date"]),
+                             "elapsed_hrs": float(r["elapsed_hrs"]),
+                             "sla_ceil":    float(r["resolved_sla"])}
+                            for _, r in wgrp_sub.iterrows()
+                        ]
+                        _ceil_map = {
+                            str(sa): float(v) for sa, v in _sub_sla_lookup.items()
+                        }
+                        _wc = _ce.compute_window_compliance(_win_recs, _ceil_map)
+                        window_comp_pct = _wc["compliance_pct"]
+                        w_total_days    = _wc["total_windows"]
+                        w_breach_days   = _wc["breach_count"]
+                    except Exception:
+                        pass
     except Exception:
         pass
 

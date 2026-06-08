@@ -54,7 +54,8 @@ def compute_window_compliance(
         _daily_default = _pc.SLA_DAILY_HRS
     except Exception:
         _excluded = {"CYCLIC", "CYCLIC_INTERVAL", "ADHOC", "CALENDAR_BASED",
-                     "MONTHLY", "ANNUAL", "UNKNOWN"}
+                     "OUTBOUND", "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY",
+                     "QUARTERLY", "ANNUAL"}
         _atrisk_pct = 15.0
         _daily_default = 6.0
 
