@@ -240,13 +240,15 @@ function initDropZone() {
       dropZone.classList.add("dropzone-active");
     })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dropZone.addEventListener(ev, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dropZone.classList.remove("dropzone-active");
-    })
-  );
+  dropZone.addEventListener("dragleave", (e) => {
+    if (dropZone.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation();
+    dropZone.classList.remove("dropzone-active");
+  });
+  dropZone.addEventListener("dragend", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dropZone.classList.remove("dropzone-active");
+  });
 
   // Drop → validate + upload (multi-file)
   dropZone.addEventListener("drop", (e) => {
@@ -1198,13 +1200,15 @@ function initBatchUploader() {
       dz.classList.add("dropzone-active");
     })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dz.classList.remove("dropzone-active");
-    })
-  );
+  dz.addEventListener("dragleave", (e) => {
+    if (dz.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation();
+    dz.classList.remove("dropzone-active");
+  });
+  dz.addEventListener("dragend", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dz.classList.remove("dropzone-active");
+  });
   dz.addEventListener("drop", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -12429,9 +12433,11 @@ function initBenchmarkUploader() {
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Cpurple","bg-Cpurple/5"); })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); })
-  );
+  dz.addEventListener("dragleave", (e) => {
+    if (dz.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5");
+  });
+  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); });
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Cpurple", "bg-Cpurple/5");
@@ -12839,9 +12845,11 @@ function initSlaIntakeUploader() {
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Camber","bg-Camber/5"); })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Camber","bg-Camber/5"); })
-  );
+  dz.addEventListener("dragleave", (e) => {
+    if (dz.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Camber","bg-Camber/5");
+  });
+  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Camber","bg-Camber/5"); });
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Camber", "bg-Camber/5");
@@ -13153,9 +13161,11 @@ function initBenchIntakeUploader() {
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Cpurple","bg-Cpurple/5"); })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); })
-  );
+  dz.addEventListener("dragleave", (e) => {
+    if (dz.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5");
+  });
+  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); });
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Cpurple", "bg-Cpurple/5");
@@ -13248,12 +13258,12 @@ function initBatchSlaInfoUploader() {
       dz.classList.add("border-Cteal", "bg-Cteal/5");
     })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => {
-      e.preventDefault(); e.stopPropagation();
-      dz.classList.remove("border-Cteal", "bg-Cteal/5");
-    })
-  );
+  dz.addEventListener("dragleave", (e) => {
+    if (dz.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation();
+    dz.classList.remove("border-Cteal", "bg-Cteal/5");
+  });
+  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cteal", "bg-Cteal/5"); });
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Cteal", "bg-Cteal/5");
@@ -13457,12 +13467,12 @@ function initSowUploadZone() {
       dz.classList.add("border-Ccyan", "bg-Ccyan/5");
     })
   );
-  ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => {
-      e.preventDefault(); e.stopPropagation();
-      dz.classList.remove("border-Ccyan", "bg-Ccyan/5");
-    })
-  );
+  dz.addEventListener("dragleave", (e) => {
+    if (dz.contains(e.relatedTarget)) return;
+    e.preventDefault(); e.stopPropagation();
+    dz.classList.remove("border-Ccyan", "bg-Ccyan/5");
+  });
+  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Ccyan", "bg-Ccyan/5"); });
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Ccyan", "bg-Ccyan/5");
