@@ -1664,6 +1664,98 @@ function renderBatchReview(data) {
     }
   }
 
+  // ── Schedule-based excluded sub_apps panel ───────────────────
+  // Shows sub_apps removed from compliance scope because their schedule type
+  // (CYCLIC, OUTBOUND, CALENDAR_BASED, MONTHLY, etc.) has no SLA window target.
+  {
+    const excludedSubs = (data.excluded_sub_apps || []).filter(x => x.reason !== "MANUAL");
+    let subPanel = document.getElementById("batch-scope-exclusion-panel");
+    if (!subPanel) {
+      subPanel = document.createElement("div");
+      subPanel.id = "batch-scope-exclusion-panel";
+      const utilEl = document.getElementById("batch-utility-panel");
+      const insertTarget = utilEl?.parentNode || document.getElementById("batch-review-body")?.parentElement;
+      if (insertTarget) {
+        const afterEl = document.getElementById("batch-utility-panel") || document.getElementById("batch-review-body");
+        if (afterEl && afterEl.parentNode === insertTarget) {
+          insertTarget.insertBefore(subPanel, afterEl.nextSibling);
+        } else {
+          insertTarget.appendChild(subPanel);
+        }
+      }
+    }
+
+    if (excludedSubs.length > 0) {
+      // Schedule type → display info
+      const schedMeta = {
+        CYCLIC:               { icon: "🔄", label: "Cyclic / Polling",          desc: "High-frequency polling — no SLA window target",                color: THEME.purple },
+        CYCLIC_INTERVAL:      { icon: "🔄", label: "Cyclic Interval",           desc: "Interval-based polling job",                                   color: THEME.purple },
+        OUTBOUND:             { icon: "📤", label: "Outbound / EDI",            desc: "File delivery job — excluded from batch compliance",           color: THEME.cyan   },
+        CALENDAR_BASED:       { icon: "📅", label: "Calendar (4-4-5)",          desc: "Retail calendar cycle — no standard SLA ceiling",              color: THEME.teal   },
+        MONTHLY:              { icon: "📆", label: "Monthly",                   desc: "Monthly run — not a daily SLA window",                         color: THEME.muted  },
+        BIMONTHLY:            { icon: "📆", label: "Bi-Monthly",                desc: "Bi-monthly run",                                               color: THEME.muted  },
+        DATE_SPECIFIC_MONTHLY:{ icon: "📆", label: "Date-Specific Monthly",     desc: "Runs on specific date each month",                             color: THEME.muted  },
+        QUARTERLY:            { icon: "📆", label: "Quarterly",                 desc: "Quarterly run — not a daily SLA window",                       color: THEME.muted  },
+        PIPELINE_STAGE:       { icon: "⚙️", label: "Pipeline Stage",            desc: "Internal pipeline orchestration step",                         color: THEME.blue   },
+        ADHOC:                { icon: "⚡", label: "Ad-Hoc",                   desc: "On-demand / manual trigger — no SLA window",                   color: THEME.amber  },
+      };
+
+      const rows = excludedSubs.map(x => {
+        const m   = schedMeta[x.reason] || { icon: "–", label: x.reason, desc: "", color: THEME.muted };
+        const jc  = x.job_count > 0 ? `${x.job_count} job${x.job_count > 1 ? "s" : ""}` : "—";
+        const ph  = x.peak_hrs  > 0 ? x.peak_hrs.toFixed(2) + "h" : "—";
+        return `<tr class="border-t border-Cborder/25 hover:bg-white/[0.02] transition-colors">
+          <td class="px-3 py-1.5 font-mono text-[10px] text-Cwhite/80">${escapeHtml(x.sub_app)}</td>
+          <td class="px-3 py-1.5">
+            <span class="inline-flex items-center gap-1 px-1.5 py-0 rounded text-[9px] font-semibold"
+                  style="color:${m.color};background:${hexA(m.color,0.12)};border:1px solid ${hexA(m.color,0.25)}"
+                  title="${escapeHtml(m.desc)}">${m.icon} ${escapeHtml(m.label)}</span>
+          </td>
+          <td class="px-3 py-1.5 text-[9px] text-Cmuted">${escapeHtml(m.desc)}</td>
+          <td class="px-3 py-1.5 text-right font-mono text-[9px] text-Cmuted">${jc}</td>
+          <td class="px-3 py-1.5 text-right font-mono text-[9px] text-Cmuted">${ph}</td>
+        </tr>`;
+      }).join("");
+
+      subPanel.className = "rounded-lg mt-2 overflow-hidden";
+      subPanel.style.cssText = `border:1px solid ${hexA(THEME.cyan,0.2)};background:${hexA(THEME.cyan,0.025)}`;
+      subPanel.innerHTML = `
+        <div class="flex items-center justify-between px-3 py-2" style="background:${hexA(THEME.cyan,0.055)}">
+          <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                 stroke="currentColor" class="w-3.5 h-3.5 shrink-0" style="color:${THEME.cyan}">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z"/>
+            </svg>
+            <span class="text-[10px] font-bold uppercase tracking-wider" style="color:${THEME.cyan}">
+              Sub-Apps Excluded from Compliance Scope
+            </span>
+            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                  style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.18)}">
+              ${excludedSubs.length} sub-app${excludedSubs.length > 1 ? "s" : ""}
+            </span>
+          </div>
+          <span class="text-[8px] text-Cmuted">Schedule type has no SLA window target — not counted in compliance %</span>
+        </div>
+        <table class="w-full">
+          <thead>
+            <tr style="background:${hexA(THEME.cyan,0.03)}">
+              <th class="px-3 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Sub-Application</th>
+              <th class="px-3 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Schedule Type</th>
+              <th class="px-3 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Reason</th>
+              <th class="px-3 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Jobs</th>
+              <th class="px-3 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Peak</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    } else {
+      subPanel.className = "hidden";
+      subPanel.innerHTML = "";
+    }
+  }
+
   // Data source watermark
   const srcWm = document.getElementById("batch-source-watermark");
   if (srcWm) {
@@ -2114,7 +2206,7 @@ function renderBatchDataWarnings(warnings) {
 
 
 // ─────────────────────────────────────────────────────────────
-// Chart 1 — SLA Buffer Gauge (Plotly gauge → Chart.js doughnut)
+// Chart 1 — SLA Buffer Gauge  (SVG arc speedometer, no Chart.js)
 // ─────────────────────────────────────────────────────────────
 function renderSlaBufferChart(k) {
   const canvas = document.getElementById("chart-sla-buffer");
@@ -2122,85 +2214,228 @@ function renderSlaBufferChart(k) {
   destroyChart("slaBuffer");
 
   const buf = k.fleet_sla_buffer;
-  const bufferPct = buf ? Math.max(0, Math.min(100, buf.buffer_pct)) : 0;
-  const usedPct   = 100 - bufferPct;
-  const bufferColor =
-    !buf                       ? THEME.muted :
-    buf.status === "EXCELLENT" ? THEME.green :
-    buf.status === "HEALTHY"   ? THEME.green :
-    buf.status === "CAUTION"   ? THEME.amber : THEME.red;
 
-  charts.slaBuffer = new Chart(canvas, {
-    type: "doughnut",
-    data: {
-      labels: ["Buffer remaining", "SLA used"],
-      datasets: [{
-        data: [bufferPct, usedPct],
-        backgroundColor: [bufferColor, hexA(THEME.border, 0.55)],
-        borderColor: [THEME.card2, THEME.card2],
-        borderWidth: 2,
-        hoverOffset: 4,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: "72%",
-      rotation: -90,
-      circumference: 180,
-      layout: { padding: { bottom: 20 } },
-      plugins: {
-        legend: {
-          position: "bottom",
-          labels: {
-            color: THEME.muted,
-            font: { family: "Sora", size: 10, weight: "600" },
-            boxWidth: 10,
-            boxHeight: 10,
-          },
-        },
-        tooltip: {
-          backgroundColor: THEME.card,
-          borderColor: THEME.border,
-          borderWidth: 1,
-          titleColor: THEME.white,
-          bodyColor: THEME.muted,
-          callbacks: {
-            label: (ctx) => `${ctx.label}: ${_n(ctx.parsed).toFixed(1)}%`,
-          },
-        },
-      },
-    },
-    plugins: [centerTextPlugin(buf ? `${_n(buf.buffer_pct).toFixed(0)}%` : "N/A", buf?.status || "")],
-  });
-}
+  // ── Extract values ─────────────────────────────────────────
+  // buffer_pct can be negative (BREACH). The gauge arc represents the SIGNED
+  // buffer position clamped to the range [-100, +100] for display.
+  const rawBuf   = buf ? buf.buffer_pct  : null;   // may be negative
+  const status   = buf ? buf.status      : "NO DATA";
+  const peakHrs  = k.worst_job_peak  ?? null;
+  const slaHrs   = (k.fleet_sla_buffer?.buffer_hrs != null && peakHrs != null)
+                     ? +(peakHrs + k.fleet_sla_buffer.buffer_hrs).toFixed(2)
+                     : (k.sla?.daily_limit_hrs ?? SLA_DAILY_HRS);
 
-// Chart.js plugin: center text inside the doughnut hole
-function centerTextPlugin(big, sub) {
-  return {
-    id: "centerText",
-    afterDraw(chart) {
-      const { ctx, chartArea } = chart;
-      if (!chartArea) return;
-      const cx = (chartArea.left + chartArea.right) / 2;
-      const cy = chartArea.bottom - 8;
-      ctx.save();
-      ctx.textAlign = "center";
-      ctx.textBaseline = "alphabetic";
-      ctx.fillStyle = THEME.white;
-      ctx.font = '800 30px "Sora", sans-serif';
-      ctx.fillText(big, cx, cy - 22);
-      ctx.fillStyle = THEME.muted;
-      ctx.font = '700 10px "Sora", sans-serif';
-      ctx.fillText(sub, cx, cy - 4);
-      ctx.restore();
-    },
+  // Map buffer_pct → needle angle on a 180° arc.
+  // Arc spans -100% (left, 180°) through 0% (middle, 90°) to +100% (right, 0°).
+  // Positive buffer = needle swings right (safe). Negative = swings left (breach).
+  const clampedBuf   = rawBuf == null ? 0 : Math.max(-100, Math.min(100, rawBuf));
+  // 0% = straight up (90°), +100% = full right (0°), -100% = full left (180°)
+  const needleAngle  = 180 - ((clampedBuf + 100) / 200) * 180;  // degrees, 0=right
+
+  // Zone colors (matching pe_config thresholds)
+  const zoneColor =
+    rawBuf == null            ? THEME.muted  :
+    rawBuf < 0                ? THEME.red    :   // BREACH
+    rawBuf <= 15              ? "#f97316"    :   // AT_RISK  (orange)
+    rawBuf <= 40              ? THEME.amber  :   // LONG_JOB (amber)
+                                THEME.green;     // OK
+
+  const statusLabel =
+    rawBuf == null ? "NO DATA" :
+    rawBuf < 0     ? "BREACH"   :
+    rawBuf <= 15   ? "AT RISK"  :
+    rawBuf <= 40   ? "LONG JOB" : "HEALTHY";
+
+  // Draw via canvas 2D (faster than SVG, same fidelity)
+  const ctx   = canvas.getContext("2d");
+  const dpr   = window.devicePixelRatio || 1;
+  const W     = canvas.parentElement?.clientWidth  || 320;
+  const H     = canvas.parentElement?.clientHeight || 256;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + "px";
+  canvas.style.height = H + "px";
+  ctx.scale(dpr, dpr);
+
+  const cx    = W / 2;
+  const cy    = H * 0.62;   // centre slightly below midpoint (semicircle sits above)
+  const R     = Math.min(W * 0.42, H * 0.72);
+  const thick = R * 0.17;
+
+  // Helper: draw arc segment (degrees, 0=right, CCW)
+  const arcDeg = (start, end, color, width, glow = false) => {
+    const s = (start - 90) * Math.PI / 180;
+    const e = (end   - 90) * Math.PI / 180;
+    ctx.save();
+    if (glow) {
+      ctx.shadowColor = color;
+      ctx.shadowBlur  = 14;
+    }
+    ctx.beginPath();
+    ctx.arc(cx, cy, R - thick / 2, s, e);
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = width;
+    ctx.lineCap     = "butt";
+    ctx.stroke();
+    ctx.restore();
   };
+
+  // ── Background track ────────────────────────────────────────
+  arcDeg(180, 360, hexA(THEME.border, 0.45), thick);
+
+  // ── Colored zone arcs (BREACH → AT_RISK → LONG_JOB → OK) ──
+  // Degrees: 180° (left) = -100%, 270° (top) = 0%, 360° (right) = +100%
+  // BREACH zone: -100% → 0% = 180° → 270°  (quarter left)
+  // AT_RISK:      0% → 15% = 270° → 297°
+  // LONG_JOB:    15% → 40% = 297° → 342°
+  // OK:          40% → 100% = 342° → 360°
+  arcDeg(180, 270, hexA(THEME.red,   0.25), thick);   // BREACH zone
+  arcDeg(270, 297, hexA("#f97316",   0.25), thick);   // AT_RISK zone
+  arcDeg(297, 342, hexA(THEME.amber, 0.25), thick);   // LONG_JOB zone
+  arcDeg(342, 360, hexA(THEME.green, 0.25), thick);   // OK zone
+
+  // ── Zone boundary ticks ─────────────────────────────────────
+  const drawTick = (pct, label) => {
+    const ang  = (180 + (pct + 100) / 200 * 180) - 180;  // map to 180→360
+    const rad  = (ang - 90) * Math.PI / 180;
+    const rIn  = R - thick - 4;
+    const rOut = R + 6;
+    ctx.save();
+    ctx.strokeStyle = hexA(THEME.border, 0.7);
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(cx + rIn  * Math.cos(rad), cy + rIn  * Math.sin(rad));
+    ctx.lineTo(cx + rOut * Math.cos(rad), cy + rOut * Math.sin(rad));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (label) {
+      const rLbl = R + 18;
+      ctx.fillStyle = hexA(THEME.muted, 0.75);
+      ctx.font = `500 9px "Sora", sans-serif`;
+      ctx.textAlign   = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, cx + rLbl * Math.cos(rad), cy + rLbl * Math.sin(rad));
+    }
+    ctx.restore();
+  };
+  drawTick(0,  "0%");
+  drawTick(15, "15%");
+  drawTick(40, "40%");
+
+  // ── Active fill arc (from 0% baseline toward current value) ─
+  if (rawBuf != null) {
+    const startDeg = clampedBuf >= 0 ? 270 : 180 + ((clampedBuf + 100) / 100) * 90;
+    const endDeg   = clampedBuf >= 0 ? 270 + (clampedBuf / 100) * 90 : 270;
+    if (Math.abs(endDeg - startDeg) > 0.5) {
+      arcDeg(Math.min(startDeg, endDeg), Math.max(startDeg, endDeg),
+             zoneColor, thick, true);
+    }
+  }
+
+  // ── Zone labels at arc midpoints ────────────────────────────
+  const zoneLabels = [
+    { mid: 225, text: "BREACH", c: THEME.red },
+    { mid: 283, text: "AT RISK", c: "#f97316" },
+    { mid: 320, text: "LONG JOB", c: THEME.amber },
+    { mid: 351, text: "OK", c: THEME.green },
+  ];
+  zoneLabels.forEach(({ mid, text, c }) => {
+    const rad   = (mid - 90) * Math.PI / 180;
+    const rLbl  = R - thick * 0.5;
+    ctx.save();
+    ctx.fillStyle = hexA(c, 0.65);
+    ctx.font = `700 7.5px "Sora", sans-serif`;
+    ctx.textAlign    = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, cx + rLbl * Math.cos(rad), cy + rLbl * Math.sin(rad));
+    ctx.restore();
+  });
+
+  // ── Needle ───────────────────────────────────────────────────
+  if (rawBuf != null) {
+    const needleRad = (needleAngle - 90) * Math.PI / 180;
+    const tipDist   = R - thick - 2;
+    const hubR      = thick * 0.38;
+    // Needle shadow / glow
+    ctx.save();
+    ctx.shadowColor = zoneColor;
+    ctx.shadowBlur  = 12;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + tipDist * Math.cos(needleRad), cy + tipDist * Math.sin(needleRad));
+    ctx.strokeStyle = zoneColor;
+    ctx.lineWidth   = 3;
+    ctx.lineCap     = "round";
+    ctx.stroke();
+    ctx.restore();
+    // Hub dot
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, hubR, 0, Math.PI * 2);
+    ctx.fillStyle = zoneColor;
+    ctx.shadowColor = zoneColor;
+    ctx.shadowBlur  = 8;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ── Centre text ──────────────────────────────────────────────
+  ctx.save();
+  ctx.textAlign = "center";
+
+  // Big number
+  const bigText = rawBuf == null ? "N/A" : (rawBuf > 0 ? "+" : "") + rawBuf.toFixed(1) + "%";
+  ctx.fillStyle = rawBuf == null ? THEME.muted : zoneColor;
+  ctx.shadowColor = rawBuf == null ? "transparent" : zoneColor;
+  ctx.shadowBlur  = rawBuf == null ? 0 : 18;
+  ctx.font = `800 ${Math.round(R * 0.28)}px "Sora", sans-serif`;
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(bigText, cx, cy - R * 0.05);
+  ctx.shadowBlur = 0;
+
+  // Status label
+  ctx.fillStyle = hexA(zoneColor, 0.9);
+  ctx.font = `700 ${Math.round(R * 0.115)}px "Sora", sans-serif`;
+  ctx.textBaseline = "top";
+  ctx.fillText(statusLabel, cx, cy - R * 0.01);
+
+  // Peak / SLA sub-line
+  if (peakHrs != null) {
+    ctx.fillStyle = hexA(THEME.muted, 0.75);
+    ctx.font = `500 ${Math.round(R * 0.095)}px "Sora", sans-serif`;
+    ctx.textBaseline = "top";
+    ctx.fillText(`Peak ${peakHrs.toFixed(2)}h  ·  SLA ${(+slaHrs).toFixed(1)}h`, cx, cy + R * 0.15);
+  }
+  ctx.restore();
+
+  // ── Legend ───────────────────────────────────────────────────
+  const legendItems = [
+    { c: THEME.green,  l: "OK (>40%)" },
+    { c: THEME.amber,  l: "Long Job (15–40%)" },
+    { c: "#f97316",    l: "At Risk (0–15%)" },
+    { c: THEME.red,    l: "Breach (<0%)" },
+  ];
+  const lgY   = cy + R * 0.38;
+  const lgW   = 8;
+  let   lgX   = cx - (legendItems.length * 80) / 2;
+  ctx.save();
+  legendItems.forEach(({ c, l }) => {
+    ctx.fillStyle = hexA(c, 0.9);
+    ctx.fillRect(lgX, lgY, lgW, lgW);
+    ctx.fillStyle = hexA(THEME.muted, 0.8);
+    ctx.font = `500 8.5px "Sora", sans-serif`;
+    ctx.textAlign    = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(l, lgX + lgW + 4, lgY + lgW / 2);
+    lgX += ctx.measureText(l).width + lgW + 16;
+  });
+  ctx.restore();
 }
 
 
 // ─────────────────────────────────────────────────────────────
-// Chart 2 — Daily Window Trend (Plotly bar → Chart.js bar)
+// Chart 2 — Daily Window Trend  (Grafana-style ambient bar chart)
 // ─────────────────────────────────────────────────────────────
 function renderWindowTrendChart(winData) {
   const canvas = document.getElementById("chart-window-trend");
@@ -2213,14 +2448,20 @@ function renderWindowTrendChart(winData) {
   const rawSums  = winData.map((w) => +(w.total_hrs  || 0));
   const rawElaps = winData.map((w) => +(w.elapsed_hrs || 0));
 
-  // ── Data accuracy: prefer elapsed_hrs (wall-clock first_start→last_end) ──
-  // total_hrs = SUM of all job runtimes — inflates heavily when jobs run in parallel.
-  // elapsed_hrs = last End_Time − first Start_Time per day — the real batch window.
+  // Prefer elapsed_hrs (wall-clock) over summed (parallel-inflated)
   const hasElapsed = rawElaps.some(v => v > 0);
   const values  = winData.map((_, i) => hasElapsed && rawElaps[i] > 0 ? rawElaps[i] : rawSums[i]);
-  const colors  = winData.map((w) => (w.breach ? THEME.red : THEME.blue));
 
-  // Update subtitle to make the metric type explicit
+  // Grafana-style: color each bar by its SLA zone
+  // OK → cyan-teal, LONG_JOB → amber, AT_RISK → orange, BREACH → red
+  const barColors = values.map(v =>
+    v > SLA_DAILY_HRS           ? THEME.red    :
+    v > SLA_DAILY_HRS * 0.85   ? "#f97316"    :
+    v > SLA_DAILY_HRS * 0.60   ? THEME.amber  :
+                                  THEME.teal
+  );
+
+  // Update subtitle
   const metricTypeEl = document.getElementById("chart-window-metric-type");
   if (metricTypeEl) {
     metricTypeEl.textContent = hasElapsed
@@ -2231,86 +2472,127 @@ function renderWindowTrendChart(winData) {
       : "text-[9px] text-Camber font-semibold mt-0.5";
   }
 
-  // Peak bar
+  // Peak bar index
   let peakIdx = 0, peakVal = 0;
   values.forEach((v, i) => { if (v > peakVal) { peakVal = v; peakIdx = i; } });
 
-  // Only label TOP 5 bars with job names — prevents overlap when all days breach.
-  // All other breached bars still get the hours value but no job name text.
   const TOP_N = 5;
   const topNIdx = new Set(
     values.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v).slice(0, TOP_N).map(x => x.i)
   );
 
-  // Plugin: breach overlay — selective labeling, no "BREACH" bottom spam
+  // ── SLA zone band plugin ─────────────────────────────────────
+  // Draws translucent colored bands for each SLA zone — like Grafana threshold bands.
+  const zoneBandPlugin = {
+    id: "zoneBands",
+    beforeDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales.y) return;
+      const { left, right } = chartArea;
+      const toY = v => scales.y.getPixelForValue(v);
+      const maxY = scales.y.max;
+
+      const bands = [
+        { from: SLA_DAILY_HRS,            to: maxY,              color: THEME.red,   alpha: 0.06, label: "BREACH" },
+        { from: SLA_DAILY_HRS * 0.85,     to: SLA_DAILY_HRS,    color: "#f97316",   alpha: 0.05, label: "AT RISK" },
+        { from: SLA_DAILY_HRS * 0.60,     to: SLA_DAILY_HRS * 0.85, color: THEME.amber, alpha: 0.04, label: "LONG JOB" },
+        { from: 0,                         to: SLA_DAILY_HRS * 0.60, color: THEME.teal, alpha: 0.03, label: "OK" },
+      ];
+      ctx.save();
+      bands.forEach(({ from, to, color, alpha, label }) => {
+        const y0 = toY(Math.min(to,   maxY));
+        const y1 = toY(Math.max(from, 0));
+        if (y1 <= y0) return;
+        ctx.fillStyle = hexA(color, alpha);
+        ctx.fillRect(left, y0, right - left, y1 - y0);
+        // Zone label on the right edge
+        ctx.fillStyle = hexA(color, 0.28);
+        ctx.font = `700 8px "Sora", sans-serif`;
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, right - 4, (y0 + y1) / 2);
+      });
+      ctx.restore();
+    },
+  };
+
+  // ── Glow bar + labels plugin ─────────────────────────────────
   const breachCount = winData.filter(w => w.breach).length;
-  const breachOverlayPlugin = {
-    id: "breachOverlay",
+  const glowLabelPlugin = {
+    id: "glowLabel",
     afterDatasetsDraw(chart) {
       const meta = chart.getDatasetMeta(0);
       if (!meta) return;
       const ctx = chart.ctx;
       ctx.save();
+
       winData.forEach((w, i) => {
         if (!meta.data[i]) return;
-        const bar   = meta.data[i];
-        const isTop = topNIdx.has(i);
+        const bar    = meta.data[i];
+        const isTop  = topNIdx.has(i);
         const isPeak = i === peakIdx;
-        const yVal  = values[i];
+        const v      = values[i];
+        const col    = barColors[i];
+        const isBreach = w.breach;
 
-        // Breach background tint
-        if (w.breach) {
-          ctx.fillStyle = hexA(THEME.red, 0.10);
-          ctx.fillRect(bar.x - bar.width / 2 - 2, chart.chartArea.top,
+        // Ambient glow on every bar
+        ctx.save();
+        ctx.shadowColor = hexA(col, isBreach ? 0.55 : 0.30);
+        ctx.shadowBlur  = isBreach ? 12 : 6;
+        ctx.fillStyle   = hexA(col, isBreach ? 0.92 : 0.75);
+        const bw  = bar.width;
+        const bh  = chart.chartArea.bottom - bar.y;
+        ctx.beginPath();
+        ctx.roundRect
+          ? ctx.roundRect(bar.x - bw/2, bar.y, bw, bh, [3, 3, 0, 0])
+          : ctx.rect(bar.x - bw/2, bar.y, bw, bh);
+        ctx.fill();
+        ctx.restore();
+
+        // Breach column full-width tint
+        if (isBreach) {
+          ctx.fillStyle = hexA(THEME.red, 0.07);
+          ctx.fillRect(bar.x - bar.width/2 - 2, chart.chartArea.top,
                        bar.width + 4, chart.chartArea.bottom - chart.chartArea.top);
         }
 
-        // Label strategy:
-        //   Top 5 bars → bold hours (10px) + job name (9px) + peak marker
-        //   Other breach bars → hours only (9px, muted red)
-        //   Non-breach, non-top bars → no label (clean)
+        // Value labels
         ctx.textAlign = "center";
+        if (isPeak) {
+          ctx.fillStyle = THEME.amber;
+          ctx.font = '700 7px "Sora", sans-serif';
+          ctx.fillText("▲ worst", bar.x, bar.y - 18);
+        }
         if (isTop || isPeak) {
           const jobLabel = topJobs[i]
             ? (topJobs[i].length > 13 ? topJobs[i].slice(0, 11) + "…" : topJobs[i])
             : null;
-          const yOff = jobLabel ? 16 : 8;
-          // "▲ worst" marker above hours for the peak bar
-          if (isPeak) {
-            ctx.fillStyle = THEME.amber;
-            ctx.font = '700 7px "Sora", sans-serif';
-            ctx.fillText("▲ worst", bar.x, bar.y - yOff - 8);
-          }
-          // Hours value
-          ctx.fillStyle = w.breach ? THEME.red : hexA(THEME.white, 0.9);
-          ctx.font = 'bold 10px "Sora", sans-serif';
-          ctx.fillText(yVal.toFixed(2) + "h", bar.x, bar.y - yOff + 6);
-          // Job name (one line below hours)
+          ctx.fillStyle = isBreach ? THEME.red : hexA(THEME.white, 0.9);
+          ctx.font = `bold 10px "Sora", sans-serif`;
+          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - (jobLabel ? 8 : 4));
           if (jobLabel) {
-            ctx.fillStyle = w.breach ? hexA(THEME.red, 0.85) : THEME.muted;
-            ctx.font = '600 9px "Sora", sans-serif';
-            ctx.fillText(jobLabel, bar.x, bar.y - 4);
+            ctx.fillStyle = isBreach ? hexA(THEME.red, 0.8) : THEME.muted;
+            ctx.font = '600 8.5px "Sora", sans-serif';
+            ctx.fillText(jobLabel, bar.x, bar.y + 4);
           }
-        } else if (w.breach) {
-          // Non-top breach: hours only, compact
-          ctx.fillStyle = hexA(THEME.red, 0.75);
-          ctx.font = '600 9px "Sora", sans-serif';
-          ctx.fillText(yVal.toFixed(1) + "h", bar.x, bar.y - 4);
+        } else if (isBreach) {
+          ctx.fillStyle = hexA(THEME.red, 0.8);
+          ctx.font = '600 8.5px "Sora", sans-serif';
+          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - 4);
         }
-        // Failed jobs ✕ marker — drawn at top of bar regardless of breach status
+
+        // Failure ✕ marker
         if (w.has_failures) {
           const failLabel = w.fail_count > 1 ? `✕${w.fail_count}` : "✕";
           ctx.fillStyle = THEME.red;
           ctx.font = 'bold 9px "Sora", sans-serif';
-          ctx.textAlign = "center";
-          // Place marker just above the bar top, or at chart top if bar is tiny
-          const markerY = Math.min(bar.y - 1, chart.chartArea.bottom - 8);
-          ctx.fillText(failLabel, bar.x, markerY - 10);
+          ctx.fillText(failLabel, bar.x, Math.min(bar.y - 1, chart.chartArea.bottom - 8) - 11);
         }
       });
-      // Summary count top-right
+
+      // Summary breach count top-right
       if (breachCount > 0) {
-        ctx.fillStyle = THEME.red;
+        ctx.fillStyle = hexA(THEME.red, 0.9);
         ctx.font = 'bold 10px "Sora", sans-serif';
         ctx.textAlign = "right";
         ctx.fillText(
@@ -2322,6 +2604,37 @@ function renderWindowTrendChart(winData) {
     },
   };
 
+  // ── SLA ceiling line plugin ──────────────────────────────────
+  const slaGlowLinePlugin = {
+    id: "slaGlowLine",
+    afterDatasetsDraw(chart) {
+      const yScale = chart.scales.y;
+      if (!yScale) return;
+      const y = yScale.getPixelForValue(SLA_DAILY_HRS);
+      const { left, right } = chart.chartArea;
+      const ctx = chart.ctx;
+      ctx.save();
+      // Glow outer
+      ctx.shadowColor = THEME.red;
+      ctx.shadowBlur  = 8;
+      ctx.strokeStyle = hexA(THEME.red, 0.65);
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(left, y);
+      ctx.lineTo(right, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Label
+      ctx.shadowBlur  = 0;
+      ctx.fillStyle   = THEME.red;
+      ctx.font        = '700 9px "Sora", sans-serif';
+      ctx.textAlign   = "left";
+      ctx.fillText(`SLA ${SLA_DAILY_HRS}h ceiling`, left + 6, y - 4);
+      ctx.restore();
+    },
+  };
+
   charts.windowTrend = new Chart(canvas, {
     type: "bar",
     data: {
@@ -2329,38 +2642,53 @@ function renderWindowTrendChart(winData) {
       datasets: [{
         label: hasElapsed ? "Elapsed Window (h)" : "Daily Total (h)",
         data: values,
-        backgroundColor: colors.map((c) => hexA(c, 0.85)),
-        borderColor: colors,
-        borderWidth: 1,
+        // Transparent — glowLabelPlugin redraws bars with glow
+        backgroundColor: "transparent",
+        borderColor:     "transparent",
+        borderWidth: 0,
         borderRadius: 4,
-        barPercentage: 0.85,
-        categoryPercentage: 0.85,
+        barPercentage: 0.82,
+        categoryPercentage: 0.88,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { top: 30 } },
+      layout: { padding: { top: 28, right: 16 } },
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: THEME.card,
-          borderColor: THEME.border,
+          backgroundColor: hexA(THEME.card, 0.97),
+          borderColor:     hexA(THEME.border, 0.8),
           borderWidth: 1,
           titleColor: THEME.white,
-          bodyColor: THEME.muted,
+          bodyColor:  THEME.muted,
+          padding: 10,
+          displayColors: false,
+          titleFont:  { family: "Sora", size: 11, weight: "700" },
+          bodyFont:   { family: "Sora", size: 10 },
           callbacks: {
+            title: (items) => labels[items[0].dataIndex],
             label: (ctx) => {
               const i = ctx.dataIndex;
-              let line = hasElapsed
-                ? `Elapsed: ${rawElaps[i].toFixed(2)}h  ·  Summed: ${rawSums[i].toFixed(2)}h  ·  Jobs: ${counts[i]}`
-                : `Total (summed): ${rawSums[i].toFixed(2)}h  ·  Jobs: ${counts[i]}`;
-              if (topJobs[i]) line += `  ·  Top: ${topJobs[i]}`;
-              return line;
+              const lines = [];
+              if (hasElapsed && rawElaps[i] > 0) {
+                lines.push(`Elapsed window : ${rawElaps[i].toFixed(2)}h`);
+                lines.push(`Summed runtime : ${rawSums[i].toFixed(2)}h`);
+              } else {
+                lines.push(`Summed runtime : ${rawSums[i].toFixed(2)}h`);
+              }
+              lines.push(`Jobs           : ${counts[i]}`);
+              if (topJobs[i]) lines.push(`Top job        : ${topJobs[i]}`);
+              lines.push(`SLA ceiling    : ${SLA_DAILY_HRS}h`);
+              const buf = SLA_DAILY_HRS - values[i];
+              lines.push(`Buffer         : ${buf >= 0 ? "+" : ""}${buf.toFixed(2)}h (${((buf / SLA_DAILY_HRS) * 100).toFixed(0)}%)`);
+              if (winData[i].breach) lines.push("⚠ SLA BREACH");
+              if (winData[i].has_failures) lines.push(`✕ ${winData[i].fail_count ?? 1} job failure(s)`);
+              return lines;
             },
           },
         },
-        annotation: undefined,
         zoom: _zoomConfig({ mode: "x" }),
       },
       scales: {
@@ -2369,30 +2697,37 @@ function renderWindowTrendChart(winData) {
             color: THEME.muted,
             font: { family: "Sora", size: 9 },
             maxRotation: 45,
-            minRotation: 45,
+            minRotation: 30,
+            maxTicksLimit: winData.length > 20 ? 15 : undefined,
           },
-          grid: { color: hexA(THEME.border, 0.4), drawBorder: false },
+          grid: { color: hexA(THEME.border, 0.25), drawBorder: false },
         },
         y: {
           beginAtZero: true,
+          suggestedMax: SLA_DAILY_HRS * 1.35,
           title: {
             display: true,
             text: hasElapsed ? "Elapsed hrs (wall-clock)" : "Hours (summed)",
             color: THEME.muted,
-            font: { size: 10 },
+            font: { family: "Sora", size: 10 },
           },
-          ticks: { color: THEME.muted, font: { family: "Sora", size: 9 } },
-          grid: { color: hexA(THEME.border, 0.4), drawBorder: false },
+          ticks: {
+            color: THEME.muted,
+            font: { family: "Sora", size: 9 },
+            callback: v => v.toFixed(0) + "h",
+          },
+          grid: { color: hexA(THEME.border, 0.20), drawBorder: false },
         },
       },
     },
-    plugins: [slaLinePlugin(SLA_DAILY_HRS), breachOverlayPlugin, crosshairPlugin],
+    plugins: [zoneBandPlugin, glowLabelPlugin, slaGlowLinePlugin, crosshairPlugin],
   });
 
-  // Enterprise: export toolbar
   _addChartToolbar(canvas.parentElement, charts.windowTrend, () => {
-    let csv = "Date,Window_Hrs,Job_Count,Breach,Top_Job\n";
-    winData.forEach((w, i) => { csv += `${w.run_date},${values[i].toFixed(2)},${counts[i]},${w.breach || false},${topJobs[i]}\n`; });
+    let csv = "Date,Window_Hrs,Summed_Hrs,Job_Count,Breach,Top_Job\n";
+    winData.forEach((w, i) => {
+      csv += `${w.run_date},${values[i].toFixed(2)},${rawSums[i].toFixed(2)},${counts[i]},${w.breach || false},${topJobs[i]}\n`;
+    });
     return csv;
   });
 }

@@ -1256,6 +1256,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # UNKNOWN is intentionally KEPT in scope (Level 4 fallback → 6h default SLA).
     _out_of_scope_subs: set = set(_user_excl_jobs)   # start with manually excluded
     _out_of_scope_subs.update(cyclic_subs)           # cyclic = never had batch SLA
+
+    # Track exclusion reasons per sub_app for frontend display
+    _excl_sub_reasons: dict = {}   # sub_app → {"reason": "CYCLIC|...", "job_count": N, "peak_hrs": X}
+    for _sa in cyclic_subs:
+        _excl_sub_reasons[str(_sa)] = {"reason": "CYCLIC", "auto": True}
+
     try:
         from services.sla_engine import classify_schedule as _classify_sched
         _NO_SCOPE = {
@@ -1265,10 +1271,21 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         }
         if "Sub_Application" in df_analysis.columns:
             for _sa in df_analysis["Sub_Application"].dropna().unique():
-                if _classify_sched(str(_sa)) in _NO_SCOPE:
+                _sched = _classify_sched(str(_sa))
+                if _sched in _NO_SCOPE:
                     _out_of_scope_subs.add(str(_sa))
+                    if str(_sa) not in _excl_sub_reasons:
+                        _excl_sub_reasons[str(_sa)] = {"reason": _sched, "auto": True}
     except Exception:
         pass  # classification unavailable — keep all sub_apps in scope
+
+    # Enrich exclusion records with job counts and peak hours
+    if "Sub_Application" in df_analysis.columns and _excl_sub_reasons:
+        for _sa, _info in _excl_sub_reasons.items():
+            _sub_df = df_analysis[df_analysis["Sub_Application"].astype(str) == _sa]
+            _info["job_count"] = int(_sub_df["Job_Name"].nunique()) if "Job_Name" in _sub_df.columns else 0
+            _info["peak_hrs"]  = round(float(_sub_df["run_time_hrs"].max()), 2) if "run_time_hrs" in _sub_df.columns and not _sub_df.empty else 0.0
+
 
     # Per-job SLA breach counting ──────────────────────────────────────────────
     # Breach = Sub_Application window (wall-clock: last End_Time − first Start_Time
@@ -1593,6 +1610,14 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "_sla_index":       sla_index,
         # ── Retry storm warnings (job failure→cascade retries, NOT cyclic) ──
         "_retry_storms":    _retry_storms,
+        # Sub_Apps excluded from compliance scope (CYCLIC/OUTBOUND/CALENDAR_BASED/etc.)
+        "excluded_sub_apps": [
+            {"sub_app": sa, "reason": info.get("reason","?"),
+             "auto": info.get("auto", True),
+             "job_count": info.get("job_count", 0),
+             "peak_hrs": info.get("peak_hrs", 0.0)}
+            for sa, info in _excl_sub_reasons.items()
+        ],
     }
 
 
@@ -1949,7 +1974,8 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             ),
             "warnings":         _build_data_warnings(m),
         },
-        "multi_app_folders": _multi_app_folders,
+        "multi_app_folders":  _multi_app_folders,
+        "excluded_sub_apps":  m.get("excluded_sub_apps", []),
         "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,
