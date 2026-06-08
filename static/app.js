@@ -65,6 +65,19 @@ let SLA_DAILY_HRS = 6.0;
 // Live Chart.js instances — re-created on every renderBatchReview() / renderResourceReview() call
 const charts = { slaBuffer: null, windowTrend: null, topJobs: null, resourceBars: null };
 
+// Latest KPIs for the SLA buffer gauge — kept so the canvas gauge can be
+// redrawn crisply on browser resize / zoom (canvas does not auto-reflow).
+let _lastBufferKpis = null;
+let _bufferResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_bufferResizeTimer);
+  _bufferResizeTimer = setTimeout(() => {
+    if (_lastBufferKpis && document.getElementById("chart-sla-buffer")?.offsetParent) {
+      renderSlaBufferChart(_lastBufferKpis);
+    }
+  }, 120);
+});
+
 // Resource Review · table view state
 const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "" };
 const RESOURCE_TABLE_PREVIEW = 25; // initial lazy slice
@@ -2213,17 +2226,32 @@ function renderSlaBufferChart(k) {
   if (!canvas) return;
   destroyChart("slaBuffer");
 
-  const buf = k.fleet_sla_buffer;
+  // Remember the latest KPIs so the gauge can be redrawn on resize / zoom.
+  _lastBufferKpis = k;
+
+  // Headline metric priority: WINDOW buffer (whole nightly batch window vs SLA)
+  // → fleet buffer (worst single job vs SLA). The window buffer is the real
+  // customer-facing SLA, so it leads when End_Time data is available.
+  const winBuf  = k.window_sla_buffer;
+  const buf      = winBuf || k.fleet_sla_buffer;
+  const isWindow = !!winBuf;
 
   // ── Extract values ─────────────────────────────────────────
   // buffer_pct can be negative (BREACH). The gauge arc represents the SIGNED
   // buffer position clamped to the range [-100, +100] for display.
   const rawBuf   = buf ? buf.buffer_pct  : null;   // may be negative
   const status   = buf ? buf.status      : "NO DATA";
-  const peakHrs  = k.worst_job_peak  ?? null;
-  const slaHrs   = (k.fleet_sla_buffer?.buffer_hrs != null && peakHrs != null)
-                     ? +(peakHrs + k.fleet_sla_buffer.buffer_hrs).toFixed(2)
-                     : (k.sla?.daily_limit_hrs ?? SLA_DAILY_HRS);
+  // Sub-line context: window mode shows worst elapsed window; job mode shows
+  // the worst single job's peak runtime.
+  const peakHrs  = isWindow
+                     ? (winBuf.worst_elapsed_hrs ?? null)
+                     : (k.worst_job_peak ?? null);
+  const slaHrs   = isWindow
+                     ? (winBuf.sla_ceiling_hrs ?? SLA_DAILY_HRS)
+                     : ((k.fleet_sla_buffer?.buffer_hrs != null && (k.worst_job_peak ?? null) != null)
+                         ? +(k.worst_job_peak + k.fleet_sla_buffer.buffer_hrs).toFixed(2)
+                         : (k.sla?.daily_limit_hrs ?? SLA_DAILY_HRS));
+  const peakLabel = isWindow ? "Window" : "Peak";
 
   // Map buffer_pct → needle angle on a 180° arc.
   // Arc spans -100% (left, 180°) through 0% (middle, 90°) to +100% (right, 0°).
@@ -2258,8 +2286,8 @@ function renderSlaBufferChart(k) {
   ctx.scale(dpr, dpr);
 
   const cx    = W / 2;
-  const cy    = H * 0.62;   // centre slightly below midpoint (semicircle sits above)
-  const R     = Math.min(W * 0.42, H * 0.72);
+  const cy    = H * 0.60;   // centre slightly below midpoint (semicircle sits above)
+  const R     = Math.min(W * 0.34, H * 0.60);   // smaller gauge, more breathing room
   const thick = R * 0.17;
 
   // Helper: draw arc segment (degrees, 0=right, CCW)
@@ -2400,12 +2428,12 @@ function renderSlaBufferChart(k) {
   ctx.textBaseline = "top";
   ctx.fillText(statusLabel, cx, cy - R * 0.01);
 
-  // Peak / SLA sub-line
+  // Window / Peak vs SLA sub-line
   if (peakHrs != null) {
     ctx.fillStyle = hexA(THEME.muted, 0.75);
-    ctx.font = `500 ${Math.round(R * 0.095)}px "Sora", sans-serif`;
+    ctx.font = `500 ${Math.round(R * 0.105)}px "Sora", sans-serif`;
     ctx.textBaseline = "top";
-    ctx.fillText(`Peak ${peakHrs.toFixed(2)}h  ·  SLA ${(+slaHrs).toFixed(1)}h`, cx, cy + R * 0.15);
+    ctx.fillText(`${peakLabel} ${peakHrs.toFixed(2)}h  ·  SLA ${(+slaHrs).toFixed(1)}h`, cx, cy + R * 0.15);
   }
   ctx.restore();
 
@@ -2567,17 +2595,17 @@ function renderWindowTrendChart(winData) {
           const jobLabel = topJobs[i]
             ? (topJobs[i].length > 13 ? topJobs[i].slice(0, 11) + "…" : topJobs[i])
             : null;
-          ctx.fillStyle = isBreach ? THEME.red : hexA(THEME.white, 0.9);
-          ctx.font = `bold 10px "Sora", sans-serif`;
-          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - (jobLabel ? 8 : 4));
+          ctx.fillStyle = isBreach ? THEME.red : hexA(THEME.white, 0.95);
+          ctx.font = `bold 12px "Sora", sans-serif`;
+          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - (jobLabel ? 9 : 4));
           if (jobLabel) {
-            ctx.fillStyle = isBreach ? hexA(THEME.red, 0.8) : THEME.muted;
-            ctx.font = '600 8.5px "Sora", sans-serif';
-            ctx.fillText(jobLabel, bar.x, bar.y + 4);
+            ctx.fillStyle = isBreach ? hexA(THEME.red, 0.85) : hexA(THEME.muted, 0.95);
+            ctx.font = '600 10px "Sora", sans-serif';
+            ctx.fillText(jobLabel, bar.x, bar.y + 5);
           }
         } else if (isBreach) {
-          ctx.fillStyle = hexA(THEME.red, 0.8);
-          ctx.font = '600 8.5px "Sora", sans-serif';
+          ctx.fillStyle = hexA(THEME.red, 0.85);
+          ctx.font = '600 10.5px "Sora", sans-serif';
           ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - 4);
         }
 
@@ -2628,9 +2656,9 @@ function renderWindowTrendChart(winData) {
       // Label
       ctx.shadowBlur  = 0;
       ctx.fillStyle   = THEME.red;
-      ctx.font        = '700 9px "Sora", sans-serif';
+      ctx.font        = '700 11px "Sora", sans-serif';
       ctx.textAlign   = "left";
-      ctx.fillText(`SLA ${SLA_DAILY_HRS}h ceiling`, left + 6, y - 4);
+      ctx.fillText(`SLA ${SLA_DAILY_HRS}h ceiling`, left + 6, y - 5);
       ctx.restore();
     },
   };
@@ -2694,11 +2722,12 @@ function renderWindowTrendChart(winData) {
       scales: {
         x: {
           ticks: {
-            color: THEME.muted,
-            font: { family: "Sora", size: 9 },
-            maxRotation: 45,
-            minRotation: 30,
+            color: hexA(THEME.muted, 0.95),
+            font: { family: "Sora", size: 11, weight: "600" },
+            maxRotation: winData.length > 12 ? 45 : 0,
+            minRotation: winData.length > 12 ? 30 : 0,
             maxTicksLimit: winData.length > 20 ? 15 : undefined,
+            autoSkipPadding: 8,
           },
           grid: { color: hexA(THEME.border, 0.25), drawBorder: false },
         },
@@ -2708,12 +2737,12 @@ function renderWindowTrendChart(winData) {
           title: {
             display: true,
             text: hasElapsed ? "Elapsed hrs (wall-clock)" : "Hours (summed)",
-            color: THEME.muted,
-            font: { family: "Sora", size: 10 },
+            color: hexA(THEME.muted, 0.95),
+            font: { family: "Sora", size: 11, weight: "600" },
           },
           ticks: {
-            color: THEME.muted,
-            font: { family: "Sora", size: 9 },
+            color: hexA(THEME.muted, 0.95),
+            font: { family: "Sora", size: 11 },
             callback: v => v.toFixed(0) + "h",
           },
           grid: { color: hexA(THEME.border, 0.20), drawBorder: false },

@@ -167,6 +167,15 @@ SENTINEL_END_PATTERNS: list = [
 SENTINEL_MIN_WINDOW_HRS: float = 0.25   # < 15 min → SUSPECT_TOO_SHORT
 SENTINEL_MAX_WINDOW_HRS: float = 20.0   # > 20h   → SUSPECT_TOO_LONG (warn, keep)
 
+# ── Schedule types EXCLUDED from window compliance denominator ────────────────
+# Used by compliance_engine.compute_window_compliance(). These schedule classes
+# either have no daily SLA window (CYCLIC/ADHOC) or run on a non-daily cadence
+# that the daily-window compliance metric must not penalize.
+COMPLIANCE_EXCLUDED_TYPES: set = {
+    "CYCLIC", "CYCLIC_INTERVAL", "ADHOC", "CALENDAR_BASED", "OUTBOUND",
+    "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY", "QUARTERLY", "ANNUAL", "UNKNOWN",
+}
+
 # ── Cyclic detection threshold ────────────────────────────────────────────────
 # Jobs with avg_runtime_hrs below this threshold are considered cyclic candidates.
 # (Combined with frequency guard: max runs/day > 5 AND median > 3)

@@ -1914,6 +1914,9 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "daily_limit_hrs":    m["sla_ceiling"],
             "monthly_limit_hrs":  pe_config.SLA_MONTHLY_HRS,
             "fleet_sla_buffer":   m["fleet_sla_buffer"],
+            # Window-level SLA buffer (whole nightly batch window vs SLA ceiling).
+            # Preferred headline gauge metric; None when End_Time is unavailable.
+            "window_sla_buffer":  _build_window_sla_buffer(m),
             # Auto-detected schedule mode — lets sla_matrix default to same mode
             "sla_detected_mode":  m.get("sla_detected_mode", "DAILY"),
         },
@@ -2043,6 +2046,56 @@ def _worst_elapsed(window_records: list) -> dict | None:
         return None
     worst = max(elapsed_days, key=lambda w: w["elapsed_hrs"])
     return {"run_date": worst["run_date"], "elapsed_hrs": worst["elapsed_hrs"]}
+
+
+def _build_window_sla_buffer(m: dict) -> dict | None:
+    """Compute the batch-WINDOW SLA buffer from the sentinel-measured elapsed
+    window (not the worst single job).
+
+        buffer_pct = (SLA_ceiling − worst_day_elapsed) / SLA_ceiling × 100
+
+    This is the headline gauge metric: it answers "how much head-room does the
+    whole nightly batch window have against its SLA ceiling?" — which is the
+    real customer-facing SLA, not a single job's peak.
+
+    Returns None when no elapsed window is available (End_Time missing); callers
+    then fall back to the worst-job ``fleet_sla_buffer``.
+    """
+    if not m.get("elapsed_available"):
+        return None
+    ewk = m.get("elapsed_window_kpi") or {}
+    worst = float(ewk.get("worst_hrs", 0.0) or 0.0)
+    avg   = float(ewk.get("avg_hrs",   0.0) or 0.0)
+    if worst <= 0:
+        return None
+    ceil = float(m.get("sla_ceiling") or pe_config.SLA_DAILY_HRS)
+    if ceil <= 0:
+        return None
+
+    buffer_hrs = round(ceil - worst, 3)
+    buffer_pct = round((ceil - worst) / ceil * 100, 1)
+    avg_buffer_pct = round((ceil - avg) / ceil * 100, 1) if avg > 0 else None
+
+    if buffer_pct < 0:
+        status = "BREACH"
+    elif buffer_pct <= pe_config.SLA_ATRISK_PCT:
+        status = "AT_RISK"
+    elif buffer_pct <= pe_config.SLA_LONGJOB_PCT:
+        status = "LONG_JOB"
+    else:
+        status = "HEALTHY"
+
+    return {
+        "buffer_hrs":        buffer_hrs,
+        "buffer_pct":        buffer_pct,
+        "avg_buffer_pct":    avg_buffer_pct,
+        "worst_elapsed_hrs": round(worst, 3),
+        "avg_elapsed_hrs":   round(avg, 3),
+        "sla_ceiling_hrs":   round(ceil, 3),
+        "worst_day":         ewk.get("worst_date", ""),
+        "status":            status,
+        "source":            "window_elapsed",
+    }
 
 
 def _build_data_warnings(m: dict) -> list:
