@@ -859,6 +859,9 @@ _COL_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"batch[\s_-]?name|batch[\s_-]?type|window[\s_-]?name|module", re.I), "batch_name"),
     (re.compile(r"^batch$|^job$|^task$|^process$|^workflow$|^stream$", re.I), "batch_name"),
     (re.compile(r"job[\s_-]?type|job[\s_-]?name|task[\s_-]?name|process[\s_-]?name", re.I), "batch_name"),
+    # When a customer's SLA XLSX uses "Sub Application" / "Sub_Application" as the
+    # workflow key column, it must map to batch_name (the SLA contract identifier).
+    (re.compile(r"sub[\s_-]?application|sub[\s_-]?app(?:lication)?$", re.I), "batch_name"),
     # ── Schedule / frequency ─────────────────────────────────────────────────
     (re.compile(r"schedule[\s_-]?(type|name)?$", re.I), "schedule_text"),
     (re.compile(r"^day$|^days$|^frequency$|^run[\s_-]?days?$", re.I), "schedule_text"),
@@ -873,7 +876,9 @@ _COL_PATTERNS: List[Tuple[re.Pattern, str]] = [
                 r"|window[\s_-]?end|sla[\s_-]?end|sla[\s_-]?time$|^sla$"
                 r"|due[\s_-]?by|due[\s_-]?time|due[\s_-]?date|^due$"
                 r"|complete[\s_-]?by|must[\s_-]?complete[\s_-]?by"
-                r"|^end$|^finish$|^closes?$", re.I), "sla_end_time"),
+                r"|^end$|^finish$|^closes?$"
+                r"|completion[\s_-]?time|end[\s_-]?by|finish[\s_-]?by|close[\s_-]?time"
+                r"|must[\s_-]?end[\s_-]?by", re.I), "sla_end_time"),
     # ── Target / expected completion (when separate from hard deadline) ───────
     (re.compile(r"expected[\s_-]?completion|target[\s_-]?completion"
                 r"|planned[\s_-]?end|planned[\s_-]?completion"
@@ -887,10 +892,11 @@ _COL_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"current[\s_-]?end[\s_-]?time|actual[\s_-]?end", re.I), "actual_end_time"),
     # ── Expected / allowed duration ──────────────────────────────────────────
     (re.compile(r"expected[\s_-]?run[\s_-]?time|expected[\s_-]?duration"
-                r"|sla[\s_-]?duration|sla[\s_-]?runtime"
+                r"|sla[\s_-]?duration|sla[\s_-]?runtime|sla[\s_-]?window"
                 r"|max[\s_-]?time|max[\s_-]?duration"
                 r"|allowed[\s_-]?time|allowed[\s_-]?duration"
-                r"|run[\s_-]?window|time[\s_-]?window|window[\s_-]?hours?", re.I), "sla_duration"),
+                r"|run[\s_-]?window|time[\s_-]?window|window[\s_-]?hours?"
+                r"|batch[\s_-]?duration|run[\s_-]?duration|^duration$", re.I), "sla_duration"),
     (re.compile(r"current[\s_-]?run[\s_-]?time|actual[\s_-]?run[\s_-]?time|actual[\s_-]?duration", re.I), "actual_duration"),
     # ── Buffer / contingency ─────────────────────────────────────────────────
     (re.compile(r"buffer|contingency|margin|grace", re.I), "buffer"),

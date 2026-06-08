@@ -837,22 +837,62 @@ def build_top_jobs_df(df: pd.DataFrame,
         top_jobs[col] = top_jobs[col].round(3)
 
     # ── Tag utility jobs (FileWatcher, DB backup, export, health-check) ──────
-    # is_utility=True → frontend can filter these out of the SLA buffer table
-    # by toggling the "Exclude utility jobs" switch.  Backend keeps them in
-    # the dataset so their run counts and fail counts are still tracked.
-    # utility_reason = first matched pattern substring (for frontend tooltip).
+    # is_utility=True → frontend can filter these out of the SLA buffer table.
+    # Backend keeps them in the dataset so run/fail counts are still tracked.
+    #
+    # Sub_Application confirmation guard (Area 1 tightening):
+    # Patterns fall into two tiers:
+    #   STRONG — unambiguous utility regardless of context (file_watcher, ping_job)
+    #   WEAK   — everything else; only auto-excluded when the job's sub_app is NOT
+    #            batch-productive (i.e. the sub_app has < 2 non-utility jobs).
+    # This prevents false-positive exclusion of legitimate batch jobs that happen
+    # to contain a matching substring in a productive batch sub_app.
+    _STRONG_UTIL: frozenset = frozenset({
+        "file_watcher", "filewatcher", "ctrl_m_file_watcher", "ping_job",
+    })
     _util_patterns = [str(p).lower() for p in getattr(pe_config, "UTILITY_JOB_PATTERNS", [])]
     if _util_patterns and "Job_Name" in top_jobs.columns:
         import re as _re_util
-        def _util_check(name: str) -> tuple:
-            norm = _re_util.sub(r"[\s\-]+", "_", str(name)).lower()
+
+        def _norm_name(n: str) -> str:
+            return _re_util.sub(r"[\s\-]+", "_", str(n)).lower()
+
+        def _util_hit(name: str) -> tuple:
+            norm = _norm_name(name)
             for pat in _util_patterns:
                 if pat in norm:
                     return True, pat
             return False, ""
-        _util_results = top_jobs["Job_Name"].apply(_util_check)
-        top_jobs["is_utility"]     = _util_results.apply(lambda t: t[0])
-        top_jobs["utility_reason"] = _util_results.apply(lambda t: t[1])
+
+        # First pass: find all pattern-based candidates
+        _util_results = top_jobs["Job_Name"].apply(_util_hit)
+        top_jobs["_is_cand"]  = _util_results.apply(lambda t: t[0])
+        top_jobs["_cand_pat"] = _util_results.apply(lambda t: t[1])
+
+        # Build batch-productive sub_apps: sub_apps where ≥ 2 jobs are NOT
+        # pattern-candidates (they do real batch work). Only meaningful when
+        # Sub_Application is present in the frame (composite-key grouping).
+        _batch_subs: set = set()
+        if "Sub_Application" in top_jobs.columns:
+            _non_cand = top_jobs[~top_jobs["_is_cand"]]
+            if not _non_cand.empty:
+                _sub_cnts = _non_cand.groupby("Sub_Application").size()
+                _batch_subs = set(_sub_cnts[_sub_cnts >= 2].index)
+
+        def _is_util(row) -> bool:
+            if not row["_is_cand"]:
+                return False
+            if row["_cand_pat"] in _STRONG_UTIL:
+                return True   # strong match — utility regardless of sub_app context
+            # Weak match: only utility when the sub_app is NOT batch-productive
+            sub = str(row.get("Sub_Application", "")) if "Sub_Application" in row.index else ""
+            return sub not in _batch_subs
+
+        top_jobs["is_utility"]     = top_jobs.apply(_is_util, axis=1)
+        top_jobs["utility_reason"] = top_jobs.apply(
+            lambda r: r["_cand_pat"] if r["is_utility"] else "", axis=1
+        )
+        top_jobs.drop(columns=["_is_cand", "_cand_pat"], inplace=True)
     else:
         top_jobs["is_utility"]     = False
         top_jobs["utility_reason"] = ""
