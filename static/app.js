@@ -2558,7 +2558,6 @@ function renderWindowTrendChart(winData) {
   };
 
   // ── Glow bar + labels plugin ─────────────────────────────────
-  const breachCount = winData.filter(w => w.breach).length;
   const glowLabelPlugin = {
     id: "glowLabel",
     afterDatasetsDraw(chart) {
