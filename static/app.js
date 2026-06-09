@@ -1510,6 +1510,42 @@ function _filterBatchUtility(data) {
 /** Re-render batch review with current exclusion state (no new fetch needed). */
 function _reRenderBatch() {
   if (window.appData?.batch) renderBatchReview(window.appData.batch);
+  // Push exclusion list to backend + recompute KPIs so gauge and tiles update too
+  _scheduleExclusionRecompute();
+}
+
+// Debounce so rapid toggle clicks only trigger one backend call
+let _exclRecomputeTimer = null;
+function _scheduleExclusionRecompute() {
+  clearTimeout(_exclRecomputeTimer);
+  _exclRecomputeTimer = setTimeout(_syncExclusionAndRecompute, 350);
+}
+
+async function _syncExclusionAndRecompute() {
+  if (!window.appData?.batch) return;
+  const excludeList = [..._batchManualExclude];
+  try {
+    // 1. Persist exclusion list to backend config_store
+    await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ exclude_jobs: excludeList }),
+    });
+    // 2. Recompute all batch KPIs from cached job_runs_df with new exclusions applied
+    const resp = await fetch("/api/batch/refresh", { method: "POST" });
+    if (!resp.ok) return;  // silent — visual filter already applied
+    const fresh = await resp.json();
+    // 3. Patch appData.batch so re-renders are consistent with new exclusions
+    window.appData.batch = { ...window.appData.batch, ...fresh };
+    // 4. Sync global SLA_DAILY_HRS
+    if (fresh.kpis?.daily_limit_hrs) {
+      SLA_DAILY_HRS = Number(fresh.kpis.daily_limit_hrs) || SLA_DAILY_HRS;
+    }
+    // 5. Re-render all data-driven panels with recomputed numbers
+    renderBatchReview(fresh);
+    // 6. Re-trigger SLA Matrix so its compliance numbers stay consistent
+    if (window.appData.slaMatrix) triggerSlaMatrix().catch(() => {});
+  } catch (_) { /* non-fatal — display filter already applied */ }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -13390,7 +13426,11 @@ async function _uploadBatchSlaInfoFile(file) {
 
     // Re-run SLA Matrix with the new XLSX SLAs applied (uses full job_runs_df from server)
     if (window.appData?.batch) {
-      triggerSlaMatrix().catch(() => {});
+      // Await so workflow_summary is ready before we re-render the commitments panel
+      try {
+        await triggerSlaMatrix();
+        _renderSlaCommitmentsPanel();
+      } catch (_) {}
     }
 
     const wfCount  = body.workflow_count || 0;

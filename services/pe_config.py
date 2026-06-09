@@ -121,14 +121,19 @@ CTRLM_COLUMN_MAP: dict = {
 # Configurable via config_store["utility_job_patterns"]. No customer names here.
 UTILITY_JOB_PATTERNS: list = [
     # FileWatcher (Ctrl-M native utility — marks data arrival, not batch logic)
-    "file_watcher", "filewatcher", "ctrl_m_file_watcher",
+    # Matches: filewatcher, file_watcher, ctrl_m_file_watcher, fw_anything, anything_fw
+    "file_watcher", "filewatcher", "ctrl_m_file_watcher", "fw_",
     # DB maintenance (backup, restore, index, stats)
     "db_backup", "database_backup", "dbbackup", "db_maint", "db_maintenance",
     "db_restore", "dbcleanup", "db_cleanup", "purge_db", "truncate_log",
     "archive_log", "archive_logs", "db_stats", "update_stats", "rebuild_index",
     "index_rebuild", "shrink_db",
+    # Generic backup jobs (any job whose name contains 'backup')
+    "backup",
     # Export / outbound file delivery (Ctrl-M job that pushes a file, not batch calc)
     "sftp_export", "sftp_send", "ftp_export", "outbound_file",
+    # Generic export pattern (e.g. export_report, daily_export, file_export)
+    "_export", "export_",
     # Health check / monitoring heartbeat (when combined with high frequency → cyclic)
     "health_check", "ping_job", "heartbeat",
 ]

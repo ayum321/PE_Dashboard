@@ -38,6 +38,8 @@ class ConfigPayload(BaseModel):
     exclude_from_sla:        Optional[List[str]]            = None
     env_prefixes_to_strip:   Optional[List[str]]            = None
     ctrlm_column_map:        Optional[Dict[str, List[str]]] = None
+    # Per-engagement job exclusions — applied by compute_metrics at analysis time
+    exclude_jobs:            Optional[List[str]]            = None
 
 
 class TestKeyRequest(BaseModel):
