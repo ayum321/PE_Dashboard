@@ -2384,8 +2384,8 @@ function renderSlaBufferChart(k) {
     const rad   = (mid - 90) * Math.PI / 180;
     const rLbl  = R - thick * 0.5;
     ctx.save();
-    ctx.fillStyle = hexA(c, 0.65);
-    ctx.font = `700 7.5px "Sora", sans-serif`;
+    ctx.fillStyle = hexA(c, 0.85);
+    ctx.font = `700 9px "Sora", sans-serif`;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(text, cx + rLbl * Math.cos(rad), cy + rLbl * Math.sin(rad));
@@ -2449,28 +2449,20 @@ function renderSlaBufferChart(k) {
   }
   ctx.restore();
 
-  // ── Legend ───────────────────────────────────────────────────
-  const legendItems = [
-    { c: THEME.green,  l: "OK (>40%)" },
-    { c: THEME.amber,  l: "Long Job (15–40%)" },
-    { c: "#f97316",    l: "At Risk (0–15%)" },
-    { c: THEME.red,    l: "Breach (<0%)" },
-  ];
-  const lgY   = cy + R * 0.38;
-  const lgW   = 8;
-  let   lgX   = cx - (legendItems.length * 80) / 2;
-  ctx.save();
-  legendItems.forEach(({ c, l }) => {
-    ctx.fillStyle = hexA(c, 0.9);
-    ctx.fillRect(lgX, lgY, lgW, lgW);
-    ctx.fillStyle = hexA(THEME.muted, 0.8);
-    ctx.font = `500 8.5px "Sora", sans-serif`;
-    ctx.textAlign    = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText(l, lgX + lgW + 4, lgY + lgW / 2);
-    lgX += ctx.measureText(l).width + lgW + 16;
-  });
-  ctx.restore();
+  // ── Legend — rendered in HTML below the canvas (no canvas clipping) ──
+  const legendEl = document.getElementById("chart-sla-buffer-legend");
+  if (legendEl) {
+    const legendItems = [
+      { c: THEME.green,  l: "OK (>40%)" },
+      { c: THEME.amber,  l: "Long Job (15–40%)" },
+      { c: "#f97316",    l: "At Risk (0–15%)" },
+      { c: THEME.red,    l: "Breach (<0%)" },
+    ];
+    legendEl.innerHTML = legendItems.map(({ c, l }) =>
+      `<span class="flex items-center gap-1 text-[9px] font-medium" style="color:${hexA(THEME.muted, 0.85)}">`+
+      `<span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:${c};flex-shrink:0"></span>${l}</span>`
+    ).join("");
+  }
 }
 
 
