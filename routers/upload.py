@@ -649,6 +649,31 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
     except Exception:
         pass
 
+    # ── Silent batch KPI recompute so the gauge reflects the new per-job SLAs ──
+    # When BatchSLA_info.xlsx is uploaded AFTER Ctrl-M, the gauge and compliance
+    # tiles were computed with the old (default 6h) SLA. Re-running compute_metrics
+    # against the stored job_runs_df with the updated config_store fixes this.
+    _updated_batch_kpis = None
+    try:
+        from services import session_cache as _sc_r
+        _job_rows = _sc_r.get("job_runs_df")
+        if _job_rows:
+            import pandas as _pd_r
+            from services.batch_calculator import build_batch_payload as _bbp
+            _df_r = _pd_r.DataFrame(_job_rows)
+            # build_batch_payload reads config_store internally via build_sla_index
+            _new_payload = _bbp(_df_r)
+            _new_kpis = _new_payload.get("kpis")
+            if _new_kpis:
+                _last_batch = _sc_r.get("last_batch") or {}
+                if _last_batch:
+                    _last_batch["kpis"] = _new_kpis
+                    _sc_r.set("last_batch", _last_batch)
+                _sc_r.ac_set("batch_kpis", _new_kpis)
+                _updated_batch_kpis = _new_kpis
+    except Exception:
+        pass
+
     # Summary for UI status badge
     workflows = result.get("workflows") or []
     with_sla       = sum(1 for w in workflows if w.get("sla_hours"))
@@ -665,4 +690,7 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
         "batch_types":         sorted(types),
         "warnings":            result.get("warnings") or [],
         "workflows":           workflows,
+        # Recomputed batch KPIs using new per-job SLAs — present when Ctrl-M
+        # was already uploaded; None when batch hasn't been processed yet.
+        "updated_batch_kpis": _updated_batch_kpis,
     }

@@ -13350,6 +13350,20 @@ async function _uploadBatchSlaInfoFile(file) {
     window.appData = window.appData || {};
     window.appData.batchSlaInfo = body;
 
+    // If the backend recomputed batch KPIs with the new per-job SLAs, patch
+    // appData.batch.kpis so the gauge + compliance tiles show accurate values.
+    if (body.updated_batch_kpis && window.appData.batch) {
+      window.appData.batch.kpis = { ...window.appData.batch.kpis, ...body.updated_batch_kpis };
+      // Sync the global SLA_DAILY_HRS to the recomputed ceiling
+      if (body.updated_batch_kpis.daily_limit_hrs) {
+        SLA_DAILY_HRS = Number(body.updated_batch_kpis.daily_limit_hrs) || SLA_DAILY_HRS;
+      }
+      // Re-render gauge and all KPI tiles with the updated numbers
+      renderSlaBufferChart(window.appData.batch.kpis);
+      renderBatchKpis(window.appData.batch.kpis);
+      renderBatchSlaSourceTags(window.appData.batch.sla_source || null, window.appData.batch.kpis);
+    }
+
     // Build slaCeilings from workflow SLA data if not already set from SLA Matrix upload
     // This ensures PE Findings has SLA context even when only BatchSLA is uploaded
     if (!window.appData.slaCeilings && body.workflows?.length > 0) {
