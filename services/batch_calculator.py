@@ -1346,6 +1346,27 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     _win_ceiling_map: dict = {}
 
     if has_end_time and "Sub_Application" in df_analysis.columns:
+        # ── Gap 1: Sentinel job map from BatchSLA XLSX ───────────────────────
+        # When the customer has uploaded a BatchSLA_info.xlsx with First_Job /
+        # Last_Job sentinels, restrict the window to those sentinel timestamps
+        # instead of the global min/max of all jobs.  This prevents file-prep
+        # jobs running before the official batch start from inflating the window.
+        _sentinel_map: dict = {}  # normalised_sub_app → {"start_jobs": set, "end_jobs": set}
+        try:
+            from services import config_store as _cs_store
+            _batch_sla_raw = _cs_store.get("_batch_sla_xlsx") or {}
+            for _wf in _batch_sla_raw.get("workflows", []):
+                _sa_key = str(_wf.get("workflow") or _wf.get("sub_app_pattern") or "").upper().strip()
+                _fj     = str(_wf.get("first_job") or "").upper().strip()
+                _lj     = str(_wf.get("last_job")  or "").upper().strip()
+                if _sa_key and (_fj or _lj):
+                    _sentinel_map[_sa_key] = {
+                        "start_jobs": {j.strip() for j in _fj.split() if j.strip()} if _fj else set(),
+                        "end_jobs":   {j.strip() for j in _lj.split() if j.strip()} if _lj else set(),
+                    }
+        except Exception:
+            pass
+
         # Primary: wall-clock window per Sub_Application per run_date.
         # Use df_window (cyclic + excluded sub-apps removed) to avoid 24h elapsed inflation.
         window_agg = (
@@ -1353,7 +1374,6 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
               .agg(
                   first_start=("Start_Time", "min"),
                   last_end=("End_Time", "max"),
-                  job_name=("Job_Name", "first"),  # representative job name
               )
         )
         # Filter out-of-scope sub_apps from compliance denominator
@@ -1362,18 +1382,88 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 ~window_agg["Sub_Application"].isin(_out_of_scope_subs)
             ].copy()
 
+        # ── Gap 1 (continued): Patch sentinel-scoped first_start / last_end ──
+        # For sub_apps that have a First_Job/Last_Job contract, recompute the
+        # window boundaries using only the sentinel job timestamps per run_date.
+        if _sentinel_map and "Job_Name" in df_window.columns:
+            for _sa_norm, _sent in _sentinel_map.items():
+                # Match normalised sub_app pattern against actual sub_app names
+                _sa_matches = [
+                    s for s in df_window["Sub_Application"].dropna().unique()
+                    if str(s).upper() == _sa_norm or _sa_norm in str(s).upper()
+                ]
+                for _sa_actual in _sa_matches:
+                    _sub_df = df_window[df_window["Sub_Application"] == _sa_actual]
+                    for _rd, _rd_grp in _sub_df.groupby("run_date"):
+                        _mask = window_agg[
+                            (window_agg["Sub_Application"] == _sa_actual) &
+                            (window_agg["run_date"] == _rd)
+                        ].index
+                        if _mask.empty:
+                            continue
+                        _jnames = _rd_grp["Job_Name"].str.upper()
+                        # Start sentinel: min Start_Time of start sentinel jobs
+                        if _sent["start_jobs"]:
+                            _start_rows = _rd_grp[_jnames.isin(_sent["start_jobs"])]
+                            if not _start_rows.empty:
+                                window_agg.loc[_mask, "first_start"] = _start_rows["Start_Time"].min()
+                        # End sentinel: max End_Time of end sentinel jobs
+                        if _sent["end_jobs"]:
+                            _end_rows = _rd_grp[_jnames.isin(_sent["end_jobs"])]
+                            if not _end_rows.empty and "End_Time" in _end_rows.columns:
+                                window_agg.loc[_mask, "last_end"] = _end_rows["End_Time"].max()
+
         window_agg["elapsed_hrs"] = (
             (window_agg["last_end"] - window_agg["first_start"])
             .dt.total_seconds() / 3600.0
         ).clip(lower=0).fillna(0.0)
 
+        # ── Gap 5: Flag suspect windows using pe_config sentinel thresholds ──
+        _max_sentinel_win = float(getattr(pe_config, "SENTINEL_MAX_WINDOW_HRS", 20.0))
+        _min_sentinel_win = float(getattr(pe_config, "SENTINEL_MIN_WINDOW_HRS", 0.25))
+        window_agg["suspect_flag"] = "OK"
+        window_agg.loc[window_agg["elapsed_hrs"] > _max_sentinel_win, "suspect_flag"] = "SUSPECT_TOO_LONG"
+        window_agg.loc[
+            (window_agg["elapsed_hrs"] > 0) & (window_agg["elapsed_hrs"] < _min_sentinel_win),
+            "suspect_flag"
+        ] = "SUSPECT_TOO_SHORT"
+
+        # ── Gap 2: _sub_sla — look up SLA by sub_app scope, not random job ──
+        # The old impl used row["job_name"] = pandas "first" aggregation value
+        # which is arbitrary.  If that job lacks an SLA entry the whole sub_app
+        # falls through to global_ceil.  Fix: scan ALL job_sla_map entries for
+        # the sub_app and take the most common non-zero SLA value; fall back to
+        # schedule-type ceiling from the uploaded XLSX ceilings map.
+        try:
+            from services.sla_engine import classify_schedule as _cs_win
+        except Exception:
+            _cs_win = lambda _n: "DAILY"   # noqa: E731
+
+        _sla_ceilings = sla_index.get("ceilings", {})
+
         def _sub_sla(row) -> float:
             sub_app  = str(row["Sub_Application"])
-            job_name = str(row["job_name"])
-            key = f"{sub_app}|{job_name}"
-            entry = job_sla_map.get(key) or job_sla_map.get(job_name)
-            if entry and entry.get("sla_hrs", 0) > 0:
-                return float(entry["sla_hrs"])
+            sa_upper = sub_app.upper()
+            # Priority 1: scan all job_sla_map entries for this sub_app
+            _sa_sla_vals = [
+                float(v["sla_hrs"]) for k, v in job_sla_map.items()
+                if (k.upper().startswith(f"{sa_upper}|") or k.upper() == sa_upper)
+                and v.get("sla_hrs") and float(v["sla_hrs"]) > 0
+            ]
+            if _sa_sla_vals:
+                # Return the most frequent value; tie-break by maximum (favour tighter XLSX value)
+                try:
+                    from statistics import mode as _stat_mode
+                    return _stat_mode(_sa_sla_vals)
+                except Exception:
+                    return max(set(_sa_sla_vals), key=_sa_sla_vals.count)
+            # Priority 2: schedule-type ceiling from uploaded XLSX ceilings map
+            try:
+                _stype = _cs_win(sub_app)
+                if _stype in _sla_ceilings and float(_sla_ceilings[_stype]) > 0:
+                    return float(_sla_ceilings[_stype])
+            except Exception:
+                pass
             return global_ceil
 
         window_agg["sla_hrs"] = window_agg.apply(_sub_sla, axis=1)
@@ -1383,14 +1473,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # Feeds the SHARED compliance_engine so the Batch Review and SLA Matrix
         # tabs compute window compliance with one identical algorithm. The
         # per-sub_app resolved sla_hrs IS the ceiling (Area 2 — no global float).
-        try:
-            from services.sla_engine import classify_schedule as _cs_win
-        except Exception:
-            _cs_win = lambda _n: "DAILY"   # noqa: E731
         for _sa in window_agg["Sub_Application"].dropna().unique():
-            _win_ceiling_map[str(_sa)] = float(
-                window_agg.loc[window_agg["Sub_Application"] == _sa, "sla_hrs"].min()
-            )
+            # Gap 3: use mode (most frequent) SLA value, not min().
+            # min() picks the wrong global_ceil 6h row when the XLSX value is 8h (weekly).
+            _sa_sla_series = window_agg.loc[window_agg["Sub_Application"] == _sa, "sla_hrs"]
+            _sa_vc = _sa_sla_series.value_counts()
+            _win_ceiling_map[str(_sa)] = float(_sa_vc.index[0]) if not _sa_vc.empty else global_ceil
         for _, _r in window_agg.iterrows():
             _win_records.append({
                 "sub_app":       str(_r["Sub_Application"]),
@@ -1398,6 +1486,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 "elapsed_hrs":   float(_r["elapsed_hrs"]),
                 "schedule_type": _cs_win(str(_r["Sub_Application"])),
                 "sla_ceil":      float(_r["sla_hrs"]),
+                "suspect_flag":  str(_r.get("suspect_flag", "OK")),
             })
 
         # Merge back to daily (Job_Name level) for compatibility with heatmap
