@@ -2269,8 +2269,9 @@ function renderSlaBufferChart(k) {
   // Arc spans -100% (left, 180°) through 0% (middle, 90°) to +100% (right, 0°).
   // Positive buffer = needle swings right (safe). Negative = swings left (breach).
   const clampedBuf   = rawBuf == null ? 0 : Math.max(-100, Math.min(100, rawBuf));
-  // 0% = straight up (90°), +100% = full right (0°), -100% = full left (180°)
-  const needleAngle  = 180 - ((clampedBuf + 100) / 200) * 180;  // degrees, 0=right
+  // Arc maps: -100% → compass 180° (Down), 0% → compass 270° (Left), +100% → compass 360° (Up)
+  // Needle must use the SAME mapping so it points at the arc position.
+  const needleAngle  = 180 + ((clampedBuf + 100) / 200) * 180;  // matches arcDeg zone mapping
 
   // Zone colors (matching pe_config thresholds)
   const zoneColor =
@@ -2289,10 +2290,15 @@ function renderSlaBufferChart(k) {
   // Draw via canvas 2D (faster than SVG, same fidelity)
   const ctx   = canvas.getContext("2d");
   const dpr   = window.devicePixelRatio || 1;
-  const W     = canvas.parentElement?.clientWidth  || 320;
-  const H     = canvas.parentElement?.clientHeight || 256;
-  canvas.width  = W * dpr;
-  canvas.height = H * dpr;
+  // Reset to CSS-controlled size first, then measure the true rendered rect.
+  // This ensures zoom/resize always reflects the real CSS layout dimensions.
+  canvas.style.width  = "100%";
+  canvas.style.height = "100%";
+  const _rect = canvas.getBoundingClientRect();
+  const W     = _rect.width  || canvas.parentElement?.clientWidth  || 320;
+  const H     = _rect.height || canvas.parentElement?.clientHeight || 256;
+  canvas.width  = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
   canvas.style.width  = W + "px";
   canvas.style.height = H + "px";
   ctx.scale(dpr, dpr);
@@ -2336,7 +2342,7 @@ function renderSlaBufferChart(k) {
 
   // ── Zone boundary ticks ─────────────────────────────────────
   const drawTick = (pct, label) => {
-    const ang  = (180 + (pct + 100) / 200 * 180) - 180;  // map to 180→360
+    const ang  = 180 + (pct + 100) / 200 * 180;  // same mapping as arcDeg zone arcs
     const rad  = (ang - 90) * Math.PI / 180;
     const rIn  = R - thick - 4;
     const rOut = R + 6;
@@ -2394,30 +2400,62 @@ function renderSlaBufferChart(k) {
     ctx.restore();
   });
 
-  // ── Needle ───────────────────────────────────────────────────
+  // ── Needle — tapered triangle (physical instrument feel) ─────
   if (rawBuf != null) {
     const needleRad = (needleAngle - 90) * Math.PI / 180;
-    const tipDist   = R - thick - 2;
-    const hubR      = thick * 0.38;
-    // Needle shadow / glow
+    const tipDist   = R - thick - 4;
+    const baseHalf  = thick * 0.22;
+    const perpRad   = needleRad + Math.PI / 2;
+    const tipX   = cx + tipDist * Math.cos(needleRad);
+    const tipY   = cy + tipDist * Math.sin(needleRad);
+    const baseLX = cx + baseHalf * Math.cos(perpRad);
+    const baseLY = cy + baseHalf * Math.sin(perpRad);
+    const baseRX = cx - baseHalf * Math.cos(perpRad);
+    const baseRY = cy - baseHalf * Math.sin(perpRad);
+    // Triangle body with glow
     ctx.save();
     ctx.shadowColor = zoneColor;
-    ctx.shadowBlur  = 12;
+    ctx.shadowBlur  = 22;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(baseLX, baseLY);
+    ctx.lineTo(baseRX, baseRY);
+    ctx.closePath();
+    ctx.fillStyle = zoneColor;
+    ctx.fill();
+    ctx.restore();
+    // Centre gradient line — white hub → status colour at tip
+    ctx.save();
+    const _ng = ctx.createLinearGradient(cx, cy, tipX, tipY);
+    _ng.addColorStop(0, "#ffffff");
+    _ng.addColorStop(1, zoneColor);
     ctx.beginPath();
     ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + tipDist * Math.cos(needleRad), cy + tipDist * Math.sin(needleRad));
-    ctx.strokeStyle = zoneColor;
-    ctx.lineWidth   = 3;
+    ctx.lineTo(tipX, tipY);
+    ctx.strokeStyle = _ng;
+    ctx.lineWidth   = 1.5;
     ctx.lineCap     = "round";
     ctx.stroke();
     ctx.restore();
-    // Hub dot
+    // Pivot ring — radial gradient white → status colour
     ctx.save();
+    const hubR  = thick * 0.30;
+    const _hg = ctx.createRadialGradient(cx, cy, 0, cx, cy, hubR);
+    _hg.addColorStop(0,    "#ffffff");
+    _hg.addColorStop(0.55, hexA(zoneColor, 0.95));
+    _hg.addColorStop(1,    zoneColor);
     ctx.beginPath();
     ctx.arc(cx, cy, hubR, 0, Math.PI * 2);
-    ctx.fillStyle = zoneColor;
+    ctx.fillStyle   = _hg;
     ctx.shadowColor = zoneColor;
-    ctx.shadowBlur  = 8;
+    ctx.shadowBlur  = 10;
+    ctx.fill();
+    ctx.restore();
+    // Bright white inner dot
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, thick * 0.12, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
     ctx.fill();
     ctx.restore();
   }

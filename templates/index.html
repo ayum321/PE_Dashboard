@@ -1741,10 +1741,10 @@
             </div>
 
             <!-- ── Charts row ───────────────────────────────── -->
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
               <!-- Chart 1 — SLA Buffer Gauge (SVG arc speedometer) -->
-              <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
+              <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5 lg:col-span-1">
                 <div class="flex items-center justify-between mb-3">
                   <div>
                     <div class="text-sm font-bold text-Cwhite">SLA Buffer Gauge</div>
@@ -1756,16 +1756,16 @@
                         class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md
                                border border-Cborder bg-Cbg text-Cmuted">—</span>
                 </div>
-                <div class="relative h-72">
+                <div class="relative h-80">
                   <div id="sla-buffer-glow" class="absolute inset-0 pointer-events-none" style="z-index:0"></div>
-                  <canvas id="chart-sla-buffer" style="width:100%;height:100%;position:relative;z-index:1"></canvas>
+                  <canvas id="chart-sla-buffer" style="display:block;width:100%;height:100%;position:relative;z-index:1"></canvas>
                 </div>
                 <!-- Legend rendered via innerHTML from renderSlaBufferChart -->
                 <div id="chart-sla-buffer-legend" class="flex flex-wrap justify-center gap-x-4 gap-y-1 mt-2 px-1"></div>
               </div>
 
               <!-- Chart 2 — Daily SLA Window Trend (Grafana-style bar) -->
-              <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
+              <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5 lg:col-span-2">
                 <div class="mb-3">
                   <div class="text-sm font-bold text-Cwhite">Daily Batch Window</div>
                   <div class="text-[11px] text-Cmuted">
@@ -1775,8 +1775,8 @@
                   <div id="chart-window-metric-type" class="text-[9px] text-Cteal font-semibold mt-0.5"></div>
                   <div id="chart-window-source-tag" class="text-[9px] font-semibold mt-0.5 text-Cmuted hidden"></div>
                 </div>
-                <div class="relative h-72">
-                  <canvas id="chart-window-trend"></canvas>
+                <div class="relative h-80">
+                  <canvas id="chart-window-trend" style="display:block;width:100%;height:100%"></canvas>
                 </div>
               </div>
             </div>
