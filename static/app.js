@@ -2385,7 +2385,9 @@ function renderSlaBufferChart(k) {
     const rLbl  = R - thick * 0.5;
     ctx.save();
     ctx.fillStyle = hexA(c, 0.85);
-    ctx.font = `700 9px "Sora", sans-serif`;
+    ctx.font = `700 9.5px "Sora", sans-serif`;
+    ctx.shadowColor = c;
+    ctx.shadowBlur  = 4;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(text, cx + rLbl * Math.cos(rad), cy + rLbl * Math.sin(rad));
@@ -2448,6 +2450,15 @@ function renderSlaBufferChart(k) {
     ctx.fillText(`${peakLabel} ${peakHrs.toFixed(2)}h  ·  SLA ${(+slaHrs).toFixed(1)}h`, cx, cy + R * 0.15);
   }
   ctx.restore();
+
+  // ── Ambient glow behind canvas — colour responds to status ────
+  const _glowEl = document.getElementById("sla-buffer-glow");
+  if (_glowEl) {
+    _glowEl.style.background = rawBuf == null
+      ? "none"
+      : `radial-gradient(ellipse at center, ${hexA(zoneColor, 0.10)} 0%, transparent 70%)`;
+    _glowEl.style.animation = rawBuf == null ? "none" : "pulseGlow 2.8s ease-in-out infinite";
+  }
 
   // ── Legend — rendered in HTML below the canvas (no canvas clipping) ──
   const legendEl = document.getElementById("chart-sla-buffer-legend");

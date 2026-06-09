@@ -313,6 +313,11 @@
     .pulse-red {
       animation: pulse-red 1.4s cubic-bezier(.4, 0, .6, 1) infinite;
     }
+    /* ── Ambient gauge glow behind the SLA buffer canvas ── */
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 0.7; }
+      50%      { opacity: 1.0; }
+    }
     /* ── Per-cell metric bars on the Resource Review table ── */
     .metric-bar-track {
       position: relative;
@@ -1752,7 +1757,8 @@
                                border border-Cborder bg-Cbg text-Cmuted">—</span>
                 </div>
                 <div class="relative h-72">
-                  <canvas id="chart-sla-buffer" style="width:100%;height:100%"></canvas>
+                  <div id="sla-buffer-glow" class="absolute inset-0 pointer-events-none" style="z-index:0"></div>
+                  <canvas id="chart-sla-buffer" style="width:100%;height:100%;position:relative;z-index:1"></canvas>
                 </div>
                 <!-- Legend rendered via innerHTML from renderSlaBufferChart -->
                 <div id="chart-sla-buffer-legend" class="flex flex-wrap justify-center gap-x-4 gap-y-1 mt-2 px-1"></div>
