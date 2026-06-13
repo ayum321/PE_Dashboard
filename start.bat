@@ -304,7 +304,7 @@ REM HTTP client
 call :pkg "requests>=2.32.0"
 
 REM Azure Monitor live-connect (optional but preinstalled)
-call :pkg "azure-identity>=1.16.0" "azure-monitor-query>=1.3.0" "azure-mgmt-compute>=30.0.0" "azure-mgmt-resource>=23.0.0" "azure-mgmt-subscription>=3.0.0"
+call :pkg "azure-identity>=1.16.0" "azure-monitor-query>=1.3.0,<2.0.0" "azure-mgmt-compute>=30.0.0" "azure-mgmt-resource>=23.0.0" "azure-mgmt-subscription>=3.0.0" "azure-mgmt-resourcegraph>=8.0.0"
 
 REM Write stamp (Python writes the file cleanly, avoids CMD redirect quirks)
 !PY! -c "open(r'!STAMP!','w').write('ok')" >nul 2>&1
