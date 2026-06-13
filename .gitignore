@@ -1,13 +1,44 @@
-.cache/
-.venv/
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.pe_config.json
+.venv/
+
+# Runtime / cache
 .pe_cache.json
-auth_record.json
-.msal_cache/
-$null
-__diag_out.txt
-__diag_err.txt
-desktop.ini
+.pe_config.json
+.pkg_stamp
+.server_pid
+debug.log
+server_err.txt
+server_stderr.txt
+server_stdout.txt
+*.txt.bak
+
+# Dev/diag scripts
+_test_*.py
+_check_*.py
+_diag_*.py
+_audit_*.py
+_bench_*.py
+_time_*.py
+_analyze_*.py
+_inspect_*.py
+_patch_*.py
+_wmi_*.py
+_restore_*.py
+_ingest_*.py
+_pe_audit_*.py
+__diag_*
+
+# Releases / customer data
+PE_Dashboard_Release*.zip
+*.xlsx
+*.csv
+*.docx
+*.pdf
+
+# IDE
+.vscode/
+.claude/
+0.0.9/
