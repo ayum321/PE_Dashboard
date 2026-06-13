@@ -507,7 +507,27 @@ async def extract_sla_ceilings(file: UploadFile = File(...)) -> Dict[str, float]
     from services import pe_config
     pe_config.reload()
 
-    return sla_map
+    # GAP-1/GAP-3: recompute batch KPIs with the new SLA ceilings immediately.
+    _recompute_status = "no_ctrlm_data_cached"
+    try:
+        from services.batch_calculator import recompute_with_new_sla as _rwns_c
+        from services import session_cache as _sc_ceil
+        _new_p = _rwns_c()
+        if _new_p is not None:
+            _new_k = _new_p.get("kpis")
+            if _new_k:
+                _lb = _sc_ceil.get("last_batch") or {}
+                if _lb:
+                    _lb["kpis"] = _new_k
+                    _sc_ceil.set("last_batch", _lb)
+                _sc_ceil.ac_set("batch_kpis", _new_k)
+            _recompute_status = "recomputed"
+    except Exception as _e:
+        import logging as _log_c
+        _log_c.getLogger("pe_dashboard").warning("sla-ceilings recompute failed: %s", _e)
+
+    # Return only float-valued ceilings — response_model=Dict[str,float] rejects strings
+    return {k: float(v) for k, v in sla_map.items() if isinstance(v, (int, float))}
 
 
 # ── /api/sla-intelligence (full SLA analysis) ────────────────────
@@ -566,10 +586,34 @@ async def sla_intelligence(file: UploadFile = File(...)) -> Dict[str, Any]:
     from services import pe_config
     pe_config.reload()
 
+    # ── GAP-1/GAP-3: Silent batch KPI recompute — use new SLA ceilings immediately ──
+    # When this SLA file is uploaded AFTER Ctrl-M, all prior gauge/compliance
+    # numbers used the old (default 6h) ceiling.  Re-running compute_metrics
+    # against the persisted job_runs_df picks up the customer's actual SLA.
+    _batch_refreshed = False
+    _updated_batch_kpis: dict | None = None
+    try:
+        from services.batch_calculator import recompute_with_new_sla as _rwns_ir
+        from services import session_cache as _sc_ir
+        _new_payload = _rwns_ir()
+        if _new_payload is not None:
+            _updated_batch_kpis = _new_payload.get("kpis")
+            if _updated_batch_kpis:
+                _last_batch = _sc_ir.get("last_batch") or {}
+                if _last_batch:
+                    _last_batch["kpis"] = _updated_batch_kpis
+                    _sc_ir.set("last_batch", _last_batch)
+                _sc_ir.ac_set("batch_kpis", _updated_batch_kpis)
+            _batch_refreshed = True
+    except Exception:
+        pass
+
     return {
-        "ceilings": result.ceilings,
-        "traceability": build_sla_traceability(result),
-        "intelligence": intel_dict,
+        "ceilings":             result.ceilings,
+        "traceability":         build_sla_traceability(result),
+        "intelligence":         intel_dict,
+        "batch_refreshed":      _batch_refreshed,
+        "updated_batch_kpis":   _updated_batch_kpis,
     }
 
 
@@ -655,22 +699,17 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
     # against the stored job_runs_df with the updated config_store fixes this.
     _updated_batch_kpis = None
     try:
+        from services.batch_calculator import recompute_with_new_sla as _rwns_r
         from services import session_cache as _sc_r
-        _job_rows = _sc_r.get("job_runs_df")
-        if _job_rows:
-            import pandas as _pd_r
-            from services.batch_calculator import build_batch_payload as _bbp
-            _df_r = _pd_r.DataFrame(_job_rows)
-            # build_batch_payload reads config_store internally via build_sla_index
-            _new_payload = _bbp(_df_r)
-            _new_kpis = _new_payload.get("kpis")
-            if _new_kpis:
+        _new_payload = _rwns_r()
+        if _new_payload is not None:
+            _updated_batch_kpis = _new_payload.get("kpis")
+            if _updated_batch_kpis:
                 _last_batch = _sc_r.get("last_batch") or {}
                 if _last_batch:
-                    _last_batch["kpis"] = _new_kpis
+                    _last_batch["kpis"] = _updated_batch_kpis
                     _sc_r.set("last_batch", _last_batch)
-                _sc_r.ac_set("batch_kpis", _new_kpis)
-                _updated_batch_kpis = _new_kpis
+                _sc_r.ac_set("batch_kpis", _updated_batch_kpis)
     except Exception:
         pass
 

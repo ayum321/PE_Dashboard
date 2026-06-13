@@ -53,6 +53,7 @@ _state: dict[str, Any] = {}
 _PERSIST_PLAIN_KEYS = {
     "last_batch", "last_resource", "last_sla_matrix",
     "last_red_flags", "last_smart_findings", "last_findings",
+    "last_benchmark",
 }
 # SOW / engagement-identity slots are intentionally EXCLUDED from this set.
 # They must be re-uploaded for each engagement and must never bleed across

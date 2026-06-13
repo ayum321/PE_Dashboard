@@ -18,8 +18,11 @@ POST /api/azure/validate
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -31,18 +34,127 @@ from services.azure_monitor import (
     AzureConfigError,
     AzureFetchError,
     _browser_credential,
+    _browser_credential_info,
     _build_credential,
     browser_login,
     clear_browser_credential,
+    clear_vm_inventory_cache,
     discover_vms,
     fetch_vm_metrics,
     fetch_vm_timeseries,
     get_browser_credential_info,
+    get_vm_prewarm_state,
+    prewarm_vm_inventory,
     search_vms,
 )
 from services.resource_calculator import build_resource_payload
-
 router = APIRouter()
+
+# ── Timeseries result cache ──────────────────────────────────────────────────
+# Caches the full processed response for (vm_ids, window) combinations so that
+# spike drill-down clicks don't re-fetch from Azure Monitor on every click.
+# TTL = 5 minutes. Cache is keyed by a SHA256 of the canonical request params.
+_TS_CACHE: Dict[str, Dict[str, Any]] = {}
+_TS_CACHE_LOCK = threading.Lock()
+_TS_CACHE_TTL = 300  # seconds
+
+
+def _ts_cache_key(vm_ids: List[str], hours_back: int,
+                  start_utc: Optional[str], end_utc: Optional[str]) -> str:
+    canonical = json.dumps(
+        {"ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc},
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _ts_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    with _TS_CACHE_LOCK:
+        entry = _TS_CACHE.get(key)
+        if entry and time.time() - entry["ts"] < _TS_CACHE_TTL:
+            return entry["data"]
+        if entry:
+            del _TS_CACHE[key]
+    return None
+
+
+def _ts_cache_set(key: str, data: Dict[str, Any]) -> None:
+    with _TS_CACHE_LOCK:
+        _TS_CACHE[key] = {"ts": time.time(), "data": data}
+
+# ── Subscription list cache ──────────────────────────────────────────────────
+# Populated once in the background; served instantly on all subsequent calls.
+_sub_cache: Dict[str, Any] = {"subs": None, "ts": 0.0, "fetching": False}
+_sub_cache_lock = threading.Lock()
+_SUB_CACHE_TTL = 600  # 10 minutes
+
+
+def _reset_sub_cache() -> None:
+    """Wipe the subscription cache — called on login/logout so a different
+    user never sees the previous user's subscription list."""
+    with _sub_cache_lock:
+        _sub_cache["subs"] = None
+        _sub_cache["ts"] = 0.0
+        _sub_cache["fetching"] = False
+    # Also drop cached VM inventory so a different user never sees stale VMs
+    try:
+        clear_vm_inventory_cache()
+    except Exception:
+        pass
+
+
+def _populate_sub_cache() -> None:
+    """Background worker: fetch all subscriptions and store in _sub_cache.
+
+    Order of preference:
+    1. Browser credential SDK (always fresh after browser login — fast, ~1-3s)
+    2. az CLI fallback (may be stale or slow — used only when SDK unavailable)
+    """
+    import subprocess as _sp, json as _json
+    rows: list[Dict[str, Any]] = []
+
+    # ── 1. Browser credential via SDK (preferred — guaranteed fresh after login)
+    try:
+        from services.azure_monitor import _browser_credential as _bc
+        if _bc is not None:
+            from azure.mgmt.subscription import SubscriptionClient
+            client = SubscriptionClient(_bc)
+            for sub in client.subscriptions.list():
+                state = str(getattr(sub, "state", "") or "")
+                if state.lower() != "enabled":
+                    continue
+                rows.append({
+                    "id":        str(getattr(sub, "subscription_id", "") or ""),
+                    "name":      str(getattr(sub, "display_name", "") or ""),
+                    "state":     state,
+                    "is_default": False,
+                    "tenant_id": str(getattr(sub, "tenant_id", "") or ""),
+                })
+    except Exception:
+        pass
+
+    # ── 2. az CLI fallback (only if SDK returned nothing)
+    if not rows:
+        try:
+            proc = _sp.run(
+                ["az", "account", "list", "--output", "json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if proc.returncode == 0:
+                subs = _json.loads(proc.stdout)
+                rows = [
+                    {"id": s.get("id", ""), "name": s.get("name", ""),
+                     "state": s.get("state", ""), "is_default": s.get("isDefault", False),
+                     "tenant_id": s.get("tenantId", "")}
+                    for s in subs if s.get("state") == "Enabled"
+                ]
+        except Exception:
+            pass
+
+    with _sub_cache_lock:
+        _sub_cache["subs"] = rows if rows else None
+        _sub_cache["ts"] = time.time()
+        _sub_cache["fetching"] = False
 
 
 def _subscriptions_via_sdk() -> list[Dict[str, Any]]:
@@ -150,8 +262,8 @@ def azure_whoami() -> Dict[str, Any]:
     try:
         import subprocess, json as _json
         proc = subprocess.run(
-            ["az", "account", "show", "--output", "json"],
-            capture_output=True, text=True, timeout=10,
+            ["az", "account", "show", "--output", "json", "--only-show-errors"],
+            capture_output=True, text=True, timeout=4,  # 4s max — expired token hangs otherwise
         )
         if proc.returncode == 0:
             acct = _json.loads(proc.stdout)
@@ -169,36 +281,10 @@ def azure_whoami() -> Dict[str, Any]:
     except (FileNotFoundError, Exception):
         pass  # CLI not installed or failed — fall through to SDK
 
-    # ── Fallback: get a token via DefaultAzureCredential + decode JWT ──
-    try:
-        from azure.identity import DefaultAzureCredential
-        import json as _json, base64, logging
-        # Suppress the noisy credential chain errors
-        logging.getLogger("azure.identity").setLevel(logging.ERROR)
-        cred = DefaultAzureCredential()
-        token = cred.get_token("https://management.azure.com/.default")
-        # Decode JWT payload (middle segment) — no verification needed,
-        # we just want the claims (upn, name, tid, etc.)
-        payload_b64 = token.token.split(".")[1]
-        # Fix padding
-        payload_b64 += "=" * (4 - len(payload_b64) % 4)
-        claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
-        return {
-            "logged_in":  True,
-            "name":       claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or claims.get("sub", ""),
-            "display_name": claims.get("name", ""),
-            "type":       "user" if claims.get("upn") else "app",
-            "tenant_id":  claims.get("tid", ""),
-            "tenant_name": claims.get("tenant_display_name", ""),
-            "method":     "sdk_token",
-        }
-    except ImportError:
-        return {"logged_in": False, "error": "Azure SDK not installed. Run: pip install azure-identity"}
-    except Exception as exc:
-        err = str(exc)
-        if "CredentialUnavailableError" in err or "DefaultAzureCredential" in err:
-            return {"logged_in": False, "error": "Not signed in. Use 'Sign in with Browser' or run 'az login'."}
-        return {"logged_in": False, "error": f"Auth check failed: {err[:150]}"}
+    # If neither browser credential nor az CLI returned a result,
+    # the user is not signed in. DefaultAzureCredential is intentionally NOT
+    # used here — its ManagedIdentity probe hangs for 30s+ on non-Azure VMs.
+    return {"logged_in": False, "error": "Not signed in. Use 'Sign in with Browser' or run 'az login'."}
 
 
 @router.post("/azure/browser-login")
@@ -217,100 +303,137 @@ def azure_browser_login() -> Dict[str, Any]:
             detail=str(exc),
         ) from exc
 
-    # After browser login, list subscriptions using the new credential
-    subs: list[Dict[str, Any]] = []
-    try:
-        from azure.identity import InteractiveBrowserCredential
-        from services.azure_monitor import _browser_credential
-        if _browser_credential is not None:
-            from azure.mgmt.subscription import SubscriptionClient
-            client = SubscriptionClient(_browser_credential)
-            for sub in client.subscriptions.list():
-                state = str(getattr(sub, "state", "") or "")
-                if state.lower() != "enabled":
-                    continue
-                subs.append({
-                    "id": str(getattr(sub, "subscription_id", "") or ""),
-                    "name": str(getattr(sub, "display_name", "") or ""),
-                    "state": state,
-                    "is_default": False,
-                    "tenant_id": str(getattr(sub, "tenant_id", "") or ""),
-                })
-    except Exception as exc:
-        info["subscription_error"] = str(exc)[:200]
+    # New identity signed in — drop any subscription list cached for a
+    # previous user so the dropdown reflects THIS user's access.
+    _reset_sub_cache()
 
-    info["subscriptions"] = subs
+    # Keep browser-login endpoint fast: subscription enumeration can be slow
+    # in tenants with many subscriptions. Frontend loads subscriptions in a
+    # separate call after auth succeeds.
+    info["subscriptions"] = []
+
+    # ── Post-login pre-warm: kick off subscription list + VM inventory in parallel
+    # so they are cached and ready before the user types a VM name.
+    # Both run as daemon threads — login endpoint returns immediately.
+    threading.Thread(target=_populate_sub_cache, daemon=True).start()
+    # Pre-warm VM inventory for the saved subscription (if any)
+    def _prewarm_after_login():
+        try:
+            from services.azure_monitor import _browser_credential as _bc
+            if _bc is None:
+                return
+            from services import config_store as _cs
+            sub_id = _cs.get("azure_subscription_id", "").strip()
+            if not sub_id:
+                # No saved sub — wait for subs to load then pre-warm first one
+                import time as _t
+                for _ in range(12):  # wait up to 60s for sub cache
+                    _t.sleep(5)
+                    with _sub_cache_lock:
+                        subs = _sub_cache.get("subs") or []
+                    if subs:
+                        sub_id = subs[0].get("id", "")
+                        break
+            if sub_id:
+                prewarm_vm_inventory(_bc, sub_id)
+        except Exception:
+            pass
+    threading.Thread(target=_prewarm_after_login, daemon=True).start()
+
     return info
+
+
+@router.get("/azure/vm-cache-status")
+def azure_vm_cache_status() -> Dict[str, Any]:
+    """Return VM inventory pre-warm status (instant — no network call).
+
+    Frontend polls this after login to know when VM search will be fast.
+    States: idle | warming | ready | error
+    """
+    state = get_vm_prewarm_state()
+    # Also fold in subscription cache state so one call tells the full picture
+    with _sub_cache_lock:
+        sub_ready = _sub_cache["subs"] is not None
+        sub_count = len(_sub_cache["subs"]) if _sub_cache["subs"] else 0
+    state["subs_ready"] = sub_ready
+    state["sub_count"] = sub_count
+    return state
 
 
 @router.post("/azure/browser-logout")
 def azure_browser_logout() -> Dict[str, Any]:
     """Clear cached browser credential."""
     clear_browser_credential()
+    _reset_sub_cache()
     return {"ok": True, "message": "Browser credential cleared."}
 
 
 @router.get("/azure/auth-status")
 def azure_auth_status() -> Dict[str, Any]:
-    """Return which auth method is active.
+    """Return which auth method is active — always instant (no network call).
 
-    Only reports 'connected' for EXPLICIT browser sign-in (or restored
-    persistent cache).  Passive az-login / DefaultAzureCredential is
-    NOT surfaced here — users must click 'Sign in with Browser' so the
-    dashboard works identically on every machine.
+    Checks in this order, all O(1)/disk-read only:
+    1. In-memory credential (already loaded this server session)
+    2. Saved JSON identity file on disk (survives server restart)
+    The actual credential object is restored lazily in the background
+    when it is first needed for a real API call.
     """
-    browser_info = get_browser_credential_info()
-    if browser_info.get("logged_in"):
+    # 1. In-memory — instant
+    from services.azure_monitor import _browser_credential, _browser_credential_info, _load_credential_info
+    mem_info = dict(_browser_credential_info or {})
+    if _browser_credential is not None and mem_info.get("logged_in"):
         return {
             "method": "browser",
-            "name": browser_info.get("name", ""),
-            "display_name": browser_info.get("display_name", ""),
-            "tenant_id": browser_info.get("tenant_id", ""),
+            "name": mem_info.get("name", ""),
+            "display_name": mem_info.get("display_name", ""),
+            "tenant_id": mem_info.get("tenant_id", ""),
         }
+
+    # 2. Disk cache — instant (just reads a small JSON file, no Azure network call)
+    disk_info = _load_credential_info()
+    if disk_info.get("logged_in"):
+        return {
+            "method": "browser",
+            "name": disk_info.get("name", ""),
+            "display_name": disk_info.get("display_name", ""),
+            "tenant_id": disk_info.get("tenant_id", ""),
+        }
+
     return {"method": "none", "name": ""}
 
 
 @router.get("/azure/subscriptions")
 def azure_subscriptions() -> Dict[str, Any]:
-    """List subscriptions using az CLI first, then SDK fallback."""
-    try:
-        import subprocess, json as _json
-        proc = subprocess.run(
-            ["az", "account", "list", "--output", "json", "--all"],
-            capture_output=True, text=True, timeout=15,
+    """Return subscription list — instant from cache; populates cache in background on first call."""
+    with _sub_cache_lock:
+        cache_fresh = (
+            _sub_cache["subs"] is not None
+            and (time.time() - _sub_cache["ts"]) < _SUB_CACHE_TTL
         )
-        if proc.returncode == 0:
-            subs = _json.loads(proc.stdout)
-            return {
-                "ok": True,
-                "subscriptions": [
-                    {
-                        "id": s.get("id", ""),
-                        "name": s.get("name", ""),
-                        "state": s.get("state", ""),
-                        "is_default": s.get("isDefault", False),
-                        "tenant_id": s.get("tenantId", ""),
-                    }
-                    for s in subs
-                    if s.get("state") == "Enabled"
-                ],
-            }
-        # CLI command failed; continue to SDK fallback below.
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
+        already_fetching = _sub_cache["fetching"]
 
-    try:
-        return {"ok": True, "subscriptions": _subscriptions_via_sdk()}
-    except ImportError:
+    # ── Serve from cache if available ───────────────────────────────────────
+    if cache_fresh:
+        return {"ok": True, "subscriptions": _sub_cache["subs"]}
+
+    # ── Kick off background fetch if not already running ────────────────────
+    if not already_fetching:
+        with _sub_cache_lock:
+            _sub_cache["fetching"] = True
+        threading.Thread(target=_populate_sub_cache, daemon=True).start()
+
+    # ── Return config-saved subscription immediately (never hangs) ──────────
+    cfg = config_store.get_all()
+    saved_id = cfg.get("azure_subscription_id", "").strip()
+    if saved_id:
         return {
-            "ok": False,
-            "error": "Azure SDK not installed. Run: pip install azure-identity azure-mgmt-subscription",
-            "subscriptions": [],
+            "ok": True,
+            "subscriptions": [{"id": saved_id, "name": saved_id,
+                                "state": "Enabled", "is_default": True, "tenant_id": ""}],
+            "_cache_warming": True,   # hint to client: full list loading in background
         }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)[:200], "subscriptions": []}
+
+    return {"ok": False, "error": "Not signed in — use Sign in with Browser first.", "subscriptions": []}
 
 
 @router.get("/azure/resource-groups")
@@ -327,7 +450,7 @@ def azure_resource_groups(subscription_id: str = "") -> Dict[str, Any]:
         import subprocess, json as _json
         proc = subprocess.run(
             ["az", "group", "list", "--subscription", sub_id, "--output", "json"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=4,
         )
         if proc.returncode == 0:
             groups = _json.loads(proc.stdout)
@@ -344,16 +467,21 @@ def azure_resource_groups(subscription_id: str = "") -> Dict[str, Any]:
     except Exception:
         pass
 
-    try:
-        return {"ok": True, "resource_groups": _resource_groups_via_sdk(sub_id)}
-    except ImportError:
-        return {
-            "ok": False,
-            "error": "Azure SDK not installed. Run: pip install azure-identity azure-mgmt-resource",
-            "resource_groups": [],
-        }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)[:200], "resource_groups": []}
+    # SDK fallback — only when browser credential is active (prevents hanging).
+    from services.azure_monitor import _browser_credential
+    if _browser_credential is not None:
+        try:
+            return {"ok": True, "resource_groups": _resource_groups_via_sdk(sub_id)}
+        except ImportError:
+            return {
+                "ok": False,
+                "error": "Azure SDK not installed. Run: pip install azure-identity azure-mgmt-resource",
+                "resource_groups": [],
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200], "resource_groups": []}
+
+    return {"ok": False, "error": "Not signed in — use Sign in with Browser first.", "resource_groups": []}
 
 
 @router.post("/azure/validate")
@@ -682,6 +810,8 @@ class TimeseriesRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     vm_ids: List[str]
     hours_back: int = Field(default=24, ge=1, le=720)
+    start_utc: Optional[str] = None
+    end_utc: Optional[str] = None
 
 
 @router.post("/azure/timeseries")
@@ -690,11 +820,32 @@ def azure_timeseries(body: TimeseriesRequest) -> Dict[str, Any]:
     Fetch time-series data + automatic spike detection for selected VMs.
     Returns only critical/significant findings — filters out normal and moderate.
     Includes pattern detection (recurring times, cross-VM correlation).
+    Result is cached for 5 minutes so spike drill-down clicks are instant.
     """
+    cache_key = _ts_cache_key(body.vm_ids, body.hours_back, body.start_utc, body.end_utc)
+    cached = _ts_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     credential = _build_credential({})
 
+    start_dt: Optional[datetime] = None
+    end_dt: Optional[datetime] = None
+    if body.start_utc and body.end_utc:
+        try:
+            start_dt = datetime.fromisoformat(body.start_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+            end_dt = datetime.fromisoformat(body.end_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid start_utc/end_utc format: {exc}") from exc
+
     try:
-        raw = fetch_vm_timeseries(credential, body.vm_ids, body.hours_back)
+        raw = fetch_vm_timeseries(
+            credential,
+            body.vm_ids,
+            body.hours_back,
+            start_utc=start_dt,
+            end_utc=end_dt,
+        )
     except AzureConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -741,15 +892,18 @@ def azure_timeseries(body: TimeseriesRequest) -> Dict[str, Any]:
                 total_critical += len(metric_spikes)
                 affected_vms.add(vm_name)
 
-    return {
+    response = {
         "vms": result,
         "heatmap": heatmap,
         "patterns": patterns,
         "baseline": baseline,
+        "window": raw.get("window", {}),
         "summary": {
             "vm_count": len(result),
             "total_critical": total_critical,
             "affected_vms": len(affected_vms),
-            "hours_back": body.hours_back,
+            "hours_back": raw.get("window", {}).get("hours_back", body.hours_back),
         },
     }
+    _ts_cache_set(cache_key, response)
+    return response

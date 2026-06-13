@@ -1056,6 +1056,10 @@
                       class="mt-3 w-full text-center text-[11px] text-Camber hover:underline">
                 View SLA Matrix →
               </button>
+              <button id="sla-result-remove"
+                      class="mt-1.5 w-full text-center text-[10px] text-Cmuted hover:text-Cred transition">
+                ✕ Remove SLA Matrix
+              </button>
             </div>
 
             <!-- SLA Intelligence Panel — compact summary on upload page -->
@@ -1227,7 +1231,7 @@
               <span id="exec-dec-status"
                     class="text-[11px] font-medium uppercase tracking-wider px-2 py-0.5 rounded-full border"
                     style="color:#94a3b8;border-color:#475569;background:rgba(148,163,184,0.12)">—</span>
-              <span class="text-[11px] text-Cmuted">Grade <span id="exec-dec-grade" class="font-bold text-Cwhite">—</span></span>
+              <span class="text-[11px] text-Cmuted cursor-help" id="exec-grade-wrap" title="A≥90 · B≥75 · C≥60 · D≥45 · F&lt;45">Grade <span id="exec-dec-grade" class="font-bold text-Cwhite">—</span><span id="exec-dec-grade-label" class="text-[9px] font-semibold uppercase tracking-wider ml-1" style="color:#94a3b8"></span></span>
               <span class="text-[11px] text-Cmuted">Blockers <span id="exec-dec-blockers" class="font-bold text-Cwhite">—</span></span>
               <span id="exec-dec-reason" class="text-[12px] text-Cwhite/85 flex-1 min-w-[260px]">Loading…</span>
               <span class="text-[11px] text-Cmuted whitespace-nowrap">Days covered <span id="exec-dec-days" class="font-bold text-Cwhite">—</span></span>
@@ -1347,25 +1351,42 @@
               </div>
             </div>
 
-            <!-- ROW 2 — THREE CORRELATION CHARTS -->
+            <!-- ROW 2 — PRIMARY ABOVE-THE-FOLD: Batch SLA bars (wide) + Top 3 At-Risk -->
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-              <!-- Panel A: Batch Runtime vs SLA Ceiling -->
-              <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
+              <!-- Panel A: Batch Runtime vs SLA Ceiling — 2/3 width -->
+              <div class="lg:col-span-2 rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
                 <h3 class="text-sm font-bold text-Cwhite mb-1">Batch Runtime vs SLA Ceiling</h3>
-                <p class="text-[10px] text-Cmuted mb-3">Horizontal bars sorted by SRI (worst at top)</p>
+                <p class="text-[10px] text-Cmuted mb-1">Horizontal bars sorted by SRI (worst at top)</p>
+                <!-- SRI legend — Problem 6 -->
+                <div class="flex items-center gap-2 mb-3 flex-wrap">
+                  <span class="text-[9px] text-Cmuted font-semibold">SRI = Schedule Risk Index:</span>
+                  <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(16,217,110,0.15);color:#10d96e" title="Low risk — comfortable buffer above ceiling">0–0.3 LOW</span>
+                  <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(245,158,11,0.15);color:#f59e0b" title="Buffer shrinking — watch carefully">0.3–0.7 AT-RISK</span>
+                  <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(244,63,94,0.15);color:#f43f5e" title="SLA ceiling breached or imminent">0.7–1.0 BREACH</span>
+                </div>
                 <div id="exec-chart-sla-bars" style="height:320px;"></div>
               </div>
-              <!-- Panel B: Resource Health Summary (NEW — replaces raw heatmap) -->
-              <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-                <h3 class="text-sm font-bold text-Cwhite mb-1">Resource Health Summary</h3>
-                <p class="text-[10px] text-Cmuted mb-3">Fleet grade · risk distribution · worst servers</p>
-                <div id="exec-resource-health" class="space-y-3"></div>
-              </div>
-              <!-- Panel C: Top 3 At-Risk Jobs (NEW — replaces sub-app table) -->
+              <!-- Panel C: Top 3 At-Risk Jobs (action-driving) -->
               <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
                 <h3 class="text-sm font-bold text-Cwhite mb-1">Top 3 At-Risk Jobs</h3>
                 <p class="text-[10px] text-Cmuted mb-3">Highest SLA breach risk by runtime overshoot</p>
                 <div id="exec-top-risk-jobs" class="space-y-3"></div>
+              </div>
+            </div>
+
+            <!-- ROW 2b — SECONDARY: Resource Health Summary (collapsible — supporting data) -->
+            <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel overflow-hidden">
+              <button type="button"
+                      onclick="const b=document.getElementById('exec-resource-health-body');b.classList.toggle('hidden');this.querySelector('[data-arrow]').textContent=b.classList.contains('hidden')?'▸':'▾';"
+                      class="w-full flex items-center justify-between px-5 py-3 hover:bg-white/[0.02] transition-colors text-left">
+                <div>
+                  <h3 class="text-sm font-bold text-Cwhite">Resource Health Summary</h3>
+                  <p class="text-[10px] text-Cmuted">Fleet grade · risk distribution · worst servers — click to expand</p>
+                </div>
+                <span data-arrow class="text-Cmuted text-base select-none">▸</span>
+              </button>
+              <div id="exec-resource-health-body" class="hidden px-5 pb-5">
+                <div id="exec-resource-health" class="space-y-3"></div>
               </div>
             </div>
 
@@ -1451,8 +1472,8 @@
                   <div id="exec-sow-sla-summary" class="text-xs text-Cwhite/85 leading-relaxed mb-2">—</div>
                   <div class="text-[11px] text-Cmuted">See <strong>Breach Calendar</strong> above for the full daily overlay against the contracted ceiling.</div>
                 </div>
-                <!-- Col 3: Baseline capacity -->
-                <div class="rounded-xl border border-Cborder/60 bg-Ccard/40 p-4">
+                <!-- Col 3: Baseline capacity — hidden when SOW contains no capacity data -->
+                <div id="exec-sow-cap-col" class="rounded-xl border border-Cborder/60 bg-Ccard/40 p-4">
                   <div class="text-[10px] uppercase tracking-widest text-Cmuted font-bold mb-2">Baseline Capacity</div>
                   <div id="exec-sow-capacity" class="space-y-2 text-xs"></div>
                 </div>
@@ -1565,6 +1586,7 @@
           <div id="batch-loaded-chip" class="hidden flex items-center gap-2 px-3 py-2 rounded-lg bg-Cgreen/10 border border-Cgreen/30 text-xs text-Cgreen font-semibold w-fit">
             <span class="w-2 h-2 rounded-full bg-Cgreen animate-pulse"></span>
             <span id="batch-dataset-chip"></span>
+            <span id="batch-env-chip" class="hidden"></span>
           </div>
           <!-- Data Source Watermark -->
           <div id="batch-source-watermark" class="hidden items-center gap-2 mt-1 text-[10px] text-Cmuted">
@@ -1749,6 +1771,7 @@
                   <div>
                     <div class="text-sm font-bold text-Cwhite">SLA Buffer Gauge</div>
                     <div id="chart-sla-subtitle" class="text-[11px] text-Cmuted">Headroom between worst-job peak and the daily SLA limit</div>
+                    <div id="gauge-buffer-source-tag" class="text-[9px] font-semibold text-Cteal mt-0.5"></div>
                     <div id="chart-sla-source-tag" class="text-[9px] font-semibold mt-0.5 text-Cmuted hidden"></div>
                     <div id="chart-sla-warnings" class="hidden flex flex-wrap gap-1 mt-1"></div>
                   </div>
@@ -1760,8 +1783,10 @@
                   <div id="sla-buffer-glow" class="absolute inset-0 pointer-events-none" style="z-index:0"></div>
                   <canvas id="chart-sla-buffer" style="display:block;width:100%;height:100%;position:relative;z-index:1"></canvas>
                 </div>
+                <div id="sla-status-pill" class="flex justify-center mt-2"></div>
+                <div id="sla-compare-block" class="mt-2 px-1"></div>
                 <!-- Legend rendered via innerHTML from renderSlaBufferChart -->
-                <div id="chart-sla-buffer-legend" class="flex flex-wrap justify-center gap-x-4 gap-y-1 mt-2 px-1"></div>
+                <div id="chart-sla-buffer-legend" class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 px-1"></div>
               </div>
 
               <!-- Chart 2 — Daily SLA Window Trend (Grafana-style bar) -->
@@ -2215,25 +2240,32 @@
           <!-- ── PE Review Narrative — structured 4-section LLM report ── -->
           <div id="pe-narrative-card"
                class="hidden rounded-2xl border border-Cpurple/30 bg-gradient-to-br from-Cpurple/8 via-Ccard to-Ccard2 shadow-panel p-6 space-y-4">
-            <div class="flex items-start justify-between gap-4 flex-wrap">
-              <div class="min-w-0">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <h2 class="text-base font-bold text-Cwhite">Completed the PE Review</h2>
-                  <span id="pe-narr-verdict"
-                        class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-Cgreen/20 text-Cgreen border border-Cgreen/40">—</span>
-                  <span id="pe-narr-model"
-                        class="text-[9px] font-mono px-1.5 py-0.5 rounded border border-Cborder text-Cmuted" title="Source model">—</span>
-                </div>
-                <p id="pe-narr-summary" class="text-[13px] text-Cwhite/85 leading-relaxed mt-2 max-w-4xl">—</p>
+            <!-- header: live verdict badge + refresh button -->
+            <div class="mb-2 flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <h2 class="text-base font-bold text-Cwhite">Completed the PE Review</h2>
+                <p class="text-xs mt-0.5" style="color:#6b7db3">Live verdict — updates when data changes or Refresh narrative is clicked</p>
               </div>
-              <button id="pe-narr-refresh-btn" onclick="triggerPeNarrative()"
-                      class="shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold bg-Cpurple/20 border border-Cpurple/40 text-Cpurple hover:bg-Cpurple/30 transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-4 h-4">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/>
-                </svg>
-                Refresh Narrative
-              </button>
+              <div class="flex items-center gap-3">
+                <span id="pe-review-verdict-badge"
+                  class="text-xs font-bold px-3 py-1 rounded-full border"
+                  style="border-color:#213060;color:#6b7db3;background:#0d152688">—</span>
+                <button id="btn-refresh-narrative"
+                  title="Re-sync session data and regenerate findings, narrative and verdict"
+                  class="shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold bg-Cpurple/20 border border-Cpurple/40 text-Cpurple hover:bg-Cpurple/30 transition-colors">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-4 h-4">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/>
+                  </svg>
+                  ↻ Refresh narrative
+                </button>
+              </div>
             </div>
+            <!-- backward-compat hidden elements used by renderPeNarrative() JS -->
+            <span id="pe-narr-verdict" style="display:none">—</span>
+            <span id="pe-narr-model" style="display:none">—</span>
+            <p id="pe-narr-summary" style="display:none">—</p>
+            <button id="pe-narr-refresh-btn" onclick="refreshPeReview()" style="display:none"></button>
+            <p id="pe-review-verdict-reason" class="text-xs mb-2 italic" style="color:#6b7db3">Upload data to generate PE audit verdict.</p>
             <div id="pe-narr-sections" class="space-y-4"></div>
             <div id="pe-narr-loading" class="hidden text-xs text-Cmuted flex items-center gap-2">
               <svg class="animate-spin h-4 w-4 text-Cpurple" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -2241,6 +2273,45 @@
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
               </svg>
               Generating PE Review narrative…
+            </div>
+            <!-- ── 4-pillar live accordion sections — driven by renderPeReviewSections() ── -->
+            <div class="space-y-3 mt-2">
+              <details class="rounded-lg border" style="border-color:#213060;background:#0d1526">
+                <summary class="px-4 py-3 cursor-pointer text-sm font-semibold text-Cwhite flex items-center justify-between select-none">
+                  <span>📊 Data Volume Analysis</span>
+                  <span class="text-xs font-normal" style="color:#6b7db3">DFU / SKU vs SOW Contract Details</span>
+                </summary>
+                <div id="pe-review-data-volume" class="px-4 pb-4 pt-1">
+                  <div class="text-xs" style="color:#6b7db3">Upload SOW PDF to populate volume analysis.</div>
+                </div>
+              </details>
+              <details class="rounded-lg border" open style="border-color:#213060;background:#0d1526">
+                <summary class="px-4 py-3 cursor-pointer text-sm font-semibold text-Cwhite flex items-center justify-between select-none">
+                  <span>⏱️ Batch Execution &amp; SLA Compliance</span>
+                  <span class="text-xs font-normal" style="color:#6b7db3">Batch Review + SLA Matrix</span>
+                </summary>
+                <div id="pe-review-batch-sla" class="px-4 pb-4 pt-1">
+                  <div class="text-xs" style="color:#6b7db3">Upload Ctrl-M CSV to populate batch analysis.</div>
+                </div>
+              </details>
+              <details class="rounded-lg border" style="border-color:#213060;background:#0d1526">
+                <summary class="px-4 py-3 cursor-pointer text-sm font-semibold text-Cwhite flex items-center justify-between select-none">
+                  <span>🖥️ Infrastructure Utilization &amp; Resource Health</span>
+                  <span class="text-xs font-normal" style="color:#6b7db3">Resource Review</span>
+                </summary>
+                <div id="pe-review-infra" class="px-4 pb-4 pt-1">
+                  <div class="text-xs" style="color:#6b7db3">Upload resource report to populate infra analysis.</div>
+                </div>
+              </details>
+              <details class="rounded-lg border" style="border-color:#213060;background:#0d1526">
+                <summary class="px-4 py-3 cursor-pointer text-sm font-semibold text-Cwhite flex items-center justify-between select-none">
+                  <span>🧪 UAT / UI Benchmark Validation</span>
+                  <span class="text-xs font-normal" style="color:#6b7db3">UI Benchmark XLSX</span>
+                </summary>
+                <div id="pe-review-ui-benchmark" class="px-4 pb-4 pt-1">
+                  <div class="text-xs" style="color:#6b7db3">Upload UI Benchmark XLSX to populate UAT analysis.</div>
+                </div>
+              </details>
             </div>
           </div>
 
@@ -2301,9 +2372,18 @@
           <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel overflow-hidden" id="findings-table-card">
             <!-- Toolbar -->
             <div class="px-5 py-3 border-b border-Cborder/40 flex flex-wrap items-center gap-3 justify-between">
-              <div class="flex items-center gap-2.5">
+              <div class="flex items-center gap-2.5 flex-wrap">
                 <h2 class="text-sm font-bold text-Cwhite tracking-tight">PE Audit Findings</h2>
                 <span id="findings-count-badge" class="text-[9px] font-mono px-1.5 py-0.5 rounded border border-Cborder text-Cmuted">0</span>
+                <!-- View mode toggle: By Finding / By Root Cause -->
+                <div class="flex items-center rounded-lg border border-Cborder/50 overflow-hidden text-[10px]">
+                  <button id="btn-mode-finding"
+                    onclick="_setFindingsMode('finding')"
+                    class="px-2.5 py-1 font-semibold transition-colors bg-Cpurple/30 text-Cwhite border-r border-Cborder/50">By finding</button>
+                  <button id="btn-mode-rootcause"
+                    onclick="_setFindingsMode('root')"
+                    class="px-2.5 py-1 font-semibold transition-colors bg-transparent text-Cmuted">By root cause</button>
+                </div>
                 <div id="findings-loading" class="hidden flex items-center gap-2 text-xs text-Cmuted">
                   <svg class="animate-spin h-3.5 w-3.5 text-Cblue" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -3066,9 +3146,9 @@
             <div>
               <p class="text-sm font-semibold text-Cwhite">No benchmark file uploaded yet</p>
               <p class="text-xs text-Cmuted mt-1">
-                Upload your benchmark XLSX / CSV from the <strong class="text-Cwhite">Upload &amp; Intake</strong> page
-                (Zone D — UI Benchmark Report). Expected columns:
-                <span class="font-mono text-Cpurple">Transaction | Baseline (sec) | Current (sec)</span>
+                Upload your benchmark XLSX from the <strong class="text-Cwhite">Upload &amp; Intake</strong> page.
+                Template columns: <span class="font-mono text-Cpurple">SRE Process / Action / TimeTaken / Records / Concurrent Users</span>
+                or <span class="font-mono text-Cpurple">Transaction | Baseline (sec) | Current (sec)</span>
               </p>
             </div>
             <button onclick="setActiveView('upload')"
@@ -3077,35 +3157,148 @@
               ↑ Go to Upload
             </button>
           </div>
-          <!-- Loaded chip (hidden until benchmark data arrives) -->
-          <div id="bench-loaded-chip" class="hidden flex items-center gap-2 text-xs font-semibold text-Cpurple">
-            <span class="w-2 h-2 rounded-full bg-Cpurple animate-pulse"></span>
-            <span id="bench-loaded-label">Benchmark data loaded</span>
+
+          <!-- Loaded chip + filters row -->
+          <div id="bench-loaded-chip" class="hidden">
+            <div class="flex flex-wrap items-center gap-3 mb-4">
+              <div class="flex items-center gap-2 text-xs font-semibold text-Cpurple">
+                <span class="w-2 h-2 rounded-full bg-Cpurple animate-pulse"></span>
+                <span id="bench-loaded-label">Benchmark data loaded</span>
+              </div>
+              <!-- Filters -->
+              <div class="flex items-center gap-2 ml-auto flex-wrap">
+                <select id="bench-filter-action" onchange="_benchApplyFilter()"
+                        class="bg-Cbg border border-Cborder rounded-lg px-2 py-1 text-xs text-Cwhite focus:outline-none focus:border-Cblue">
+                  <option value="">All Actions</option>
+                  <option>Load</option><option>Export</option><option>Save</option>
+                  <option>Import</option><option>SRE Process Run</option><option>Other</option>
+                </select>
+                <select id="bench-filter-volume" onchange="_benchApplyFilter()"
+                        class="bg-Cbg border border-Cborder rounded-lg px-2 py-1 text-xs text-Cwhite focus:outline-none focus:border-Cblue">
+                  <option value="">All Volumes</option>
+                  <option value="small">&lt;10k records</option>
+                  <option value="medium">10k–100k records</option>
+                  <option value="large">&gt;100k records</option>
+                </select>
+                <button id="bench-show-all-btn" onclick="_benchToggleShowAll()"
+                        class="px-3 py-1 rounded-full border border-Cborder text-[10px] font-semibold text-Cmuted hover:text-Cwhite hover:border-Cpurple/60 transition-all">
+                  Show All
+                </button>
+                <button onclick="_benchResetFilters()"
+                        class="px-3 py-1 rounded-full border border-Cborder text-[10px] text-Cmuted hover:text-Cwhite transition-all">
+                  Reset
+                </button>
+              </div>
+            </div>
           </div>
 
-          <!-- KPI strip -->
-          <div id="bench-kpi-row" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <!-- ── BAND A: KPI strip ── -->
+          <div id="bench-kpi-row" class="hidden grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center" title="% UI actions meeting benchmark (OK status)">
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Pass Rate</div>
+              <div id="bk-pass-rate" class="text-2xl font-bold text-Cgreen">—</div>
+              <div class="text-[10px] text-Cmuted mt-1" id="bk-pass-rate-sub"></div>
+            </div>
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center" title="Worst single-transaction regression">
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Worst Regression</div>
+              <div id="bk-worst-reg" class="text-2xl font-bold text-Cred">—</div>
+              <div class="text-[10px] text-Cmuted mt-1 truncate" id="bk-worst-reg-name" title=""></div>
+            </div>
             <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
               <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Transactions</div>
               <div id="bk-total" class="text-2xl font-bold text-Cwhite">—</div>
+              <div class="text-[10px] text-Cmuted mt-1">tested</div>
             </div>
             <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Regressions</div>
-              <div id="bk-degraded" class="text-2xl font-bold text-Cred">—</div>
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Max Concurrent</div>
+              <div id="bk-max-concurrent" class="text-2xl font-bold text-Cblue">—</div>
+              <div class="text-[10px] text-Cmuted mt-1">users</div>
             </div>
             <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">SLA Breaches</div>
-              <div id="bk-sla-breach" class="text-2xl font-bold text-Camber">—</div>
-            </div>
-            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Avg Delta</div>
-              <div id="bk-avg-delta" class="text-2xl font-bold text-Cwhite">—</div>
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Coverage</div>
+              <div id="bk-coverage" class="text-sm font-bold text-Cpurple leading-tight">—</div>
+              <div class="text-[10px] text-Cmuted mt-1" id="bk-coverage-sub"></div>
             </div>
           </div>
 
           <!-- Summary banner -->
           <div id="bench-summary-banner" class="hidden rounded-xl border border-Cborder bg-Ccard2/60 px-5 py-3">
             <p id="bench-summary-text" class="text-sm text-Cwhite font-semibold"></p>
+          </div>
+
+          <!-- ── BAND B: Comparison matrix + mini regression chart ── -->
+          <div id="bench-table-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
+            <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+              <h3 class="text-sm font-bold text-Cwhite">Transaction Comparison Matrix</h3>
+              <div class="flex items-center gap-2 text-[10px] text-Cmuted">
+                <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-Cred/70 inline-block"></span> BREACH</span>
+                <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-Camber/70 inline-block"></span> WATCH</span>
+                <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-Cgreen/70 inline-block"></span> OK</span>
+                <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-Cmuted/30 inline-block"></span> N/A</span>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <!-- Table -->
+              <div class="flex-1 overflow-x-auto max-h-[520px] overflow-y-auto min-w-0">
+                <table class="w-full text-xs">
+                  <thead class="sticky top-0 bg-Ccard z-20">
+                    <tr class="border-b border-Cborder">
+                      <th class="text-left py-2 pr-3 text-Cmuted font-semibold min-w-[180px]">Transaction</th>
+                      <th class="text-center py-2 pr-3 text-Cmuted font-semibold w-24">Action</th>
+                      <th class="text-right py-2 pr-3 text-Cmuted font-semibold w-20">Baseline (s)</th>
+                      <th class="text-right py-2 pr-3 text-Cmuted font-semibold w-20">Current (s)</th>
+                      <th class="text-right py-2 pr-3 text-Cmuted font-semibold w-20">Delta %</th>
+                      <th class="text-right py-2 pr-3 text-Cmuted font-semibold w-24">Records</th>
+                      <th class="text-right py-2 pr-3 text-Cmuted font-semibold w-16">SLA (s)</th>
+                      <th class="text-center py-2 text-Cmuted font-semibold w-20">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="bench-tbody"></tbody>
+                </table>
+              </div>
+              <!-- Mini regression chart -->
+              <div id="bench-chart-panel" class="w-64 shrink-0 hidden">
+                <div class="text-[10px] font-bold text-Cmuted uppercase tracking-wider mb-2">Top 5 Regressions</div>
+                <canvas id="bench-regression-chart" height="220"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── BAND C: Coverage + Evidence ── -->
+          <div id="bench-coverage-panel" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
+            <h3 class="text-sm font-bold text-Cwhite mb-4">Evidence &amp; Coverage for PE Audit</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <!-- Coverage summary -->
+              <div class="space-y-3" id="bench-coverage-detail">
+                <div>
+                  <div class="text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1.5">Flows Covered</div>
+                  <div id="bench-flows-badges" class="flex flex-wrap gap-1"></div>
+                </div>
+                <div>
+                  <div class="text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1.5">Actions Covered</div>
+                  <div id="bench-actions-badges" class="flex flex-wrap gap-1"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="rounded-lg border border-Cborder bg-Cbg p-2.5">
+                    <div class="text-[10px] text-Cmuted font-semibold mb-1">Record Volumes</div>
+                    <div id="bench-record-vol" class="text-xs text-Cwhite font-mono">—</div>
+                  </div>
+                  <div class="rounded-lg border border-Cborder bg-Cbg p-2.5">
+                    <div class="text-[10px] text-Cmuted font-semibold mb-1">Concurrency</div>
+                    <div id="bench-concurrency" class="text-xs text-Cwhite font-mono">—</div>
+                  </div>
+                </div>
+              </div>
+              <!-- Evidence list -->
+              <div>
+                <div class="text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1.5">
+                  Evidence List
+                  <span class="ml-1 font-normal normal-case text-Cmuted/60">(feeds PE narrative)</span>
+                </div>
+                <div id="bench-evidence-list"
+                     class="space-y-1.5 max-h-[280px] overflow-y-auto pr-1"></div>
+              </div>
+            </div>
           </div>
 
           <!-- Category summary cards (multi-sheet files) -->
@@ -3117,30 +3310,9 @@
           <!-- Batch Performance summary panel -->
           <div id="bench-batch-perf" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
 
-          <!-- Comparison table -->
-          <div id="bench-table-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-            <h3 class="text-sm font-bold text-Cwhite mb-3">Transaction Comparison Matrix</h3>
-            <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
-              <table class="w-full text-xs">
-                <thead class="sticky top-0 bg-Ccard z-20">
-                  <tr class="border-b border-Cborder">
-                    <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Transaction</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">PROD (s)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">TEST (s)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Delta %</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">SLA (s)</th>
-                    <th class="text-center py-2 text-Cmuted font-semibold">Status</th>
-                  </tr>
-                </thead>
-                <tbody id="bench-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
           <!-- SIT Observations panel -->
           <div id="bench-observations" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
 
-          <!-- Empty state (hidden — bench-no-data-prompt covers this) -->
           <div id="bench-empty" class="hidden"></div>
 
         </section>
@@ -3321,14 +3493,182 @@
             </button>
           </div>
 
-          <!-- Empty state (hidden when contract loaded) -->
+          <!-- Empty state (hidden when contract loaded OR manual form open) -->
           <div id="sow-empty" class="rounded-2xl border border-dashed border-Cborder bg-Ccard/30 p-10 text-center space-y-3">
             <div class="w-12 h-12 rounded-xl bg-Ccyan/10 border border-Ccyan/30 flex items-center justify-center mx-auto">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-Ccyan"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
             </div>
             <p class="text-sm text-Cwhite font-semibold">No SOW contract loaded</p>
-            <p class="text-[11px] text-Cmuted max-w-md mx-auto">Upload the SOW PDF via the <strong class="text-Ccyan">SOW Contract</strong> tile on the Upload panel to auto-extract all contract intelligence.</p>
-            <button onclick="setActiveView('upload')" class="mt-2 px-4 py-2 rounded-lg text-xs font-semibold bg-Ccyan/15 border border-Ccyan/30 text-Ccyan hover:bg-Ccyan/25 transition">Go to Upload →</button>
+            <p class="text-[11px] text-Cmuted max-w-md mx-auto">Upload the SOW PDF to auto-extract all contract intelligence — or skip the PDF and enter values manually.</p>
+            <div class="flex items-center justify-center gap-3 flex-wrap mt-2">
+              <button onclick="setActiveView('upload')" class="px-4 py-2 rounded-lg text-xs font-semibold bg-Ccyan/15 border border-Ccyan/30 text-Ccyan hover:bg-Ccyan/25 transition">
+                ↑ Upload SOW PDF
+              </button>
+              <button onclick="openSowManualEntry()" class="px-4 py-2 rounded-lg text-xs font-semibold bg-Cpurple/15 border border-Cpurple/30 text-Cpurple hover:bg-Cpurple/25 transition flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" /></svg>
+                Enter values manually
+              </button>
+            </div>
+          </div>
+
+          <!-- ── MANUAL ENTRY PANEL (shown without PDF, standalone) ─── -->
+          <div id="sow-manual-panel" class="hidden rounded-2xl border border-Cpurple/30 bg-gradient-to-br from-Cpurple/5 to-Ccard shadow-panel">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-5 py-4 border-b border-Cborder/50">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-Cpurple/20 border border-Cpurple/40 flex items-center justify-center shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-4 h-4 text-Cpurple"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z" /></svg>
+                </div>
+                <div>
+                  <h3 class="text-xs font-bold text-Cwhite uppercase tracking-wider">Manual SOW Entry</h3>
+                  <p class="text-[10px] text-Cmuted">Enter contracted volume targets, SLA windows and resource baselines directly</p>
+                </div>
+                <span class="ml-2 text-[9px] px-2 py-0.5 rounded-full border border-Cpurple/40 text-Cpurple font-semibold">No PDF needed</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button onclick="setActiveView('upload')" class="text-[10px] text-Cmuted hover:text-Ccyan transition flex items-center gap-1">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
+                  Upload PDF instead
+                </button>
+              </div>
+            </div>
+
+            <div class="p-5 space-y-5">
+
+              <!-- Row 0: Engagement Identity -->
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1">Customer Name</label>
+                  <input id="sow-m-customer" type="text" placeholder="e.g. WESCO International"
+                         class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cpurple" />
+                </div>
+                <div>
+                  <label class="block text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1">Contract Years</label>
+                  <input id="sow-m-contract-years" type="number" min="1" max="10" placeholder="e.g. 3"
+                         class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cpurple" />
+                </div>
+                <div>
+                  <label class="block text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1">Annual Fee</label>
+                  <input id="sow-m-annual-fee" type="number" min="0" placeholder="e.g. 450000"
+                         class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cpurple" />
+                </div>
+              </div>
+
+              <!-- Section 1: Volume Targets -->
+              <div class="rounded-xl border border-Cborder bg-Cbg/30 p-4">
+                <div class="text-[10px] font-bold uppercase tracking-wider text-Ccyan mb-3 flex items-center gap-2">
+                  <span class="w-1.5 h-1.5 rounded-full bg-Ccyan inline-block"></span>
+                  Volume Targets
+                </div>
+                <div class="grid grid-cols-3 gap-x-3 gap-y-2">
+                  <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted">Metric</div>
+                  <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted text-right">SOW Target</div>
+                  <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted text-right">Actual (measured)</div>
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Daily DFU</div>
+                  <input id="sow-dfu-baseline" type="number" min="0" placeholder="e.g. 500,000"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-dfu-actual" type="number" min="0" placeholder="auto-fill or enter"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Daily SKU Count</div>
+                  <input id="sow-sku-baseline" type="number" min="0" placeholder="e.g. 80,000"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-sku-actual" type="number" min="0" placeholder="auto-fill or enter"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Daily Orders</div>
+                  <input id="sow-orders-baseline" type="number" min="0" placeholder="e.g. 10,000"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-orders-actual" type="number" min="0" placeholder="actual"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Batch Jobs / Day</div>
+                  <input id="sow-batchjobs-baseline" type="number" min="0" placeholder="e.g. 200"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-batchjobs-actual" type="number" min="0" placeholder="auto-fill from batch"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Peak Concurrent Users</div>
+                  <input id="sow-users-baseline" type="number" min="0" placeholder="e.g. 50"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-users-actual" type="number" min="0" placeholder="actual"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+                </div>
+              </div>
+
+              <!-- Section 2: SLA Windows -->
+              <div class="rounded-xl border border-Cborder bg-Cbg/30 p-4">
+                <div class="text-[10px] font-bold uppercase tracking-wider text-Camber mb-3 flex items-center gap-2">
+                  <span class="w-1.5 h-1.5 rounded-full bg-Camber inline-block"></span>
+                  Batch Window SLA Ceilings (hours)
+                  <span class="font-normal normal-case text-Cmuted/70 ml-1">— activates as Tier 2 SLA in the matrix</span>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-[10px] text-Cmuted font-semibold mb-1">Daily batch (hrs)</label>
+                    <input id="sow-sla-daily" type="number" min="0" max="24" step="0.5" placeholder="e.g. 6"
+                           class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Camber" />
+                  </div>
+                  <div>
+                    <label class="block text-[10px] text-Cmuted font-semibold mb-1">Weekly batch (hrs)</label>
+                    <input id="sow-sla-weekly" type="number" min="0" max="48" step="0.5" placeholder="e.g. 8"
+                           class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Camber" />
+                  </div>
+                  <div>
+                    <label class="block text-[10px] text-Cmuted font-semibold mb-1">Monthly batch (hrs)</label>
+                    <input id="sow-sla-monthly" type="number" min="0" max="72" step="0.5" placeholder="e.g. 17"
+                           class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Camber" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Section 3: Resource Baselines -->
+              <div class="rounded-xl border border-Cborder bg-Cbg/30 p-4">
+                <div class="text-[10px] font-bold uppercase tracking-wider text-Cpurple mb-3 flex items-center gap-2">
+                  <span class="w-1.5 h-1.5 rounded-full bg-Cpurple inline-block"></span>
+                  Resource Baselines (%) — optional
+                </div>
+                <div class="grid grid-cols-3 gap-x-3 gap-y-2">
+                  <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted">Resource</div>
+                  <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted text-right">SOW Target</div>
+                  <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted text-right">Actual</div>
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">CPU Utilisation %</div>
+                  <input id="sow-cpu-baseline" type="number" min="0" max="100" step="1" placeholder="e.g. 70"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-cpu-actual" type="number" min="0" max="100" step="0.1" placeholder="auto-fill from resource"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Memory Utilisation %</div>
+                  <input id="sow-mem-baseline" type="number" min="0" max="100" step="1" placeholder="e.g. 70"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-mem-actual" type="number" min="0" max="100" step="0.1" placeholder="auto-fill from resource"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+
+                  <div class="text-xs font-semibold text-Cwhite self-center">Disk Utilisation %</div>
+                  <input id="sow-disk-baseline" type="number" min="0" max="100" step="1" placeholder="e.g. 70"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple" />
+                  <input id="sow-disk-actual" type="number" min="0" max="100" step="0.1" placeholder="actual"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-xs text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Cblue" />
+                </div>
+              </div>
+
+              <!-- Action row -->
+              <div class="flex items-center gap-3 flex-wrap pt-1">
+                <button onclick="saveSowBaseline()"
+                        class="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-Cpurple/20 to-Cblue/20 border border-Cpurple/40 text-Cwhite hover:opacity-90 transition flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                  Save &amp; Compare vs Actuals
+                </button>
+                <button onclick="clearSowManual()"
+                        class="px-4 py-2 rounded-xl text-xs font-semibold border border-Cborder text-Cmuted hover:text-Cred hover:border-Cred/40 transition">
+                  Clear All
+                </button>
+                <p id="sow-save-msg" class="hidden text-[11px] ml-2"></p>
+              </div>
+
+            </div>
           </div>
 
           <!-- ── CONTRACT INTELLIGENCE GRID (shown when loaded) ─────── -->
@@ -3449,39 +3789,13 @@
               </div>
             </div>
 
-            <!-- Manual entry (collapsed by default) -->
-            <details class="rounded-2xl border border-Cborder bg-Ccard/40">
-              <summary class="px-5 py-3 text-xs font-bold text-Cmuted uppercase tracking-wider cursor-pointer hover:text-Cwhite transition select-none">
-                Manual Override — Enter SOW Targets &amp; Actuals
-              </summary>
-              <div class="px-5 pb-5 pt-2 space-y-3">
-                <div class="grid grid-cols-3 gap-2 text-xs pb-1 border-b border-Cborder">
-                  <div class="text-[10px] font-bold text-Cmuted uppercase">Metric</div>
-                  <div class="text-[10px] font-bold text-Cmuted uppercase text-right">SOW Target</div>
-                  <div class="text-[10px] font-bold text-Cmuted uppercase text-right">Actual</div>
-                </div>
-                <div class="grid grid-cols-3 gap-2 items-center">
-                  <div class="text-xs font-semibold text-Cwhite">Daily DFU</div>
-                  <input id="sow-dfu-baseline" type="number" min="0" placeholder="e.g. 500000"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                  <input id="sow-dfu-actual" type="number" min="0" placeholder="actual"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                </div>
-                <div class="grid grid-cols-3 gap-2 items-center">
-                  <div class="text-xs font-semibold text-Cwhite">Daily SKU Count</div>
-                  <input id="sow-sku-baseline" type="number" min="0" placeholder="e.g. 80000"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                  <input id="sow-sku-actual" type="number" min="0" placeholder="actual"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                </div>
-                <p id="sow-save-msg" class="hidden text-[11px]"></p>
-              </div>
-
-              <!-- SOW vs Actual comparison bars (shown when actuals are entered) -->
-              <div id="sow-volume-comparison" class="hidden mt-2 pt-3 border-t border-Cborder/30 space-y-1">
-                <div class="text-[10px] font-bold text-Cmuted uppercase tracking-wider mb-2">Volume Achievement vs SOW Commitment</div>
-              </div>
-            </details>
+            <!-- Manual Override link (shown only when contract grid is visible) -->
+            <div class="flex items-center justify-end">
+              <button onclick="openSowManualEntry()" class="text-[10px] text-Cmuted hover:text-Cpurple transition flex items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z" /></svg>
+                Override with manual values
+              </button>
+            </div>
 
           </div><!-- /sow-contract-grid -->
 
@@ -3708,5 +4022,21 @@
   <!-- Application bootstrap -->
   <script src="/static/app.js?v={{ static_v }}" defer></script>
   <script src="/static/deep_dive.js?v={{ static_v }}" defer></script>
+
+  <!-- Finding detail drawer — slides in from right on row click -->
+  <div id="pe-finding-drawer"
+       class="fixed right-0 top-0 h-full w-full max-w-md z-50 flex flex-col"
+       style="background:#0d1526;border-left:1px solid #213060;box-shadow:-8px 0 40px rgba(0,0,0,.6);transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1)">
+    <div class="flex items-start justify-between px-4 py-3.5 border-b shrink-0" style="border-color:#213060">
+      <div class="flex-1 min-w-0 pr-3">
+        <div class="text-[9px] uppercase tracking-widest font-bold mb-0.5" id="pe-finding-drawer-pillar" style="color:#6b7db3">Finding detail</div>
+        <div class="text-sm font-bold text-white leading-snug" id="pe-finding-drawer-title">—</div>
+      </div>
+      <button onclick="window.peCloseDrawer()" class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-sm transition-colors hover:bg-white/10" style="color:#6b7db3">✕</button>
+    </div>
+    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4 text-xs" id="pe-finding-drawer-body"></div>
+  </div>
+  <!-- Backdrop -->
+  <div id="pe-finding-backdrop" class="fixed inset-0 z-40 hidden" style="background:rgba(0,0,0,.45)" onclick="window.peCloseDrawer()"></div>
 </body>
 </html>

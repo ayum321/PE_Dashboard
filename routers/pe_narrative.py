@@ -276,12 +276,47 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
         out["smart_findings"] = sf
 
     # -- Red flags / benchmark ---------------------------------------------
-    bm = payload.get("benchmark") or {}
-    if bm:
-        out["benchmark"] = {"summary": bm.get("summary")}
+    # Pass the FULL benchmark object (not just summary) so the UAT section can
+    # render transaction-level evidence. Fall back to session_cache last_benchmark.
+    bm = payload.get("benchmark") or session_cache.get("last_benchmark") or {}
+    if bm and isinstance(bm, dict):
+        out["benchmark"] = {
+            "filename":           bm.get("filename"),
+            "total_transactions": bm.get("total_transactions"),
+            "degraded":           bm.get("degraded"),
+            "improved":           bm.get("improved"),
+            "sla_breaches":       bm.get("sla_breaches"),
+            "avg_delta_pct":      bm.get("avg_delta_pct"),
+            "threshold_pct":      bm.get("threshold_pct"),
+            "summary":            bm.get("summary"),
+            "rows": [
+                {k: r.get(k) for k in (
+                    "transaction", "action", "current_sec", "baseline_sec",
+                    "sla_sec", "delta_pct", "status", "records", "concurrent_users",
+                ) if r.get(k) is not None}
+                for r in (bm.get("rows") or [])[:40]
+            ],
+            "evidence_sentences": (bm.get("evidence_sentences") or [])[:10],
+            "coverage_summary":   bm.get("coverage_summary"),
+        }
     rf = payload.get("red_flags") or session_cache.get("last_red_flags") or {}
     if rf:
         out["red_flags"] = {"summary": rf.get("summary") or rf}
+
+    # -- Rule-engine findings (deterministic criticality evidence) ----------
+    # The /api/generate-findings response — its critical/warning counts must
+    # influence the narrative verdict so both panels agree.
+    fnd = payload.get("findings") or {}
+    if isinstance(fnd, dict) and fnd.get("findings"):
+        _fl = fnd["findings"]
+        out["rule_findings"] = {
+            "critical": [
+                {"text": f.get("text"), "source": f.get("source")}
+                for f in _fl if str(f.get("severity", "")).lower() == "critical"
+            ][:10],
+            "warning_count": len([f for f in _fl if str(f.get("severity", "")).lower() == "warning"]),
+            "total": len(_fl),
+        }
 
     # -- Deep dive time-series evidence ------------------------------------
     dd = payload.get("deep_dive") or {}
@@ -377,29 +412,60 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         dv_rows.append(["Planned SKUs", f"{int(sow_c['planned_skus']):,}", "—", "Contractual"])
 
     if sw and isinstance(sw, dict):
-        for dim, vals in sw.items():
-            if not isinstance(vals, dict):
-                continue
-            sow_v = vals.get("sow") or vals.get("promised") or "NA"
-            act_v = vals.get("actual") or vals.get("measured") or "NA"
-            # util_pct may come from the compare endpoint, or we compute it on-the-fly
-            util = vals.get("utilisation") or vals.get("utilization") or vals.get("util_pct") or vals.get("zone")
-            if util is None:
-                # sow_compare from manual inputs only carries {sow, actual} — compute %
-                try:
-                    _sow_f = float(sow_v) if sow_v not in ("NA", None) else 0.0
-                    _act_f = float(act_v) if act_v not in ("NA", None) else -1.0
-                    if _sow_f > 0 and _act_f >= 0:
-                        _pct = round(_act_f / _sow_f * 100, 1)
-                        zone = ("EXCEEDS" if _pct > 110
-                                else "OPTIMAL" if _pct >= 90
-                                else "AT RISK" if _pct >= 70
-                                else "LOW")
-                        util = f"{_pct:.1f}% ({zone})"
-                except (TypeError, ValueError):
-                    pass
-            util_s = util if isinstance(util, str) else (f"{util:.1f}%" if isinstance(util, (int, float)) else "NA")
-            dv_rows.append([str(dim), str(sow_v), str(act_v), util_s])
+        # Shape A (canonical): {"metrics": [{key,label,sow,actual,pct,status}, ...]}
+        # — produced by /api/sow/compare and the manual SOW entry form.
+        _sw_metrics = sw.get("metrics")
+        if isinstance(_sw_metrics, list):
+            for m in _sw_metrics:
+                if not isinstance(m, dict):
+                    continue
+                label  = m.get("label") or m.get("key") or "Metric"
+                sow_v  = m.get("sow")
+                act_v  = m.get("actual")
+                pct    = m.get("pct")
+                status = m.get("status") or m.get("zone")
+                if pct is None:
+                    try:
+                        _sow_f = float(sow_v or 0)
+                        _act_f = float(act_v) if act_v is not None else -1.0
+                        if _sow_f > 0 and _act_f >= 0:
+                            pct = round(_act_f / _sow_f * 100, 1)
+                    except (TypeError, ValueError):
+                        pct = None
+                if status is None and pct is not None:
+                    status = ("HIGH" if pct > 110
+                              else "OPTIMAL" if pct >= 90
+                              else "ACCEPTABLE" if pct >= 70
+                              else "LOW")
+                util_s = (f"{pct:.1f}% ({status})" if pct is not None and status
+                          else str(status) if status else "Target only — no actual")
+                _fmt_n = lambda v: f"{float(v):,.0f}" if isinstance(v, (int, float)) else str(v if v is not None else "NA")
+                dv_rows.append([str(label), _fmt_n(sow_v), _fmt_n(act_v) if act_v is not None else "—", util_s])
+        else:
+            # Shape B (legacy): {dim: {sow, actual, ...}}
+            for dim, vals in sw.items():
+                if not isinstance(vals, dict):
+                    continue
+                sow_v = vals.get("sow") or vals.get("promised") or "NA"
+                act_v = vals.get("actual") or vals.get("measured") or "NA"
+                # util_pct may come from the compare endpoint, or we compute it on-the-fly
+                util = vals.get("utilisation") or vals.get("utilization") or vals.get("util_pct") or vals.get("zone")
+                if util is None:
+                    # sow_compare from manual inputs only carries {sow, actual} — compute %
+                    try:
+                        _sow_f = float(sow_v) if sow_v not in ("NA", None) else 0.0
+                        _act_f = float(act_v) if act_v not in ("NA", None) else -1.0
+                        if _sow_f > 0 and _act_f >= 0:
+                            _pct = round(_act_f / _sow_f * 100, 1)
+                            zone = ("EXCEEDS" if _pct > 110
+                                    else "OPTIMAL" if _pct >= 90
+                                    else "AT RISK" if _pct >= 70
+                                    else "LOW")
+                            util = f"{_pct:.1f}% ({zone})"
+                    except (TypeError, ValueError):
+                        pass
+                util_s = util if isinstance(util, str) else (f"{util:.1f}%" if isinstance(util, (int, float)) else "NA")
+                dv_rows.append([str(dim), str(sow_v), str(act_v), util_s])
 
     if not dv_rows and sf:
         sf_vol = sf.get("volume") or sf.get("data_volume") or {}
@@ -441,10 +507,15 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         else:
             dv_prose += "Enter DFU/SKU actuals in the Volume Ramp panel to compare against SOW commitments."
     elif sw:
-        dims = list(sw.keys())
-        with_actuals = [d for d in dims if (sw[d] or {}).get("actual") not in (None, 0)]
+        _m = sw.get("metrics") if isinstance(sw.get("metrics"), list) else None
+        if _m:
+            dims = [str(x.get("label") or x.get("key") or "?") for x in _m]
+            with_actuals = [x for x in _m if x.get("actual") not in (None, 0)]
+        else:
+            dims = [str(d) for d in sw.keys()]
+            with_actuals = [d for d in dims if isinstance(sw.get(d), dict) and (sw[d] or {}).get("actual") not in (None, 0)]
         dv_prose = (
-            f"Volume data loaded from manual inputs: {', '.join(str(d) for d in dims[:4])}. "
+            f"Volume data loaded from manual inputs: {', '.join(dims[:5])}. "
             + (f"{len(with_actuals)} dimension(s) have actuals entered for comparison. "
                if with_actuals else
                "SOW targets captured — enter actuals to complete the comparison. ")
@@ -697,7 +768,12 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     })
 
     # -- 4. UAT ------------------------------------------------------------
+    # Priority: explicit UAT artefacts (uat_df) → benchmark / UI performance
+    # test results (the UAT-phase evidence in practice) → empty state.
     uat_ac = digest.get("uat") or []
+    bench  = digest.get("benchmark") or {}
+    bench_rows = bench.get("rows") or []
+
     if uat_ac:
         uat_rows: List[List[str]] = []
         uat_by_cat: Dict[str, List] = {}
@@ -715,10 +791,52 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             + "."
         )
         uat_tbl: Dict[str, Any] = {"headers": ["Test Category", "Test Cases"], "rows": uat_rows}
+    elif bench_rows:
+        # Build UAT evidence from the performance benchmark (OK/WATCH/BREACH)
+        def _sev(r):
+            return {"BREACH": 0, "RED": 0, "WATCH": 1, "AMBER": 1}.get(str(r.get("status", "")), 2)
+        sorted_rows = sorted(bench_rows, key=_sev)
+        uat_rows = []
+        for r in sorted_rows[:8]:
+            cur = r.get("current_sec")
+            base = r.get("baseline_sec")
+            sla = r.get("sla_sec")
+            ref = (f"SLA {sla:.0f}s" if isinstance(sla, (int, float)) and sla
+                   else f"baseline {base:.1f}s" if isinstance(base, (int, float)) and base
+                   else "—")
+            uat_rows.append([
+                str(r.get("transaction", "?"))[:60],
+                str(r.get("action") or "—"),
+                f"{cur:.1f}s" if isinstance(cur, (int, float)) else "NA",
+                ref,
+                str(r.get("status", "N/A")),
+            ])
+
+        n_total  = _int(bench.get("total_transactions") or len(bench_rows))
+        n_breach = len([r for r in bench_rows if str(r.get("status")) in ("BREACH", "RED")])
+        n_watch  = len([r for r in bench_rows if str(r.get("status")) in ("WATCH", "AMBER")])
+        n_ok     = n_total - n_breach - n_watch
+        pass_pct = round(n_ok / n_total * 100, 1) if n_total else 0.0
+        cov      = bench.get("coverage_summary") or {}
+        max_cc   = (cov.get("concurrency") or {}).get("max") if isinstance(cov.get("concurrency"), dict) else None
+
+        uat_prose = (
+            f"UAT performance validation from benchmark '{bench.get('filename', '')}': "
+            f"{n_total} transaction(s) tested · {pass_pct:.0f}% pass rate "
+            f"({n_ok} OK · {n_watch} WATCH · {n_breach} BREACH)."
+            + (f" Max concurrency tested: {max_cc} user(s)." if max_cc else "")
+            + (f" {n_breach} transaction(s) exceed SLA or regression threshold — "
+               "resolution or formal customer acknowledgment required before sign-off."
+               if n_breach else " All flows within agreed performance limits.")
+        )
+        uat_tbl = {
+            "headers": ["Transaction", "Action", "Current", "Reference", "Status"],
+            "rows":    uat_rows,
+        }
     else:
         uat_prose = (
             "UAT validation artefacts were not provided in this audit run. "
-            "Upload UAT test results for sign-off coverage analysis."
+            "Upload the performance benchmark / UAT test results for sign-off coverage analysis."
         )
         uat_tbl = {
             "headers": ["Test Category", "Test Cases"],
@@ -732,13 +850,20 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     })
 
     # -- Verdict -----------------------------------------------------------
+    # Rule-engine criticals + benchmark breaches now feed the verdict so the
+    # narrative agrees with the PE Findings table (same evidence, same call).
     verdict  = "CONDITIONAL"
     rf_crit  = _int(rf_sum.get("critical") or rf_sum.get("CRITICAL"))
     _comp_n  = _num(compliance)
 
-    if _comp_n is not None and _comp_n >= 98 and rf_crit == 0:
+    rule_f      = digest.get("rule_findings") or {}
+    rule_crit_n = len(rule_f.get("critical") or [])
+    bench_breach_n = len([r for r in bench_rows if str(r.get("status")) in ("BREACH", "RED")])
+
+    if (_comp_n is not None and _comp_n >= 98 and rf_crit == 0
+            and rule_crit_n == 0 and bench_breach_n == 0):
         verdict = "APPROVED"
-    elif rf_crit > 0 or (_comp_n is not None and _comp_n < 90):
+    elif rf_crit > 0 or rule_crit_n > 0 or (_comp_n is not None and _comp_n < 90):
         verdict = "BLOCKED"
 
     try:
@@ -824,6 +949,15 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         )
     if _cp_diagnosis:
         parts.append(_cp_diagnosis)
+    if rule_crit_n:
+        _crit_srcs = sorted({str(c.get("source") or "?") for c in (rule_f.get("critical") or [])})
+        parts.append(
+            f"{rule_crit_n} critical PE finding(s) open"
+            + (f" (sources: {', '.join(_crit_srcs[:4])})" if _crit_srcs else "")
+            + " — must be resolved or formally acknowledged before sign-off."
+        )
+    if bench_breach_n:
+        parts.append(f"{bench_breach_n} UAT benchmark transaction(s) in BREACH.")
     if rf_crit:
         parts.append(
             f"{rf_crit} critical finding(s) require immediate attention before PE sign-off."

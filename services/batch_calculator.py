@@ -124,6 +124,27 @@ def _parse_dt(s: "pd.Series | str") -> "pd.Series | pd.Timestamp":
     ]
 
     if isinstance(s, pd.Series):
+        # Stage 0: Excel serial date detection — numeric values > 40000 are Excel epoch days.
+        # Excel epoch is 1899-12-30; a value of 40000 ≈ 2009-07-06; 45000 ≈ 2023-03-16.
+        # Some Ctrl-M exports store timestamps as numeric serial+fraction (e.g. 45001.625).
+        # Detect these BEFORE string normalization so they aren't corrupted by str coercion.
+        _numeric_s = pd.to_numeric(s, errors="coerce")
+        _serial_mask = _numeric_s.notna() & (_numeric_s > 40000) & (_numeric_s < 60000)
+        if _serial_mask.any():
+            # Convert Excel serial to datetime (origin="1899-12-30", unit="D")
+            try:
+                _excel_dt = pd.to_datetime(_numeric_s[_serial_mask],
+                                           unit="D", origin="1899-12-30", errors="coerce")
+                # Only apply if conversion looks sane (year 2000–2040)
+                _valid = _excel_dt.notna() & (_excel_dt.dt.year >= 2000) & (_excel_dt.dt.year <= 2040)
+                if _valid.any():
+                    s = s.copy().astype(object)
+                    s[_serial_mask & _valid.reindex(s.index, fill_value=False)] = \
+                        _excel_dt[_valid].dt.strftime("%Y-%m-%d %H:%M:%S")
+                    s = s.astype(str)
+            except Exception:
+                pass
+
         # Vectorised Oracle normalisation: "06-NOV-24 11.00.05.100271000 PM GMT" → "06-NOV-24 11:00:05 PM"
         s = s.astype(str).str.replace(
             r"(\d{2}-[A-Z]{3}-\d{2})\s+(\d{2})\.(\d{2})\.(\d{2})\.\d+\s+(AM|PM)\s+\w+",
@@ -628,7 +649,10 @@ def calculate_sla_buffer(sla_window_hrs: float, max_runtime_hrs: float) -> Dict[
             "buffer_pct": round(buffer_pct, 1),
             "growth_multiplier": round(growth_multiplier, 2),
             "growth_capacity_pct": round(growth_capacity, 1),
-            "status": status}
+            "status": status,
+            # GAP-4: tag source so UI knows this is a single-job peak, not the
+            # whole-window elapsed metric (active when End_Time is unavailable).
+            "source": "fleet_peak_fallback"}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -702,6 +726,93 @@ def detect_job_anomalies(df: pd.DataFrame) -> list:
                     "has_zero_sec_failures": fi.get("has_zero_sec_failures", False),
                 })
     return sorted(anomalies, key=lambda x: x["severity"], reverse=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# PATH C — Adaptive SLA from run history (no XLSX uploaded)
+# ─────────────────────────────────────────────────────────────────
+# Minimum avg runtime (5 min) below which adaptive SLA is unreliable.
+# Sub-minute jobs are OS scheduler noise, not batch SLA signals.
+_MIN_ADAPTIVE_AVG_HRS: float = 5.0 / 60.0
+
+
+def _compute_adaptive_sla(df: pd.DataFrame, global_ceil: float) -> pd.DataFrame:
+    """Compute per-job adaptive SLA baseline from Ctrl-M run history (PATH C).
+
+    Used when no SLA XLSX is uploaded so every job gets a history-derived ceiling
+    rather than a one-size-fits-all global default.
+
+    Quality tiers (by OK run count per job):
+      STRONG     (≥14 runs)  → p95
+      MODERATE   (7-13 runs) → max(p90, avg + 2σ)
+      WEAK       (3-6 runs)  → max(peak×0.90, avg + 2σ, avg + σ), floor = avg
+      INSUFFICIENT (<3 runs) → peak (excluded from per-job compliance)
+      SHORT_JOB  (avg < 5 min) → excluded (OS jitter, not batch signal)
+
+    Returns a DataFrame indexed by composite key suitable for merging into
+    top_jobs_df.  Columns: sla_hrs, baseline_quality, is_high_variance.
+    """
+    import math as _math_ap
+
+    has_status = "Status" in df.columns
+    ok_df = df[df["Status"] == "OK"].copy() if has_status else df.copy()
+    if ok_df.empty:
+        ok_df = df.copy()
+
+    group_cols = (["Sub_Application", "Job_Name"]
+                  if "Sub_Application" in df.columns else ["Job_Name"])
+
+    rows = []
+    for key, grp in ok_df.groupby(group_cols)["run_time_hrs"]:
+        hrs = grp.dropna()
+        n = len(hrs)
+        if n == 0:
+            continue
+        avg = float(hrs.mean())
+        std = float(hrs.std(ddof=1)) if n > 1 else 0.0
+
+        # SHORT_JOB: average < 5 min → noise, exclude from adaptive compliance
+        if avg < _MIN_ADAPTIVE_AVG_HRS:
+            quality = "SHORT_JOB"
+            sla_hrs = None
+        elif n >= 14:
+            quality = "STRONG"
+            sla_hrs = float(hrs.quantile(0.95))
+        elif n >= 7:
+            quality = "MODERATE"
+            sla_hrs = max(float(hrs.quantile(0.90)), avg + 2 * std, avg)
+        elif n >= 3:
+            quality = "WEAK"
+            peak = float(hrs.max())
+            sla_hrs = max(peak * 0.90, avg + 2 * std, avg + std, avg)
+        else:
+            quality = "INSUFFICIENT"
+            sla_hrs = float(hrs.max())  # best estimate, but excluded from compliance
+
+        if sla_hrs is not None:
+            # Cap at global_ceil — adaptive SLA must not exceed the schedule window
+            sla_hrs = min(sla_hrs, global_ceil)
+            sla_hrs = round(sla_hrs, 4)
+
+        # High-variance flag: CV > 0.5 AND σ > 15 min AND n ≥ 5
+        is_high_variance = (
+            n >= 5 and avg > 0
+            and (std / avg) > 0.5
+            and std > 0.25
+        )
+
+        _key = key if isinstance(key, tuple) else (key,)
+        rows.append({
+            **dict(zip(group_cols, _key)),
+            "sla_hrs":         sla_hrs,
+            "baseline_quality": quality,
+            "is_high_variance": is_high_variance,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=group_cols + ["sla_hrs", "baseline_quality", "is_high_variance"])
+
+    return pd.DataFrame(rows).set_index(group_cols)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -787,6 +898,56 @@ def build_top_jobs_df(df: pd.DataFrame,
         axis=1,
     )
 
+    # ── PATH C: Adaptive baseline when no XLSX contracts present ────────────
+    # When every job resolved from global_ceil (no XLSX), compute per-job history
+    # baselines so jobs get meaningful individual targets instead of one shared default.
+    # PATH A/B (XLSX present) → skip entirely; contracted values take precedence.
+    _sla_path = "A" if sla_index and sla_index.get("source") in ("sla_matrix", "batch_sla_xlsx") else "C"
+    top_jobs["sla_path"] = _sla_path
+
+    if _sla_path == "C":
+        _adaptive_df = _compute_adaptive_sla(df, global_ceil)
+        if not _adaptive_df.empty:
+            _gc = group_cols if isinstance(group_cols, list) else [group_cols]
+            _merge_cols = [c for c in _gc if c in top_jobs.columns]
+            _top_reset = top_jobs.reset_index(drop=True)
+            try:
+                _top_reset = _top_reset.join(
+                    _adaptive_df[["sla_hrs", "baseline_quality", "is_high_variance"]],
+                    on=_merge_cols if len(_merge_cols) > 1 else _merge_cols[0],
+                    how="left",
+                    rsuffix="_adaptive",
+                )
+                # Apply adaptive SLA where available (not SHORT_JOB/INSUFFICIENT for compliance)
+                _has_adapt = _top_reset.get("sla_hrs_adaptive", pd.Series(dtype=float)).notna()
+                if _has_adapt.any():
+                    _top_reset.loc[_has_adapt, "sla_hrs"] = _top_reset.loc[_has_adapt, "sla_hrs_adaptive"]
+                    _top_reset.loc[_has_adapt, "sla_source"] = "adaptive"
+                # Mark SHORT_JOB rows — buffer_pct will be set to None (excluded from compliance)
+                if "baseline_quality" in _top_reset.columns:
+                    _short_mask = _top_reset["baseline_quality"] == "SHORT_JOB"
+                    _top_reset["is_short_job"] = _short_mask
+                    _insuf_mask = _top_reset["baseline_quality"] == "INSUFFICIENT"
+                    _top_reset.loc[_short_mask | _insuf_mask, "sla_hrs"] = global_ceil  # display only
+                else:
+                    _top_reset["is_short_job"] = False
+                # Carry is_high_variance column
+                if "is_high_variance" not in _top_reset.columns:
+                    _top_reset["is_high_variance"] = False
+                # Drop temp adaptive sla column
+                _top_reset.drop(columns=["sla_hrs_adaptive"], inplace=True, errors="ignore")
+                top_jobs = _top_reset
+            except Exception as _adap_err:
+                logger.warning("build_top_jobs_df: adaptive SLA merge failed — %s", _adap_err)
+        else:
+            top_jobs["is_short_job"] = False
+            top_jobs["is_high_variance"] = False
+            top_jobs["baseline_quality"] = "INSUFFICIENT"
+    else:
+        top_jobs["is_short_job"] = False
+        top_jobs["is_high_variance"] = False
+        top_jobs["baseline_quality"] = "CONTRACTED"
+
     # Gap 3 — pre-agreed buffer from SLA contract (contractual, from SLA file)
     def _get_pre_agreed(r):
         entry = (job_sla_map.get(
@@ -814,10 +975,34 @@ def build_top_jobs_df(df: pd.DataFrame,
 
     # F3 — observed SLA Buffer from Ctrl-M data (sla_hrs - peak_hrs)
     # Guard against sla_hrs=0 (SLA_MISSING rows) — produces inf/NaN without the guard.
+    # GAP-6: also guard against entirely-absent sla_hrs column (all NaN after replace).
     # Use np.where so the entire column is vectorised; NaN propagates correctly downstream.
     _sla_safe = top_jobs["sla_hrs"].replace(0, float("nan"))
+    # Coerce to numeric in case any SlaContract reconstruction silently left strings
+    _sla_safe = pd.to_numeric(_sla_safe, errors="coerce")
+    _nan_ratio = float(_sla_safe.isna().mean())
+    if _nan_ratio > 0.5:
+        logger.warning(
+            "build_top_jobs_df: %.0f%% of jobs have NaN/0 sla_hrs — "
+            "SLA contracts may not have loaded correctly.  "
+            "Falling back to global_ceil for NaN rows so gauge and table stay in sync.",
+            _nan_ratio * 100,
+        )
+        _global_ceil_for_nan = float(
+            sla_index.get("global_ceiling", 0) if sla_index else 0
+        ) or float(getattr(pe_config, "SLA_DAILY_HRS", 6.0))
+        _sla_safe = _sla_safe.fillna(_global_ceil_for_nan)
     top_jobs["buffer_pct"]   = ((_sla_safe - top_jobs["peak_hrs"]) / _sla_safe * 100).round(1)
     top_jobs["sla_used_pct"] = (top_jobs["peak_hrs"] / _sla_safe * 100).round(1)
+
+    # PATH C: SHORT_JOB and INSUFFICIENT quality → set buffer_pct to None so they
+    # are excluded from the per-job compliance denominator (avoid noise-driven false positives).
+    if "is_short_job" in top_jobs.columns:
+        _excl_mask = top_jobs["is_short_job"].fillna(False)
+        if "baseline_quality" in top_jobs.columns:
+            _excl_mask = _excl_mask | (top_jobs["baseline_quality"] == "INSUFFICIENT")
+        top_jobs.loc[_excl_mask, "buffer_pct"]   = None
+        top_jobs.loc[_excl_mask, "sla_used_pct"] = None
     # Unify status labels with pe_config thresholds (same as sla_matrix _compute_sla_matrix).
     # Removes CRITICAL/CAUTION/HEALTHY/EXCELLENT labels that differ from AT_RISK/LONG_JOB/OK.
     _at  = float(getattr(pe_config, 'SLA_ATRISK_PCT',  15.0))
@@ -848,7 +1033,12 @@ def build_top_jobs_df(df: pd.DataFrame,
     # This prevents false-positive exclusion of legitimate batch jobs that happen
     # to contain a matching substring in a productive batch sub_app.
     _STRONG_UTIL: frozenset = frozenset({
-        "file_watcher", "filewatcher", "ctrl_m_file_watcher", "ping_job",
+        # FileWatcher — strong regardless of sub_app (marks data arrival, not batch)
+        "file_watcher", "filewatcher", "ctrl_m_file_watcher", "_fw", "fw_", "ping_job",
+        # Outbound file delivery — always file push, never batch computation
+        "export_outbound", "move_file_to_outbox", "outbound_file",
+        # DB maintenance utilities — stats/cleanup, never batch SLA jobs
+        "gather_db_stats", "delete_type4_fcst", "delete_type",
     })
     _util_patterns = [str(p).lower() for p in getattr(pe_config, "UTILITY_JOB_PATTERNS", [])]
     if _util_patterns and "Job_Name" in top_jobs.columns:
@@ -952,14 +1142,34 @@ def _detect_sla_ceiling(df: pd.DataFrame) -> float:
 
     dominant, votes = max(schedule_votes.items(), key=lambda kv: kv[1])
     if votes == 0:
-        return pe_config.SLA_DAILY_HRS
+        dominant = "DAILY"
 
     ceiling_map: Dict[str, float] = {
         "DAILY":   pe_config.SLA_DAILY_HRS,
         "WEEKLY":  pe_config.SLA_WEEKLY_HRS,
         "MONTHLY": pe_config.SLA_MONTHLY_HRS,
     }
-    return ceiling_map.get(dominant, pe_config.SLA_DAILY_HRS)
+    base = ceiling_map.get(dominant, pe_config.SLA_DAILY_HRS)
+
+    # CHANGE 3: prefer stored SLA-intelligence ceilings (set when matrix uploaded)
+    # over pe_config defaults — this fixes the 6.0h vs 8.8h gauge discrepancy.
+    try:
+        from services import config_store as _cs_dc
+        _intel = _cs_dc.get("_sla_intelligence") or {}
+        _ceilings = _intel.get("ceilings") or {}
+        _matrix_val = _ceilings.get(dominant) or _ceilings.get("DAILY")
+        if _matrix_val and float(_matrix_val) > 0:
+            return float(_matrix_val)
+        # Fall back to SOW windows when no SLA matrix
+        _sow = _cs_dc.get("_sow_sla_windows") or {}
+        _sow_entry = _sow.get(dominant, {})
+        _sow_val = _sow_entry.get("limit_hours") if isinstance(_sow_entry, dict) else _sow_entry
+        if _sow_val and float(_sow_val) > 0:
+            return float(_sow_val)
+    except Exception:
+        pass
+
+    return base
 
 
 def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
@@ -996,10 +1206,56 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
         pass
 
     if not intel or not isinstance(intel, dict):
-        return result
+        intel = {}
 
     raw_contracts = intel.get("contracts", [])
     raw_ceilings  = intel.get("ceilings", {})
+
+    # ── Tier-2 fallback: BatchSLA_info.xlsx workflows (set by /api/batch-sla/upload) ──
+    # When no full SLA-intelligence run happened, the simpler BatchSLA XLSX upload
+    # stores parsed {workflow, sla_hours, schedule} rows under '_batch_sla_xlsx'.
+    # Convert those to contract dicts so per-job resolution still works.
+    if not raw_contracts:
+        try:
+            _bsla = _cs.get("_batch_sla_xlsx") or {}
+        except Exception:
+            _bsla = {}
+        _wfs = _bsla.get("workflows") or []
+        raw_contracts = []
+        for _w in _wfs:
+            if not isinstance(_w, dict):
+                continue
+            _name = str(_w.get("workflow") or _w.get("job_name") or "").strip()
+            _hrs_raw = _w.get("sla_hours", _w.get("sla_hrs"))
+            try:
+                _hrs = float(_hrs_raw) if _hrs_raw is not None else 0.0
+            except (TypeError, ValueError):
+                _hrs = 0.0
+            if not _name or _hrs <= 0:
+                continue
+            _sched_raw = str(_w.get("schedule") or "")
+            try:
+                _stype = classify_schedule(_sched_raw) if _sched_raw else "UNKNOWN"
+                if _stype in ("UNKNOWN", ""):
+                    _stype = classify_schedule(_name)
+            except Exception:
+                _stype = "UNKNOWN"
+            raw_contracts.append({
+                "batch_name":       _name,
+                "schedule_type":    _stype or "UNKNOWN",
+                "schedule_raw":     _sched_raw,
+                "sla_model":        "DURATION",
+                "sla_duration_hrs": _hrs,
+                "sla_window_hrs":   _hrs,
+                "sla_source_type":  "JOB_SPECIFIC",
+                "completeness":     "complete",
+                "source_row":       int(_w.get("row", 0) or 0),
+            })
+        if raw_contracts:
+            logger.info(
+                "build_sla_index: using %d workflow SLA(s) from _batch_sla_xlsx fallback",
+                len(raw_contracts),
+            )
 
     if not raw_contracts:
         return result
@@ -1034,8 +1290,25 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
                 # Two-tier classification: restore from cache (or fall back to INFERRED)
                 sla_source_type=c.get("sla_source_type", "INFERRED"),
             ))
-        except Exception:
+        except Exception as _contract_err:
+            # GAP-2: log skipped contracts so silent failures become visible in diagnostics
+            logger.warning(
+                "build_sla_index: skipped SlaContract row %d ('%s') — %s: %s",
+                c.get("source_row", 0), c.get("batch_name", "?"),
+                type(_contract_err).__name__, _contract_err,
+            )
             continue
+
+    # GAP-2: surface skip count in result for UI diagnostic
+    _total_raw = len([c for c in raw_contracts if isinstance(c, dict)])
+    _skip_count = _total_raw - len(contracts)
+    if _skip_count > 0:
+        logger.warning(
+            "build_sla_index: %d/%d SlaContract(s) skipped due to reconstruction errors "
+            "— these jobs will fall back to default SLA ceilings",
+            _skip_count, _total_raw,
+        )
+    result["_contract_skip_count"] = _skip_count
 
     result["contracts"] = contracts
     result["ceilings"]  = {k: float(v) for k, v in raw_ceilings.items() if v}
@@ -1367,10 +1640,34 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # G20b/G20c: Synthesise End_Time from Start_Time + Run_Sec for rows where
+        # End_Time is NaT.  Without this, sub-apps where ALL rows in a date group
+        # have NaT End_Time would produce elapsed_hrs = 0.0 (via fillna) and
+        # silently appear compliant even though batch ran for hours.
+        # Run_Sec is always populated by load_ctrlm_bytes; this is a safe fallback.
+        _df_win_for_agg = df_window
+        if (
+            "End_Time" in df_window.columns
+            and "Start_Time" in df_window.columns
+            and "Run_Sec" in df_window.columns
+            and df_window["End_Time"].isna().any()
+        ):
+            _df_win_for_agg = df_window.copy()
+            _nat_end = _df_win_for_agg["End_Time"].isna()
+            _valid_start = _df_win_for_agg["Start_Time"].notna()
+            _valid_sec   = pd.to_numeric(_df_win_for_agg["Run_Sec"], errors="coerce").notna()
+            _synth_mask  = _nat_end & _valid_start & _valid_sec
+            if _synth_mask.any():
+                _run_secs = pd.to_numeric(_df_win_for_agg.loc[_synth_mask, "Run_Sec"], errors="coerce")
+                _df_win_for_agg.loc[_synth_mask, "End_Time"] = (
+                    _df_win_for_agg.loc[_synth_mask, "Start_Time"]
+                    + pd.to_timedelta(_run_secs, unit="s", errors="coerce")
+                )
+
         # Primary: wall-clock window per Sub_Application per run_date.
         # Use df_window (cyclic + excluded sub-apps removed) to avoid 24h elapsed inflation.
         window_agg = (
-            df_window.groupby(["Sub_Application", "run_date"], as_index=False)
+            _df_win_for_agg.groupby(["Sub_Application", "run_date"], as_index=False)
               .agg(
                   first_start=("Start_Time", "min"),
                   last_end=("End_Time", "max"),
@@ -1428,12 +1725,34 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             "suspect_flag"
         ] = "SUSPECT_TOO_SHORT"
 
+        # ── PROMPT 1: Build direct XLSX workflow→SLA map (Priority 0 in _sub_sla) ────
+        # When BatchSLA XLSX is present, build a direct sub_app-pattern→sla_hrs map
+        # from the workflow rows. This is Priority 0 in _sub_sla() — it overrides
+        # job_sla_map scanning for sub_apps where the workflow name substring-matches,
+        # so PO_RANGES gets 8.83h (from XLSX), not 6.0h (global_ceil default).
+        # Sub-string match: "HALEON_PO_RANGES" in "TEST_HALEON_PO_RANGES" → True.
+        _xlsx_sla_map: dict = {}
+        try:
+            from services import config_store as _cs_p1
+            _bsla_p1 = _cs_p1.get("_batch_sla_xlsx") or {}
+            for _wf_p1 in _bsla_p1.get("workflows", []):
+                _wk = str(
+                    _wf_p1.get("workflow") or _wf_p1.get("sub_app_pattern") or ""
+                ).upper().strip()
+                _wv = float(
+                    _wf_p1.get("sla_hours") or _wf_p1.get("window_sla_hrs")
+                    or _wf_p1.get("sla_hrs") or 0
+                )
+                if _wk and _wv > 0:
+                    _xlsx_sla_map[_wk] = _wv
+        except Exception:
+            pass
+
         # ── Gap 2: _sub_sla — look up SLA by sub_app scope, not random job ──
-        # The old impl used row["job_name"] = pandas "first" aggregation value
-        # which is arbitrary.  If that job lacks an SLA entry the whole sub_app
-        # falls through to global_ceil.  Fix: scan ALL job_sla_map entries for
-        # the sub_app and take the most common non-zero SLA value; fall back to
-        # schedule-type ceiling from the uploaded XLSX ceilings map.
+        # Priority 0: direct XLSX workflow map (substring match: env prefix stripped)
+        # Priority 1: scan all job_sla_map entries for this sub_app
+        # Priority 2: schedule-type ceiling from uploaded XLSX ceilings map
+        # Priority 3: global_ceil
         try:
             from services.sla_engine import classify_schedule as _cs_win
         except Exception:
@@ -1444,6 +1763,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         def _sub_sla(row) -> float:
             sub_app  = str(row["Sub_Application"])
             sa_upper = sub_app.upper()
+            # Priority 0: direct XLSX workflow SLA (fuzzy substring match)
+            # "HALEON_PO_RANGES" matches "TEST_HALEON_PO_RANGES" via substring
+            for _wk, _wv in _xlsx_sla_map.items():
+                if _wk in sa_upper or sa_upper in _wk:
+                    return _wv
             # Priority 1: scan all job_sla_map entries for this sub_app
             _sa_sla_vals = [
                 float(v["sla_hrs"]) for k, v in job_sla_map.items()
@@ -1469,16 +1793,27 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         window_agg["sla_hrs"] = window_agg.apply(_sub_sla, axis=1)
         window_agg["breach"]  = window_agg["elapsed_hrs"] > window_agg["sla_hrs"]
 
-        # ── Canonical window records (one per (sub_app, run_date)) ───────────
-        # Feeds the SHARED compliance_engine so the Batch Review and SLA Matrix
-        # tabs compute window compliance with one identical algorithm. The
-        # per-sub_app resolved sla_hrs IS the ceiling (Area 2 — no global float).
-        for _sa in window_agg["Sub_Application"].dropna().unique():
-            # Gap 3: use mode (most frequent) SLA value, not min().
-            # min() picks the wrong global_ceil 6h row when the XLSX value is 8h (weekly).
-            _sa_sla_series = window_agg.loc[window_agg["Sub_Application"] == _sa, "sla_hrs"]
-            _sa_vc = _sa_sla_series.value_counts()
-            _win_ceiling_map[str(_sa)] = float(_sa_vc.index[0]) if not _sa_vc.empty else global_ceil
+        # ── Canonical ceiling map via shared compliance_engine ───────────────
+        # build_ceiling_map() is the SINGLE source of truth used by both
+        # Batch Review and SLA Matrix — guarantees identical numbers on both tabs.
+        # Per-row sla_hrs (from _sub_sla above) already encodes XLSX Priority 0;
+        # build_ceiling_map() re-derives the per-sub_app ceiling from the same
+        # XLSX source so the compliance engine's fallback path is also aligned.
+        try:
+            from services import compliance_engine as _ce_cm
+            from services import config_store as _cs_cm
+            _win_ceiling_map = _ce_cm.build_ceiling_map(
+                sub_applications=list(window_agg["Sub_Application"].dropna().unique()),
+                xlsx_config=_cs_cm.get("_batch_sla_xlsx") or None,
+                pe_config_ref=pe_config,
+            )
+        except Exception:
+            # Fallback: derive from window_agg sla_hrs column (mode per sub_app)
+            for _sa in window_agg["Sub_Application"].dropna().unique():
+                _sa_sla_series = window_agg.loc[window_agg["Sub_Application"] == _sa, "sla_hrs"]
+                _sa_vc = _sa_sla_series.value_counts()
+                _win_ceiling_map[str(_sa)] = float(_sa_vc.index[0]) if not _sa_vc.empty else global_ceil
+
         for _, _r in window_agg.iterrows():
             _win_records.append({
                 "sub_app":       str(_r["Sub_Application"]),
@@ -1488,6 +1823,31 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 "sla_ceil":      float(_r["sla_hrs"]),
                 "suspect_flag":  str(_r.get("suspect_flag", "OK")),
             })
+
+        # ── PROMPT 2: Worst window using per-sub_app SLA as denominator ──────
+        # Compute buffer_pct using each row's own sla_hrs (not global_ceil).
+        # Store worst-window info in a dict so _build_window_sla_buffer
+        # can use the correct denominator for the gauge.
+        _worst_window_info: dict = {}
+        try:
+            if not window_agg.empty and "elapsed_hrs" in window_agg.columns:
+                _wab = window_agg.copy()
+                _wab["_buf_pct"] = (
+                    (_wab["sla_hrs"] - _wab["elapsed_hrs"])
+                    / _wab["sla_hrs"].clip(lower=0.001)
+                    * 100
+                )
+                _widx = int(_wab["_buf_pct"].idxmin())
+                _wr = _wab.loc[_widx]
+                _worst_window_info = {
+                    "sla_hrs":     float(_wr["sla_hrs"]),
+                    "elapsed_hrs": float(_wr["elapsed_hrs"]),
+                    "sub_app":     str(_wr["Sub_Application"]),
+                    "run_date":    str(_wr["run_date"]),
+                    "buffer_pct":  float(_wr["_buf_pct"]),
+                }
+        except Exception:
+            pass
 
         # Merge back to daily (Job_Name level) for compatibility with heatmap
         daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
@@ -1606,6 +1966,21 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     if not elapsed_available:
         window["elapsed_hrs"] = 0.0
 
+    # ── Identify primary (DAILY/UNKNOWN) sub-apps for headline compliance ────
+    # WEEKLY/MONTHLY sub-apps run on a different cadence; combining them with
+    # DAILY in the denominator dilutes the compliance % (e.g. 4 passing weekly
+    # windows lift a 43.5% DAILY result to 58.1% combined — wrong headline).
+    # Primary sub-apps are DAILY/UNKNOWN schedule types only.
+    _primary_comp_sas: set = set()
+    try:
+        if "window_agg" in dir() and not window_agg.empty:
+            _primary_comp_sas = {
+                sa for sa in window_agg["Sub_Application"].dropna().unique()
+                if _cs_win(str(sa)) in {"DAILY", "UNKNOWN"}
+            }
+    except Exception:
+        pass
+
     # ── Batch Window Compliance (wall-clock daily window vs per-sub-app SLA) ──
     # Fix #14: window_agg["breach"] already uses per-Sub_Application resolved SLA
     # (via _sub_sla()). Use that aggregated breach count instead of re-computing
@@ -1618,6 +1993,15 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             _sub_breach_daily = window_agg.groupby("run_date")["breach"].any()
             # Align to window's run_date index
             window_breach_days = int(_sub_breach_daily.reindex(window["run_date"]).fillna(False).sum())
+            # Refine denominator to DAILY-only so WEEKLY passing windows don't
+            # inflate the headline compliance % beyond the DAILY batch result.
+            if _primary_comp_sas:
+                _pwagg = window_agg[window_agg["Sub_Application"].isin(_primary_comp_sas)]
+                _p_dates = int(_pwagg["run_date"].nunique())
+                _p_breach = int(_pwagg.groupby("run_date")["breach"].any().sum())
+                if _p_dates > 0:
+                    n_window_days = _p_dates
+                    window_breach_days = _p_breach
         elif elapsed_available:
             window_breach_days = int((window["elapsed_hrs"] > global_ceil).sum())
         else:
@@ -1644,6 +2028,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # The (sub_app, date)-granular compliance that BOTH the Batch Review and the
     # SLA Matrix tabs report. compliance_engine is the single definition so the
     # two screens can never diverge for the same data.
+    # Use DAILY/primary sub-apps only so the headline matches batch_window_comp.
     window_compliance = {
         "compliance_pct": float(round(batch_window_comp, 1)),
         "breach_count": int(window_breach_days),
@@ -1654,7 +2039,17 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     if _win_records:
         try:
             from services import compliance_engine as _ce
-            _wc = _ce.compute_window_compliance(_win_records, _win_ceiling_map)
+            # Filter to primary (DAILY/UNKNOWN) sub-apps only — WEEKLY records
+            # must not inflate total_windows and lift the headline compliance.
+            _primary_records = (
+                [r for r in _win_records if r["sub_app"] in _primary_comp_sas]
+                if _primary_comp_sas else _win_records
+            ) or _win_records
+            _primary_ceiling = (
+                {k: v for k, v in _win_ceiling_map.items() if k in _primary_comp_sas}
+                if _primary_comp_sas else _win_ceiling_map
+            ) or _win_ceiling_map
+            _wc = _ce.compute_window_compliance(_primary_records, _primary_ceiling)
             _wc["granularity"] = "sub_app_date"
             window_compliance = _wc
         except Exception:
@@ -1757,7 +2152,10 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "jobs_breach":      int(j_breach),
         "jobs_at_risk":     int(j_at_risk),
         "total_runs":       int(len(df)),
-        "total_hrs":        float(round(df["run_time_hrs"].sum(), 2)),
+        # PROMPT 4: summed_runtime uses df_window (cyclic excluded) not raw df
+        # raw df is kept for total_runs count (fail_count, anomaly visibility)
+        "total_hrs":        float(round(df_window["run_time_hrs"].sum() if has_end_time else df_analysis["run_time_hrs"].sum(), 2)),
+        # Sub-application rollup
         "sub_stats":        sub,
         "top_jobs":         top_jobs,
         "anomalies":        anomalies,
@@ -1766,6 +2164,8 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "worst_job_name":   worst_job_name,
         "worst_job_peak":   round(worst_job_peak, 3),
         "elapsed_available": elapsed_available,
+        # PROMPT 2: worst window info (sub_app-resolved SLA as gauge denominator)
+        "_worst_window_info": _worst_window_info if "window_agg" in dir() else {},
         # Headline elapsed-window KPI (DAILY/UNKNOWN sub_apps only — separate from
         # the bar chart which shows max across ALL in-scope sub_apps per date).
         "elapsed_window_kpi": {
@@ -2004,13 +2404,27 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # Inject into metrics dict so _build_data_warnings can surface them
     m["_multi_app_folders"] = _multi_app_folders
 
-    # Top 10 breaching jobs (buffer < 0); fall back to worst 10 by peak if none breaching
-    breaches_df = top_jobs_df[top_jobs_df["buffer_pct"] < 0].head(10)
-    if breaches_df.empty:
-        breaches_df = top_jobs_df.head(10)
-
-    # Top 15 jobs by peak (used by the horizontal bar chart)
-    top15_df = top_jobs_df.head(15).copy()
+    # Top 10 breaching jobs (buffer < 0); fall back to worst 10 by peak if none breaching.
+    # Top 15 jobs by peak (used by the horizontal bar chart).
+    #
+    # Utility jobs (is_utility=True) must NOT crowd out real batch jobs from these
+    # top-N views — a DB backup running 4h would otherwise take a top slot and push
+    # real batch jobs beyond position 15, making them invisible after frontend filtering.
+    # Fix: build top-N from non-utility jobs only, then append all utility jobs at the
+    # end so the frontend utility detection panel still has access to them.
+    if "is_utility" in top_jobs_df.columns:
+        _real_jobs_df = top_jobs_df[~top_jobs_df["is_utility"].fillna(False)]
+        _util_jobs_df = top_jobs_df[top_jobs_df["is_utility"].fillna(False)]
+        breaches_df = _real_jobs_df[_real_jobs_df["buffer_pct"] < 0].head(10)
+        if breaches_df.empty:
+            breaches_df = _real_jobs_df.head(10)
+        # Top 15 real batch jobs + all utility jobs (for detection panel)
+        top15_df = pd.concat([_real_jobs_df.head(15), _util_jobs_df]).copy()
+    else:
+        breaches_df = top_jobs_df[top_jobs_df["buffer_pct"] < 0].head(10)
+        if breaches_df.empty:
+            breaches_df = top_jobs_df.head(10)
+        top15_df = top_jobs_df.head(15).copy()
 
     # Identify top contributing job for each day (for chart annotation)
     daily_df = m["daily"]
@@ -2066,6 +2480,15 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                               "fail_count", "is_utility", "utility_reason"]
                  if c in top_jobs_df.columns]
 
+    # CHANGE 1: cache the full df so SLA-matrix upload can recompute without
+    # the user re-uploading the Ctrl-M CSV.
+    try:
+        from services import session_cache as _sc_bbp
+        _sc_bbp.set("_last_ctrlm_df_records", df.to_dict("records"))
+        _sc_bbp.set("_last_ctrlm_df_columns", list(df.columns))
+    except Exception:
+        pass
+
     return {
         "kpis": {
             "compliance_pct":             m["compliance"],
@@ -2101,6 +2524,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             # Window-level SLA buffer (whole nightly batch window vs SLA ceiling).
             # Preferred headline gauge metric; None when End_Time is unavailable.
             "window_sla_buffer":  _build_window_sla_buffer(m),
+            # GAP-4: explicit flag so the UI knows which of the two buffer paths is active.
+            # "window_elapsed"     — End_Time available; gauge measures whole batch window.
+            # "fleet_peak_fallback" — End_Time absent; gauge falls back to worst-job peak.
+            "gauge_buffer_source": "window_elapsed" if m.get("elapsed_available") else "fleet_peak_fallback",
             # Auto-detected schedule mode — lets sla_matrix default to same mode
             "sla_detected_mode":  m.get("sla_detected_mode", "DAILY"),
         },
@@ -2160,6 +2587,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                 "LOW" if m["confidence"] >= 40 else "INSUFFICIENT"
             ),
             "warnings":         _build_data_warnings(m),
+            "excluded_jobs":    _build_excluded_jobs_list(top15_df),
         },
         "multi_app_folders":  _multi_app_folders,
         "excluded_sub_apps":  m.get("excluded_sub_apps", []),
@@ -2173,6 +2601,35 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "hour_heatmap": _build_hour_heatmap(df),
         "daily_jobs":   _build_daily_jobs(df),
     }
+
+
+# CHANGE 2: convenience function for SLA-upload routes to trigger a full
+# recompute without the user re-uploading the Ctrl-M file.
+def recompute_with_new_sla() -> "dict | None":
+    """Rebuild the full batch payload from the cached Ctrl-M DataFrame.
+
+    Called automatically after any SLA file is ingested so the gauge and
+    compliance KPIs update immediately without a re-upload.  Returns the
+    new payload dict, or None if no cached data exists.
+    """
+    try:
+        from services import session_cache as _sc_rw
+        records = _sc_rw.get("_last_ctrlm_df_records")
+        columns = _sc_rw.get("_last_ctrlm_df_columns")
+        if not records or not columns:
+            return None
+        df = pd.DataFrame(records, columns=columns)
+        for col in ("Start_Time", "End_Time"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        if "Run_Sec" in df.columns:
+            df["Run_Sec"] = pd.to_numeric(df["Run_Sec"], errors="coerce").fillna(0)
+        if "run_time_hrs" not in df.columns and "Run_Sec" in df.columns:
+            df["run_time_hrs"] = df["Run_Sec"] / 3600.0
+        return build_batch_payload(df)
+    except Exception as _e:
+        logger.error("recompute_with_new_sla failed: %s", _e)
+        return None
 
 
 def _build_daily_jobs(df: pd.DataFrame) -> Dict[str, list]:
@@ -2236,26 +2693,34 @@ def _build_window_sla_buffer(m: dict) -> dict | None:
     """Compute the batch-WINDOW SLA buffer from the sentinel-measured elapsed
     window (not the worst single job).
 
-        buffer_pct = (SLA_ceiling − worst_day_elapsed) / SLA_ceiling × 100
+    PROMPT 2: The denominator is the worst window's own per-sub_app SLA
+    (from _win_ceiling_map/_xlsx_sla_map), NOT global_ceil.  This means
+    PO_RANGES (8.83h SLA) and AM_DAILY (6.0h SLA) are measured against
+    their own contracted ceiling — not the majority-vote global.
 
-    This is the headline gauge metric: it answers "how much head-room does the
-    whole nightly batch window have against its SLA ceiling?" — which is the
-    real customer-facing SLA, not a single job's peak.
-
-    Returns None when no elapsed window is available (End_Time missing); callers
-    then fall back to the worst-job ``fleet_sla_buffer``.
+        buffer_pct = (sub_app_SLA − worst_day_elapsed) / sub_app_SLA × 100
     """
     if not m.get("elapsed_available"):
         return None
-    ewk = m.get("elapsed_window_kpi") or {}
-    worst = float(ewk.get("worst_hrs", 0.0) or 0.0)
-    avg   = float(ewk.get("avg_hrs",   0.0) or 0.0)
-    if worst <= 0:
-        return None
-    ceil = float(m.get("sla_ceiling") or pe_config.SLA_DAILY_HRS)
-    if ceil <= 0:
+
+    # PROMPT 2: prefer worst-window's own resolved SLA as denominator
+    _wwi  = m.get("_worst_window_info") or {}
+    if _wwi.get("elapsed_hrs") and _wwi.get("sla_hrs"):
+        worst = float(_wwi["elapsed_hrs"])
+        ceil  = float(_wwi["sla_hrs"])
+        worst_date  = _wwi.get("run_date", "")
+        worst_sub   = _wwi.get("sub_app", "")
+    else:
+        ewk   = m.get("elapsed_window_kpi") or {}
+        worst = float(ewk.get("worst_hrs", 0.0) or 0.0)
+        ceil  = float(m.get("sla_ceiling") or pe_config.SLA_DAILY_HRS)
+        worst_date  = ewk.get("worst_date", "")
+        worst_sub   = ""
+
+    if worst <= 0 or ceil <= 0:
         return None
 
+    avg   = float((m.get("elapsed_window_kpi") or {}).get("avg_hrs", 0.0) or 0.0)
     buffer_hrs = round(ceil - worst, 3)
     buffer_pct = round((ceil - worst) / ceil * 100, 1)
     avg_buffer_pct = round((ceil - avg) / ceil * 100, 1) if avg > 0 else None
@@ -2270,15 +2735,16 @@ def _build_window_sla_buffer(m: dict) -> dict | None:
         status = "HEALTHY"
 
     return {
-        "buffer_hrs":        buffer_hrs,
-        "buffer_pct":        buffer_pct,
-        "avg_buffer_pct":    avg_buffer_pct,
-        "worst_elapsed_hrs": round(worst, 3),
-        "avg_elapsed_hrs":   round(avg, 3),
-        "sla_ceiling_hrs":   round(ceil, 3),
-        "worst_day":         ewk.get("worst_date", ""),
-        "status":            status,
-        "source":            "window_elapsed",
+        "buffer_hrs":         buffer_hrs,
+        "buffer_pct":         buffer_pct,
+        "avg_buffer_pct":     avg_buffer_pct,
+        "worst_elapsed_hrs":  round(worst, 3),
+        "avg_elapsed_hrs":    round(avg, 3),
+        "sla_ceiling_hrs":    round(ceil, 3),
+        "worst_day":          worst_date,
+        "worst_sub_app":      worst_sub,
+        "status":             status,
+        "source":             "window_elapsed",
     }
 
 
@@ -2346,6 +2812,34 @@ def _build_data_warnings(m: dict) -> list:
             "app_count":  maf["app_count"],
         })
     return warnings
+
+
+def _build_excluded_jobs_list(top_jobs_df) -> list:
+    """Return a list of {job_name, reason} dicts for jobs excluded from SLA compliance.
+
+    Pulls SHORT_JOB / INSUFFICIENT quality rows from top_jobs_df (if adaptive path
+    was taken) plus any CYCLIC sentinel-flagged jobs that were removed before
+    reaching top_jobs_df (carried in the dataframe via is_short_job / baseline_quality).
+    """
+    result = []
+    if top_jobs_df is None or top_jobs_df.empty:
+        return result
+    try:
+        name_col = "Job_Name" if "Job_Name" in top_jobs_df.columns else (
+                   "job_name" if "job_name" in top_jobs_df.columns else None)
+        if not name_col:
+            return result
+        for _, row in top_jobs_df.iterrows():
+            quality = str(row.get("baseline_quality", "")).upper()
+            is_short = bool(row.get("is_short_job", False))
+            if quality in ("SHORT_JOB", "INSUFFICIENT") or is_short:
+                result.append({
+                    "job_name": str(row[name_col]),
+                    "reason":   "SHORT_JOB" if quality == "SHORT_JOB" or is_short else "INSUFFICIENT",
+                })
+    except Exception:
+        pass
+    return result
 
 
 def _build_sla_source_payload(m: dict) -> dict:

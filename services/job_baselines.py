@@ -74,9 +74,15 @@ def compute_job_baselines(df, *, min_runs: int = 3) -> Dict[str, Dict[str, Any]]
         except Exception:
             p95 = float(hrs.max())
         mx = float(hrs.max())
-        # Adaptive ceiling: prefer p95 (robust), fall back to mean+2σ when std
-        # is meaningful, but never below the actual peak observed in the file.
-        expected = max(p95, avg + 2.0 * std)
+        # GAP-F2 fix: adaptive ceiling formula depends on sample size.
+        # For small n, stddev is an unreliable estimator — reduce the multiplier
+        # to avoid inflating the ceiling above any observed value.
+        if runs >= 10:
+            expected = max(p95, avg + 2.0 * std)
+        elif runs >= 5:
+            expected = max(p95, avg + 1.5 * std)  # reduced multiplier for small n
+        else:
+            expected = mx                           # insufficient data: use observed max
         if expected <= 0:
             expected = max(mx, avg)
 

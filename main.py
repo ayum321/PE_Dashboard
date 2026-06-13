@@ -220,6 +220,34 @@ async def get_audit_context() -> dict:
     if last_batch.get("hourly_counts"):
         extra["hourly_counts"] = last_batch["hourly_counts"]
 
+    # Benchmark restore: full payload so UI + narrative + findings can rebuild
+    last_bench = session_cache.get("last_benchmark") or {}
+    if last_bench.get("rows"):
+        extra["last_benchmark"] = last_bench
+
+    # Live-patch stale sla_source in last_batch if BatchSLA XLSX has since been
+    # uploaded.  Without this, a page reload after BatchSLA upload would still show
+    # the amber "No customer SLA matrix" banner because last_batch was persisted
+    # with sla_source.type = "default" from before the upload.
+    try:
+        from services import config_store as _cs_ctx
+        _bsla = _cs_ctx.get("_batch_sla_xlsx") or {}
+        _src_type = _cs_ctx.get("_sla_source_type") or ""
+        if _bsla.get("workflows") and last_batch:
+            _src_obj = last_batch.get("sla_source") or {}
+            if isinstance(_src_obj, dict) and _src_obj.get("type") in ("default", None, ""):
+                _src_obj["type"] = _src_type or "batch_sla_xlsx"
+                last_batch["sla_source"] = _src_obj
+                # Also strip the DEFAULT_SLA data warning from data_coverage
+                _dc = last_batch.get("data_coverage") or {}
+                if isinstance(_dc.get("warnings"), list):
+                    _dc["warnings"] = [
+                        w for w in _dc["warnings"]
+                        if w.get("code") != "DEFAULT_SLA"
+                    ]
+    except Exception:
+        pass
+
     return {
         "slots":            ac,
         "status":           status,

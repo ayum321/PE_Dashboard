@@ -173,11 +173,15 @@ def build_sub_app_metrics(
     top_jobs: list[dict],
     servers: list[dict],
     sla_ceiling_hrs: float,
+    ceiling_map: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Aggregate per-sub-application metrics for the 3-Way Risk Matrix bubble chart.
     Returns list of {sub_app, avg_peak_hrs, max_peak_hrs, job_count, breach_count,
                      avg_buffer_pct, sri, rfcs_band, resource_pressure, crs}.
+
+    BUG-W5 fix: ceiling_map provides per-sub-app contracted SLA so SRI/CRS are
+    computed against the right ceiling, not the global default for all sub-apps.
     """
     from collections import defaultdict
 
@@ -194,31 +198,38 @@ def build_sub_app_metrics(
 
     results = []
     for sa, jobs in groups.items():
-        peaks = [_f(j.get("peak_hrs")) for j in jobs]
-        buffers = [_f(j.get("buffer_pct"), 50.0) for j in jobs]
-        breach_count = sum(1 for j in jobs if _f(j.get("buffer_pct"), 100) < 0)
+        # Resolve per-sub-app ceiling: ceiling_map first, then global fallback
+        sa_key = sa.upper().strip()
+        sa_ceiling = float((ceiling_map or {}).get(sa_key) or sla_ceiling_hrs)
+
+        peaks   = [_f(j.get("peak_hrs")) for j in jobs]
+        # BUG-M2 companion: None buffers are unknown, not healthy — exclude from avg
+        buffers = [float(j["buffer_pct"]) for j in jobs if j.get("buffer_pct") is not None]
+        breach_count = sum(1 for j in jobs
+                           if j.get("buffer_pct") is not None and float(j["buffer_pct"]) < 0)
         fail_rate = breach_count / max(len(jobs), 1) * 100.0
 
         max_peak = max(peaks) if peaks else 0.0
         avg_peak = sum(peaks) / len(peaks) if peaks else 0.0
-        avg_buf = sum(buffers) / len(buffers) if buffers else 50.0
+        avg_buf  = sum(buffers) / len(buffers) if buffers else None   # None = all unknown
 
-        sri = calc_sri(max_peak, sla_ceiling_hrs, avg_cpu)
+        sri  = calc_sri(max_peak, sa_ceiling, avg_cpu)
         rfcs = calc_rfcs(fail_rate, avg_cpu, avg_mem, crit_count)
-        crs = calc_crs(breach_count > 0, len(jobs), avg_buf)
+        crs  = calc_crs(breach_count > 0, len(jobs), avg_buf if avg_buf is not None else 50.0)
 
         results.append({
-            "sub_app": sa,
-            "job_count": len(jobs),
-            "avg_peak_hrs": round(avg_peak, 2),
-            "max_peak_hrs": round(max_peak, 2),
-            "breach_count": breach_count,
-            "avg_buffer_pct": round(avg_buf, 1),
-            "sri": round(sri, 3),
-            "rfcs": round(rfcs, 1),
-            "rfcs_band": "red" if rfcs >= 60 else ("amber" if rfcs >= 30 else "green"),
+            "sub_app":          sa,
+            "job_count":        len(jobs),
+            "avg_peak_hrs":     round(avg_peak, 2),
+            "max_peak_hrs":     round(max_peak, 2),
+            "breach_count":     breach_count,
+            "avg_buffer_pct":   round(avg_buf, 1) if avg_buf is not None else None,
+            "sla_ceiling":      round(sa_ceiling, 3),
+            "sri":              round(sri, 3),
+            "rfcs":             round(rfcs, 1),
+            "rfcs_band":        "red" if rfcs >= 60 else ("amber" if rfcs >= 30 else "green"),
             "resource_pressure": round(resource_pressure, 1),
-            "crs": round(crs, 3),
+            "crs":              round(crs, 3),
         })
 
     results.sort(key=lambda x: x["sri"], reverse=True)

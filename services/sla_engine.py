@@ -1848,13 +1848,37 @@ def ingest_sla_file(raw_bytes: bytes, filename: str) -> SlaIngestResult:
     # Use MAX because the global ceiling represents the overall batch window,
     # not individual workflow SLAs.  Per-workflow compliance is reported
     # separately via workflow_sla_summary.
+    #
+    # Canonical type map — schedules that aren't DAILY/WEEKLY/MONTHLY are folded
+    # into their closest standard type so they contribute to the ceiling.
+    # WEEKLY_SPECIFIC_DAY is resolved via batch_name when canonical is None.
+    _CANONICAL_MAP = {
+        "DAILY":                "DAILY",
+        "TWICE_DAILY":          "DAILY",
+        "DAILY_EXCEPT":         "DAILY",
+        "DAILY_EXCEPT_WEEKEND": "DAILY",
+        "MIDWEEK":              "DAILY",
+        "WEEKLY":               "WEEKLY",
+        "WEEKLY_SPECIFIC_DAY":  None,   # resolved by batch_name below
+        "FORTNIGHTLY":          "WEEKLY",
+        "BIWEEKLY":             "WEEKLY",
+        "PARALLEL_WEEKLY":      "WEEKLY",
+        "PARALLEL_WORKFLOW":    "WEEKLY",
+        "MONTHLY":              "MONTHLY",
+        "BIMONTHLY":            "MONTHLY",
+    }
     for contract in result.contracts:
         if contract.sla_window_hrs and contract.sla_window_hrs > 0:
             sched = contract.schedule_type
-            if sched in ("DAILY", "WEEKLY", "MONTHLY"):
-                existing = result.ceilings.get(sched)
+            canonical = _CANONICAL_MAP.get(sched)
+            if canonical is None and sched == "WEEKLY_SPECIFIC_DAY":
+                # Use batch_name keyword (DAILY/WEEKLY suffix) to pick ceiling bucket
+                _name_type = classify_schedule(contract.batch_name or "")
+                canonical = _CANONICAL_MAP.get(_name_type)
+            if canonical in ("DAILY", "WEEKLY", "MONTHLY"):
+                existing = result.ceilings.get(canonical)
                 if existing is None or contract.sla_window_hrs > existing:
-                    result.ceilings[sched] = contract.sla_window_hrs
+                    result.ceilings[canonical] = contract.sla_window_hrs
 
     # Generate warnings
     if result.partial_rows > 0:
@@ -2313,8 +2337,9 @@ def resolve_sla(
     # substring match.  Short generic schedule-type words like "Daily", "Weekly",
     # "Monthly" (≤7 chars) would otherwise false-positive match against any
     # specific contract name containing that word (e.g. "PROD_WEEKLY_WF1_REQPL").
-    # Guard 2: when one name is a prefix of the other, require a 60% length ratio
-    # to avoid "PROD_WEEKLY" falsely matching "PROD_WEEKLY_WF1_REQPL".
+    # Guard 2: when one name is a pure prefix of the other, require a 50% length
+    # ratio (relaxed from 60% — GAP-7: "HALEON_CHEC" vs "HALEON_CHECKLIST_DAILY"
+    # has ratio 11/22=0.50 which was blocked by the old 0.6 guard).
     _MIN_SUBSTR_LEN = 8
     if len(batch_upper) >= _MIN_SUBSTR_LEN:
         for contract in valid:
@@ -2324,7 +2349,7 @@ def resolve_sla(
             if cn in batch_upper or batch_upper in cn:
                 # Apply length-ratio guard when one is a pure prefix of the other
                 longer, shorter = (cn, batch_upper) if len(cn) >= len(batch_upper) else (batch_upper, cn)
-                if longer.startswith(shorter) and len(shorter) / len(longer) < 0.6:
+                if longer.startswith(shorter) and len(shorter) / len(longer) < 0.50:
                     continue   # prefix too short relative to full contract name — skip
                 return ResolvedSla(
                     sla_hrs=_sla_from_contract(contract),
@@ -2353,8 +2378,19 @@ def resolve_sla(
                 and schedule_type not in ("UNKNOWN", "")):
             continue
         shared = batch_tokens & ct_tokens
-        # Require at least 2 shared tokens to avoid false positives on short names
-        if len(shared) < 2:
+        # GAP-7: Require ≥2 shared tokens OR exactly 1 shared token that is a
+        # long, dominant anchor (≥6 chars AND represents ≥40% of the shorter
+        # token set's size).
+        # Rationale: "HALEON_CHEC" vs "HALEON_CHECKLIST_DAILY" shares {"HALEON"}
+        # (1 token, 6 chars, 100% of the 1-token set) — that IS a valid anchor.
+        # Without this relaxation, Pass 3 substring guard blocks it (len ratio 0.5
+        # < 0.60) and it falls through to the 6h default.
+        _long_anchor = (
+            len(shared) == 1
+            and len(next(iter(shared))) >= 6
+            and len(shared) / max(len(batch_tokens), 1) >= 0.40
+        )
+        if len(shared) < 2 and not _long_anchor:
             continue
         ratio = len(shared) / max(len(batch_tokens), len(ct_tokens))
         if ratio >= 0.60:

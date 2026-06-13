@@ -62,25 +62,88 @@ const THEME = {
 // Use `let` so loadConfig() can update it when the user changes settings.
 let SLA_DAILY_HRS = 6.0;
 
+// Utility job exclusion — file watchers, exports, DB backups excluded by default.
+// Toggled by the user via the batch review panel toggle.
+let _batchExcludeUtility = true;
+// Per-job overrides: user can re-include auto-detected utility jobs or manually exclude any job.
+const _batchManualInclude = new Set();  // jobs auto-detected as utility but user wants included
+const _batchManualExclude = new Set();  // jobs NOT auto-detected but user manually excluded
+
 // Live Chart.js instances — re-created on every renderBatchReview() / renderResourceReview() call
 const charts = { slaBuffer: null, windowTrend: null, topJobs: null, resourceBars: null };
 
-// Latest KPIs for the SLA buffer gauge — kept so the canvas gauge can be
-// redrawn crisply on browser resize / zoom (canvas does not auto-reflow).
-let _lastBufferKpis = null;
-let _bufferResizeTimer = null;
-window.addEventListener("resize", () => {
-  clearTimeout(_bufferResizeTimer);
-  _bufferResizeTimer = setTimeout(() => {
-    if (_lastBufferKpis && document.getElementById("chart-sla-buffer")?.offsetParent) {
-      renderSlaBufferChart(_lastBufferKpis);
-    }
-  }, 120);
+// ── Session boundary tracking ──────────────────────────────────────────
+// Uses sessionStorage to distinguish "same-tab refresh" (restore data) from
+// "new tab / new browser" (clean dashboard).  sessionStorage is scoped to
+// the browser tab — closing the tab clears it automatically.
+const _PE_SESSION_KEY = 'pe_active_session';
+
+/** Mark this tab as having an active upload session. */
+function _markSessionActive() {
+  try { sessionStorage.setItem(_PE_SESSION_KEY, Date.now().toString()); } catch {}
+}
+
+/** True if this tab already has an active session (user uploaded files here). */
+function _isSessionActive() {
+  try { return !!sessionStorage.getItem(_PE_SESSION_KEY); } catch { return false; }
+}
+
+/** Clear the session marker (called on New Engagement / clear session). */
+function _clearSessionMarker() {
+  try { sessionStorage.removeItem(_PE_SESSION_KEY); } catch {}
+}
+
+// ── Dev-mode reset helpers ──────────────────────────────────────────────
+// Two ways to get a clean slate without opening a new tab:
+//   1. Add ?reset to the URL:  http://127.0.0.1:8765/?reset  → clears + reloads clean
+//   2. Press Ctrl+Shift+D in the app → same effect (for mid-session dev testing)
+// Normal F5 refresh preserves session data so you don't need to re-upload files.
+(function _handleResetParam() {
+  const url = new URL(window.location.href);
+  if (url.searchParams.has("reset")) {
+    // Remove the param from URL first so the clean reload doesn't loop
+    url.searchParams.delete("reset");
+    // Clear server session + local marker, then reload without ?reset
+    fetch("/api/clear-session", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}) }).catch(() => {}).finally(() => {
+        try { sessionStorage.clear(); } catch {}
+        window.location.replace(url.toString());
+    });
+  }
+})();
+
+document.addEventListener("keydown", (e) => {
+  // Ctrl+Shift+D = Dev Reset: clear session cache and reload with clean slate
+  if (e.ctrlKey && e.shiftKey && e.key === "D") {
+    e.preventDefault();
+    devReset();
+  }
 });
+
+function devReset() {
+  if (!confirm("Dev Reset: clear all session data and reload?\nYour uploaded files will need to be re-uploaded.")) return;
+  const btn = document.getElementById("btn-dev-reset");
+  if (btn) btn.textContent = "resetting…";
+  fetch("/api/clear-session", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}) }).catch(() => {}).finally(() => {
+      try { sessionStorage.clear(); } catch {}
+      window.location.reload();
+  });
+}
+
+/** Fast 32-bit hash (djb2) for cache-key comparison — NOT cryptographic. */
+function _simpleHash(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return h >>> 0;  // unsigned
+}
 
 // Resource Review · table view state
 const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "" };
 const RESOURCE_TABLE_PREVIEW = 25; // initial lazy slice
+const AZURE_REQUIRE_FRESH_LOGIN = false; // persist sign-in across reloads/restarts (fast). Use the Sign out button to switch accounts.
 
 // ─────────────────────────────────────────────────────────────
 // Bootstrap
@@ -103,11 +166,31 @@ document.addEventListener("DOMContentLoaded", () => {
   setActiveView("upload");
   loadConfig();           // pull stored settings from backend
   _loadAzureStatusBadge(); // check Azure config status
-  checkAzureIdentity();    // show logged-in Azure identity
+  // Run Azure auth checks after initial shell paint for faster first render.
+  setTimeout(() => { _initAzureAuthFast().catch(() => {}); }, 0);
   refreshAiStatus();      // header AI engine badge
-  refreshAuditContext().catch(() => {}); // restore session-cache data on reload
+  // Only restore cached data if this tab already had an active session
+  // (same-tab refresh).  New tab / new browser → clean dashboard.
+  if (_isSessionActive()) {
+    refreshAuditContext().catch(() => {}); // restore session-cache data on reload
+  } else {
+    // Wipe any stale server-side cache from a previous engagement
+    fetch("/api/clear-session", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}) }).catch(() => {});
+  }
   console.info("[pe-dashboard] full shell ready (phases 2-8)");
 });
+
+async function _initAzureAuthFast() {
+  // Persistent sign-in: only force a logout on a brand-new session if the
+  // "require fresh login" policy is explicitly enabled. By default we keep the
+  // cached credential so the dashboard is instant and never re-prompts.
+  if (AZURE_REQUIRE_FRESH_LOGIN && !_isSessionActive()) {
+    try { await fetch("/api/azure/browser-logout", { method: "POST" }); } catch {}
+  }
+  await checkAzureIdentity({ loadSubscriptions: false, timeoutMs: 2500 });
+}
 
 
 // ─────────────────────────────────────────────────────────────
@@ -183,11 +266,14 @@ function setActiveView(view) {
   // Auto-refresh each intelligence tab when data is available
   const hasData = !!(window.appData.batch || window.appData.resource || window.appData.servers?.length);
   if (hasData) {
-    if (view === "overview")     renderOverview();
-    if (view === "insights")     triggerGenerateFindings();
-    if (view === "redflags")     triggerRedFlags();
-  } else if (view === "overview") {
+    try {
+      if (view === "overview")     renderOverview();
+      if (view === "insights")     triggerGenerateFindings();
+      if (view === "redflags")     triggerRedFlags();
+    } catch(e) { console.error("[pe-dashboard] view render error:", e); }
+  } else if (view === "overview" && _isSessionActive()) {
     // Data might be in session cache — try restoring then render
+    // Only attempt restore if this tab has an active session (same-tab refresh)
     refreshAuditContext().then(() => {
       if (window.appData.batch || window.appData.resource || window.appData.servers?.length)
         renderOverview();
@@ -198,9 +284,11 @@ function setActiveView(view) {
   if (view === "insights")     refreshAuditContext();
 
   // New tab hooks
-  if (view === "settings")   loadSettings();
-  if (view === "slamatrix") { _renderSlaCommitmentsPanel(); if (window.appData.batch) triggerSlaMatrix(); }
-  if (view === "sow")        { initSowTab(); loadSowBaseline(); }
+  try {
+    if (view === "settings")   loadSettings();
+    if (view === "slamatrix") { _renderSlaCommitmentsPanel(); if (window.appData.batch) triggerSlaMatrix(); }
+    if (view === "sow")        { initSowTab(); loadSowBaseline(); }
+  } catch(e) { console.error("[pe-dashboard] tab init error:", e); }
 
   // Always refresh overview if data is present (sidebar data-status too)
   refreshDataStatus();
@@ -240,15 +328,13 @@ function initDropZone() {
       dropZone.classList.add("dropzone-active");
     })
   );
-  dropZone.addEventListener("dragleave", (e) => {
-    if (dropZone.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation();
-    dropZone.classList.remove("dropzone-active");
-  });
-  dropZone.addEventListener("dragend", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    dropZone.classList.remove("dropzone-active");
-  });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dropZone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove("dropzone-active");
+    })
+  );
 
   // Drop → validate + upload (multi-file)
   dropZone.addEventListener("drop", (e) => {
@@ -427,12 +513,13 @@ function renderUploadResult(payload) {
   setText("kpi-server-count", String(payload.server_count ?? 0));
   setText("kpi-mode",         payload.image_only ? "Image-only" : "Text-extracted");
 
-  // Header chip
+  // Header chip + reset button
   const chip = document.getElementById("dataset-chip");
   if (chip) {
     chip.textContent = `${payload.filename} · ${payload.server_count} servers`;
     chip.classList.remove("hidden");
   }
+  document.getElementById("reset-btn")?.classList.remove("hidden");
 
   // Pre-stage the JSON dump (collapsed by default)
   const dump = document.getElementById("json-dump");
@@ -476,12 +563,15 @@ function _renderBatchIntakeCard(payload) {
   document.getElementById("batch-no-data-prompt")?.classList.add("hidden");
   const chip = document.getElementById("batch-loaded-chip");
   if (chip) chip.classList.remove("hidden");
-  setText("batch-dataset-chip", `${payload.filename} · ${payload.kpis.total_runs.toLocaleString()} runs`);
+  // Show refresh button so user can manually re-sync charts with SLA changes
+  document.getElementById("batch-refresh-btn")?.classList.remove("hidden");
+  const _kpis = payload.kpis || {};
+  setText("batch-dataset-chip", `${payload.filename} · ${(_kpis.total_runs || 0).toLocaleString()} runs`);
 
   // Customer name — sourced ONLY from the Ctrl-M filename (server-side extraction).
   const cust = (payload.customer_name || "").trim();
   window.appData.customerName = cust;
-  const totalRuns = payload?.kpis?.total_runs || 0;
+  const totalRuns = _kpis.total_runs || 0;
   applyCustomerName(cust, { runs: totalRuns, filename: payload.filename });
 }
 
@@ -772,7 +862,7 @@ function _makeNetworkError(url) {
   return new Error(
     "Cannot reach the server — make sure it is running.\n" +
     `Expected: ${location.origin} → ${url}\n` +
-    "Run: py -3.14 -m uvicorn main:app --host 127.0.0.1 --port 8765"
+    "Run: py -3.14 main.py"
   );
 }
 
@@ -796,7 +886,7 @@ async function _apiFetch(url, options = {}) {
       _showServerDownBanner();
       toast("error", "Server unreachable",
         "The PE Dashboard server is not responding. " +
-        "Start it with: py -3.14 -m uvicorn main:app --host 127.0.0.1 --port 8765");
+        "Start it with: py -3.14 main.py (auto-finds a free port)");
     } else {
       toast("error", "Network error", msg.split("\n")[0]);
     }
@@ -805,22 +895,25 @@ async function _apiFetch(url, options = {}) {
 }
 
 /** Show a persistent red banner at the top when the server is down. */
+let _serverDownPollId = null;  // dedup: only one poll interval at a time
 function _showServerDownBanner() {
   if (document.getElementById("server-down-banner")) return;
   const banner = document.createElement("div");
   banner.id = "server-down-banner";
   banner.className = "fixed top-0 left-0 right-0 z-[9999] bg-Cred/90 text-white text-xs font-semibold px-4 py-2 flex items-center justify-between gap-4";
   banner.innerHTML = `
-    <span>⚠ Server unreachable — run <code class="bg-black/30 px-1 rounded">py -3.14 -m uvicorn main:app --host 127.0.0.1 --port 8765</code> then reload</span>
+    <span>⚠ Server unreachable — start the server and reload the page</span>
     <button onclick="this.parentElement.remove()" class="opacity-70 hover:opacity-100 text-lg leading-none">&times;</button>
   `;
   document.body.prepend(banner);
-  // Auto-retry: poll /api/config every 5s and remove banner when server is back
-  const poll = setInterval(async () => {
+  // Auto-retry: poll /api/config every 5s — dedup to avoid multiple intervals
+  if (_serverDownPollId) clearInterval(_serverDownPollId);
+  _serverDownPollId = setInterval(async () => {
     try {
       const r = await fetch("/api/config", { signal: AbortSignal.timeout(2000) });
       if (r.ok) {
-        clearInterval(poll);
+        clearInterval(_serverDownPollId);
+        _serverDownPollId = null;
         document.getElementById("server-down-banner")?.remove();
         toast("success", "Server reconnected", "The PE Dashboard server is back online.");
       }
@@ -845,16 +938,16 @@ function _handleFetchError(err, label) {
     _showServerDownBanner();
     toast("error", "Server unreachable",
       "The PE Dashboard server is not responding. " +
-      "Start it with: py -3.14 -m uvicorn main:app --host 127.0.0.1 --port 8765");
+      "Start it with: py -3.14 main.py (auto-finds a free port)");
   } else {
     toast("error", "Network error", msg.split("\n")[0].slice(0, 200));
   }
 }
 
 function initResetButton() {
-  // #reset-btn now calls clearSessionData() directly via onclick in HTML.
-  // This function is kept as a no-op so the initResetButton() call at startup
-  // doesn't throw a ReferenceError.
+  // #reset-btn wiring is handled via onclick="clearSessionData()" in the HTML.
+  // This function is kept as a no-op so the DOMContentLoaded call sequence is unchanged.
+  // The old partial-reset logic was superseded by clearSessionData() (full hard reset).
 }
 
 function initJsonToggle() {
@@ -886,7 +979,9 @@ const TOAST_STYLES = {
   },
 };
 
-function toast(kind, title, message, ttlMs = 4500) {
+function toast(kind, title, message, ttlMs) {
+  // Default TTL: errors stay 12s (user needs time to read), others 4.5s
+  if (ttlMs === undefined) ttlMs = kind === "error" ? 12000 : 4500;
   const stack = document.getElementById("toast-stack");
   if (!stack) return;
   const style = TOAST_STYLES[kind] || TOAST_STYLES.info;
@@ -996,8 +1091,18 @@ const crosshairPlugin = {
       chart._crosshairX = (evt.x >= chart.chartArea.left && evt.x <= chart.chartArea.right) ? evt.x : null;
     } else if (evt.type === "mouseout") {
       chart._crosshairX = null;
+    } else {
+      return; // only redraw for mousemove / mouseout
     }
-    chart.draw();
+    // Throttle to one redraw per animation frame — prevents chart.draw() being
+    // called hundreds of times per second on fast mouse movement (the primary
+    // cause of the Firefox "page slowing down" warning on Resource Review).
+    if (!chart._crosshairRaf) {
+      chart._crosshairRaf = requestAnimationFrame(() => {
+        chart._crosshairRaf = null;
+        chart.draw();
+      });
+    }
   },
   afterDraw(chart) {
     if (!chart._crosshairX || !chart.chartArea) return;
@@ -1135,6 +1240,15 @@ function _plotlyConfig(opts = {}) {
 // When user zooms/pans a Plotly chart, propagate the time range to all others.
 const _syncedPlotlyCharts = new Set();
 
+/** Safely purge a Plotly chart before re-rendering (prevents GPU/memory leak). */
+function _plotlyPurge(el) {
+  if (!el) return;
+  try {
+    if (typeof Plotly !== "undefined" && el._fullLayout) Plotly.purge(el);
+  } catch(e) { /* noop */ }
+  _syncedPlotlyCharts.delete(el);
+}
+
 function _registerPlotlySync(plotlyEl) {
   _syncedPlotlyCharts.add(plotlyEl);
   plotlyEl.on("plotly_relayout", (evtData) => {
@@ -1154,17 +1268,20 @@ function _registerPlotlySync(plotlyEl) {
 // Consistent defaults for all Chart.js instances.
 function _chartJsDefaults() {
   if (typeof Chart === "undefined") return;
+  // Reduced animation durations — Firefox canvas rendering is much slower
+  // than Chrome. 600ms with thousands of data points causes the
+  // "slowing down your browser" warning.
   Chart.defaults.animation = {
-    duration: 600,
+    duration: 0,
     easing: "easeOutQuart",
   };
   Chart.defaults.transitions = {
-    active: { animation: { duration: 200 } },
+    active: { animation: { duration: 0 } },
     resize: { animation: { duration: 0 } },
   };
   Chart.defaults.elements.point.hitRadius = 6;
   Chart.defaults.elements.point.hoverRadius = 5;
-  Chart.defaults.plugins.tooltip.animation = { duration: 150, easing: "easeOutQuart" };
+  Chart.defaults.plugins.tooltip.animation = { duration: 0 };
 }
 // Apply on load
 if (typeof Chart !== "undefined") _chartJsDefaults();
@@ -1200,15 +1317,13 @@ function initBatchUploader() {
       dz.classList.add("dropzone-active");
     })
   );
-  dz.addEventListener("dragleave", (e) => {
-    if (dz.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation();
-    dz.classList.remove("dropzone-active");
-  });
-  dz.addEventListener("dragend", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    dz.classList.remove("dropzone-active");
-  });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dz.classList.remove("dropzone-active");
+    })
+  );
   dz.addEventListener("drop", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1293,6 +1408,7 @@ async function processBatchFiles(files) {
     window.appData.batch    = payload;
     window.appData.loadedAt = new Date().toISOString();
     window._execCache = null; // invalidate exec dashboard cache
+    _markSessionActive();  // track session boundary
     // Hardwired interconnection: batch response now embeds full-dataset SLA Matrix.
     // Capture it so PE Findings + Red Flags + PE Consultant all see ALL runs.
     if (payload.sla_matrix) {
@@ -1315,10 +1431,11 @@ async function processBatchFiles(files) {
     triggerGenerateFindings().catch(() => {});
     triggerRedFlags().catch(() => {});
     refreshAuditContext().catch(() => {});  // update health bar
+    const _bk = payload.kpis || {};
     toast(
       "success",
       "Batch analysis complete",
-      `${files.length} file(s) · ${payload.kpis.total_runs.toLocaleString()} runs · ${payload.kpis.total_jobs} jobs · ${_n(payload.kpis.compliance_pct).toFixed(1)}% compliant`
+      `${files.length} file(s) · ${(_bk.total_runs || 0).toLocaleString()} runs · ${_bk.total_jobs || 0} jobs · ${_n(_bk.compliance_pct).toFixed(1)}% compliant`
     );
     console.info("[pe-dashboard] window.appData.batch updated", payload);
   } catch (err) {
@@ -1484,80 +1601,241 @@ function hideBatchStatus() {
 
 
 // ─────────────────────────────────────────────────────────────
-// Utility job exclusion state (persists across re-renders)
+// renderBatchReview(payload) — main entrypoint after upload
 // ─────────────────────────────────────────────────────────────
-let _batchExcludeUtility = true;           // auto-detected utility jobs excluded by default
-let _batchManualExclude  = new Set();      // user explicitly excluded
-let _batchManualInclude  = new Set();      // user overrode auto-exclude
 
 /** Check if a job should be excluded from the current analysis. */
 function _isJobExcluded(job) {
   const name = job.Job_Name || "";
-  if (_batchManualExclude.has(name)) return true;   // manual always wins
-  if (_batchManualInclude.has(name)) return false;  // manual include overrides auto
-  return _batchExcludeUtility && !!job.is_utility;  // auto-detected utility
+  // Manual exclude always wins
+  if (_batchManualExclude.has(name)) return true;
+  // Manual include overrides auto-detection
+  if (_batchManualInclude.has(name)) return false;
+  // Auto-detected utility excluded when master toggle is on
+  return _batchExcludeUtility && !!job.is_utility;
 }
 
-/** Shallow copy of batch payload with excluded jobs filtered out. */
+/** Filter excluded jobs from batch payload.
+ *  Returns a shallow copy with filtered arrays. Also masks excluded job names
+ *  from the window top_job field so the Daily Batch Window tooltip is clean. */
 function _filterBatchUtility(data) {
+  const filteredJobs    = new Set((data.top_jobs || []).filter(j => !_isJobExcluded(j)).map(j => j.Job_Name));
+  const filteredBreaches = new Set((data.top_breaches || []).filter(j => !_isJobExcluded(j)).map(j => j.Job_Name));
+  // For window entries: if the top_job for that day is excluded, find the next
+  // visible top job, or blank it out — so tooltips don't reference removed jobs.
+  const window2 = (data.window || []).map(w => {
+    if (!w.top_job || filteredJobs.has(w.top_job)) return w;  // still visible
+    // top_job was excluded — try to find another job that day from top_jobs
+    const dayJobs = (data.top_jobs || []).filter(j => !_isJobExcluded(j));
+    return { ...w, top_job: dayJobs.length ? dayJobs[0].Job_Name : "" };
+  });
   return {
     ...data,
-    top_jobs:     (data.top_jobs     || []).filter(j => !_isJobExcluded(j)),
+    top_jobs:     (data.top_jobs || []).filter(j => !_isJobExcluded(j)),
     top_breaches: (data.top_breaches || []).filter(j => !_isJobExcluded(j)),
+    window:       window2,
   };
 }
 
-/** Re-render batch review with current exclusion state (no new fetch needed). */
+/** Re-render batch review with current exclusion state.
+ *  Also queues a findings refresh so the PE Findings page stays in sync.
+ *  Busts the executive dashboard cache so next visit gets fresh analysis. */
 function _reRenderBatch() {
-  if (window.appData?.batch) renderBatchReview(window.appData.batch);
-  // Push exclusion list to backend + recompute KPIs so gauge and tiles update too
-  _scheduleExclusionRecompute();
+  if (window.appData.batch) renderBatchReview(window.appData.batch);
+  // Bust exec cache so excluded jobs don't bleed into executive dashboard
+  window._execCache     = null;
+  window._execCacheHash = null;
+  // Propagate exclusion changes to PE Findings (debounced — avoids storm)
+  setTimeout(() => triggerGenerateFindings().catch(() => {}), 600);
 }
 
-// Debounce so rapid toggle clicks only trigger one backend call
-let _exclRecomputeTimer = null;
-function _scheduleExclusionRecompute() {
-  clearTimeout(_exclRecomputeTimer);
-  _exclRecomputeTimer = setTimeout(_syncExclusionAndRecompute, 350);
+/**
+ * Show an amber banner when BatchSLA XLSX is loaded but Batch Review KPIs
+ * are still on global defaults (i.e. /api/batch/refresh not yet called).
+ * Banner auto-removes when refresh succeeds.
+ */
+function _renderSlaStaleWarningBanner() {
+  const existing = document.getElementById("sla-stale-banner");
+
+  const batchSlaLoaded = (window.appData?.batchSlaInfo?.workflows?.length || 0) > 0;
+  const batchUsesXlsx  = window.appData?.batch?.sla_source?.type === "batch_sla_xlsx";
+  const refreshing     = window._batchRefreshing === true;
+
+  // Hide if XLSX not loaded, already applied, or refresh in progress
+  if (!batchSlaLoaded || batchUsesXlsx || refreshing) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return; // already shown
+
+  const banner = document.createElement("div");
+  banner.id = "sla-stale-banner";
+  banner.className = [
+    "flex items-start gap-3 px-4 py-3 rounded-xl border",
+    "border-amber-500/40 bg-amber-950/30",
+    "text-amber-200 text-sm leading-snug",
+    "mb-4 mt-1",
+  ].join(" ");
+
+  const srcFile = window.appData.batchSlaInfo?.source_file || "BatchSLA XLSX";
+  banner.innerHTML = `
+    <span class="text-amber-400 text-lg leading-none shrink-0 mt-0.5">⚠</span>
+    <div class="flex-1 min-w-0">
+      <p class="font-semibold text-amber-100 text-xs">
+        BatchSLA XLSX loaded — Batch Review KPIs use system defaults until refreshed.
+      </p>
+      <p class="text-amber-300/80 text-[11px] mt-0.5">
+        Window SLA compliance and gauge reflect <span class="font-bold">6h default</span>,
+        not the contracted SLA from <span class="font-bold">${srcFile}</span>.
+      </p>
+    </div>
+    <button id="sla-stale-apply-btn"
+      onclick="_refreshBatchReview()"
+      class="ml-2 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/35
+             border border-amber-500/50 text-amber-200 font-semibold
+             transition-colors cursor-pointer text-xs whitespace-nowrap shrink-0">
+      Apply XLSX SLA now
+    </button>
+    <button onclick="document.getElementById('sla-stale-banner')?.remove()"
+      class="ml-1 px-2 py-1 rounded text-amber-400/60 hover:text-amber-300
+             text-base leading-none shrink-0 cursor-pointer">×</button>
+  `;
+
+  // Insert before the KPI grid — first child of batch-review-body after watermark
+  const batchBody = document.getElementById("batch-review-body");
+  const datawarn  = document.getElementById("batch-data-warnings");
+  if (datawarn?.parentNode) {
+    datawarn.parentNode.insertBefore(banner, datawarn);
+  } else if (batchBody) {
+    batchBody.prepend(banner);
+  }
 }
 
-async function _syncExclusionAndRecompute() {
+/**
+ * One-click refresh: re-runs batch metrics with current XLSX SLA ceilings.
+ * Called from the amber stale banner "Apply XLSX SLA now" button.
+ */
+async function _refreshBatchReview() {
   if (!window.appData?.batch) return;
-  const excludeList = [..._batchManualExclude];
+  window._batchRefreshing = true;
+
+  const btn = document.getElementById("sla-stale-apply-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Refreshing…"; }
+
   try {
-    // 1. Persist exclusion list to backend config_store
-    await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ exclude_jobs: excludeList }),
-    });
-    // 2. Recompute all batch KPIs from cached job_runs_df with new exclusions applied
-    const resp = await fetch("/api/batch/refresh", { method: "POST" });
-    if (!resp.ok) return;  // silent — visual filter already applied
-    const fresh = await resp.json();
-    // 3. Patch appData.batch so re-renders are consistent with new exclusions
-    window.appData.batch = { ...window.appData.batch, ...fresh };
-    // 4. Sync global SLA_DAILY_HRS
-    if (fresh.kpis?.daily_limit_hrs) {
-      SLA_DAILY_HRS = Number(fresh.kpis.daily_limit_hrs) || SLA_DAILY_HRS;
-    }
-    // 5. Re-render all data-driven panels with recomputed numbers
-    renderBatchReview(fresh);
-    // 6. Re-trigger SLA Matrix so its compliance numbers stay consistent
-    if (window.appData.slaMatrix) triggerSlaMatrix().catch(() => {});
-  } catch (_) { /* non-fatal — display filter already applied */ }
+    const res = await fetch("/api/batch/refresh", { method: "POST" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    if (payload.error) throw new Error(payload.message || "refresh error");
+
+    window.appData.batch = payload;
+    renderBatchReview(payload);
+    document.getElementById("sla-stale-banner")?.remove();
+    toast("success", "Batch Review updated",
+      "Window SLA compliance and gauge now reflect BatchSLA XLSX contracts.");
+  } catch (e) {
+    toast("warning", "Refresh failed", "Batch Review still shows default SLA values.");
+    if (btn) { btn.disabled = false; btn.textContent = "Apply XLSX SLA now"; }
+  } finally {
+    window._batchRefreshing = false;
+  }
 }
 
-// ─────────────────────────────────────────────────────────────
-// renderBatchReview(payload) — main entrypoint after upload
-// ─────────────────────────────────────────────────────────────
+/**
+ * Re-fetch batch analysis from the server using cached raw data + current SLA.
+ * Called after SLA matrix upload/removal so charts reflect new SLA ceilings.
+ * @param {string} [toastMsg] - optional toast message on success
+ */
+async function _refreshBatchFromServer(toastMsg) {
+  if (!window.appData.batch) return;  // nothing to refresh
+
+  // Show a subtle "refreshing" badge on the batch tab
+  const chip = document.getElementById("batch-dataset-chip");
+  const _origText = chip?.textContent || "";
+  if (chip) chip.textContent = "⟳ Refreshing…";
+
+  try {
+    const res = await fetch("/api/batch/refresh", { method: "POST" });
+    if (!res.ok) {
+      // Server restarted (session cache wiped) — batch CSV needs re-uploading.
+      // Still apply SLA banner from batchSlaInfo so the user sees SLA is loaded.
+      _applyBatchSlaInfoToBanner();
+      const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = err.detail || "No cached data";
+      toast("warning", "Batch refresh skipped",
+        detail + (detail.includes("re-upload") ? "" : " — re-upload the Ctrl-M CSV to apply SLA ceilings."));
+      return;
+    }
+    const data = await res.json();
+    window.appData.batch = data;
+    renderBatchReview(data);
+    // Cascade: fresh batch data invalidates exec cache and findings
+    window._execCache     = null;
+    window._execCacheHash = null;
+    setTimeout(() => triggerGenerateFindings().catch(() => {}), 400);
+    if (toastMsg) toast("success", "Charts updated", toastMsg);
+  } catch (err) {
+    console.warn("[pe-dashboard] batch refresh failed:", err);
+  } finally {
+    if (chip) chip.textContent = _origText;
+  }
+}
+
+// When batch/refresh returns 404 (server restarted, session cache wiped),
+// still update the SLA baseline banner from batchSlaInfo so the user can
+// see the SLA XLSX IS loaded — they just need to re-upload the Ctrl-M CSV
+// to get the full per-job compliance metrics recomputed.
+function _applyBatchSlaInfoToBanner() {
+  const bsi = window.appData?.batchSlaInfo;
+  if (!bsi?.workflows?.length) return;
+
+  // Derive the tightest daily/weekly SLA from workflows
+  let dailyHrs = 6.0, weeklyHrs = 8.0;
+  for (const wf of bsi.workflows) {
+    const bt = (wf.batch_type || "DAILY").toUpperCase();
+    const sh = parseFloat(wf.sla_hours || 0);
+    if (sh > 0) {
+      if (bt === "DAILY"  && sh < dailyHrs)  dailyHrs  = sh;
+      if (bt === "WEEKLY" && sh < weeklyHrs) weeklyHrs = sh;
+    }
+  }
+
+  // Update the baseline banner directly — show "loaded but not applied" state.
+  // Avoids a falsely-green banner when KPIs haven't been recomputed yet.
+  const banner      = document.getElementById("sla-baseline-banner");
+  const bannerIcon  = document.getElementById("sla-baseline-icon");
+  const bannerTitle = document.getElementById("sla-baseline-title");
+  const bannerDetail = document.getElementById("sla-baseline-detail");
+  if (banner && bannerTitle && bannerDetail && bannerIcon) {
+    bannerIcon.textContent = "📋";
+    bannerTitle.textContent =
+      `SLA Baseline: XLSX loaded — Daily ${dailyHrs.toFixed(1)}h · Weekly ${weeklyHrs.toFixed(1)}h`;
+    bannerDetail.textContent =
+      `${bsi.filename || "BatchSLA_info.xlsx"} loaded (${bsi.with_sla_count || bsi.workflow_count || 0} workflows). ` +
+      `Re-upload Ctrl-M CSV to apply per-job targets to compliance metrics.`;
+    banner.className =
+      "mt-2 px-3 py-2 rounded-lg border border-Cblue/40 bg-Cblue/5 text-Cblue text-[11px] flex items-start gap-2";
+    banner.classList.remove("hidden");
+  }
+  // Also populate slaCeilings so findings immediately picks up the SLA context
+  if (!window.appData.slaCeilings) {
+    const ceilMap = {};
+    for (const wf of bsi.workflows) {
+      const bt = (wf.batch_type || "DAILY").toUpperCase();
+      const sh = parseFloat(wf.sla_hours || 0);
+      if (sh > 0 && (!ceilMap[bt] || sh > ceilMap[bt])) ceilMap[bt] = sh;
+    }
+    if (Object.keys(ceilMap).length > 0) window.appData.slaCeilings = ceilMap;
+  }
+}
+
 function renderBatchReview(data) {
   if (!data || !data.kpis) {
     console.warn("[pe-dashboard] renderBatchReview called with empty payload");
     return;
   }
 
-  // Apply exclusion filter — filtered is used for charts/tables
+  // Apply utility job exclusion filter
   const filtered = _filterBatchUtility(data);
 
   // Reveal the body, hide empty state
@@ -1571,242 +1849,92 @@ function renderBatchReview(data) {
     chip.classList.remove("hidden");
   }
 
-  // ── Excluded jobs panel (per-job chips) ──────────────────────
-  {
-    const allJobs       = data.top_jobs || [];
-    const autoUtilJobs  = allJobs.filter(j => j.is_utility);
-    const excludedJobs  = allJobs.filter(j => _isJobExcluded(j));
-    const includedBack  = autoUtilJobs.filter(j => _batchManualInclude.has(j.Job_Name));
+  // ── Utility job exclusion panel (per-job chips) ──
+  const allJobs = data.top_jobs || [];
+  const autoUtilJobs = allJobs.filter(j => j.is_utility);
+  const excludedJobs = allJobs.filter(j => _isJobExcluded(j));
+  const includedBackJobs = autoUtilJobs.filter(j => _batchManualInclude.has(j.Job_Name));
 
-    let utilPanel = document.getElementById("batch-utility-panel");
-    if (!utilPanel) {
-      utilPanel = document.createElement("div");
-      utilPanel.id = "batch-utility-panel";
-      const _srcWm = document.getElementById("batch-source-watermark");
-      const insertTarget = _srcWm?.parentElement || document.getElementById("batch-review-body");
-      if (insertTarget) {
-        // IMPORTANT: chip (#batch-dataset-chip) is a nested <span> inside
-        // #batch-loaded-chip — it is NOT a direct child of insertTarget.
-        // Using chip.nextSibling as a reference node causes the
-        // "Child to insert before is not a child of this node" crash.
-        // Use #batch-review-body instead — it IS a direct child of insertTarget.
-        const _batchBody = document.getElementById("batch-review-body");
-        if (_batchBody && _batchBody.parentNode === insertTarget) {
-          insertTarget.insertBefore(utilPanel, _batchBody);
-        } else {
-          insertTarget.appendChild(utilPanel);
-        }
-      }
-    }
-
-    if (autoUtilJobs.length > 0 || _batchManualExclude.size > 0) {
-      const hasAnyExclusion = excludedJobs.length > 0 || _batchManualExclude.size > 0;
-
-      // Build rows for the detection table — show ALL detected utility + manually excluded
-      const manualOnlyJobs = (data.top_jobs || []).filter(
-        j => !j.is_utility && _batchManualExclude.has(j.Job_Name)
-      );
-      const tableJobs = [...autoUtilJobs, ...manualOnlyJobs];
-
-      const detectionRows = tableJobs.map(j => {
-        const isExcluded   = _isJobExcluded(j);
-        const isAuto       = !!j.is_utility;
-        const reason       = j.utility_reason || "";
-        const isManualExcl = _batchManualExclude.has(j.Job_Name);
-        const isManualIncl = _batchManualInclude.has(j.Job_Name);
-
-        const patternBadge = isAuto
-          ? `<span class="inline-flex items-center px-1.5 py-0 rounded font-mono text-[8px]"
-                  style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}"
-                  title="Matched pattern: '${escapeHtml(reason)}'">${escapeHtml(reason) || "utility"}</span>`
-          : `<span class="text-[8px] text-Cmuted font-mono">manual</span>`;
-
-        const statusBadge = isExcluded
-          ? `<span class="text-[8px] font-bold" style="color:${THEME.amber}">⊘ excluded</span>`
-          : `<span class="text-[8px] font-bold" style="color:${THEME.green}">✓ included</span>`;
-
-        const toggleBtn = isExcluded
-          ? `<button class="util-toggle-btn text-[8px] px-2 py-0.5 rounded font-semibold hover:opacity-80 transition"
-                    style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.25)}"
-                    data-util-include="${escapeHtml(j.Job_Name)}"
-                    title="Include this job back in SLA analysis">Include</button>`
-          : `<button class="util-toggle-btn text-[8px] px-2 py-0.5 rounded font-semibold hover:opacity-80 transition"
-                    style="color:${THEME.amber};background:${hexA(THEME.amber,0.1)};border:1px solid ${hexA(THEME.amber,0.25)}"
-                    data-util-exclude="${escapeHtml(j.Job_Name)}"
-                    title="Exclude this job from SLA analysis">Exclude</button>`;
-
-        const peak = typeof j.peak_hrs === "number" ? j.peak_hrs.toFixed(2) + "h" : "—";
-        const rowStyle = isExcluded
-          ? `opacity:0.55;background:${hexA(THEME.amber,0.04)}`
-          : "";
-
-        return `<tr style="${rowStyle}" class="border-t border-Cborder/30">
-          <td class="px-2 py-1 font-mono text-[10px] text-Cmuted/90"
-              style="${isExcluded ? "text-decoration:line-through" : ""}">
-            ${escapeHtml(j.Job_Name)}
-          </td>
-          <td class="px-2 py-1 text-[9px]">${patternBadge}</td>
-          <td class="px-2 py-1 text-right font-mono text-[9px] text-Cmuted">${peak}</td>
-          <td class="px-2 py-1 text-center">${statusBadge}</td>
-          <td class="px-2 py-1 text-right">${toggleBtn}</td>
-        </tr>`;
-      }).join("");
-
-      utilPanel.className = "rounded-lg mt-2 overflow-hidden";
-      utilPanel.style.cssText = `border:1px solid ${hexA(THEME.amber,0.3)};background:${hexA(THEME.amber,0.03)}`;
-      utilPanel.innerHTML = `
-        <div class="flex items-center justify-between px-3 py-2" style="background:${hexA(THEME.amber,0.07)}">
-          <div class="flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
-                 class="w-3.5 h-3.5" style="color:${THEME.amber}">
-              <path stroke-linecap="round" stroke-linejoin="round"
-                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
-            </svg>
-            <span class="text-[10px] font-bold uppercase tracking-wider" style="color:${THEME.amber}">
-              Detected Utility / Infrastructure Jobs
-            </span>
-            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded"
-                  style="color:${THEME.amber};background:${hexA(THEME.amber,0.18)}">
-              ${excludedJobs.length} excluded · ${tableJobs.length - excludedJobs.length} included
-            </span>
-          </div>
-          <div class="flex items-center gap-2">
-            <span class="text-[8px] text-Cmuted">Pattern-matched against ${autoUtilJobs.length} job(s) — not SLA targets</span>
-            ${hasAnyExclusion ? `<button id="batch-util-reset" class="text-[8px] px-2 py-0.5 rounded hover:opacity-80 transition"
-                style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}">Reset all</button>` : ""}
-          </div>
-        </div>
-        <table class="w-full">
-          <thead>
-            <tr style="background:${hexA(THEME.amber,0.04)}">
-              <th class="px-2 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold w-1/2">Job Name</th>
-              <th class="px-2 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Detected Pattern</th>
-              <th class="px-2 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Peak</th>
-              <th class="px-2 py-1 text-center text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Status</th>
-              <th class="px-2 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Action</th>
-            </tr>
-          </thead>
-          <tbody>${detectionRows}</tbody>
-        </table>
-      `;
-
-      // Wire toggle buttons
-      utilPanel.querySelectorAll("[data-util-include]").forEach(el => {
-        el.addEventListener("click", () => {
-          const name = el.dataset.utilInclude;
-          _batchManualExclude.delete(name);
-          if (autoUtilJobs.some(j => j.Job_Name === name)) _batchManualInclude.add(name);
-          _reRenderBatch();
-        });
-      });
-      utilPanel.querySelectorAll("[data-util-exclude]").forEach(el => {
-        el.addEventListener("click", () => {
-          _batchManualExclude.add(el.dataset.utilExclude);
-          _batchManualInclude.delete(el.dataset.utilExclude);
-          _reRenderBatch();
-        });
-      });
-      utilPanel.querySelector("#batch-util-reset")?.addEventListener("click", () => {
-        _batchManualInclude.clear();
-        _batchManualExclude.clear();
-        _reRenderBatch();
-      });
-    } else {
-      utilPanel.className = "hidden";
-      utilPanel.innerHTML = "";
+  let utilPanel = document.getElementById("batch-utility-panel");
+  if (!utilPanel) {
+    utilPanel = document.createElement("div");
+    utilPanel.id = "batch-utility-panel";
+    const _srcWm = document.getElementById("batch-source-watermark");
+    const insertTarget = _srcWm?.parentElement || document.getElementById("batch-review-body");
+    if (insertTarget) {
+      const afterEl = _srcWm || chip;
+      if (afterEl?.nextSibling) insertTarget.insertBefore(utilPanel, afterEl.nextSibling);
+      else insertTarget.appendChild(utilPanel);
     }
   }
 
-  // ── Schedule-based excluded sub_apps panel ───────────────────
-  // Shows sub_apps removed from compliance scope because their schedule type
-  // (CYCLIC, OUTBOUND, CALENDAR_BASED, MONTHLY, etc.) has no SLA window target.
-  {
-    const excludedSubs = (data.excluded_sub_apps || []).filter(x => x.reason !== "MANUAL");
-    let subPanel = document.getElementById("batch-scope-exclusion-panel");
-    if (!subPanel) {
-      subPanel = document.createElement("div");
-      subPanel.id = "batch-scope-exclusion-panel";
-      const utilEl = document.getElementById("batch-utility-panel");
-      const insertTarget = utilEl?.parentNode || document.getElementById("batch-review-body")?.parentElement;
-      if (insertTarget) {
-        const afterEl = document.getElementById("batch-utility-panel") || document.getElementById("batch-review-body");
-        if (afterEl && afterEl.parentNode === insertTarget) {
-          insertTarget.insertBefore(subPanel, afterEl.nextSibling);
-        } else {
-          insertTarget.appendChild(subPanel);
-        }
-      }
-    }
+  if (excludedJobs.length > 0 || includedBackJobs.length > 0 || autoUtilJobs.length > 0) {
+    // Excluded job chips — click ✕ to include back
+    const exChips = excludedJobs.map(j => {
+      const isAuto = !!j.is_utility && !_batchManualExclude.has(j.Job_Name);
+      return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono cursor-pointer group/chip hover:opacity-80 transition"
+                    style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.25)}"
+                    data-util-include="${escapeHtml(j.Job_Name)}"
+                    title="Click to include this job back in the analysis">
+                ${escapeHtml(j.Job_Name)}
+                <span class="text-[7px] text-Cmuted">${isAuto ? "auto" : "manual"}</span>
+                <span class="text-[11px] opacity-50 group-hover/chip:opacity-100">✕</span>
+              </span>`;
+    }).join("");
 
-    if (excludedSubs.length > 0) {
-      // Schedule type → display info
-      const schedMeta = {
-        CYCLIC:               { icon: "🔄", label: "Cyclic / Polling",          desc: "High-frequency polling — no SLA window target",                color: THEME.purple },
-        CYCLIC_INTERVAL:      { icon: "🔄", label: "Cyclic Interval",           desc: "Interval-based polling job",                                   color: THEME.purple },
-        OUTBOUND:             { icon: "📤", label: "Outbound / EDI",            desc: "File delivery job — excluded from batch compliance",           color: THEME.cyan   },
-        CALENDAR_BASED:       { icon: "📅", label: "Calendar (4-4-5)",          desc: "Retail calendar cycle — no standard SLA ceiling",              color: THEME.teal   },
-        MONTHLY:              { icon: "📆", label: "Monthly",                   desc: "Monthly run — not a daily SLA window",                         color: THEME.muted  },
-        BIMONTHLY:            { icon: "📆", label: "Bi-Monthly",                desc: "Bi-monthly run",                                               color: THEME.muted  },
-        DATE_SPECIFIC_MONTHLY:{ icon: "📆", label: "Date-Specific Monthly",     desc: "Runs on specific date each month",                             color: THEME.muted  },
-        QUARTERLY:            { icon: "📆", label: "Quarterly",                 desc: "Quarterly run — not a daily SLA window",                       color: THEME.muted  },
-        PIPELINE_STAGE:       { icon: "⚙️", label: "Pipeline Stage",            desc: "Internal pipeline orchestration step",                         color: THEME.blue   },
-        ADHOC:                { icon: "⚡", label: "Ad-Hoc",                   desc: "On-demand / manual trigger — no SLA window",                   color: THEME.amber  },
-      };
+    // Included-back chips — click ↩ to re-exclude
+    const inChips = includedBackJobs.map(j => {
+      return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono cursor-pointer group/chip hover:opacity-80 transition"
+                    style="color:${THEME.green};background:${hexA(THEME.green,0.12)};border:1px solid ${hexA(THEME.green,0.25)}"
+                    data-util-reexclude="${escapeHtml(j.Job_Name)}"
+                    title="Click to exclude this job again">
+                ${escapeHtml(j.Job_Name)}
+                <span class="text-[7px] text-Cmuted">included</span>
+                <span class="text-[11px] opacity-50 group-hover/chip:opacity-100">↩</span>
+              </span>`;
+    }).join("");
 
-      const rows = excludedSubs.map(x => {
-        const m   = schedMeta[x.reason] || { icon: "–", label: x.reason, desc: "", color: THEME.muted };
-        const jc  = x.job_count > 0 ? `${x.job_count} job${x.job_count > 1 ? "s" : ""}` : "—";
-        const ph  = x.peak_hrs  > 0 ? x.peak_hrs.toFixed(2) + "h" : "—";
-        return `<tr class="border-t border-Cborder/25 hover:bg-white/[0.02] transition-colors">
-          <td class="px-3 py-1.5 font-mono text-[10px] text-Cwhite/80">${escapeHtml(x.sub_app)}</td>
-          <td class="px-3 py-1.5">
-            <span class="inline-flex items-center gap-1 px-1.5 py-0 rounded text-[9px] font-semibold"
-                  style="color:${m.color};background:${hexA(m.color,0.12)};border:1px solid ${hexA(m.color,0.25)}"
-                  title="${escapeHtml(m.desc)}">${m.icon} ${escapeHtml(m.label)}</span>
-          </td>
-          <td class="px-3 py-1.5 text-[9px] text-Cmuted">${escapeHtml(m.desc)}</td>
-          <td class="px-3 py-1.5 text-right font-mono text-[9px] text-Cmuted">${jc}</td>
-          <td class="px-3 py-1.5 text-right font-mono text-[9px] text-Cmuted">${ph}</td>
-        </tr>`;
-      }).join("");
-
-      subPanel.className = "rounded-lg mt-2 overflow-hidden";
-      subPanel.style.cssText = `border:1px solid ${hexA(THEME.cyan,0.2)};background:${hexA(THEME.cyan,0.025)}`;
-      subPanel.innerHTML = `
-        <div class="flex items-center justify-between px-3 py-2" style="background:${hexA(THEME.cyan,0.055)}">
-          <div class="flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
-                 stroke="currentColor" class="w-3.5 h-3.5 shrink-0" style="color:${THEME.cyan}">
-              <path stroke-linecap="round" stroke-linejoin="round"
-                    d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z"/>
-            </svg>
-            <span class="text-[10px] font-bold uppercase tracking-wider" style="color:${THEME.cyan}">
-              Sub-Apps Excluded from Compliance Scope
-            </span>
-            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded"
-                  style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.18)}">
-              ${excludedSubs.length} sub-app${excludedSubs.length > 1 ? "s" : ""}
-            </span>
-          </div>
-          <span class="text-[8px] text-Cmuted">Schedule type has no SLA window target — not counted in compliance %</span>
+    utilPanel.className = "rounded-lg px-3 py-2 space-y-1.5 mt-1";
+    utilPanel.style.cssText = `border:1px solid ${hexA(THEME.amber, 0.25)};background:${hexA(THEME.amber, 0.04)}`;
+    utilPanel.innerHTML = `
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] font-bold uppercase tracking-wider text-Cmuted">Excluded Jobs</span>
+          <span class="text-[9px] font-mono px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">${excludedJobs.length} excluded from analysis</span>
         </div>
-        <table class="w-full">
-          <thead>
-            <tr style="background:${hexA(THEME.cyan,0.03)}">
-              <th class="px-3 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Sub-Application</th>
-              <th class="px-3 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Schedule Type</th>
-              <th class="px-3 py-1 text-left text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Reason</th>
-              <th class="px-3 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Jobs</th>
-              <th class="px-3 py-1 text-right text-[9px] uppercase tracking-wider text-Cmuted font-semibold">Peak</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      `;
-    } else {
-      subPanel.className = "hidden";
-      subPanel.innerHTML = "";
-    }
+        <div class="flex items-center gap-2">
+          <span class="text-[8px] text-Cmuted">Click job to include/exclude · Use ⊘ in table below to exclude any job</span>
+          ${(excludedJobs.length || _batchManualInclude.size || _batchManualExclude.size) ? `<button id="batch-util-reset" class="text-[8px] px-1.5 py-0.5 rounded hover:opacity-80 transition" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}">Reset</button>` : ""}
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-1">${exChips}${inChips}</div>
+    `;
+
+    // Wire: include back
+    utilPanel.querySelectorAll("[data-util-include]").forEach(el => {
+      el.addEventListener("click", () => {
+        const name = el.dataset.utilInclude;
+        _batchManualExclude.delete(name);
+        if (autoUtilJobs.some(j => j.Job_Name === name)) _batchManualInclude.add(name);
+        _reRenderBatch();
+      });
+    });
+    // Wire: re-exclude
+    utilPanel.querySelectorAll("[data-util-reexclude]").forEach(el => {
+      el.addEventListener("click", () => {
+        _batchManualInclude.delete(el.dataset.utilReexclude);
+        _reRenderBatch();
+      });
+    });
+    // Wire: reset all
+    utilPanel.querySelector("#batch-util-reset")?.addEventListener("click", () => {
+      _batchManualInclude.clear();
+      _batchManualExclude.clear();
+      _reRenderBatch();
+    });
+  } else {
+    utilPanel.className = "hidden";
+    utilPanel.innerHTML = "";
   }
 
   // Data source watermark
@@ -1828,7 +1956,8 @@ function renderBatchReview(data) {
         slaSrcEl.style.borderColor = THEME.green;
         slaSrcEl.style.color = THEME.green;
       } else {
-        slaSrcEl.textContent = `SLA: System Default (${data.kpis.daily_limit_hrs || 6}h)`;
+        const defHrs = (data.pe_defaults?.daily_hrs || 6).toFixed(1);
+        slaSrcEl.textContent = `SLA: System Default (Daily ${defHrs}h)`;
         slaSrcEl.style.borderColor = THEME.amber;
         slaSrcEl.style.color = THEME.amber;
       }
@@ -1836,30 +1965,62 @@ function renderBatchReview(data) {
   }
 
   // 1. KPI cards
-  // Sync the global SLA_DAILY_HRS to the resolved ceiling from this dataset
-  // so every chart/component that reads it reflects the actual customer SLA,
-  // not the hardcoded 6h default.
-  if (data.kpis?.daily_limit_hrs) {
-    SLA_DAILY_HRS = Number(data.kpis.daily_limit_hrs) || SLA_DAILY_HRS;
+  // Sync the global SLA_DAILY_HRS to the pe_defaults (fresh from server) if
+  // available, else from kpis. pe_defaults is always current pe_config values
+  // so it never carries stale cached ceiling values.
+  if (data.pe_defaults?.daily_hrs) {
+    SLA_DAILY_HRS = Number(data.pe_defaults.daily_hrs) || SLA_DAILY_HRS;
+  } else if (data.kpis?.sla_ceiling || data.kpis?.daily_limit_hrs) {
+    // FIX 6.1: sla_ceiling is the resolved per-sub-app ceiling (more accurate than global default)
+    SLA_DAILY_HRS = Number(data.kpis.sla_ceiling || data.kpis.daily_limit_hrs) || SLA_DAILY_HRS;
   }
-  renderBatchKpis(data.kpis);
+
+  // ── Client-side KPI recompute from filtered job list ──────────
+  // When jobs are excluded/included, recompute the fleet SLA buffer from the
+  // current visible set so the doughnut gauge updates instantly — no server
+  // round-trip needed.
+  const _filteredJobs = filtered.top_jobs || [];
+  const _displayKpis = (() => {
+    if (!_filteredJobs.length) return data.kpis;
+    const validBuffers = _filteredJobs.map(j => j.buffer_pct ?? 0);
+    const avgBuf = validBuffers.reduce((s, v) => s + v, 0) / validBuffers.length;
+    const avgBufRounded = Math.round(avgBuf * 10) / 10;
+    const status = avgBuf >= 50 ? "EXCELLENT" : avgBuf >= 30 ? "HEALTHY" : avgBuf >= 15 ? "CAUTION" : "CRITICAL";
+    const breachCount = validBuffers.filter(b => b < 0).length;
+    const critCount = validBuffers.filter(b => b >= 0 && b < 10).length;
+    return {
+      ...data.kpis,
+      fleet_sla_buffer: { ...((data.kpis?.fleet_sla_buffer) || {}), buffer_pct: avgBufRounded, status },
+      total_breach_jobs: breachCount,
+      total_critical_jobs: critCount,
+    };
+  })();
+
+  renderBatchKpis(_displayKpis);
   renderBatchLayerCards(data);
   renderBatchCoverageStrip(data.data_coverage || null);
-  renderBatchDataWarnings(data.data_coverage?.warnings || []);
-  renderBatchSlaSourceTags(data.sla_source || null, data.kpis);
+  // FIX 6.2: merge data quality warnings from both coverage and kpis.dq_warnings
+  renderBatchDataWarnings([
+    ...(data.data_coverage?.warnings || []),
+    ...(data.kpis?.dq_warnings      || []),
+  ]);
+  renderExcludedJobsPanel(data.data_coverage || null);
+  renderBatchSlaSourceTags(data.sla_source || null, _displayKpis);
 
-  // 2. Charts
-  renderSlaBufferChart(data.kpis);
-  renderWindowTrendChart(data.window || []);
-  renderTopJobsChart(filtered.top_jobs || [], filtered.kpis);
+  // 2. Charts — use filtered data for job-level views
+  renderSlaBufferChart(_displayKpis);
+  renderWindowTrendChart(filtered.window || []);
+  renderTopJobsChart(_filteredJobs, _displayKpis);
 
   // 3. Top 10 breaching jobs table
-  // Pass allJobs (unfiltered) as the excluded context so user can see what was detected
-  renderTopBreachesTable(filtered.top_breaches || [], filtered.kpis, data.top_jobs || []);
+  renderTopBreachesTable(filtered.top_breaches || [], data.kpis);
 
   // 4. Heatmaps (only shown when data is present)
   renderSlaHeatmap(data.sla_heatmap  || null);
   renderHourHeatmap(data.hour_heatmap || null);
+
+  // 5. Show amber banner if BatchSLA XLSX is loaded but not yet applied to KPIs
+  _renderSlaStaleWarningBanner();
 }
 
 
@@ -1869,10 +2030,23 @@ function renderBatchSlaSourceTags(sla, kpis) {
   const tag2 = document.getElementById("chart-window-source-tag");
   const ceiling = document.getElementById("chart-sla-ceiling-tag");
 
+  // ── SLA Baseline Banner ──────────────────────────────────────
+  const banner    = document.getElementById("sla-baseline-banner");
+  const bannerIcon  = document.getElementById("sla-baseline-icon");
+  const bannerTitle = document.getElementById("sla-baseline-title");
+  const bannerDetail = document.getElementById("sla-baseline-detail");
+
   if (sla) {
-    // Determine source label
+    const isMatrix = sla.type === "sla_matrix";
+    // For the banner, always use live pe_defaults (fresh from server) in default
+    // mode so a stale cached sla.daily_hrs never shows wrong values.
+    const pd = window.appData?.batch?.pe_defaults || {};
+    const dailyHrs  = isMatrix ? (sla.daily_hrs  || pd.daily_hrs  || 6.0) : (pd.daily_hrs  || 6.0);
+    const weeklyHrs = isMatrix ? (sla.weekly_hrs || pd.weekly_hrs || 8.0) : (pd.weekly_hrs || 8.0);
+
+    // Determine source label for small chip
     let srcLabel;
-    if (sla.type === "sla_matrix") {
+    if (isMatrix) {
       srcLabel = `From SLA Matrix (${sla.filename || "uploaded"})`;
     } else if (sla.type === "customer_fallback") {
       srcLabel = "From Customer Fallback";
@@ -1888,17 +2062,16 @@ function renderBatchSlaSourceTags(sla, kpis) {
       ? ` · ${matchStats.sla_matrix}/${matchStats.total_jobs} matched`
         + (matchStats.assumed > 0 ? ` (${matchStats.assumed} assumed)` : "")
       : "";
-    const label = `SLA: ${srcLabel}${modelTag}${validTag}${matchTag} · Daily ${sla.daily_hrs?.toFixed(1) || "6.0"}h`;
+    const label = `SLA: ${srcLabel}${modelTag}${validTag}${matchTag} · Daily ${Number(dailyHrs).toFixed(1)}h`;
 
     if (tag1) { tag1.textContent = label; tag1.classList.remove("hidden"); }
     if (tag2) { tag2.textContent = label; tag2.classList.remove("hidden"); }
-    if (ceiling) { ceiling.textContent = `${sla.daily_hrs?.toFixed(1) || "6.0"} h`; }
+    if (ceiling) { ceiling.textContent = `${Number(dailyHrs).toFixed(1)} h`; }
 
-    // Show blocked warning if SLA is assumed
     if (sla.blocked) {
       if (tag1) tag1.style.color = THEME.red;
       if (tag2) tag2.style.color = THEME.red;
-    } else if (sla.type === "sla_matrix") {
+    } else if (isMatrix) {
       if (tag1) tag1.style.color = THEME.green;
       if (tag2) tag2.style.color = THEME.green;
     }
@@ -1911,8 +2084,43 @@ function renderBatchSlaSourceTags(sla, kpis) {
       ).join(" ");
       warnEl.classList.remove("hidden");
     }
-  } else if (kpis) {
-    if (ceiling) { ceiling.textContent = `${kpis.daily_limit_hrs?.toFixed(1) || "6.0"} h`; }
+
+    // ── Render SLA Baseline Banner ───────────────────────────
+    if (banner && bannerTitle && bannerDetail && bannerIcon) {
+      banner.classList.remove("hidden");
+      if (isMatrix) {
+        // Green: real matrix loaded
+        const ms = matchStats || {};
+        const matchLine = ms.total_jobs > 0
+          ? `${ms.sla_matrix || 0}/${ms.total_jobs} jobs matched to contract · ${ms.assumed || 0} using schedule defaults`
+          : "";
+        const schemaLine = sla.schema_type ? `${sla.schema_type.toUpperCase()} model` : "Job-specific model";
+        const details = [schemaLine, matchLine].filter(Boolean).join("  ·  ");
+        bannerIcon.textContent = "✅";
+        bannerTitle.textContent = `SLA Baseline: Customer Matrix — ${sla.filename || "uploaded"}`;
+        bannerDetail.textContent = `Per-job SLA contracts active. Daily ${Number(dailyHrs).toFixed(1)}h · Weekly ${Number(weeklyHrs).toFixed(1)}h${details ? "  ·  " + details : ""}`;
+        banner.className = "mt-2 px-3 py-2 rounded-lg border border-Cgreen/40 bg-Cgreen/5 text-Cgreen text-[11px] flex items-start gap-2";
+      } else {
+        // Amber: defaults only
+        bannerIcon.textContent = "📐";
+        bannerTitle.textContent = `SLA Baseline: System Defaults (Daily ${Number(dailyHrs).toFixed(1)}h · Weekly ${Number(weeklyHrs).toFixed(1)}h)`;
+        bannerDetail.textContent = "No customer SLA matrix uploaded. Compliance findings use PE assumed defaults — indicative only. Upload BatchSLA_info.xlsx to load per-job contract targets.";
+        banner.className = "mt-2 px-3 py-2 rounded-lg border border-Camber/40 bg-Camber/5 text-Camber text-[11px] flex items-start gap-2";
+      }
+    }
+  } else {
+    // No sla object — show defaults from pe_defaults or kpis
+    const pd = window.appData?.batch?.pe_defaults || {};
+    const dailyHrs = pd.daily_hrs || kpis?.daily_limit_hrs || 6.0;
+    const weeklyHrs = pd.weekly_hrs || 8.0;
+    if (ceiling) { ceiling.textContent = `${Number(dailyHrs).toFixed(1)} h`; }
+    if (banner && bannerTitle && bannerDetail && bannerIcon) {
+      banner.classList.remove("hidden");
+      bannerIcon.textContent = "📐";
+      bannerTitle.textContent = `SLA Baseline: System Defaults (Daily ${Number(dailyHrs).toFixed(1)}h · Weekly ${Number(weeklyHrs).toFixed(1)}h)`;
+      bannerDetail.textContent = "No customer SLA matrix uploaded. Upload BatchSLA_info.xlsx to activate per-job SLA contracts.";
+      banner.className = "mt-2 px-3 py-2 rounded-lg border border-Camber/40 bg-Camber/5 text-Camber text-[11px] flex items-start gap-2";
+    }
   }
 }
 
@@ -2032,6 +2240,30 @@ function _populateFailedRunsDrill() {
 }
 
 function renderBatchKpis(k) {
+  // ── FIX 6.3: ENV chip — show TEST or PROD badge ──────────────────────────
+  const _env     = (k?.batch_env || k?.env_type || "").toUpperCase();
+  const _envChip = document.getElementById("batch-env-chip");
+  if (_envChip) {
+    if (_env === "TEST" || _env === "UAT") {
+      _envChip.textContent = _env;
+      _envChip.className   = "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase "
+                           + "tracking-wider bg-amber-500/20 border border-amber-500/40 "
+                           + "text-amber-300 ml-2";
+      _envChip.title       = "This data is from a TEST/UAT environment — not production";
+      _envChip.classList.remove("hidden");
+    } else if (_env === "PROD" || _env === "PRODUCTION") {
+      _envChip.textContent = "PROD";
+      _envChip.className   = "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase "
+                           + "tracking-wider bg-green-500/20 border border-green-500/40 "
+                           + "text-green-300 ml-2";
+      _envChip.title       = "";
+      _envChip.classList.remove("hidden");
+    } else {
+      _envChip.classList.add("hidden");
+    }
+  }
+  // ── end ENV chip ──────────────────────────────────────────────────────────
+
   // Job SLA Compliance (individual job peaks vs SLA)
   const compEl = document.getElementById("bk-compliance");
   if (compEl) {
@@ -2223,8 +2455,8 @@ function renderBatchCoverageStrip(dc) {
   };
 
   const span = dc.date_span_days || 0;
-  badge("cov-30day", "30-Day Evidence",
-    span >= 30 ? "loaded" : span >= 14 ? "partial" : "missing");
+  badge("cov-30day", "15-Day Evidence",
+    span >= 15 ? "loaded" : span >= 7 ? "partial" : "missing");
 
   // SLA source quality from sla_source metadata
   const batchSla = (window.appData.batch || {}).sla_source || {};
@@ -2234,6 +2466,12 @@ function renderBatchCoverageStrip(dc) {
 
   badge("cov-confidence", `Confidence ${dc.confidence || 0}%`,
     dc.confidence >= 80 ? "loaded" : dc.confidence >= 60 ? "partial" : "missing");
+
+  // Data integrity: flag synthetic timestamps prominently
+  if (dc.has_synthetic_timestamps) {
+    badge("cov-confidence", "⛔ SYNTHETIC TIMESTAMPS", "missing");
+  }
+
   badge("cov-waivers", "Waivers", "missing");
   const hasSow = !!(window.appData.sowCompare || window.appData.sow);
   badge("cov-sow", "Volume vs SOW", hasSow ? "loaded" : "missing");
@@ -2247,336 +2485,261 @@ function renderBatchDataWarnings(warnings) {
   if (!warnings || !warnings.length) { wrap.classList.add("hidden"); return; }
 
   wrap.classList.remove("hidden");
-  wrap.innerHTML = warnings.map(w => {
-    const sev = w.severity === "warning" ? THEME.amber : THEME.cyan;
-    return `<div class="rounded-lg border-l-2 px-3 py-2 text-[11px]"
-                 style="border-left-color:${sev};background:${hexA(sev, 0.06)}">
-      <span style="color:${sev}" class="font-bold">${w.severity === "warning" ? "⚠️" : "ℹ️"}</span>
-      <span class="text-Cmuted ml-1">${escapeHtml(w.text)}</span>
+
+  // Sort: critical first, then warning, then info
+  const sevOrder = { critical: 0, warning: 1, info: 2 };
+  const sorted = [...warnings].sort((a, b) =>
+    (sevOrder[a.severity] ?? 3) - (sevOrder[b.severity] ?? 3)
+  );
+
+  wrap.innerHTML = sorted.map(w => {
+    const isCritical = w.severity === "critical";
+    const isWarning  = w.severity === "warning";
+    const sev = isCritical ? THEME.red : isWarning ? THEME.amber : THEME.cyan;
+    const icon = isCritical ? "🚨" : isWarning ? "⚠️" : "ℹ️";
+    const borderW = isCritical ? "3" : "2";
+    const bgOpacity = isCritical ? 0.10 : 0.06;
+    const extraClass = isCritical
+      ? "animate-pulse font-semibold text-[12px]"
+      : "text-[11px]";
+    return `<div class="rounded-lg border-l-${borderW} px-3 py-2 ${extraClass}"
+                 style="border-left-color:${sev};border-left-width:${borderW}px;background:${hexA(sev, bgOpacity)}">
+      <span style="color:${sev}" class="font-bold">${icon}</span>
+      <span class="${isCritical ? 'text-red-300' : 'text-Cmuted'} ml-1">${escapeHtml(w.text)}</span>
     </div>`;
   }).join("");
 }
 
 
-// ─────────────────────────────────────────────────────────────
-// Chart 1 — SLA Buffer Gauge  (SVG arc speedometer, no Chart.js)
-// ─────────────────────────────────────────────────────────────
+// ── Excluded Jobs Panel (SHORT_JOB / INSUFFICIENT / manual excludes) ──────
+function renderExcludedJobsPanel(dataCoverage) {
+  // Inject panel adjacent to batch-data-warnings if not already present
+  const refEl = document.getElementById("batch-data-warnings");
+  if (!refEl) return;
+
+  let panel = document.getElementById("batch-excluded-jobs-panel");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "batch-excluded-jobs-panel";
+    refEl.insertAdjacentElement("afterend", panel);
+  }
+
+  const excluded = dataCoverage?.excluded_jobs || [];
+  if (!excluded.length) {
+    panel.innerHTML = "";
+    panel.classList.add("hidden");
+    return;
+  }
+
+  panel.classList.remove("hidden");
+  const rows = excluded.slice(0, 20).map(j => {
+    const reason  = (j.reason || "EXCLUDED").toUpperCase();
+    const badgeColor = reason === "SHORT_JOB"
+      ? THEME.cyan  : reason === "INSUFFICIENT"
+      ? THEME.muted : reason === "CYCLIC"
+      ? THEME.amber : THEME.blue;
+    return `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono mr-1 mb-1"
+                  style="background:${hexA(badgeColor,0.10)};border:1px solid ${hexA(badgeColor,0.25)};color:${badgeColor}">
+      ${escapeHtml(j.job_name || j.name || "?")}
+      <span class="text-[9px] opacity-70">${reason}</span>
+    </span>`;
+  }).join("");
+
+  panel.innerHTML = `<div class="rounded-lg border border-Cborder/20 px-3 py-2 mt-1 text-[11px]"
+                         style="background:${hexA(THEME.cyan,0.04)}">
+    <span class="text-Cmuted font-semibold mr-2">⊘ ${excluded.length} job(s) excluded from compliance:</span>
+    ${rows}
+    ${excluded.length > 20 ? `<span class="text-Cmuted text-[10px]">…and ${excluded.length - 20} more</span>` : ""}
+  </div>`;
+}
+
+
+
 function renderSlaBufferChart(k) {
   const canvas = document.getElementById("chart-sla-buffer");
   if (!canvas) return;
   destroyChart("slaBuffer");
 
-  // Remember the latest KPIs so the gauge can be redrawn on resize / zoom.
-  _lastBufferKpis = k;
+  const buf = k.fleet_sla_buffer;
+  const bufferPct = buf ? Math.max(0, Math.min(100, buf.buffer_pct)) : 0;
+  const bufferColor =
+    !buf                       ? THEME.muted :
+    buf.status === "EXCELLENT" ? THEME.green :
+    buf.status === "HEALTHY"   ? THEME.green :
+    buf.status === "CAUTION"   ? THEME.amber : THEME.red;
 
-  // Headline metric priority: WINDOW buffer (whole nightly batch window vs SLA)
-  // → fleet buffer (worst single job vs SLA). The window buffer is the real
-  // customer-facing SLA, so it leads when End_Time data is available.
-  const winBuf  = k.window_sla_buffer;
-  const buf      = winBuf || k.fleet_sla_buffer;
-  const isWindow = !!winBuf;
-
-  // ── Extract values ─────────────────────────────────────────
-  // buffer_pct can be negative (BREACH). The gauge arc represents the SIGNED
-  // buffer position clamped to the range [-100, +100] for display.
-  const rawBuf   = buf ? buf.buffer_pct  : null;   // may be negative
-  const status   = buf ? buf.status      : "NO DATA";
-  // Sub-line context: window mode shows worst elapsed window; job mode shows
-  // the worst single job's peak runtime.
-  const peakHrs  = isWindow
-                     ? (winBuf.worst_elapsed_hrs ?? null)
-                     : (k.worst_job_peak ?? null);
-  const slaHrs   = isWindow
-                     ? (winBuf.sla_ceiling_hrs ?? SLA_DAILY_HRS)
-                     : ((k.fleet_sla_buffer?.buffer_hrs != null && (k.worst_job_peak ?? null) != null)
-                         ? +(k.worst_job_peak + k.fleet_sla_buffer.buffer_hrs).toFixed(2)
-                         : (k.sla?.daily_limit_hrs ?? SLA_DAILY_HRS));
-  const peakLabel = isWindow ? "Window" : "Peak";
-
-  // Update subtitle text to match the active metric
-  const _subtitleEl = document.getElementById("chart-sla-subtitle");
-  if (_subtitleEl) {
-    _subtitleEl.textContent = isWindow
-      ? "Headroom between worst daily batch window and the SLA ceiling"
-      : "Headroom between worst-job peak and the daily SLA limit";
-  }
-
-  // Map buffer_pct → needle angle on a 180° arc.
-  // Arc spans -100% (left, 180°) through 0% (middle, 90°) to +100% (right, 0°).
-  // Positive buffer = needle swings right (safe). Negative = swings left (breach).
-  const clampedBuf   = rawBuf == null ? 0 : Math.max(-100, Math.min(100, rawBuf));
-  // Arc maps: -100% → compass 180° (Down), 0% → compass 270° (Left), +100% → compass 360° (Up)
-  // Needle must use the SAME mapping so it points at the arc position.
-  const needleAngle  = 180 + ((clampedBuf + 100) / 200) * 180;  // matches arcDeg zone mapping
-
-  // Zone colors (matching pe_config thresholds)
-  const zoneColor =
-    rawBuf == null            ? THEME.muted  :
-    rawBuf < 0                ? THEME.red    :   // BREACH
-    rawBuf <= 15              ? "#f97316"    :   // AT_RISK  (orange)
-    rawBuf <= 40              ? THEME.amber  :   // LONG_JOB (amber)
-                                THEME.green;     // OK
-
-  const statusLabel =
-    rawBuf == null ? "NO DATA" :
-    rawBuf < 0     ? "BREACH"   :
-    rawBuf <= 15   ? "AT RISK"  :
-    rawBuf <= 40   ? "LONG JOB" : "HEALTHY";
-
-  // Draw via canvas 2D (faster than SVG, same fidelity)
-  const ctx   = canvas.getContext("2d");
-  const dpr   = window.devicePixelRatio || 1;
-  // Reset to CSS-controlled size first, then measure the true rendered rect.
-  // This ensures zoom/resize always reflects the real CSS layout dimensions.
-  canvas.style.width  = "100%";
-  canvas.style.height = "100%";
-  const _rect = canvas.getBoundingClientRect();
-  const W     = _rect.width  || canvas.parentElement?.clientWidth  || 320;
-  const H     = _rect.height || canvas.parentElement?.clientHeight || 256;
-  canvas.width  = Math.round(W * dpr);
-  canvas.height = Math.round(H * dpr);
-  canvas.style.width  = W + "px";
-  canvas.style.height = H + "px";
-  ctx.scale(dpr, dpr);
-
-  const cx    = W / 2;
-  const cy    = H * 0.60;   // centre slightly below midpoint (semicircle sits above)
-  const R     = Math.min(W * 0.34, H * 0.60);   // smaller gauge, more breathing room
-  const thick = R * 0.17;
-
-  // Helper: draw arc segment (degrees, 0=right, CCW)
-  const arcDeg = (start, end, color, width, glow = false) => {
-    const s = (start - 90) * Math.PI / 180;
-    const e = (end   - 90) * Math.PI / 180;
-    ctx.save();
-    if (glow) {
-      ctx.shadowColor = color;
-      ctx.shadowBlur  = 14;
-    }
-    ctx.beginPath();
-    ctx.arc(cx, cy, R - thick / 2, s, e);
-    ctx.strokeStyle = color;
-    ctx.lineWidth   = width;
-    ctx.lineCap     = "butt";
-    ctx.stroke();
-    ctx.restore();
-  };
-
-  // ── Background track ────────────────────────────────────────
-  arcDeg(180, 360, hexA(THEME.border, 0.45), thick);
-
-  // ── Colored zone arcs (BREACH → AT_RISK → LONG_JOB → OK) ──
-  // Degrees: 180° (left) = -100%, 270° (top) = 0%, 360° (right) = +100%
-  // BREACH zone: -100% → 0% = 180° → 270°  (quarter left)
-  // AT_RISK:      0% → 15% = 270° → 297°
-  // LONG_JOB:    15% → 40% = 297° → 342°
-  // OK:          40% → 100% = 342° → 360°
-  arcDeg(180, 270, hexA(THEME.red,   0.25), thick);   // BREACH zone
-  arcDeg(270, 297, hexA("#f97316",   0.25), thick);   // AT_RISK zone
-  arcDeg(297, 342, hexA(THEME.amber, 0.25), thick);   // LONG_JOB zone
-  arcDeg(342, 360, hexA(THEME.green, 0.25), thick);   // OK zone
-
-  // ── Zone boundary ticks ─────────────────────────────────────
-  const drawTick = (pct, label) => {
-    const ang  = 180 + (pct + 100) / 200 * 180;  // same mapping as arcDeg zone arcs
-    const rad  = (ang - 90) * Math.PI / 180;
-    const rIn  = R - thick - 4;
-    const rOut = R + 6;
-    ctx.save();
-    ctx.strokeStyle = hexA(THEME.border, 0.7);
-    ctx.lineWidth   = 1;
-    ctx.setLineDash([2, 2]);
-    ctx.beginPath();
-    ctx.moveTo(cx + rIn  * Math.cos(rad), cy + rIn  * Math.sin(rad));
-    ctx.lineTo(cx + rOut * Math.cos(rad), cy + rOut * Math.sin(rad));
-    ctx.stroke();
-    ctx.setLineDash([]);
-    if (label) {
-      const rLbl = R + 18;
-      ctx.fillStyle = hexA(THEME.muted, 0.75);
-      ctx.font = `500 9px "Sora", sans-serif`;
-      ctx.textAlign   = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, cx + rLbl * Math.cos(rad), cy + rLbl * Math.sin(rad));
-    }
-    ctx.restore();
-  };
-  drawTick(0,  "0%");
-  drawTick(15, "15%");
-  drawTick(40, "40%");
-
-  // ── Active fill arc (from 0% baseline toward current value) ─
-  if (rawBuf != null) {
-    const startDeg = clampedBuf >= 0 ? 270 : 180 + ((clampedBuf + 100) / 100) * 90;
-    const endDeg   = clampedBuf >= 0 ? 270 + (clampedBuf / 100) * 90 : 270;
-    if (Math.abs(endDeg - startDeg) > 0.5) {
-      arcDeg(Math.min(startDeg, endDeg), Math.max(startDeg, endDeg),
-             zoneColor, thick, true);
-    }
-  }
-
-  // ── Zone labels at arc midpoints ────────────────────────────
-  const zoneLabels = [
-    { mid: 225, text: "BREACH", c: THEME.red },
-    { mid: 283, text: "AT RISK", c: "#f97316" },
-    { mid: 320, text: "LONG JOB", c: THEME.amber },
-    { mid: 351, text: "OK", c: THEME.green },
-  ];
-  zoneLabels.forEach(({ mid, text, c }) => {
-    const rad   = (mid - 90) * Math.PI / 180;
-    const rLbl  = R - thick * 0.5;
-    ctx.save();
-    ctx.fillStyle = hexA(c, 0.85);
-    ctx.font = `700 9.5px "Sora", sans-serif`;
-    ctx.shadowColor = c;
-    ctx.shadowBlur  = 4;
-    ctx.textAlign    = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(text, cx + rLbl * Math.cos(rad), cy + rLbl * Math.sin(rad));
-    ctx.restore();
+  // Speedometer zones from pe_config thresholds:
+  // 0–15% buffer = red (AT_RISK), 15–40% = amber (LONG_JOB), 40–100% = green
+  const atRisk  = 15, longJob = 40;
+  charts.slaBuffer = new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels: ["At risk (≤15%)", "Caution (15–40%)", "Healthy (>40%)"],
+      datasets: [{
+        data: [atRisk, longJob - atRisk, 100 - longJob],
+        backgroundColor: [hexA(THEME.red, 0.75), hexA(THEME.amber, 0.75), hexA(THEME.green, 0.75)],
+        borderColor: [THEME.card2, THEME.card2, THEME.card2],
+        borderWidth: 2,
+        hoverOffset: 0,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: "72%",
+      rotation: -90,
+      circumference: 180,
+      layout: { padding: { bottom: 20 } },
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: {
+            color: THEME.muted,
+            font: { family: "Sora", size: 10, weight: "600" },
+            boxWidth: 10,
+            boxHeight: 10,
+          },
+        },
+        tooltip: {
+          backgroundColor: THEME.card,
+          borderColor: THEME.border,
+          borderWidth: 1,
+          titleColor: THEME.white,
+          bodyColor: THEME.muted,
+          callbacks: {
+            label: (ctx) => ctx.label,
+          },
+        },
+      },
+    },
+    plugins: [
+      gaugeNeedlePlugin(bufferPct, bufferColor),
+      centerTextPlugin(buf ? `${_n(buf.buffer_pct).toFixed(0)}%` : "N/A", buf?.status || ""),
+    ],
   });
+}
 
-  // ── Needle — tapered triangle (physical instrument feel) ─────
-  if (rawBuf != null) {
-    const needleRad = (needleAngle - 90) * Math.PI / 180;
-    const tipDist   = R - thick - 4;
-    const baseHalf  = thick * 0.22;
-    const perpRad   = needleRad + Math.PI / 2;
-    const tipX   = cx + tipDist * Math.cos(needleRad);
-    const tipY   = cy + tipDist * Math.sin(needleRad);
-    const baseLX = cx + baseHalf * Math.cos(perpRad);
-    const baseLY = cy + baseHalf * Math.sin(perpRad);
-    const baseRX = cx - baseHalf * Math.cos(perpRad);
-    const baseRY = cy - baseHalf * Math.sin(perpRad);
-    // Triangle body with glow
-    ctx.save();
-    ctx.shadowColor = zoneColor;
-    ctx.shadowBlur  = 22;
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(baseLX, baseLY);
-    ctx.lineTo(baseRX, baseRY);
-    ctx.closePath();
-    ctx.fillStyle = zoneColor;
-    ctx.fill();
-    ctx.restore();
-    // Centre gradient line — white hub → status colour at tip
-    ctx.save();
-    const _ng = ctx.createLinearGradient(cx, cy, tipX, tipY);
-    _ng.addColorStop(0, "#ffffff");
-    _ng.addColorStop(1, zoneColor);
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(tipX, tipY);
-    ctx.strokeStyle = _ng;
-    ctx.lineWidth   = 1.5;
-    ctx.lineCap     = "round";
-    ctx.stroke();
-    ctx.restore();
-    // Pivot ring — radial gradient white → status colour
-    ctx.save();
-    const hubR  = thick * 0.30;
-    const _hg = ctx.createRadialGradient(cx, cy, 0, cx, cy, hubR);
-    _hg.addColorStop(0,    "#ffffff");
-    _hg.addColorStop(0.55, hexA(zoneColor, 0.95));
-    _hg.addColorStop(1,    zoneColor);
-    ctx.beginPath();
-    ctx.arc(cx, cy, hubR, 0, Math.PI * 2);
-    ctx.fillStyle   = _hg;
-    ctx.shadowColor = zoneColor;
-    ctx.shadowBlur  = 10;
-    ctx.fill();
-    ctx.restore();
-    // Bright white inner dot
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, thick * 0.12, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.fill();
-    ctx.restore();
-  }
+// Chart.js plugin: speedometer needle over the half-doughnut
+function gaugeNeedlePlugin(valuePct, color) {
+  return {
+    id: "gaugeNeedle",
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart;
+      const meta = chart.getDatasetMeta(0);
+      if (!chartArea || !meta?.data?.length) return;
+      const arc = meta.data[0];
+      const cx = arc.x;
+      const cy = arc.y;
+      const outerR = arc.outerRadius;
+      const innerR = arc.innerRadius;
+      // -90° rotation, 180° sweep: 0% → pointing left (π), 100% → pointing right (0)
+      const angle = Math.PI + (Math.max(0, Math.min(100, valuePct)) / 100) * Math.PI;
+      const needleLen = (innerR + outerR) / 2;
 
-  // ── Centre text ──────────────────────────────────────────────
-  ctx.save();
-  ctx.textAlign = "center";
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      // Needle body
+      ctx.beginPath();
+      ctx.moveTo(0, -3.5);
+      ctx.lineTo(needleLen, 0);
+      ctx.lineTo(0, 3.5);
+      ctx.closePath();
+      ctx.fillStyle = color || THEME.white;
+      ctx.shadowColor = hexA(color || "#ffffff", 0.5);
+      ctx.shadowBlur = 6;
+      ctx.fill();
+      ctx.restore();
 
-  // Big number
-  const bigText = rawBuf == null ? "N/A" : (rawBuf > 0 ? "+" : "") + rawBuf.toFixed(1) + "%";
-  ctx.fillStyle = rawBuf == null ? THEME.muted : zoneColor;
-  ctx.shadowColor = rawBuf == null ? "transparent" : zoneColor;
-  ctx.shadowBlur  = rawBuf == null ? 0 : 18;
-  ctx.font = `800 ${Math.round(R * 0.28)}px "Sora", sans-serif`;
-  ctx.textBaseline = "alphabetic";
-  ctx.fillText(bigText, cx, cy - R * 0.05);
-  ctx.shadowBlur = 0;
+      // Hub
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = color || THEME.white;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = THEME.card2;
+      ctx.fill();
+      ctx.restore();
+    },
+  };
+}
 
-  // Status label
-  ctx.fillStyle = hexA(zoneColor, 0.9);
-  ctx.font = `700 ${Math.round(R * 0.115)}px "Sora", sans-serif`;
-  ctx.textBaseline = "top";
-  ctx.fillText(statusLabel, cx, cy - R * 0.01);
-
-  // Window / Peak vs SLA sub-line
-  if (peakHrs != null) {
-    ctx.fillStyle = hexA(THEME.muted, 0.75);
-    ctx.font = `500 ${Math.round(R * 0.105)}px "Sora", sans-serif`;
-    ctx.textBaseline = "top";
-    ctx.fillText(`${peakLabel} ${peakHrs.toFixed(2)}h  ·  SLA ${(+slaHrs).toFixed(1)}h`, cx, cy + R * 0.15);
-  }
-  ctx.restore();
-
-  // ── Ambient glow behind canvas — colour responds to status ────
-  const _glowEl = document.getElementById("sla-buffer-glow");
-  if (_glowEl) {
-    _glowEl.style.background = rawBuf == null
-      ? "none"
-      : `radial-gradient(ellipse at center, ${hexA(zoneColor, 0.10)} 0%, transparent 70%)`;
-    _glowEl.style.animation = rawBuf == null ? "none" : "pulseGlow 2.8s ease-in-out infinite";
-  }
-
-  // ── Legend — rendered in HTML below the canvas (no canvas clipping) ──
-  const legendEl = document.getElementById("chart-sla-buffer-legend");
-  if (legendEl) {
-    const legendItems = [
-      { c: THEME.green,  l: "OK (>40%)" },
-      { c: THEME.amber,  l: "Long Job (15–40%)" },
-      { c: "#f97316",    l: "At Risk (0–15%)" },
-      { c: THEME.red,    l: "Breach (<0%)" },
-    ];
-    legendEl.innerHTML = legendItems.map(({ c, l }) =>
-      `<span class="flex items-center gap-1 text-[9px] font-medium" style="color:${hexA(THEME.muted, 0.85)}">`+
-      `<span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:${c};flex-shrink:0"></span>${l}</span>`
-    ).join("");
-  }
+// Chart.js plugin: center text inside the doughnut hole
+function centerTextPlugin(big, sub) {
+  return {
+    id: "centerText",
+    afterDraw(chart) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const cx = (chartArea.left + chartArea.right) / 2;
+      const cy = chartArea.bottom - 8;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = THEME.white;
+      ctx.font = '800 30px "Sora", sans-serif';
+      ctx.fillText(big, cx, cy - 22);
+      ctx.fillStyle = THEME.muted;
+      ctx.font = '700 10px "Sora", sans-serif';
+      ctx.fillText(sub, cx, cy - 4);
+      ctx.restore();
+    },
+  };
 }
 
 
 // ─────────────────────────────────────────────────────────────
-// Chart 2 — Daily Window Trend  (Grafana-style ambient bar chart)
+// Chart 2 — Daily Batch Window (premium bar chart)
 // ─────────────────────────────────────────────────────────────
 function renderWindowTrendChart(winData) {
   const canvas = document.getElementById("chart-window-trend");
   if (!canvas) return;
   destroyChart("windowTrend");
 
+  if (!winData || winData.length === 0) return;
+
   const labels   = winData.map((w) => w.run_date);
-  const counts   = winData.map((w) => w.job_count);
+  const counts   = winData.map((w) => w.job_count || 0);
   const topJobs  = winData.map((w) => w.top_job || "");
   const rawSums  = winData.map((w) => +(w.total_hrs  || 0));
   const rawElaps = winData.map((w) => +(w.elapsed_hrs || 0));
 
-  // Prefer elapsed_hrs (wall-clock) over summed (parallel-inflated)
+  // Prefer elapsed_hrs (wall-clock first_start→last_end) over summed runtime
   const hasElapsed = rawElaps.some(v => v > 0);
   const values  = winData.map((_, i) => hasElapsed && rawElaps[i] > 0 ? rawElaps[i] : rawSums[i]);
 
-  // Grafana-style: color each bar by its SLA zone
-  // OK → cyan-teal, LONG_JOB → amber, AT_RISK → orange, BREACH → red
-  const barColors = values.map(v =>
-    v > SLA_DAILY_HRS           ? THEME.red    :
-    v > SLA_DAILY_HRS * 0.85   ? "#f97316"    :
-    v > SLA_DAILY_HRS * 0.60   ? THEME.amber  :
-                                  THEME.teal
-  );
+  // ── Spike detection: statistical z-score on window values ───
+  const vMean = values.reduce((s, v) => s + v, 0) / values.length;
+  const vStd  = Math.sqrt(values.reduce((s, v) => s + (v - vMean) ** 2, 0) / values.length);
+  // A day is a "spike" if its value is >1.5 std above mean AND above SLA, or >2std
+  const spikeIdxs = new Set(values.map((v, i) => {
+    const z = vStd > 0 ? (v - vMean) / vStd : 0;
+    return (z > 2.0 || (z > 1.5 && winData[i]?.breach)) ? i : -1;
+  }).filter(i => i >= 0));
+
+  // Gradient fills
+  const ctxCanvas = canvas.getContext("2d");
+  const h = canvas.parentElement?.clientHeight || 420;
+  const breachGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
+  breachGrad.addColorStop(0, "rgba(244,63,94,0.95)");
+  breachGrad.addColorStop(1, "rgba(244,63,94,0.40)");
+  const spikeGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
+  spikeGrad.addColorStop(0, "rgba(251,146,60,0.95)");   // orange spike
+  spikeGrad.addColorStop(1, "rgba(251,146,60,0.40)");
+  const okGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
+  okGrad.addColorStop(0, "rgba(59,130,246,0.85)");
+  okGrad.addColorStop(1, "rgba(59,130,246,0.28)");
+
+  const bgColors  = winData.map((w, i) =>
+    w.breach        ? breachGrad :
+    spikeIdxs.has(i) ? spikeGrad :
+    okGrad);
+  const bdrColors = winData.map((w, i) =>
+    w.breach        ? "rgba(244,63,94,0.9)" :
+    spikeIdxs.has(i) ? "rgba(251,146,60,0.9)" :
+    "rgba(59,130,246,0.7)");
 
   // Update subtitle
   const metricTypeEl = document.getElementById("chart-window-metric-type");
@@ -2593,172 +2756,101 @@ function renderWindowTrendChart(winData) {
   let peakIdx = 0, peakVal = 0;
   values.forEach((v, i) => { if (v > peakVal) { peakVal = v; peakIdx = i; } });
 
-  const TOP_N = 5;
-  const topNIdx = new Set(
-    values.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v).slice(0, TOP_N).map(x => x.i)
-  );
-  const breachCount = winData.filter(w => w.breach).length;
+  const breachCount  = winData.filter(w => w.breach).length;
+  const spikeCount   = spikeIdxs.size;
+  const maxCount     = Math.max(...counts, 1);
 
-  // ── SLA zone band plugin ─────────────────────────────────────
-  // Draws translucent colored bands for each SLA zone — like Grafana threshold bands.
-  const zoneBandPlugin = {
-    id: "zoneBands",
-    beforeDatasetsDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      if (!chartArea || !scales.y) return;
-      const { left, right } = chartArea;
-      const toY = v => scales.y.getPixelForValue(v);
-      const maxY = scales.y.max;
-
-      const bands = [
-        { from: SLA_DAILY_HRS,            to: maxY,              color: THEME.red,   alpha: 0.06, label: "BREACH" },
-        { from: SLA_DAILY_HRS * 0.85,     to: SLA_DAILY_HRS,    color: "#f97316",   alpha: 0.05, label: "AT RISK" },
-        { from: SLA_DAILY_HRS * 0.60,     to: SLA_DAILY_HRS * 0.85, color: THEME.amber, alpha: 0.04, label: "LONG JOB" },
-        { from: 0,                         to: SLA_DAILY_HRS * 0.60, color: THEME.teal, alpha: 0.03, label: "OK" },
-      ];
-      ctx.save();
-      bands.forEach(({ from, to, color, alpha, label }) => {
-        const y0 = toY(Math.min(to,   maxY));
-        const y1 = toY(Math.max(from, 0));
-        if (y1 <= y0) return;
-        ctx.fillStyle = hexA(color, alpha);
-        ctx.fillRect(left, y0, right - left, y1 - y0);
-        // Zone label on the right edge
-        ctx.fillStyle = hexA(color, 0.28);
-        ctx.font = `700 8px "Sora", sans-serif`;
-        ctx.textAlign = "right";
-        ctx.textBaseline = "middle";
-        ctx.fillText(label, right - 4, (y0 + y1) / 2);
-      });
-      ctx.restore();
-    },
-  };
-
-  // ── Glow bar + labels plugin ─────────────────────────────────
-  const glowLabelPlugin = {
-    id: "glowLabel",
+  // ── Enhanced canvas plugin: job counts + spike labels ──────
+  const enrichPlugin = {
+    id: "enrichLabels",
     afterDatasetsDraw(chart) {
       const meta = chart.getDatasetMeta(0);
       if (!meta) return;
       const ctx = chart.ctx;
       ctx.save();
 
+      // Adaptive font size: shrink for many bars
+      const nBars = winData.length;
+      const barFontPx = nBars > 25 ? 7 : nBars > 15 ? 8 : 9;
+
       winData.forEach((w, i) => {
         if (!meta.data[i]) return;
-        const bar    = meta.data[i];
-        const isTop  = topNIdx.has(i);
-        const isPeak = i === peakIdx;
-        const v      = values[i];
-        const col    = barColors[i];
-        const isBreach = w.breach;
+        const bar = meta.data[i];
+        const yVal = values[i];
+        const cnt  = counts[i];
+        const isSpike = spikeIdxs.has(i);
+        const isBreak = w.breach;
 
-        // Ambient glow on every bar
-        ctx.save();
-        ctx.shadowColor = hexA(col, isBreach ? 0.55 : 0.30);
-        ctx.shadowBlur  = isBreach ? 12 : 6;
-        ctx.fillStyle   = hexA(col, isBreach ? 0.92 : 0.75);
-        const bw  = bar.width;
-        const bh  = chart.chartArea.bottom - bar.y;
-        ctx.beginPath();
-        ctx.roundRect
-          ? ctx.roundRect(bar.x - bw/2, bar.y, bw, bh, [3, 3, 0, 0])
-          : ctx.rect(bar.x - bw/2, bar.y, bw, bh);
-        ctx.fill();
-        ctx.restore();
-
-        // Breach column full-width tint
-        if (isBreach) {
-          ctx.fillStyle = hexA(THEME.red, 0.07);
-          ctx.fillRect(bar.x - bar.width/2 - 2, chart.chartArea.top,
-                       bar.width + 4, chart.chartArea.bottom - chart.chartArea.top);
-        }
-
-        // Value labels
-        // Peak → ▲ marker + value + job name (always)
-        // Non-peak breach → value only when few breach days (≤5) and differs from peak
-        //   (avoids printing "11.0h" on 15 identical breach bars)
-        // Non-breach top-N → value only (gives scale context)
-        ctx.textAlign = "center";
-        if (isPeak) {
-          ctx.fillStyle = THEME.amber;
-          ctx.font = '700 7px "Sora", sans-serif';
-          ctx.fillText("▲ worst", bar.x, bar.y - 18);
-          const jobLabel = topJobs[i]
-            ? (topJobs[i].length > 13 ? topJobs[i].slice(0, 11) + "…" : topJobs[i])
-            : null;
-          ctx.fillStyle = isBreach ? THEME.red : hexA(THEME.white, 0.95);
-          ctx.font = `bold 12px "Sora", sans-serif`;
-          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - (jobLabel ? 9 : 4));
-          if (jobLabel) {
-            ctx.fillStyle = isBreach ? hexA(THEME.red, 0.85) : hexA(THEME.muted, 0.95);
-            ctx.font = '600 10px "Sora", sans-serif';
-            ctx.fillText(jobLabel, bar.x, bar.y + 5);
+        // --- Job count label INSIDE bar (bottom) ---
+        if (cnt > 0) {
+          const barHeight = Math.abs(bar.base - bar.y);
+          if (barHeight > 18) {
+            ctx.save();
+            ctx.textAlign = "center";
+            ctx.font = `600 ${barFontPx}px "Sora", monospace`;
+            ctx.fillStyle = hexA(THEME.white, 0.55);
+            ctx.fillText(`${cnt}`, bar.x, bar.base - 5);
+            ctx.restore();
           }
-        } else if (isBreach && breachCount <= 5 && Math.abs(v - peakVal) > 0.05) {
-          // Few distinct breach days — worth labelling individually
-          ctx.fillStyle = hexA(THEME.red, 0.85);
-          ctx.font = '600 10.5px "Sora", sans-serif';
-          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - 4);
-        } else if (!isBreach && isTop) {
-          // OK/AT_RISK top-N bars — show value for scale context
-          ctx.fillStyle = hexA(THEME.white, 0.80);
-          ctx.font = '600 10px "Sora", sans-serif';
-          ctx.fillText(v.toFixed(1) + "h", bar.x, bar.y - 4);
         }
 
-        // Failure ✕ marker
-        if (w.has_failures) {
-          const failLabel = w.fail_count > 1 ? `✕${w.fail_count}` : "✕";
-          ctx.fillStyle = THEME.red;
-          ctx.font = 'bold 9px "Sora", sans-serif';
-          ctx.fillText(failLabel, bar.x, Math.min(bar.y - 1, chart.chartArea.bottom - 8) - 11);
+        // --- Hours label above breach / spike bars ---
+        if (isBreak || isSpike) {
+          ctx.textAlign = "center";
+          ctx.font = `bold ${barFontPx + 1}px "Sora", sans-serif`;
+          ctx.fillStyle = isBreak ? THEME.red : THEME.amber;
+          ctx.fillText(yVal.toFixed(1) + "h", bar.x, bar.y - 6);
+        }
+
+        // --- Spike bolt icon above spike bars ---
+        if (isSpike && !isBreak) {
+          ctx.textAlign = "center";
+          ctx.font = `bold ${barFontPx + 2}px "Sora", sans-serif`;
+          ctx.fillStyle = THEME.amber;
+          ctx.fillText("⚡", bar.x, bar.y - 18);
         }
       });
 
-      // Summary breach count top-right
-      if (breachCount > 0) {
-        ctx.fillStyle = hexA(THEME.red, 0.9);
-        ctx.font = 'bold 10px "Sora", sans-serif';
+      // --- Peak marker ---
+      if (peakVal > 0 && meta.data[peakIdx]) {
+        const bar = meta.data[peakIdx];
+        ctx.textAlign = "center";
+        ctx.fillStyle = THEME.amber;
+        ctx.font = `bold 8px "Sora", sans-serif`;
+        ctx.fillText("▲ WORST", bar.x, bar.y - (winData[peakIdx]?.breach ? 20 : 6));
+      }
+
+      // --- Summary badge top-right ---
+      const badgeParts = [];
+      if (breachCount > 0) badgeParts.push(`${breachCount} breach${breachCount > 1 ? "es" : ""}`);
+      if (spikeCount > 0)  badgeParts.push(`${spikeCount} spike${spikeCount > 1 ? "s" : ""}`);
+      if (badgeParts.length > 0) {
+        const txt = badgeParts.join("  ·  ");
+        ctx.font = 'bold 9px "Sora", sans-serif';
         ctx.textAlign = "right";
-        ctx.fillText(
-          `${breachCount}/${winData.length} days breached (${Math.round(breachCount / winData.length * 100)}%)`,
-          chart.chartArea.right - 4, chart.chartArea.top + 12
-        );
+        const tw = ctx.measureText(txt).width;
+        const bx = chart.chartArea.right - tw - 18;
+        const by = chart.chartArea.top + 6;
+        ctx.fillStyle = hexA(THEME.red, 0.14);
+        _roundRect(ctx, bx, by, tw + 14, 18, 4);
+        ctx.fill();
+        ctx.strokeStyle = hexA(THEME.red, 0.35);
+        ctx.lineWidth = 1;
+        _roundRect(ctx, bx, by, tw + 14, 18, 4);
+        ctx.stroke();
+        ctx.fillStyle = THEME.red;
+        ctx.fillText(txt, chart.chartArea.right - 11, by + 13);
       }
       ctx.restore();
     },
   };
 
-  // ── SLA ceiling line plugin ──────────────────────────────────
-  const slaGlowLinePlugin = {
-    id: "slaGlowLine",
-    afterDatasetsDraw(chart) {
-      const yScale = chart.scales.y;
-      if (!yScale) return;
-      const y = yScale.getPixelForValue(SLA_DAILY_HRS);
-      const { left, right } = chart.chartArea;
-      const ctx = chart.ctx;
-      ctx.save();
-      // Glow outer
-      ctx.shadowColor = THEME.red;
-      ctx.shadowBlur  = 8;
-      ctx.strokeStyle = hexA(THEME.red, 0.65);
-      ctx.lineWidth   = 1.5;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.moveTo(left, y);
-      ctx.lineTo(right, y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Label
-      ctx.shadowBlur  = 0;
-      ctx.fillStyle   = THEME.red;
-      ctx.font        = '700 11px "Sora", sans-serif';
-      ctx.textAlign   = "left";
-      ctx.fillText(`SLA ${SLA_DAILY_HRS}h ceiling`, left + 6, y - 5);
-      ctx.restore();
-    },
-  };
+  // ── Spike pattern annotations passed to heatmap ─────────────
+  window._batchWindowSpikes = [...spikeIdxs].map(i => ({ date: labels[i], value: values[i], count: counts[i] }));
+
+  // Bar width auto-sizing: when ≤16 bars use wider bars
+  const nBars = winData.length;
+  const barPct = nBars <= 10 ? 0.85 : nBars <= 20 ? 0.78 : 0.70;
 
   charts.windowTrend = new Chart(canvas, {
     type: "bar",
@@ -2767,95 +2859,157 @@ function renderWindowTrendChart(winData) {
       datasets: [{
         label: hasElapsed ? "Elapsed Window (h)" : "Daily Total (h)",
         data: values,
-        // Transparent — glowLabelPlugin redraws bars with glow
-        backgroundColor: "transparent",
-        borderColor:     "transparent",
-        borderWidth: 0,
-        borderRadius: 4,
-        barPercentage: 0.82,
-        categoryPercentage: 0.88,
+        backgroundColor: bgColors,
+        borderColor: bdrColors,
+        borderWidth: 1.5,
+        borderRadius: 5,
+        borderSkipped: false,
+        barPercentage: barPct,
+        categoryPercentage: 0.85,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { top: 28, right: 16 } },
+      layout: { padding: { top: 38, right: 12, left: 4, bottom: 4 } },
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: hexA(THEME.card, 0.97),
-          borderColor:     hexA(THEME.border, 0.8),
+          backgroundColor: "rgba(11,18,32,0.97)",
+          borderColor: THEME.border,
           borderWidth: 1,
+          titleFont: { family: "Sora", size: 12, weight: "bold" },
+          bodyFont: { family: "Sora", size: 10 },
           titleColor: THEME.white,
-          bodyColor:  THEME.muted,
-          padding: 10,
+          bodyColor: "#94a3b8",
+          padding: { x: 14, y: 10 },
+          cornerRadius: 8,
           displayColors: false,
-          titleFont:  { family: "Sora", size: 11, weight: "700" },
-          bodyFont:   { family: "Sora", size: 10 },
           callbacks: {
-            title: (items) => labels[items[0].dataIndex],
+            title: (items) => {
+              const i = items[0]?.dataIndex;
+              if (i == null) return "";
+              const isSpike = spikeIdxs.has(i);
+              const spike = isSpike ? "  ⚡ SPIKE" : "";
+              return `${labels[i]}  ·  ${counts[i]} job${counts[i] !== 1 ? "s" : ""}${spike}`;
+            },
             label: (ctx) => {
               const i = ctx.dataIndex;
               const lines = [];
-              if (hasElapsed && rawElaps[i] > 0) {
-                lines.push(`Elapsed window : ${rawElaps[i].toFixed(2)}h`);
-                lines.push(`Summed runtime : ${rawSums[i].toFixed(2)}h`);
+              if (hasElapsed) {
+                lines.push(`Elapsed window: ${rawElaps[i].toFixed(2)}h`);
+                if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h`);
               } else {
-                lines.push(`Summed runtime : ${rawSums[i].toFixed(2)}h`);
+                lines.push(`Total (summed): ${rawSums[i].toFixed(2)}h`);
               }
-              lines.push(`Jobs           : ${counts[i]}`);
-              if (topJobs[i]) lines.push(`Top job        : ${topJobs[i]}`);
-              lines.push(`SLA ceiling    : ${SLA_DAILY_HRS}h`);
-              const buf = SLA_DAILY_HRS - values[i];
-              lines.push(`Buffer         : ${buf >= 0 ? "+" : ""}${buf.toFixed(2)}h (${((buf / SLA_DAILY_HRS) * 100).toFixed(0)}%)`);
-              if (winData[i].breach) lines.push("⚠ SLA BREACH");
-              if (winData[i].has_failures) lines.push(`✕ ${winData[i].fail_count ?? 1} job failure(s)`);
+              if (topJobs[i]) lines.push(`Longest job: ${topJobs[i]}`);
+              if (winData[i]?.breach) lines.push(`⚠ SLA BREACH  +${(values[i] - SLA_DAILY_HRS).toFixed(1)}h over limit`);
               return lines;
             },
           },
         },
+        annotation: undefined,
         zoom: _zoomConfig({ mode: "x" }),
       },
       scales: {
         x: {
           ticks: {
-            color: hexA(THEME.muted, 0.95),
-            font: { family: "Sora", size: 11, weight: "600" },
-            maxRotation: winData.length > 12 ? 45 : 0,
-            minRotation: winData.length > 12 ? 30 : 0,
-            maxTicksLimit: winData.length > 20 ? 15 : undefined,
-            autoSkipPadding: 8,
+            color: THEME.muted,
+            font: { family: "Sora", size: nBars > 25 ? 7 : 9 },
+            maxRotation: 45,
+            minRotation: 30,
+            autoSkip: nBars > 30,
+            autoSkipPadding: 6,
           },
-          grid: { color: hexA(THEME.border, 0.25), drawBorder: false },
+          grid: { color: hexA(THEME.border, 0.2), drawBorder: false },
         },
         y: {
           beginAtZero: true,
-          suggestedMax: SLA_DAILY_HRS * 1.35,
           title: {
             display: true,
             text: hasElapsed ? "Elapsed hrs (wall-clock)" : "Hours (summed)",
-            color: hexA(THEME.muted, 0.95),
-            font: { family: "Sora", size: 11, weight: "600" },
+            color: THEME.muted,
+            font: { family: "Sora", size: 10 },
           },
           ticks: {
-            color: hexA(THEME.muted, 0.95),
-            font: { family: "Sora", size: 11 },
-            callback: v => v.toFixed(0) + "h",
+            color: THEME.muted,
+            font: { family: "Sora", size: 10 },
+            stepSize: vMean > 20 ? 10 : vMean > 10 ? 5 : 2,
           },
-          grid: { color: hexA(THEME.border, 0.20), drawBorder: false },
+          grid: { color: hexA(THEME.border, 0.18), drawBorder: false },
         },
       },
     },
-    plugins: [zoneBandPlugin, glowLabelPlugin, slaGlowLinePlugin, crosshairPlugin],
+    plugins: [slaLinePlugin(SLA_DAILY_HRS), enrichPlugin, crosshairPlugin],
   });
 
+  // ── Render spike legend below chart ─────────────────────────
+  _renderWindowSpikePanel(winData, spikeIdxs, values, counts);
+
+  // Export toolbar
   _addChartToolbar(canvas.parentElement, charts.windowTrend, () => {
-    let csv = "Date,Window_Hrs,Summed_Hrs,Job_Count,Breach,Top_Job\n";
+    let csv = "Date,Window_Hrs,Job_Count,Breach,Spike,Top_Job\n";
     winData.forEach((w, i) => {
-      csv += `${w.run_date},${values[i].toFixed(2)},${rawSums[i].toFixed(2)},${counts[i]},${w.breach || false},${topJobs[i]}\n`;
+      csv += `${w.run_date},${values[i].toFixed(2)},${counts[i]},${w.breach || false},${spikeIdxs.has(i)},${topJobs[i]}\n`;
     });
     return csv;
   });
+}
+
+/** Render a compact spike summary panel below the window chart. */
+function _renderWindowSpikePanel(winData, spikeIdxs, values, counts) {
+  let panel = document.getElementById("window-spike-panel");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "window-spike-panel";
+    document.getElementById("chart-window-trend")?.parentElement?.after(panel);
+  }
+
+  if (spikeIdxs.size === 0 && !winData.some(w => w.breach)) {
+    panel.innerHTML = "";
+    return;
+  }
+
+  const items = [];
+  winData.forEach((w, i) => {
+    if (spikeIdxs.has(i) || w.breach) {
+      const type = w.breach ? "breach" : "spike";
+      items.push({ date: w.run_date, val: values[i], count: counts[i], type, top: w.top_job || "" });
+    }
+  });
+
+  panel.className = "mt-2 rounded-xl border px-3 py-2";
+  panel.style.cssText = `border-color:${hexA(THEME.amber,0.3)};background:${hexA(THEME.amber,0.04)}`;
+  panel.innerHTML = `
+    <div class="flex items-center gap-2 mb-1.5">
+      <span class="text-[9px] font-bold uppercase tracking-widest text-Camber">Pattern Detection</span>
+      <span class="text-[8px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">${items.length} anomalous day${items.length !== 1 ? "s" : ""}</span>
+    </div>
+    <div class="flex flex-wrap gap-1.5">
+      ${items.map(it => `
+        <span class="text-[8px] font-mono px-1.5 py-0.5 rounded cursor-default"
+              style="color:${it.type === "breach" ? THEME.red : THEME.amber};background:${hexA(it.type === "breach" ? THEME.red : THEME.amber, 0.1)};border:1px solid ${hexA(it.type === "breach" ? THEME.red : THEME.amber, 0.3)}"
+              title="${it.date}: ${it.val.toFixed(2)}h · ${it.count} jobs${it.top ? " · " + it.top : ""}">
+          ${it.type === "breach" ? "⚠" : "⚡"} ${it.date} ${it.val.toFixed(1)}h
+        </span>`).join("")}
+    </div>
+  `;
+}
+
+
+// Canvas helper: rounded rectangle path (used by chart plugins)
+function _roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
 
 // Chart.js plugin: dashed horizontal SLA line on the y-axis
@@ -2869,7 +3023,8 @@ function slaLinePlugin(slaHrs) {
       const { left, right } = chart.chartArea;
       const ctx = chart.ctx;
       ctx.save();
-      ctx.strokeStyle = THEME.red;
+      // Dashed line
+      ctx.strokeStyle = hexA(THEME.red, 0.7);
       ctx.lineWidth = 1.5;
       ctx.setLineDash([6, 4]);
       ctx.beginPath();
@@ -2877,10 +3032,16 @@ function slaLinePlugin(slaHrs) {
       ctx.lineTo(right, y);
       ctx.stroke();
       ctx.setLineDash([]);
+      // Label badge
+      const label = `${slaHrs}h SLA`;
+      ctx.font = 'bold 9px "Sora", sans-serif';
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = hexA(THEME.red, 0.12);
+      _roundRect(ctx, left + 4, y - 16, tw + 10, 14, 3);
+      ctx.fill();
       ctx.fillStyle = THEME.red;
-      ctx.font = '700 10px "Sora", sans-serif';
       ctx.textAlign = "left";
-      ctx.fillText(`${slaHrs}h SLA`, left + 6, y - 4);
+      ctx.fillText(label, left + 9, y - 6);
       ctx.restore();
     },
   };
@@ -3026,7 +3187,7 @@ function verticalSlaLinePlugin(slaHrs) {
 // Shows true breaches (buffer<0) when present, otherwise shows
 // top 10 jobs by peak hours as a ranked heat-map fallback.
 // ─────────────────────────────────────────────────────────────
-function renderTopBreachesTable(rows, kpis, allJobs) {
+function renderTopBreachesTable(rows, kpis) {
   const tbody    = document.getElementById("top-jobs-tbody");
   const wrap     = document.getElementById("top-jobs-wrap");
   const empty    = document.getElementById("top-jobs-empty");
@@ -3051,86 +3212,119 @@ function renderTopBreachesTable(rows, kpis, allJobs) {
   const isFallback   = trueBreaches.length === 0;
   const defaultSla   = kpis?.daily_limit_hrs ?? SLA_DAILY_HRS;
 
+  // Adaptive mode: PATH C (no XLSX loaded) — breaches are regressions vs history baseline
+  const batchSlaPath  = window.appData?.batch?.kpis?.sla_path
+    || (rows.some(r => r.sla_source === "adaptive") ? "C" : null);
+  const isAdaptiveMode = batchSlaPath === "C"
+    || rows.some(r => r.sla_source === "adaptive");
+
+  // Observation period from batch data
+  const batchKpis = window.appData?.batch?.kpis || window.appData?.batch || {};
+  const dateRange = batchKpis.date_range || [];
+  const dataSpanDays = batchKpis.date_span_days || batchKpis.window_total_days || 0;
+  const dateRangeLabel = dateRange.length === 2
+    ? `${dateRange[0]} → ${dateRange[1]}`
+    : (dataSpanDays > 0 ? `${dataSpanDays} day(s)` : "");
+  const slaCeiling = batchKpis.sla_ceiling || batchKpis.sla_daily_hrs || defaultSla;
+
   // Update title / subtitle dynamically
   if (title) {
-    title.textContent = isFallback
-      ? "Top 10 Jobs by Peak Runtime"
-      : `Top ${trueBreaches.length} Breaching Jobs`;
+    if (isAdaptiveMode && !isFallback) {
+      title.textContent = `Top ${trueBreaches.length} Performance Regressions`;
+    } else {
+      title.textContent = isFallback
+        ? "Top 10 Jobs by Peak Runtime"
+        : `Top ${trueBreaches.length} Breaching Jobs`;
+    }
   }
   if (subtitle) {
-    subtitle.textContent = isFallback
-      ? "No SLA breaches — showing ranked jobs by peak runtime"
-      : `${trueBreaches.length} job(s) exceeded their SLA window`;
+    if (isFallback) {
+      const parts = ["No SLA breaches — showing ranked jobs by peak runtime"];
+      if (dateRangeLabel) parts.push(dateRangeLabel);
+      subtitle.textContent = parts.join(" · ");
+    } else if (isAdaptiveMode) {
+      subtitle.textContent = `${trueBreaches.length} job(s) exceeded adaptive history baseline`
+        + (dateRangeLabel ? ` · ${dateRangeLabel}` : "")
+        + "  ·  No contract SLA loaded";
+    } else {
+      subtitle.textContent = `${trueBreaches.length} job(s) exceeded their SLA window`
+        + (dateRangeLabel ? ` · ${dateRangeLabel}` : "");
+    }
   }
   // Badge
   if (badge) {
     if (!isFallback) {
-      badge.textContent  = `${trueBreaches.length} breach${trueBreaches.length !== 1 ? "es" : ""}`;
-      badge.className    = "metric-badge metric-badge-red";
+      badge.textContent = isAdaptiveMode
+        ? `${trueBreaches.length} regression${trueBreaches.length !== 1 ? "s" : ""}`
+        : `${trueBreaches.length} breach${trueBreaches.length !== 1 ? "es" : ""}`;
+      badge.className = isAdaptiveMode
+        ? "metric-badge metric-badge-amber"
+        : "metric-badge metric-badge-red";
       badge.classList.remove("hidden");
     } else {
       badge.classList.add("hidden");
     }
   }
 
+  // Adaptive mode warning banner
+  const existingAdaptBanner = document.getElementById("top-jobs-adaptive-banner");
+  if (existingAdaptBanner) existingAdaptBanner.remove();
+  if (isAdaptiveMode && !isFallback) {
+    const wrapEl = document.getElementById("top-jobs-wrap");
+    if (wrapEl) {
+      const ab = document.createElement("div");
+      ab.id = "top-jobs-adaptive-banner";
+      ab.className = "mb-2 px-3 py-1.5 rounded border border-Camber/30 bg-Camber/5 text-Camber text-[10px]";
+      ab.textContent = "⚠ Adaptive baseline mode — regressions are vs. historical run patterns, not contracted SLA. Upload BatchSLA_info.xlsx to activate contract targets.";
+      wrapEl.insertAdjacentElement("beforebegin", ab);
+    }
+  }
+
   empty?.classList.add("hidden");
   wrap?.classList.remove("hidden");
 
-  // Add "Show excluded" toggle button into the table header area if there are excluded jobs
-  const excludedInAll = (allJobs || []).filter(j => _isJobExcluded(j));
-  let showExcludedToggle = wrap?.querySelector("#show-excluded-toggle");
-  if (excludedInAll.length > 0) {
-    if (!showExcludedToggle) {
-      showExcludedToggle = document.createElement("button");
-      showExcludedToggle.id = "show-excluded-toggle";
-      showExcludedToggle.dataset.showExcluded = "false";
-      // Insert near the table title area
-      const titleEl = document.getElementById("top-jobs-title");
-      titleEl?.parentElement?.parentElement?.insertAdjacentElement("afterend", showExcludedToggle)
-        ?? wrap?.insertAdjacentElement("beforebegin", showExcludedToggle);
-    }
-    const showing = showExcludedToggle.dataset.showExcluded === "true";
-    showExcludedToggle.className = "text-[9px] font-semibold px-2 py-1 rounded transition mb-1";
-    showExcludedToggle.style.cssText = showing
-      ? `color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.3)}`
-      : `color:${THEME.muted || "#6b7280"};background:transparent;border:1px solid ${hexA(THEME.amber,0.2)}`;
-    showExcludedToggle.textContent = showing
-      ? `⊘ Hiding ${excludedInAll.length} excluded job(s) — click to show`
-      : `⊘ ${excludedInAll.length} excluded job(s) hidden — click to show`;
-    showExcludedToggle.onclick = () => {
-      showExcludedToggle.dataset.showExcluded =
-        showExcludedToggle.dataset.showExcluded === "true" ? "false" : "true";
-      renderTopBreachesTable(rows, kpis, allJobs);
-    };
-  } else if (showExcludedToggle) {
-    showExcludedToggle.remove();
-    showExcludedToggle = null;
-  }
+  // Detect if any job has a real SLA matrix contract — drives dynamic column
+  const hasSlaMatrix = (window.appData?.batch?.sla_source?.type === "sla_matrix")
+    || rows.some(r => r.sla_source === "sla_matrix" || r.sla_contract_type === "JOB_SPECIFIC");
 
-  const showExcluded = showExcludedToggle?.dataset.showExcluded === "true";
+  // Dynamically add/remove SLA column header
+  const slaColTh = document.getElementById("top-jobs-th-sla");
+  const tableHead = tbody?.closest("table")?.querySelector("thead tr");
+  if (tableHead) {
+    if (hasSlaMatrix && !slaColTh) {
+      // Insert after Avg col (3rd th, index 2)
+      const avgTh = tableHead.querySelectorAll("th")[2];
+      if (avgTh) {
+        const th = document.createElement("th");
+        th.id = "top-jobs-th-sla";
+        th.className = "px-2 py-2 font-semibold uppercase tracking-wider text-[10px] text-center";
+        th.title = "SLA ceiling per job — 📋 = from SLA matrix contract · ⚙ = schedule default";
+        th.textContent = "SLA";
+        avgTh.insertAdjacentElement("afterend", th);
+      }
+    } else if (!hasSlaMatrix && slaColTh) {
+      slaColTh.remove();
+    }
+  }
 
   const statusClass = (status) => {
     switch ((status || "").toUpperCase()) {
-      case "BREACH":    return "metric-badge metric-badge-red";
-      case "AT_RISK":   return "metric-badge metric-badge-orange";
-      case "LONG_JOB":  return "metric-badge metric-badge-amber";
-      case "OK":        return "metric-badge metric-badge-green";
-      case "CRITICAL":  return "metric-badge metric-badge-red";
-      case "CAUTION":   return "metric-badge metric-badge-amber";
-      case "HEALTHY":   return "metric-badge metric-badge-green";
-      case "EXCELLENT": return "metric-badge metric-badge-green";
-      default:          return "metric-badge metric-badge-blue";
+      case "BREACH":               return "metric-badge metric-badge-red";
+      case "ADAPTIVE_REGRESSION":  return "metric-badge metric-badge-amber";
+      case "AT_RISK":              return "metric-badge metric-badge-amber";
+      case "CRITICAL":             return "metric-badge metric-badge-amber";
+      case "CAUTION":              return "metric-badge metric-badge-amber";
+      case "LONG_JOB":             return "metric-badge metric-badge-blue";
+      case "HEALTHY":              return "metric-badge metric-badge-green";
+      case "EXCELLENT":            return "metric-badge metric-badge-green";
+      case "OK":                   return "metric-badge metric-badge-green";
+      default:                     return "metric-badge metric-badge-blue";
     }
   };
 
-  const renderRow = (row, isExcluded) => {
+  for (const row of displayRows) {
     const tr = document.createElement("tr");
-    tr.className = isExcluded
-      ? "border-t border-Cborder/20 transition-colors"
-      : "hover:bg-Cblue/5 transition-colors";
-    if (isExcluded) {
-      tr.style.cssText = `opacity:0.45;background:${hexA(THEME.amber,0.04)}`;
-    }
+    tr.className = "hover:bg-Cblue/5 transition-colors";
 
     const bufPct  = typeof row.buffer_pct   === "number" ? row.buffer_pct   : null;
     const slaUsed = typeof row.sla_used_pct === "number" ? row.sla_used_pct : null;
@@ -3138,49 +3332,53 @@ function renderTopBreachesTable(rows, kpis, allJobs) {
     const avg     = typeof row.avg_hrs      === "number" ? row.avg_hrs      : 0;
     const status  = row.buffer_status || (bufPct < 0 ? "BREACH" : "HEALTHY");
     const jobName = row.Job_Name || row.job_name || "—";
-    const reason  = row.utility_reason || "";
 
     const bufferClass =
-      isExcluded    ? "text-Cmuted"  :
       bufPct === null   ? "text-Cmuted"  :
       bufPct < 0        ? "text-Cred font-bold"   :
       bufPct < 10       ? "text-Camber font-bold"  :
       bufPct < 30       ? "text-Camber" : "text-Cgreen";
 
-    const slaBarPct   = Math.min(100, slaUsed ?? (peak / (row.sla_hrs ?? defaultSla) * 100));
-    const slaBarColor = isExcluded ? "#6b7280" : slaBarPct >= 100 ? "#f43f5e" : slaBarPct >= 80 ? "#f59e0b" : "#3b82f6";
-    const jobSla = row.sla_hrs ?? defaultSla;
+    const jobSla = row.sla_hrs ?? slaCeiling;
+    const slaBarPct   = Math.min(100, slaUsed ?? (peak / jobSla * 100));
+    const slaBarColor = slaBarPct >= 100 ? "#f43f5e" : slaBarPct >= 80 ? "#f59e0b" : "#3b82f6";
 
-    const nameCell = isExcluded
-      ? `<div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}" style="text-decoration:line-through">
-           ${escapeHtml(jobName)}
-         </div>
-         <div class="text-[8px] font-mono mt-0.5" style="color:${THEME.amber}">
-           ⊘ excluded${reason ? ` · ${escapeHtml(reason)}` : ""}
-         </div>`
-      : `<div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}">${escapeHtml(jobName)}</div>`;
+    // Buffer display: show buffer% when available, else compute from peak/SLA
+    let bufferDisplay = "—";
+    if (bufPct !== null) {
+      bufferDisplay = (bufPct >= 0 ? "+" : "") + bufPct.toFixed(1) + "%";
+    } else if (peak > 0 && jobSla > 0) {
+      const computedBuf = ((jobSla - peak) / jobSla) * 100;
+      bufferDisplay = (computedBuf >= 0 ? "+" : "") + computedBuf.toFixed(1) + "%";
+    }
 
-    const actionBtn = isExcluded
-      ? `<button class="batch-include-btn text-[10px] px-1.5 py-0.5 rounded hover:opacity-80 transition"
-                 style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}"
-                 data-include-job="${escapeHtml(jobName)}"
-                 title="Include '${escapeHtml(jobName)}' back in analysis">↩ Include</button>`
-      : `<button class="batch-exclude-btn text-[11px] px-1 py-0.5 rounded opacity-40 hover:opacity-100 transition cursor-pointer"
-                 style="color:${THEME.amber};background:${hexA(THEME.amber,0.08)};border:1px solid transparent"
-                 data-exclude-job="${escapeHtml(jobName)}"
-                 title="Exclude '${escapeHtml(jobName)}' from analysis">⊘</button>`;
+    // SLA ceiling column — shows per-job contract source when matrix loaded
+    const rowSlaSource = row.sla_source || (hasSlaMatrix ? "default" : null);
+    const isJobMatrix  = rowSlaSource === "sla_matrix" || row.sla_contract_type === "JOB_SPECIFIC";
+    const slaSourceIcon = isJobMatrix ? "📋" : "⚙";
+    const slaSourceTitle = isJobMatrix
+      ? `Contract SLA: ${jobSla.toFixed(1)}h (from SLA matrix — job-specific)`
+      : `Default SLA: ${jobSla.toFixed(1)}h (schedule default)`;
+    const slaCtx = `title="${slaSourceTitle}"`;
+    const slaCeilCell = hasSlaMatrix
+      ? `<td class="px-2 py-2 text-center text-[10px]" title="${slaSourceTitle}">
+           <span class="${isJobMatrix ? "text-Cgreen" : "text-Camber opacity-60"}">${slaSourceIcon}</span>
+           <span class="ml-1 font-mono text-Cmuted">${jobSla.toFixed(1)}h</span>
+         </td>`
+      : "";
 
     tr.innerHTML = `
-      <td class="px-3 py-2 font-mono text-[11px]" style="color:${isExcluded ? '#9ca3af' : ''}">
-        ${nameCell}
+      <td class="px-3 py-2 font-mono text-Cwhite text-[11px]">
+        <div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}">${escapeHtml(jobName)}</div>
       </td>
-      <td class="px-3 py-2 text-right font-mono font-bold text-[11px]" style="color:${isExcluded ? '#6b7280' : ''}">
+      <td class="px-3 py-2 text-right font-mono font-bold text-Cwhite text-[11px]" ${slaCtx}>
         ${peak.toFixed(2)}h
-        ${!isExcluded && peak > jobSla ? '<span class="ml-1 text-[9px] text-Cred font-bold">▲SLA</span>' : ""}
+        ${peak > jobSla ? `<span class="ml-1 text-[9px] font-bold" style="color:${isAdaptiveMode ? THEME.amber : THEME.red}">${isAdaptiveMode ? "▲BASE" : "▲SLA"}</span>` : ""}
       </td>
       <td class="px-3 py-2 text-right font-mono text-Cmuted text-[11px]">${avg.toFixed(2)}h</td>
+      ${slaCeilCell}
       <td class="px-3 py-2 text-right font-mono text-[11px] ${bufferClass}">
-        ${bufPct !== null ? (bufPct >= 0 ? "+" : "") + bufPct.toFixed(1) + "%" : "—"}
+        ${bufferDisplay}
       </td>
       <td class="px-3 py-2 text-right text-[11px]">
         <div class="flex items-center justify-end gap-1.5">
@@ -3191,40 +3389,47 @@ function renderTopBreachesTable(rows, kpis, allJobs) {
         </div>
       </td>
       <td class="px-3 py-2">
-        ${isExcluded ? `<span class="metric-badge" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">excluded</span>` : `<span class="${statusClass(status)}">${escapeHtml(status)}</span>`}
+        <span class="${statusClass(isAdaptiveMode && status === 'BREACH' ? 'ADAPTIVE_REGRESSION' : status)}">${escapeHtml(isAdaptiveMode && status === "BREACH" ? "REGRESSION" : status)}</span>
       </td>
-      <td class="px-1 py-2 text-center">${actionBtn}</td>
+      <td class="px-1 py-2 text-center">
+        <button class="batch-exclude-btn text-[11px] px-1 py-0.5 rounded opacity-40 hover:opacity-100 transition cursor-pointer"
+                style="color:${THEME.amber};background:${hexA(THEME.amber,0.08)};border:1px solid transparent"
+                data-exclude-job="${escapeHtml(jobName)}"
+                title="Exclude '${escapeHtml(jobName)}' from analysis">⊘</button>
+      </td>
     `;
-
+    // Wire exclude button
     tr.querySelector(".batch-exclude-btn")?.addEventListener("click", (e) => {
       e.stopPropagation();
       _batchManualExclude.add(jobName);
       _batchManualInclude.delete(jobName);
       _reRenderBatch();
     });
-    tr.querySelector(".batch-include-btn")?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      _batchManualExclude.delete(jobName);
-      if ((allJobs || []).find(j => j.Job_Name === jobName)?.is_utility) {
-        _batchManualInclude.add(jobName);
-      }
-      _reRenderBatch();
-    });
-
     tbody.appendChild(tr);
-  };
+  }
 
-  for (const row of displayRows) renderRow(row, false);
-
-  // Append excluded rows when toggle is on
-  if (showExcluded && excludedInAll.length > 0) {
-    const sepRow = document.createElement("tr");
-    sepRow.innerHTML = `<td colspan="7" class="px-3 py-1 text-[9px] font-bold uppercase tracking-wider"
-                                         style="color:${THEME.amber};background:${hexA(THEME.amber,0.06)}">
-                         ⊘ Excluded from SLA analysis — detected as utility / infrastructure jobs
-                        </td>`;
-    tbody.appendChild(sepRow);
-    for (const row of excludedInAll) renderRow(row, true);
+  // ── Contextual SLA summary line under the table ──
+  const existingSummary = document.getElementById("top-jobs-sla-summary");
+  if (existingSummary) existingSummary.remove();
+  const wrapEl = document.getElementById("top-jobs-wrap");
+  if (wrapEl && displayRows.length > 0) {
+    const summaryDiv = document.createElement("div");
+    summaryDiv.id = "top-jobs-sla-summary";
+    summaryDiv.className = "flex items-center gap-3 flex-wrap text-[9px] text-Cmuted mt-2 px-1";
+    const parts = [];
+    parts.push(`SLA ceiling: <span class="font-bold text-Cwhite">${slaCeiling.toFixed(1)}h</span>`);
+    if (dataSpanDays > 0) parts.push(`Observation: <span class="font-bold text-Cwhite">${dataSpanDays}d</span>`);
+    if (isFallback && displayRows.length > 0) {
+      const avgBuf = displayRows.reduce((s, r) => {
+        const b = typeof r.buffer_pct === "number" ? r.buffer_pct : ((slaCeiling - (r.peak_hrs || 0)) / slaCeiling * 100);
+        return s + b;
+      }, 0) / displayRows.length;
+      parts.push(`Avg buffer (top ${displayRows.length}): <span class="font-bold text-Cgreen">${avgBuf.toFixed(1)}%</span>`);
+    }
+    const slaSource = batchKpis.sla_source || "";
+    if (slaSource) parts.push(`Source: ${slaSource}`);
+    summaryDiv.innerHTML = parts.join(' <span class="text-Cborder">·</span> ');
+    wrapEl.insertAdjacentElement("afterend", summaryDiv);
   }
 }
 
@@ -3259,7 +3464,43 @@ const RESOURCE_THRESHOLDS = {
   cpu_ok:   75,  cpu_warn:  90,   // Warning: 75%, Critical: 90%
   mem_ok:   75,  mem_warn:  90,   // Warning: 75%, Critical: 90%
   disk_ok:  75,  disk_warn: 90,   // Warning: 75%, Critical: 90%
+  db_mem_band_low:  80,  db_mem_band_high: 92,  // DB expected band
+  db_mem_warn: 93, db_mem_crit: 95,
 };
+
+// ── DB memory awareness ──────────────────────────────────────
+// Oracle/SQL DB servers pre-allocate SGA/PGA memory — steady 80-92% used
+// is normal and should not alarm users. These helpers rewrite labels.
+function _isDbRole(role) {
+  return /\bDB\b/i.test(role || "");
+}
+function _isDbMemExpected(role, memPct, thresholds) {
+  const t = thresholds || RESOURCE_THRESHOLDS;
+  return _isDbRole(role)
+    && memPct >= (t.db_mem_band_low || 80)
+    && memPct <= (t.db_mem_band_high || 92);
+}
+function _dbMemLabel(memPct, thresholds) {
+  const t = thresholds || RESOURCE_THRESHOLDS;
+  const hi = t.db_mem_band_high || 92;
+  return `${memPct.toFixed(1)}% used — within DB expected range (${t.db_mem_band_low || 80}–${hi}%)`;
+}
+function _rewriteWaveformForDb(wf, role, memUsed, thresholds) {
+  // Rewrite alarming waveform labels for DB servers in expected band
+  if (!_isDbMemExpected(role, memUsed, thresholds) || !wf) return wf;
+  const shape = wf.shape || "";
+  const alarmingShapes = ["plateau", "flat_high"];
+  if (!alarmingShapes.includes(shape)) return wf;
+  const t = thresholds || RESOURCE_THRESHOLDS;
+  return {
+    ...wf,
+    label: "Expected DB Load",
+    icon: "🗄️",
+    risk: "low",
+    meaning: `Memory at ${memUsed.toFixed(0)}% — normal for DB workload. Oracle SGA/PGA keeps memory intentionally high.`,
+    action: `No action needed. Monitor for growth above ${t.db_mem_warn || 93}%.`,
+  };
+}
 
 const GRADE_COLORS = {
   A: THEME.green,
@@ -3293,11 +3534,15 @@ function initResourceView() {
     }
   });
 
+  let _resourceSearchDebounce = null;
   const search = document.getElementById("resource-table-search");
   search?.addEventListener("input", (e) => {
     resourceTableState.filter = (e.target.value || "").trim().toLowerCase();
     _updateClearButton();
-    if (window.appData.resource) renderResourceTable(window.appData.resource.servers);
+    if (_resourceSearchDebounce) clearTimeout(_resourceSearchDebounce);
+    _resourceSearchDebounce = setTimeout(() => {
+      if (window.appData.resource) renderResourceTable(window.appData.resource.servers);
+    }, 150);
   });
   search?.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
@@ -3408,16 +3653,20 @@ async function processResourceServers(servers) {
 
     window.appData.resource = payload;
     window._execCache = null; // invalidate exec dashboard cache
+    _markSessionActive();  // track session boundary
     renderResourceReview(payload);
-    triggerPeConsultant().catch(() => {});  // re-run with resource data now available
 
-    // PE Narrative: fire directly — do NOT rely solely on the findings cascade
-    // because findings may skip early (no batch) or fail, leaving narrative stale.
-    triggerPeNarrative().catch(() => {});
-
-    // Pre-AI: auto-generate findings immediately on resource processing
-    triggerGenerateFindings().catch(() => {});
-    refreshAuditContext().catch(() => {});  // update health bar
+    // Defer cascade API calls — let the browser paint resource KPIs first
+    // before firing network requests that trigger more rendering.
+    // triggerPeConsultant and triggerPeNarrative already have debounces
+    // (600ms / 500ms) and are also fired from triggerGenerateFindings
+    // completion, so a small delay here avoids main-thread contention.
+    setTimeout(() => {
+      triggerPeConsultant().catch(() => {});
+      triggerPeNarrative().catch(() => {});
+      triggerGenerateFindings().catch(() => {});
+      refreshAuditContext().catch(() => {});
+    }, 100);
 
     const k = payload.kpis || {};
 
@@ -3474,21 +3723,37 @@ function renderResourceReview(data) {
     }
   }
 
+  // ── Phase 1: instant — lightweight KPI DOM writes (fast first paint)
   renderResourceKpis(data.kpis || {});
   _renderPriorityAction(data);
-  renderResourceExecutiveSummary(data.executive_summary || null);
-  renderResourceAnomalies(data.anomalies || []);
-  renderResourceBarChart(data.servers || []);
-  renderResourceHeatmap(data.servers || []);
-  renderResourceTable(data.servers || []);
 
-  // Show Metrics Deep Dive card when Azure data is present
-  const ddCard = document.getElementById("resource-deepdive-card");
-  if (ddCard) {
-    const isAzure = (data.servers || []).some(s => s.source === "azure_monitor");
-    if (isAzure) ddCard.classList.remove("hidden");
-    else ddCard.classList.add("hidden");
+  // ── Phase 2: deferred — heavy renders staggered across frames
+  //    Prevents Firefox "this page is slowing down" warning by yielding
+  //    to the browser between Chart.js creation, heatmap, and table builds.
+  const _deferredResourceRenders = [
+    () => renderResourceExecutiveSummary(data.executive_summary || null),
+    () => renderResourceAnomalies(data.anomalies || []),
+    () => renderResourceBarChart(data.servers || []),
+    () => renderResourceHeatmap(data.servers || []),
+    () => renderResourceTable(data.servers || []),
+    () => {
+      // Show Metrics Deep Dive card when Azure data is present
+      const ddCard = document.getElementById("resource-deepdive-card");
+      if (ddCard) {
+        const isAzure = (data.servers || []).some(s => s.source === "azure_monitor");
+        if (isAzure) ddCard.classList.remove("hidden");
+        else ddCard.classList.add("hidden");
+      }
+    },
+  ];
+  let _ri = 0;
+  function _nextResourceRender() {
+    if (_ri < _deferredResourceRenders.length) {
+      _deferredResourceRenders[_ri++]();
+      requestAnimationFrame(_nextResourceRender);
+    }
   }
+  requestAnimationFrame(_nextResourceRender);
 }
 
 // ── E1: Highest Priority Action — single "start here" signal ──
@@ -3502,43 +3767,50 @@ function _renderPriorityAction(data) {
   if (!servers.length) { banner.classList.add("hidden"); return; }
 
   // Find the worst server — highest single metric breach
-  let worst = null, worstMetric = "", worstVal = 0, worstIssue = "";
+  // Memory: convert from used% (backend) to pressure score for comparison
+  let worst = null, worstMetric = "", worstVal = 0, worstIssue = "", worstMemAvail = 0;
   for (const s of servers) {
     const memUsed = s.mem_pct || 0;
+    const memAvailPct = 100 - memUsed;
     const cpuUsed = s.cpu_pct || 0;
     const diskUsed = s.disk_pct || 0;
     const candidates = [
-      { metric: "MEM", val: memUsed, threshold: 80, action: "investigate SGA/PGA allocation or VM sizing" },
-      { metric: "CPU", val: cpuUsed, threshold: 80, action: "check runaway SQL, parallel degree, or vCPU sizing" },
-      { metric: "DISK", val: diskUsed, threshold: 85, action: "review I/O-bound queries or storage throughput limits" },
+      { metric: "MEM", val: memUsed, displayVal: memAvailPct, threshold: 80, action: "investigate SGA/PGA allocation or VM sizing" },
+      { metric: "CPU", val: cpuUsed, displayVal: cpuUsed, threshold: 80, action: "check runaway SQL, parallel degree, or vCPU sizing" },
+      { metric: "DISK", val: diskUsed, displayVal: diskUsed, threshold: 85, action: "review I/O-bound queries or storage throughput limits" },
     ];
     for (const c of candidates) {
       if (c.val > worstVal) {
-        worst = s; worstMetric = c.metric; worstVal = c.val; worstIssue = c.action;
+        worst = s; worstMetric = c.metric; worstVal = c.val; worstIssue = c.action; worstMemAvail = memAvailPct;
       }
     }
   }
 
   if (!worst || worstVal < 70) { banner.classList.add("hidden"); return; }
 
-  const sev = worstVal >= 90 ? THEME.red : worstVal >= 80 ? THEME.amber : THEME.blue;
   const name = (worst.server || "").split(".")[0];
   const status = worst.status || "unknown";
   const wEnv = worst.environment || "";
   const wType = worst.type || "";
   const envTag = wEnv ? ` [${wEnv}]` : "";
+  const t = window.appData?.resource?.kpis?.thresholds || RESOURCE_THRESHOLDS;
 
-  // DB servers with high memory but low CPU → softer action text
-  const isDbExpected = wType === "DB" && worstMetric === "MEM" && worstVal <= 92 && (worst.cpu_pct || 0) < 20;
-  const actionText = isDbExpected
-    ? `DB memory ${worstVal.toFixed(0)}% is within expected SGA/PGA range. Monitor for growth trend above 93%.`
+  // DB servers with high memory in expected band → informational, not alarming
+  const isDbExp = _isDbMemExpected(wType, worstVal, t) && worstMetric === "MEM" && (worst.cpu_pct || 0) < 20;
+  const sev = isDbExp ? THEME.cyan : (worstVal >= 90 ? THEME.red : worstVal >= 80 ? THEME.amber : THEME.blue);
+  const displayVal = worstMetric === "MEM" ? worstMemAvail : worstVal;
+  const displaySuffix = worstMetric === "MEM" ? "avail" : "";
+  const actionText = isDbExp
+    ? `Memory ${worstMemAvail.toFixed(0)}% available — expected for DB workload (SGA/PGA allocation). Monitor for drops below ${100 - (t.db_mem_warn || 93)}%.`
     : `Highest priority: ${worstIssue} before next batch window. This server is the fleet's single biggest risk.`;
+  const titleSuffix = isDbExp ? "EXPECTED DB LOAD" : status.toUpperCase();
 
   banner.classList.remove("hidden");
   banner.style.borderColor = hexA(sev, 0.5);
   banner.style.background = hexA(sev, 0.06);
+  banner.style.setProperty("--alert-color", sev);
   titleEl.style.color = sev;
-  titleEl.textContent = `${name} (${wType}${envTag}) — ${worstMetric} ${worstVal.toFixed(0)}% (${status.toUpperCase()})`;
+  titleEl.textContent = `${name} (${wType}${envTag}) — ${worstMetric} ${displayVal.toFixed(0)}% ${displaySuffix} (${titleSuffix})`;
   detailEl.textContent = actionText;
 }
 
@@ -3556,34 +3828,64 @@ function _updatePriorityFromDeepDive(vms) {
     let spikeCount = 0;
     for (const arr of Object.values(sp)) spikeCount += arr.length;
     if (!spikeCount) continue;
-    const memUsed = st["Available Memory Percentage"]?.min != null ? 100 - st["Available Memory Percentage"].min : 0;
+    const memAvailMin = st["Available Memory Percentage"]?.min ?? 100;
+    const memPressure = 100 - memAvailMin;  // convert to pressure score for comparison
     const cpuMax = st["Percentage CPU"]?.max ?? 0;
-    const score = Math.max(memUsed, cpuMax) + spikeCount * 5;
+    const score = Math.max(memPressure, cpuMax) + spikeCount * 5;
     if (score > worstScore) {
       worstScore = score;
-      const domMetric = memUsed >= cpuMax ? "MEM" : "CPU";
-      const domVal = Math.max(memUsed, cpuMax);
-      worst = { vmName, domMetric, domVal, spikeCount, memUsed, cpuMax };
+      const domMetric = memPressure >= cpuMax ? "MEM" : "CPU";
+      const domVal = domMetric === "MEM" ? memAvailMin : cpuMax;
+      worst = { vmName, domMetric, domVal, spikeCount, memAvailMin, memPressure, cpuMax };
     }
   }
 
   if (!worst) return;
 
-  const sev = worst.domVal >= 90 ? THEME.red : worst.domVal >= 80 ? THEME.amber : THEME.blue;
   const name = worst.vmName.split(".")[0];
   const role = _inferRole(worst.vmName);
   const env = _inferEnv(worst.vmName);
   const envSuffix = env ? ` [${env}]` : "";
-  const action = worst.domMetric === "MEM"
-    ? "investigate SGA/PGA allocation or VM sizing"
-    : "check runaway SQL, parallel degree, or vCPU sizing";
+  const t = window.appData?.resource?.kpis?.thresholds || RESOURCE_THRESHOLDS;
+
+  // DB-aware: if worst metric is MEM and server is DB in expected band, soften
+  // _isDbMemExpected expects used%, so pass 100 - available
+  const isDbExp = worst.domMetric === "MEM" && _isDbMemExpected(role, worst.memPressure, t) && worst.cpuMax < 20;
+  const sev = isDbExp ? THEME.cyan : (worst.domMetric === "MEM" ? (worst.domVal <= 10 ? THEME.red : worst.domVal <= 25 ? THEME.amber : THEME.blue) : (worst.domVal >= 90 ? THEME.red : worst.domVal >= 80 ? THEME.amber : THEME.blue));
+  const action = isDbExp
+    ? `Memory ${worst.domVal.toFixed(0)}% available — expected DB allocation (SGA/PGA). Monitor for drops below ${100 - (t.db_mem_warn || 93)}%.`
+    : worst.domMetric === "MEM"
+    ? `Highest priority: investigate SGA/PGA allocation or VM sizing before next batch window. This is the fleet's single biggest risk right now.`
+    : `Highest priority: check runaway SQL, parallel degree, or vCPU sizing before next batch window. This is the fleet's single biggest risk right now.`;
+  const titleSuffix = isDbExp ? "EXPECTED DB LOAD" : `${worst.spikeCount} anomal${worst.spikeCount > 1 ? "ies" : "y"} in last ${_deepDiveHoursBack}h`;
 
   banner.classList.remove("hidden");
   banner.style.borderColor = hexA(sev, 0.5);
   banner.style.background = hexA(sev, 0.06);
+  banner.style.setProperty("--alert-color", sev);
   titleEl.style.color = sev;
-  titleEl.textContent = `${name} (${role}${envSuffix}) — ${worst.domMetric} ${worst.domVal.toFixed(0)}%, ${worst.spikeCount} spike${worst.spikeCount > 1 ? "s" : ""} in last ${_deepDiveHoursBack}h`;
-  detailEl.textContent = `Highest priority: ${action} before next batch window. This is the fleet's single biggest risk right now.`;
+  // CPU domVal = peak used %; MEM domVal = available %; DISK domVal = I/O consumed %
+  const _metricSfx = worst.domMetric === "MEM" ? "% avail" : worst.domMetric === "CPU" ? "% peak" : "% I/O";
+  // "as of" — find the most recent spike for the dominant metric so the banner
+  // reflects when that peak actually occurred, not just that it was in the window.
+  const _domMetricKey = worst.domMetric === "CPU" ? "Percentage CPU"
+    : worst.domMetric === "MEM" ? "Available Memory Percentage"
+    : "OS Disk Bandwidth Consumed Percentage";
+  const _domSpikes = (vms[worst.vmName]?.spikes || {})[_domMetricKey] || [];
+  let _peakAsOf = "";
+  if (_domSpikes.length) {
+    const _latestSpike = _domSpikes.reduce((a, b) =>
+      new Date(b.peak_time) > new Date(a.peak_time) ? b : a
+    );
+    _peakAsOf = ` · last seen ${new Date(_latestSpike.peak_time).toLocaleString([], {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
+    })} UTC`;
+  } else {
+    // No flagged spike — value is a period stat, not a pinpoint event
+    _peakAsOf = ` · ${_deepDiveHoursBack}h window max`;
+  }
+  titleEl.textContent = `${name} (${role}${envSuffix}) — ${worst.domMetric} ${worst.domVal.toFixed(0)}${_metricSfx}${_peakAsOf}, ${titleSuffix}`;
+  detailEl.textContent = action;
 }
 
 // ── KPI cards ─────────────────────────────────────────────────
@@ -3592,15 +3894,27 @@ let _scoreDecomp = null;  // stored for grade drill-down
 function renderResourceKpis(k) {
   setText("rk-servers", String(k.total_servers ?? 0));
 
-  // Build server type/environment subtitle
-  const typeParts = [`${k.n_app ?? 0} APP`, `${k.n_db ?? 0} DB`];
-  if (k.n_sre) typeParts.push(`${k.n_sre} SRE`);
-  const envParts = [];
-  if (k.n_prod) envParts.push(`${k.n_prod} PROD`);
-  if (k.n_test) envParts.push(`${k.n_test} TEST`);
-  if (k.n_dev)  envParts.push(`${k.n_dev} DEV`);
-  const subtitle = typeParts.join(" · ") + (envParts.length ? ` │ ${envParts.join(" · ")}` : "");
-  setText("rk-servers-sub", subtitle);
+  // Build server type/environment pills
+  const subEl = document.getElementById("rk-servers-sub");
+  if (subEl) {
+    const pills = [];
+    const pill = (label, color) =>
+      `<span class="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md" style="color:${color};background:${hexA(color,.12)};border:1px solid ${hexA(color,.25)}">${label}</span>`;
+    if (k.n_app)  pills.push(pill(`${k.n_app} APP`, THEME.blue));
+    if (k.n_db)   pills.push(pill(`${k.n_db} DB`, '#a855f7'));
+    if (k.n_sre)  pills.push(pill(`${k.n_sre} SRE`, THEME.cyan));
+    if (k.n_prod) pills.push(pill(`${k.n_prod} PROD`, THEME.red));
+    if (k.n_test) pills.push(pill(`${k.n_test} TEST`, THEME.amber));
+    if (k.n_dev)  pills.push(pill(`${k.n_dev} DEV`, THEME.cyan));
+    subEl.innerHTML = pills.length ? pills.join('') : `<span class="text-[9px] text-Cmuted">No servers</span>`;
+  }
+
+  // Live badge for Azure Monitor
+  const liveBadge = document.getElementById("rk-live-badge");
+  if (liveBadge) {
+    const isAzure = (window.appData?.resource?.servers || []).some(s => s.source === "azure_monitor");
+    liveBadge.classList.toggle("hidden", !isAzure);
+  }
 
   const grade = k.fleet_grade || "?";
   const gradeEl = document.getElementById("rk-grade");
@@ -3608,21 +3922,98 @@ function renderResourceKpis(k) {
     if (grade === "N/A") {
       gradeEl.textContent = "N/A";
       gradeEl.style.color = THEME.amber;
+      gradeEl.classList.remove("rk-grade-glow");
     } else {
       gradeEl.textContent = grade;
-      gradeEl.style.color = GRADE_COLORS[grade] || THEME.muted;
+      // Strip asterisk for color lookup (B* → B)
+      const baseGrade = grade.replace("*", "");
+      gradeEl.style.color = GRADE_COLORS[baseGrade] || THEME.muted;
+      gradeEl.classList.add("rk-grade-glow");
     }
   }
   if (grade === "N/A") {
     setText("rk-grade-sub", "Resource data required");
   } else {
-    setText("rk-grade-sub", `Score ${(k.fleet_score ?? 0).toFixed(1)}/100`);
+    const scoreText = `Score ${(k.fleet_score ?? 0).toFixed(1)}/100`;
+    const caveat = k.small_sample ? " (limited sample)" : "";
+    setText("rk-grade-sub", scoreText + caveat);
+  }
+
+  // Grade change indicator (from previous session)
+  const changeEl = document.getElementById("rk-grade-change");
+  if (changeEl && k._prev_grade && k._prev_grade !== grade && grade !== "N/A") {
+    const dir = (GRADE_COLORS[grade] === THEME.green || grade < k._prev_grade) ? "↑" : "↓";
+    const chColor = dir === "↑" ? THEME.green : THEME.red;
+    changeEl.innerHTML = `<span style="color:${chColor}">${dir} FROM ${k._prev_grade}</span>`;
+    changeEl.classList.remove("hidden");
   }
 
   // Store decomposition for drill-down
   _scoreDecomp = k.score_decomposition || null;
 
   const t = k.thresholds || RESOURCE_THRESHOLDS;
+
+  // Animated SVG ring gauges (r=29, circ=2πr=182.21)
+  const animateRing = (svgId, val, ok, warn, statusId, ringLabelId, invertColor = false) => {
+    const svg = document.getElementById(svgId);
+    if (!svg) return;
+    const v = Math.max(0, Math.min(100, Number(val) || 0));
+    const ring = svg.querySelector(".rk-ring");
+    const tick = svg.querySelector(".rk-tick");
+    const circ = 2 * Math.PI * 29; // r=29
+
+    // Color by zone
+    let color;
+    if (invertColor) {
+      // For Available % — lower = worse
+      if (v <= warn)        color = "#ef4444";
+      else if (v <= ok)     color = "#f59e0b";
+      else                  color = "#10b981";
+    } else {
+      if (v >= warn)        color = "#ef4444";
+      else if (v >= ok)     color = "#f59e0b";
+      else                  color = "#10b981";
+    }
+    ring.setAttribute("stroke", color);
+    ring.setAttribute("stroke-dasharray", circ.toFixed(2));
+
+    // Animate fill — set dashoffset to represent value
+    const offset = circ * (1 - v / 100);
+    requestAnimationFrame(() => { ring.style.strokeDashoffset = offset; });
+
+    // Threshold tick
+    if (tick) {
+      const threshVal = invertColor ? warn : warn;
+      const angle = (threshVal / 100) * 360;
+      tick.setAttribute("transform", `rotate(${angle} 36 36)`);
+      tick.setAttribute("opacity", "1");
+    }
+
+    // Ring center label (percentage inside ring)
+    const rlEl = document.getElementById(ringLabelId);
+    if (rlEl) {
+      rlEl.textContent = `${v.toFixed(0)}%`;
+      rlEl.style.color = color;
+    }
+
+    // Status pill below value
+    const statusEl = document.getElementById(statusId);
+    if (statusEl) {
+      let label, pillColor;
+      if (invertColor) {
+        if (v <= warn)       { label = "WARN"; pillColor = "#ef4444"; }
+        else if (v <= ok)    { label = "OK"; pillColor = "#f59e0b"; }
+        else                 { label = "OK"; pillColor = "#10b981"; }
+      } else {
+        if (v >= warn)       { label = "WARN"; pillColor = "#ef4444"; }
+        else if (v >= ok)    { label = "OK"; pillColor = "#f59e0b"; }
+        else                 { label = "OK"; pillColor = "#10b981"; }
+      }
+      statusEl.innerHTML = `<span style="color:${pillColor};background:${hexA(pillColor,.12)};border:1px solid ${hexA(pillColor,.3)}" class="rk-status-pill">${label}</span>`;
+      statusEl.classList.remove("hidden");
+    }
+  };
+
   const setMetric = (id, val, ok, warn) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -3630,31 +4021,108 @@ function renderResourceKpis(k) {
     el.style.color = metricColor(val ?? 0, ok, warn);
   };
   setMetric("rk-cpu",  k.avg_cpu,  t.cpu_ok,  t.cpu_warn);
-  setMetric("rk-mem",  k.avg_mem,  t.mem_ok,  t.mem_warn);
+
+  // CPU fleet detail line — peak, p95, count above warn
+  const cpuDetailEl = document.getElementById("rk-cpu-fleet-detail");
+  if (cpuDetailEl) {
+    const parts = [];
+    if (k.cpu_peak_p95 != null) parts.push(`p95 peak: ${k.cpu_peak_p95.toFixed(1)}%`);
+    if (k.cpu_above_warn > 0)  parts.push(`${k.cpu_above_warn} server(s) ≥${t.cpu_warn}%`);
+    cpuDetailEl.textContent = parts.length ? parts.join(" · ") : `Warn ≥${t.cpu_warn}%`;
+  }
+  // Memory: show Available % (Azure native) — convert from backend's used %
+  const avgMemAvail = k.avg_mem != null ? 100 - k.avg_mem : null;
+  const memAvailEl = document.getElementById("rk-mem");
+  if (memAvailEl && avgMemAvail != null) {
+    memAvailEl.textContent = `${avgMemAvail.toFixed(1)}%`;
+    // Invert color: low available = red
+    memAvailEl.style.color = avgMemAvail <= (100 - t.mem_warn) ? THEME.red
+      : avgMemAvail <= (100 - t.mem_ok) ? THEME.amber : THEME.green;
+  }
+
+  // Memory fleet detail line: Avg · Min · N/M below floor
+  const memFleetDetailEl = document.getElementById("rk-mem-fleet-detail");
+  if (memFleetDetailEl && avgMemAvail != null) {
+    const minAvail  = k.mem_avail_min;
+    const p95Avail  = k.mem_avail_p95;
+    const belowFloor = k.mem_below_floor ?? 0;
+    const floor      = k.mem_avail_floor ?? (100 - t.mem_warn);
+    const nKnown     = k.known_servers || 1;
+    const parts = [`Avg ${avgMemAvail.toFixed(1)}%`];
+    if (minAvail != null)  parts.push(`Min ${minAvail.toFixed(1)}%`);
+    if (p95Avail != null)  parts.push(`p5 ${p95Avail.toFixed(1)}%`);
+    if (belowFloor > 0)    parts.push(`${belowFloor}/${nKnown} below ${floor}%`);
+    memFleetDetailEl.textContent = parts.join(" · ");
+    memFleetDetailEl.style.color = belowFloor > 0 ? THEME.red : (minAvail != null && minAvail < floor ? THEME.amber : THEME.muted);
+  }
   setMetric("rk-disk", k.avg_disk, t.disk_ok, t.disk_warn);
 
-  drawDonutRing("rk-cpu-ring",  k.avg_cpu  ?? 0, RESOURCE_THRESHOLDS.cpu_warn);
-  drawDonutRing("rk-mem-ring",  k.avg_mem  ?? 0, RESOURCE_THRESHOLDS.mem_warn);
-  drawDonutRing("rk-disk-ring", k.avg_disk ?? 0, RESOURCE_THRESHOLDS.disk_warn);
+  animateRing("rk-cpu-svg",  k.avg_cpu  ?? 0, t.cpu_ok,  t.cpu_warn,  "rk-cpu-status",  "rk-cpu-ring-label");
+  // Memory ring: show available % with inverted fill (full ring = 100% available = healthy)
+  animateRing("rk-mem-svg",  avgMemAvail ?? 0, 100 - t.mem_warn, 100 - t.mem_ok,  "rk-mem-status",  "rk-mem-ring-label", true);
+  animateRing("rk-disk-svg", k.avg_disk ?? 0, t.disk_ok, t.disk_warn, "rk-disk-status", "rk-disk-ring-label");
 
-  const healthEl = document.getElementById("rk-health");
-  if (healthEl) {
+  // DB memory band helper — show conversion + DB expected band when DB servers present
+  const memSubEl = document.getElementById("rk-mem-sub");
+  const memFormulaEl = document.getElementById("rk-mem-formula");
+  const avgMem = k.avg_mem ?? 0;
+  const availPctDisplay = avgMemAvail != null ? avgMemAvail.toFixed(1) : null;
+  // Show the Available % with Azure context
+  if (memFormulaEl && availPctDisplay !== null) {
+    memFormulaEl.innerHTML = `Azure Available ≈ <span style="color:${THEME.white}">${availPctDisplay}%</span>`;
+  }
+  if (memSubEl && (k.n_db || 0) > 0) {
+    const loAvail = 100 - (t.db_mem_band_high || 92);  // 8% available
+    const hiAvail = 100 - (t.db_mem_band_low || 80);    // 20% available
+    if (avgMemAvail >= loAvail && avgMemAvail <= hiAvail) {
+      memSubEl.innerHTML = `<span style="color:${THEME.cyan}">DB expected: ${loAvail}–${hiAvail}% avail</span> · <span class="text-Cmuted">SGA/PGA steady</span>`;
+    } else if (avgMemAvail < loAvail) {
+      memSubEl.innerHTML = `<span style="color:${THEME.amber}">Below DB band (<${loAvail}% avail)</span>`;
+    } else {
+      memSubEl.textContent = `${avgMemAvail.toFixed(0)}% available`;
+    }
+  }
+
+  // Health card — colored number badges (not plain text)
+  const badgesEl = document.getElementById("rk-health-badges");
+  if (badgesEl) {
     const c = k.n_critical ?? 0;
     const w = k.n_warning  ?? 0;
     const o = k.n_healthy  ?? 0;
     const a = k.n_agg_trap ?? 0;
     const d = k.n_dual_pressure ?? 0;
-    let html =
-      `<span style="color:${THEME.red}">${c}C</span> ` +
-      `<span style="color:${THEME.amber}">${w}W</span> ` +
-      `<span style="color:${THEME.green}">${o}✓</span>`;
-    if (a > 0) {
-      html += ` <span style="color:${THEME.cyan}" title="${a} server(s) with aggregation trap (false alarm)">${a}🔬</span>`;
-    }
-    if (d > 0) {
-      html += ` <span style="color:${THEME.red}" title="${d} server(s) under dual CPU+Memory pressure">${d}⚡</span>`;
-    }
-    healthEl.innerHTML = html;
+    const badge = (n, label, color, pulse) =>
+      `<div class="flex flex-col items-center gap-1">
+        <span class="inline-flex items-center justify-center rounded-lg font-extrabold ${pulse ? 'animate-pulse' : ''}" style="width:36px;height:36px;font-size:1.3rem;color:${color};background:${hexA(color,.1)};border:1px solid ${hexA(color,.3)}">${n}</span>
+        <span class="text-[7px] font-bold uppercase tracking-wider" style="color:${color}">${label}</span>
+      </div>`;
+    let html = badge(c, 'Crit', THEME.red, c > 0) + badge(w, 'Warn', THEME.amber, false) + badge(o, 'OK', THEME.green, false);
+    if (a > 0) html += `<div class="flex flex-col items-center gap-1"><span class="inline-flex items-center justify-center rounded-lg font-extrabold" style="width:28px;height:28px;font-size:.9rem;color:${THEME.cyan};background:${hexA(THEME.cyan,.1)};border:1px solid ${hexA(THEME.cyan,.3)}" title="${a} aggregation artifact(s)">${a}</span><span class="text-[7px] font-bold uppercase tracking-wider" style="color:${THEME.cyan}">🔬</span></div>`;
+    if (d > 0) html += `<div class="flex flex-col items-center gap-1"><span class="inline-flex items-center justify-center rounded-lg font-extrabold" style="width:28px;height:28px;font-size:.9rem;color:${THEME.red};background:${hexA(THEME.red,.1)};border:1px solid ${hexA(THEME.red,.3)}" title="${d} dual pressure">${d}</span><span class="text-[7px] font-bold uppercase tracking-wider" style="color:${THEME.red}">⚡</span></div>`;
+    badgesEl.innerHTML = html;
+  }
+
+  // Glowing health dots
+  const dotsEl = document.getElementById("rk-health-dots");
+  if (dotsEl) {
+    const c = k.n_critical ?? 0, w = k.n_warning ?? 0, o = k.n_healthy ?? 0;
+    let dots = '';
+    if (c > 0) dots += `<span class="w-2 h-2 rounded-full status-dot-red animate-pulse"></span>`;
+    if (w > 0) dots += `<span class="w-2 h-2 rounded-full status-dot-amber"></span>`;
+    dots += `<span class="w-2 h-2 rounded-full status-dot-green"></span>`;
+    dotsEl.innerHTML = dots;
+  }
+
+  // Health verdict pill
+  const verdictEl = document.getElementById("rk-health-verdict");
+  if (verdictEl) {
+    const c = k.n_critical ?? 0, w = k.n_warning ?? 0;
+    let label, color;
+    if (c > 0)      { label = "CRITICAL"; color = THEME.red; }
+    else if (w > 0) { label = "WARNING"; color = THEME.amber; }
+    else            { label = "HEALTHY"; color = THEME.green; }
+    verdictEl.innerHTML = `<span class="text-[8px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md" style="color:${color};background:${hexA(color,.12)};border:1px solid ${hexA(color,.3)}">${label}</span>`;
+    verdictEl.classList.remove("hidden");
   }
 }
 
@@ -3676,6 +4144,11 @@ function toggleGradeDecomp() {
   }
 
   const d = _scoreDecomp;
+  if (!d.components || !Array.isArray(d.components)) {
+    body.innerHTML = `<div class="text-xs text-Cmuted">Score components unavailable.</div>`;
+    card.classList.remove("hidden");
+    return;
+  }
   const colorMap = { blue: THEME.blue, cyan: THEME.cyan, purple: THEME.purple, red: THEME.red, amber: THEME.amber };
 
   // Waterfall bars
@@ -3751,7 +4224,7 @@ function renderResourceExecutiveSummary(exec) {
     ).join(" ");
     falseAlarmsHtml = `
       <div class="mt-3 flex flex-wrap items-center gap-2">
-        <span class="text-[9px] font-bold uppercase tracking-wider text-Ccyan">🔬 FALSE ALARMS (${exec.false_alarms.length})</span>
+        <span class="text-[9px] font-bold uppercase tracking-wider text-Ccyan">🔬 Aggregation Artifacts (${exec.false_alarms.length})</span>
         ${faTags}
       </div>`;
   }
@@ -3759,15 +4232,17 @@ function renderResourceExecutiveSummary(exec) {
   // Bottlenecks — compact 2-line cards (max 48px collapsed)
   let bottlenecksHtml = "";
   if (exec.bottlenecks && exec.bottlenecks.length) {
+    // Separate expected (DB within operating range) from actionable items
+    const allExpected = exec.bottlenecks.every(bn => (bn.issues || []).join(' ').includes("expected range for DB"));
     const bnRows = exec.bottlenecks.map(bn => {
       const primaryIssue = (bn.issues || []).join(' · ');
       const words = primaryIssue.split(/\s+/);
       const truncated = words.length > 12 ? words.slice(0, 12).join(' ') + '…' : primaryIssue;
-      // DB servers with expected memory range → amber (informational), not red (alarm)
+      // DB servers with expected memory range → muted (informational), not red (alarm)
       const isExpected = primaryIssue.includes("expected range for DB");
-      const cardColor = isExpected ? THEME.amber : THEME.red;
-      const statusLabel = isExpected ? "EXPECTED" : bn.status;
-      const statusColor = isExpected ? THEME.green : (STATUS_COLORS[bn.status] || THEME.muted);
+      const cardColor = isExpected ? THEME.muted : THEME.red;
+      const statusLabel = isExpected ? "EXPECTED DB LOAD" : bn.status;
+      const statusColor = isExpected ? THEME.cyan : (STATUS_COLORS[bn.status] || THEME.muted);
       const bnEnv = bn.environment || "";
       const bnEnvColor = bnEnv === "PROD" ? THEME.red : bnEnv === "TEST" ? THEME.amber : bnEnv === "DEV" ? THEME.cyan : "";
       const bnEnvBadge = bnEnv ? ` <span class="text-[8px] font-bold uppercase px-1 py-0.5 rounded" style="color:${bnEnvColor};background:${hexA(bnEnvColor,0.12)}">${bnEnv}</span>` : "";
@@ -3780,18 +4255,29 @@ function renderResourceExecutiveSummary(exec) {
         <div class="text-[11px] text-Cmuted truncate mt-0.5">${escapeHtml(truncated)}</div>
       </div>`;
     }).join("");
+    // When all items are expected DB memory, show as monitoring note instead of root cause
+    const sectionIcon = allExpected ? "📋" : "🔥";
+    const sectionLabel = allExpected ? "Monitoring Notes" : "Root Cause Candidates";
+    const sectionColor = allExpected ? "text-Cmuted" : "text-Cred";
     bottlenecksHtml = `
       <div class="mt-3">
-        <div class="text-[9px] font-bold uppercase tracking-wider text-Cred mb-2" style="letter-spacing:0.12em">🔥 Root Cause Candidates (${exec.bottlenecks.length})</div>
+        <div class="text-[9px] font-bold uppercase tracking-wider ${sectionColor} mb-2" style="letter-spacing:0.12em">${sectionIcon} ${sectionLabel} (${exec.bottlenecks.length})</div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-2">${bnRows}</div>
       </div>`;
   }
+
+  // When HEALTHY but has monitoring notes, show "HEALTHY — EXPECTED ALLOCATION"
+  const hasExpectedOnly = exec.bottlenecks?.length > 0 &&
+    exec.bottlenecks.every(bn => (bn.issues || []).join(' ').includes("expected range for DB"));
+  const verdictDisplay = (exec.verdict === "HEALTHY" && hasExpectedOnly)
+    ? "HEALTHY — EXPECTED ALLOCATION"
+    : exec.verdict;
 
   card.innerHTML = `
     <div class="rounded-xl border p-4" style="border-color:${hexA(vc, 0.4)};background:${hexA(vc, 0.05)}">
       <div class="flex items-center gap-3 mb-2">
         <span class="text-[10px] font-bold uppercase tracking-wider text-Cmuted" style="letter-spacing:0.12em">Fleet Diagnosis</span>
-        <span class="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md border" style="color:${vc};border-color:${hexA(vc, 0.5)};background:${hexA(vc, 0.12)}">${exec.verdict}</span>
+        <span class="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md border" style="color:${vc};border-color:${hexA(vc, 0.5)};background:${hexA(vc, 0.12)}">${verdictDisplay}</span>
       </div>
       <div class="text-[12px] text-Cwhite leading-relaxed">${escapeHtml(exec.verdict_detail)}</div>
       ${falseAlarmsHtml}
@@ -3829,28 +4315,52 @@ function renderResourceAnomalies(anomalies) {
   }
   const hostArr = Object.values(byHost).sort((a, b) => b.maxZ - a.maxZ);
 
+  // ── Canonical severity vocabulary ──
+  const _sevFromZ = (z) => {
+    const az = Math.abs(z);
+    if (az >= 4) return { label: "CRITICAL", color: THEME.red };
+    if (az >= 3) return { label: "WARNING",  color: THEME.amber };
+    return              { label: "ELEVATED", color: THEME.amber };
+  };
+
   for (const hg of hostArr) {
-    const sev = hg.maxZ >= 3 ? THEME.red : THEME.amber;
-    const sevLabel = hg.maxZ >= 3 ? "CRITICAL" : "ELEVATED";
+    const { label: sevLabel, color: sev } = _sevFromZ(hg.maxZ);
 
     const metricChips = hg.items.map(a => {
-      const mc = a.metric === "cpu" ? THEME.blue : a.metric === "memory" ? THEME.cyan : THEME.purple;
-      return `<span class="inline-flex items-center gap-1 text-[10px]"><span class="w-1.5 h-1.5 rounded-full inline-block" style="background:${mc}"></span><span class="font-semibold" style="color:${mc}">${(a.metric || "").toUpperCase()}</span> <span class="font-mono" style="color:${sev}">${_n(a.value).toFixed(0)}%</span> <span class="text-Cmuted font-mono">z${_n(a.z) >= 0 ? "+" : ""}${_n(a.z).toFixed(1)}</span></span>`;
+      const mKey = (a.metric || "").toLowerCase();
+      const mc = mKey === "cpu" ? THEME.blue : mKey === "memory" ? THEME.cyan : THEME.purple;
+      const zVal = _n(a.z);
+      const zLabel = Math.abs(zVal) >= 4 ? "extreme" : Math.abs(zVal) >= 3 ? "significant" : "elevated";
+      const roleTag = a.role && a.role !== "SERVER" ? ` <span class="text-[7px] opacity-60">[${a.role}]</span>` : "";
+      return `<span class="inline-flex items-center gap-1 text-[10px]"><span class="w-1.5 h-1.5 rounded-full inline-block" style="background:${mc}"></span><span class="font-semibold" style="color:${mc}">${(a.metric || "").toUpperCase()}</span>${roleTag} <span class="font-mono" style="color:${sev}">${_n(a.value).toFixed(0)}%</span> <span class="text-Cmuted text-[8px]" title="Statistical deviation: z=${zVal >= 0 ? '+' : ''}${zVal.toFixed(1)}">${zLabel}</span></span>`;
     }).join(" ");
 
+    // "Why flagged?" drilldown formula
+    const drillRows = hg.items.map(a => {
+      const zVal = _n(a.z);
+      const floorVal = a.floor || "—";
+      return `<div class="text-[9px] text-Cmuted"><span class="font-semibold text-Cwhite">${(a.metric||"").toUpperCase()}</span>: value=${_n(a.value).toFixed(1)}% · z-score=${zVal >= 0 ? '+' : ''}${zVal.toFixed(2)} (≥2.0 threshold) · floor=${floorVal}%${a.role ? ' · role=' + a.role : ''}</div>`;
+    }).join("");
+
     const item = document.createElement("div");
-    item.className = "rounded-lg border p-2 transition";
+    item.className = "rounded-lg border p-2 transition cursor-pointer";
     item.style.borderColor = hexA(sev, 0.3);
     item.style.background = hexA(sev, 0.05);
-    item.style.maxHeight = "48px";
-    item.style.overflow = "hidden";
     item.innerHTML = `
       <div class="flex items-center justify-between">
         <span class="text-[13px] font-mono font-semibold" style="color:${sev}">${escapeHtml(hg.host)}</span>
-        <span class="text-[8px] font-extrabold uppercase tracking-wider px-1.5 py-0.5 rounded-md" style="color:${sev};background:${hexA(sev,0.15)}">${sevLabel}</span>
+        <div class="flex items-center gap-2">
+          <span class="text-[8px] font-extrabold uppercase tracking-wider px-1.5 py-0.5 rounded-md" style="color:${sev};background:${hexA(sev,0.15)}">${sevLabel}</span>
+          <span class="text-[7px] text-Cmuted opacity-60 hover:opacity-100">▸ why?</span>
+        </div>
       </div>
       <div class="flex flex-wrap gap-2 mt-0.5">${metricChips}</div>
+      <div class="anomaly-drill hidden mt-1.5 pt-1.5 border-t border-Cborder/30">${drillRows}</div>
     `;
+    item.addEventListener("click", () => {
+      const drill = item.querySelector(".anomaly-drill");
+      if (drill) drill.classList.toggle("hidden");
+    });
     list.appendChild(item);
   }
 }
@@ -3885,30 +4395,34 @@ function renderResourceBarChart(servers) {
     data: {
       labels,
       datasets: [
-        { label: "CPU %",  data: top.map((s) => s.cpu_pct  || 0), backgroundColor: hexA(THEME.blue,   0.85), borderColor: THEME.blue,   borderWidth: 1, borderRadius: 3 },
-        { label: "Mem %",  data: top.map((s) => s.mem_pct  || 0), backgroundColor: hexA(THEME.cyan,   0.85), borderColor: THEME.cyan,   borderWidth: 1, borderRadius: 3 },
-        { label: "Disk %", data: top.map((s) => s.disk_pct || 0), backgroundColor: hexA(THEME.purple, 0.85), borderColor: THEME.purple, borderWidth: 1, borderRadius: 3 },
+        { label: "CPU %",        data: top.map((s) => s.cpu_pct  || 0), backgroundColor: "rgba(59,130,246,0.8)",  borderColor: "#3b82f6",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "Mem Avail %",  data: top.map((s) => s.mem_pct != null ? 100 - s.mem_pct : 0), backgroundColor: "rgba(6,182,212,0.8)", borderColor: "#06b6d4",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "Disk %",       data: top.map((s) => s.disk_pct || 0), backgroundColor: "rgba(168,85,247,0.8)",  borderColor: "#a855f7",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
       ],
     },
     options: {
       indexAxis: "y",
       responsive: true,
       maintainAspectRatio: false,
-      animation: { duration: 380 },
-      layout: { padding: { right: 12 } },
+      animation: false, // no initial animation — eliminates 400ms canvas paint-loop on load
+      layout: { padding: { right: 16, left: 4, top: 4, bottom: 4 } },
       plugins: {
         legend: {
           position: "bottom",
-          labels: { color: THEME.muted, font: { size: 10 }, boxWidth: 10 },
+          labels: { color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" }, boxWidth: 12, padding: 16, usePointStyle: true, pointStyle: "rectRounded" },
         },
         tooltip: {
-          backgroundColor: THEME.card2,
+          backgroundColor: "rgba(9,14,31,0.95)",
           borderColor: THEME.border,
           borderWidth: 1,
           titleColor: THEME.white,
+          titleFont: { size: 12, weight: "bold" },
           bodyColor: THEME.white,
+          bodyFont: { size: 11 },
+          padding: 10,
+          cornerRadius: 6,
           callbacks: {
-            label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)}%`,
+            label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)}%`,
           },
         },
         zoom: _zoomConfig({ mode: "y" }),
@@ -3916,17 +4430,17 @@ function renderResourceBarChart(servers) {
       scales: {
         x: {
           min: 0, max: 105,
-          grid:   { color: hexA(THEME.border, 0.5), drawBorder: false },
-          ticks:  { color: THEME.muted, font: { size: 10 }, callback: (v) => `${v}%` },
-          title:  { display: true, text: "% Used", color: THEME.muted, font: { size: 10 } },
+          grid:   { color: "rgba(255,255,255,0.04)", drawBorder: false },
+          ticks:  { color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" }, callback: (v) => `${v}%`, stepSize: 25 },
+          title:  { display: true, text: "Utilisation %", color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" } },
         },
         y: {
-          grid:  { color: hexA(THEME.border, 0.25), drawBorder: false },
-          ticks: { color: THEME.muted, font: { size: 10 } },
+          grid:  { display: false },
+          ticks: { color: THEME.white, font: { size: 11, family: "'JetBrains Mono', monospace" }, padding: 8 },
         },
       },
     },
-    plugins: [resourceThresholdLinesPlugin(75, 90), crosshairPlugin],
+    plugins: [resourceThresholdLinesPlugin(75, 90)],
   });
 
   // Enterprise: export toolbar
@@ -3995,28 +4509,36 @@ function renderResourceHeatmap(servers) {
   const barCell = (val, ok = 60, warn = 80, opts = {}) => {
     if (val == null || isNaN(Number(val)) || val < 0) {
       return `<div class="metric-bar-track" title="No data"><div class="metric-bar-fill" style="width:0%;background:#475569"></div></div>
-              <div class="text-[9px] text-Cmuted text-right mt-0.5">N/A</div>`;
+              <div class="text-[10px] text-Cmuted text-right mt-0.5 font-mono" style="min-width:3rem">N/A</div>`;
     }
     const v = Math.max(0, Math.min(100, Number(val)));
-    let color;
-    if (v >= warn)      color = "#ef4444";  // red
-    else if (v >= ok)   color = "#f59e0b";  // amber
-    else                color = "#10b981";  // green
+    let color, gradStart, gradEnd;
+    if (opts.invertColor) {
+      // For metrics where lower = worse (e.g., Available Memory %)
+      if (v <= warn)      { color = "#ef4444"; gradStart = "#dc2626"; gradEnd = "#f87171"; }
+      else if (v <= ok)   { color = "#f59e0b"; gradStart = "#d97706"; gradEnd = "#fbbf24"; }
+      else                { color = "#10b981"; gradStart = "#059669"; gradEnd = "#34d399"; }
+    } else {
+      if (v >= warn)      { color = "#ef4444"; gradStart = "#dc2626"; gradEnd = "#f87171"; }
+      else if (v >= ok)   { color = "#f59e0b"; gradStart = "#d97706"; gradEnd = "#fbbf24"; }
+      else                { color = "#10b981"; gradStart = "#059669"; gradEnd = "#34d399"; }
+    }
     const threshold = opts.threshold ?? warn;
-    const pulse = (opts.pulseAt != null && v >= opts.pulseAt)
+    const pulseActive = opts.pulseAt != null && (opts.invertColor ? v <= opts.pulseAt : v >= opts.pulseAt);
+    const pulse = pulseActive
       ? `<span class="pulse-red" style="position:absolute;right:-3px;top:-3px;width:8px;height:8px;border-radius:50%;background:#ef4444"></span>`
       : "";
-    let bar = `<div class="metric-bar-fill" style="width:${v}%;background:${color}"></div>`;
+    const grad = `linear-gradient(90deg, ${gradStart} 0%, ${gradEnd} 100%)`;
+    let bar = `<div class="metric-bar-fill" style="width:${v}%;background:${grad}"></div>`;
     if (opts.segmented) {
-      // Used-vs-available pattern: solid + striped track
-      bar = `<div class="metric-bar-fill" style="width:${v}%;background:repeating-linear-gradient(45deg,${color} 0 6px,${color}cc 6px 12px)"></div>`;
+      bar = `<div class="metric-bar-fill" style="width:${v}%;background:repeating-linear-gradient(90deg,${gradStart} 0 8px,${gradEnd} 8px 16px)"></div>`;
     }
     return `<div class="metric-bar-track" title="${v.toFixed(1)}% (threshold ${threshold}%)">
               ${bar}
               <div class="metric-bar-threshold" style="left:${threshold}%"></div>
               ${pulse}
             </div>
-            <div class="text-[9px] font-mono text-right mt-0.5" style="color:${color}">${v.toFixed(0)}%${opts.trendArrow ? ' ' + opts.trendArrow : ''}</div>`;
+            <div class="text-[10px] font-mono text-right mt-0.5 tabular-nums" style="color:${color};min-width:3rem">${v.toFixed(0)}%${opts.trendArrow ? ' ' + opts.trendArrow : ''}</div>`;
   };
 
   const rows = top.map((s) => {
@@ -4031,28 +4553,41 @@ function renderResourceHeatmap(servers) {
     const diskTrend = trendArrow(s.disk_trend_pct);
     const serverName = escapeHtml(s.server || s.host || "");
 
-    return `<div class="grid items-center gap-3 py-1.5 border-b border-Cborder/30 cursor-pointer hover:bg-Ccard/60 transition rounded"
-                 style="grid-template-columns:minmax(120px,1fr) 1.6fr 1.6fr 1.6fr"
+    return `<div class="grid items-center gap-4 py-2 border-b border-Cborder/20 cursor-pointer hover:bg-white/[0.03] transition rounded-md px-1"
+                 style="grid-template-columns:minmax(140px,1.2fr) 1.5fr 1.5fr 1.5fr"
                  onclick="filterServerTable('${serverName.replace(/'/g, "\\'")}')" title="Click to filter table to ${serverName}">
       <div class="min-w-0 flex items-center gap-1.5">
-        <span class="text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0"
-              style="color:${typeColor};background:${hexA(typeColor, 0.12)};border:1px solid ${hexA(typeColor, 0.4)}">${escapeHtml(type)}</span>
+        <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0"
+              style="color:${typeColor};background:${hexA(typeColor, 0.12)};border:1px solid ${hexA(typeColor, 0.35)}">${escapeHtml(type)}</span>
         ${sEnvTag}
-        <span class="text-[11px] font-mono text-Cwhite truncate" title="${escapeHtml(s.host || s.server || '')}">${escapeHtml(host)}</span>
+        <span class="text-[11px] font-mono text-Cwhite truncate font-medium" title="${escapeHtml(s.host || s.server || '')}">${escapeHtml(host)}</span>
       </div>
-      <div>${barCell(s.cpu_pct,  RESOURCE_THRESHOLDS.cpu_ok, RESOURCE_THRESHOLDS.cpu_warn, { threshold: RESOURCE_THRESHOLDS.cpu_warn, trendArrow: cpuTrend })}</div>
-      <div>${barCell(s.mem_pct,  RESOURCE_THRESHOLDS.mem_ok, RESOURCE_THRESHOLDS.mem_warn, { threshold: RESOURCE_THRESHOLDS.mem_warn, pulseAt: 95, trendArrow: memTrend })}</div>
+      <div>${barCell(s.cpu_pct,  RESOURCE_THRESHOLDS.cpu_ok, RESOURCE_THRESHOLDS.cpu_warn, { threshold: RESOURCE_THRESHOLDS.cpu_warn, trendArrow: cpuTrend })}${s.cpu_avg_pct != null && Math.abs((s.cpu_pct || 0) - s.cpu_avg_pct) > 5 ? `<div class="text-[7px] text-Cmuted mt-0.5" title="Recent snapshot: ${(s.cpu_pct||0).toFixed(1)}% · Period avg: ${s.cpu_avg_pct.toFixed(1)}%">avg ${s.cpu_avg_pct.toFixed(0)}%</div>` : ""}</div>
+      <div>${barCell(s.mem_pct != null ? 100 - s.mem_pct : null,  100 - RESOURCE_THRESHOLDS.mem_ok, 100 - RESOURCE_THRESHOLDS.mem_warn, { threshold: 100 - RESOURCE_THRESHOLDS.mem_warn, invertColor: true, pulseAt: 5, trendArrow: memTrend })}</div>
       <div>${barCell(s.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn, { threshold: RESOURCE_THRESHOLDS.disk_warn, segmented: true, trendArrow: diskTrend })}</div>
     </div>`;
   }).join("");
 
   wrap.innerHTML = `
-    <div class="grid items-center gap-3 pb-1.5 border-b border-Cborder/60 text-[9px] uppercase tracking-wider text-Cmuted font-bold"
-         style="grid-template-columns:minmax(120px,1fr) 1.6fr 1.6fr 1.6fr">
+    <div class="flex items-center gap-4 pb-2 mb-2 text-[9px] text-Cmuted">
+      <span class="font-bold uppercase tracking-wider text-Cwhite/70">Legend:</span>
+      <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,#059669,#34d399)"></span> OK</span>
+      <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,#d97706,#fbbf24)"></span> Warning</span>
+      <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,#dc2626,#f87171)"></span> Critical</span>
+      <span class="text-Cmuted/60 text-[8px]">| Memory = Available % (Azure native, lower = more pressure) · Disk = I/O BW consumed % (not storage space) · DB servers 8–20% mem available is expected SGA/PGA</span>
+    </div>
+    <div class="grid items-center gap-4 pb-2 border-b border-Cborder/40 text-[10px] uppercase tracking-wider text-Cmuted font-bold px-1"
+         style="grid-template-columns:minmax(140px,1.2fr) 1.5fr 1.5fr 1.5fr">
       <div>Server</div>
-      <div>CPU (threshold ${RESOURCE_THRESHOLDS.cpu_warn}%)</div>
-      <div>Memory (threshold ${RESOURCE_THRESHOLDS.mem_warn}%)</div>
-      <div>Disk (threshold ${RESOURCE_THRESHOLDS.disk_warn}%)</div>
+      <div class="flex items-center gap-1">
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.blue}"></span> CPU (threshold ${RESOURCE_THRESHOLDS.cpu_warn}%)
+      </div>
+      <div class="flex items-center gap-1 cursor-help" title="Available Memory % (Azure native). DB servers typically show 8–20% available (SGA/PGA pre-allocation).">
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.cyan}"></span> Mem Available (< ${100 - RESOURCE_THRESHOLDS.mem_warn}% crit) <span class="text-[7px] opacity-50">ℹ</span>
+      </div>
+      <div class="flex items-center gap-1" title="Azure OS/Data Disk Bandwidth Consumed % — NOT storage space. 0.3% = near-idle I/O. Warn at ${RESOURCE_THRESHOLDS.disk_warn}% of provisioned IOPS/BW quota.">
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.purple}"></span> Disk I/O (threshold ${RESOURCE_THRESHOLDS.disk_warn}%) <span class="text-[7px] opacity-50">ℹ</span>
+      </div>
     </div>
     ${rows}
   `;
@@ -4207,7 +4742,7 @@ function renderResourceTable(servers) {
     const cpuColor = cpuAvail ? metricColor(r.effective_cpu ?? r.cpu_pct ?? 0, cpuOk, cpuWarn) : '';
     let cpuExtra = "";
     if (r.agg_trap) {
-      cpuExtra = ` <span class="text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)};border:1px solid ${hexA(THEME.cyan,0.4)}" title="Aggregation Trap: Max CPU ${cpuVal}% but Avg only ${(r.cpu_avg_pct||0).toFixed(1)}% — false alarm, server is healthy">FALSE ALARM</span>`;
+      cpuExtra = ` <span class="text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)};border:1px solid ${hexA(THEME.cyan,0.4)}" title="Aggregation Artifact: Max CPU ${cpuVal}% but Avg only ${(r.cpu_avg_pct||0).toFixed(1)}% — brief spike, server is healthy">BRIEF SPIKE</span>`;
     }
 
     // Build dual pressure badge
@@ -4221,25 +4756,71 @@ function renderResourceTable(servers) {
     const memGbAvail = r.mem_available !== false && r.mem_gb != null;
     const cpuAvgAvail = r.cpu_available !== false && r.cpu_avg_pct != null;
 
+    // Role-aware memory context tag (logic uses mem_pct = used%, display shows available%)
+    let memContextTag = "";
+    const rType = (r.type || "").toUpperCase();
+    const rEnv = (r.environment || "").toUpperCase();
+    const memAvailPct = memAvail ? 100 - r.mem_pct : 0;
+    if (memAvail) {
+      if (_isDbMemExpected(rType, r.mem_pct)) {
+        memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)}" title="DB expected allocation (SGA/PGA). ${(100 - RESOURCE_THRESHOLDS.db_mem_band_high)}–${(100 - RESOURCE_THRESHOLDS.db_mem_band_low)}% available is normal for DB servers.">DB expected</span>`;
+      } else if (rType === "DB" && r.mem_pct > (RESOURCE_THRESHOLDS.db_mem_band_high || 92)) {
+        memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.red};background:${hexA(THEME.red,0.1)}" title="DB server below expected available (<${(100 - (RESOURCE_THRESHOLDS.db_mem_band_high || 92))}%). Check for memory pressure.">DB high</span>`;
+      } else if (rEnv === "TEST" && r.mem_pct >= 70) {
+        memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.muted,0.1)}" title="TEST environment — low available memory may be tolerated.">TEST tolerated</span>`;
+      } else if (rType === "APP" && r.mem_pct >= RESOURCE_THRESHOLDS.mem_warn) {
+        memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.1)}" title="APP server critically low available memory. Check for memory leak or under-provisioning.">APP elevated</span>`;
+      }
+    }
+
     // Environment badge
     const env = r.environment || "";
     const envColor = env === "PROD" ? THEME.red : env === "TEST" ? THEME.amber : env === "DEV" ? THEME.cyan : THEME.muted;
-    const envBadge = env ? `<span class="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style="color:${envColor};background:${hexA(envColor,0.12)};border:1px solid ${hexA(envColor,0.3)}">${env}</span>` : '<span class="text-Cmuted">—</span>';
+    const envBadge = env ? `<span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style="color:${envColor};background:${hexA(envColor,0.12)};border:1px solid ${hexA(envColor,0.3)}">${env}</span>` : '<span class="text-Cmuted">—</span>';
 
     tr.innerHTML = `
-      <td class="py-2 pr-3 font-semibold text-Cwhite truncate max-w-[220px]" title="${escapeHtml(r.host || r.server)}">${escapeHtml(r.server)}${dualBadge}</td>
-      <td class="py-2 pr-3 text-Cmuted">${escapeHtml(r.type || "")}</td>
-      <td class="py-2 pr-3">${envBadge}</td>
-      <td class="py-2 pr-3 text-right font-mono ${!cpuAvail ? 'text-Cmuted' : ''}" style="color:${cpuColor}">${cpuAvail ? cpuVal + '%' + cpuExtra : '<span title="Data unavailable">N/A</span>'}</td>
-      <td class="py-2 pr-3 text-right font-mono text-Cmuted">${cpuAvgAvail ? r.cpu_avg_pct.toFixed(1) + '%' : 'N/A'}</td>
-      <td class="py-2 pr-3 text-right font-mono ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memAvail ? metricColor(r.mem_pct, RESOURCE_THRESHOLDS.mem_ok, RESOURCE_THRESHOLDS.mem_warn) : ''}">${memAvail ? r.mem_pct.toFixed(1) + '%' : '<span title="Data unavailable">N/A</span>'}</td>
-      <td class="py-2 pr-3 text-right font-mono text-Cmuted">${memGbAvail ? r.mem_gb.toFixed(1) : 'N/A'}</td>
-      <td class="py-2 pr-3 text-right font-mono ${r.disk_pct == null ? 'text-Cmuted' : ''}" style="color:${r.disk_pct != null ? metricColor(r.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn) : ''}">${r.disk_pct != null ? (r.disk_pct).toFixed(1) + '%' : 'N/A'}</td>
-      <td class="py-2 pr-3"><span class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md border" style="${statusPillStyle(r.status)}">${escapeHtml(r.status || "Unknown")}</span></td>
-      <td class="py-2 pr-3 text-Cmuted truncate max-w-[180px]" title="${escapeHtml(r.source_env || "")}">${escapeHtml(truncate(r.source_env || "", 28))}</td>
+      <td class="py-2.5 pr-3 font-semibold text-Cwhite truncate max-w-[220px]" title="${escapeHtml(r.host || r.server)}">${escapeHtml(r.server)}${dualBadge}</td>
+      <td class="py-2.5 pr-3 text-Cmuted">${escapeHtml(r.type || "")}</td>
+      <td class="py-2.5 pr-3">${envBadge}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!cpuAvail ? 'text-Cmuted' : ''}" style="color:${cpuColor}">${cpuAvail ? cpuVal + '%' + cpuExtra : '<span title="Data unavailable">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${cpuAvgAvail ? r.cpu_avg_pct.toFixed(1) + '%' : '<span title="Insufficient data for period average">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memAvail ? (memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_warn) ? THEME.red : memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok) ? THEME.amber : THEME.green) : ''}">${memAvail ? memAvailPct.toFixed(1) + '%' + memContextTag : '<span title="Data unavailable">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${memGbAvail ? r.mem_gb.toFixed(1) : '<span title="Memory capacity not available from source">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${r.disk_pct == null ? 'text-Cmuted' : ''}" style="color:${r.disk_pct != null ? metricColor(r.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn) : ''}">${r.disk_pct != null ? (r.disk_pct).toFixed(1) + '%' : '<span title="Disk data unavailable">N/A</span>'}</td>
+      <td class="py-2.5 pr-3">
+        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border cursor-help" title="${_buildStatusTooltip(r)}" style="${statusPillStyle(r.status)}">${escapeHtml(r.status || "Unknown")}</span>
+        ${(r.status === "Warning" || r.status === "Critical") ? `<div class="text-[8px] text-Cmuted mt-0.5 leading-tight">${_statusDrivenBy(r)}</div>` : ""}
+      </td>
+      <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[180px]" title="${escapeHtml(r.source_env || "")}">${escapeHtml(truncate(r.source_env || "", 28))}</td>
     `;
     tbody.appendChild(tr);
   }
+}
+
+// Returns a compact "↑ Mem 16% avail · CPU 81%" line showing which metric(s) drove
+// the server into Warning/Critical — eliminates ambiguity when e.g. disk is 0.3%
+// but the row shows Warning due to memory.
+function _statusDrivenBy(r) {
+  const t = RESOURCE_THRESHOLDS;
+  const cpu  = r.effective_cpu ?? r.cpu_pct ?? 0;
+  const mem  = r.mem_pct;
+  const disk = r.disk_pct;
+  const memAvail = mem != null ? +(100 - mem).toFixed(1) : null;
+  // Score each metric by how far it exceeds its warn threshold (0–1 scale).
+  // Sort descending so the worst metric always leads the sub-line.
+  const candidates = [];
+  if (cpu >= t.cpu_ok) {
+    candidates.push({ label: `CPU ${cpu.toFixed(0)}%`, score: (cpu - t.cpu_ok) / Math.max(1, 100 - t.cpu_ok) });
+  }
+  if (memAvail != null && memAvail <= (100 - t.mem_ok)) {
+    const floor = 100 - t.mem_ok;
+    candidates.push({ label: `Mem ${memAvail.toFixed(0)}% avail`, score: floor > 0 ? (floor - memAvail) / floor : 1 });
+  }
+  if (disk != null && disk >= t.disk_ok) {
+    candidates.push({ label: `Disk I/O ${disk.toFixed(0)}%`, score: (disk - t.disk_ok) / Math.max(1, 100 - t.disk_ok) });
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.length ? `↑ ${candidates.map(c => c.label).join(" · ")}` : "";
 }
 
 function statusRowTint(status) {
@@ -4256,6 +4837,36 @@ function statusPillStyle(status) {
   return `color:${c};border-color:${hexA(c, 0.5)};background:${hexA(c, 0.12)}`;
 }
 
+function _buildStatusTooltip(r) {
+  // Build a human-readable explanation of WHY the server has this status.
+  const cpuOk   = r.role_cpu_ok   ?? RESOURCE_THRESHOLDS.cpu_ok;
+  const cpuWarn = r.role_cpu_warn ?? RESOURCE_THRESHOLDS.cpu_warn;
+  const memWarn = RESOURCE_THRESHOLDS.mem_warn;
+  const diskWarn = RESOURCE_THRESHOLDS.disk_warn;
+  const cpu  = r.effective_cpu ?? r.cpu_pct;
+  const mem  = r.mem_pct;          // used %
+  const disk = r.disk_pct;
+  const memAvailPct = mem != null ? +(100 - mem).toFixed(1) : null;
+
+  const reasons = [];
+  if (cpu != null && cpu >= cpuWarn)      reasons.push(`CPU ${cpu.toFixed(1)}% used ≥ ${cpuWarn}% threshold`);
+  else if (cpu != null && cpu >= cpuOk)   reasons.push(`CPU ${cpu.toFixed(1)}% used ≥ ${cpuOk}% warn`);
+  if (memAvailPct != null && memAvailPct <= (100 - memWarn))
+    reasons.push(`Memory ${memAvailPct.toFixed(1)}% available ≤ ${(100 - memWarn).toFixed(0)}% floor`);
+  else if (memAvailPct != null && memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok))
+    reasons.push(`Memory ${memAvailPct.toFixed(1)}% available ≤ ${(100 - RESOURCE_THRESHOLDS.mem_ok).toFixed(0)}% warn`);
+  if (disk != null && disk >= diskWarn)   reasons.push(`Disk ${disk.toFixed(1)}% used ≥ ${diskWarn}% threshold`);
+  if (r.dual_pressure)                    reasons.push(`Dual pressure: CPU+Memory both critical`);
+  if (r.agg_trap)                         reasons.push(`Aggregation trap: peak=${r.cpu_pct?.toFixed(1)}%, avg=${r.cpu_avg_pct?.toFixed(1)}%`);
+
+  if (!reasons.length) {
+    if (r.status === "Healthy") return `Healthy: all metrics within thresholds`;
+    if (r.status === "Unknown") return `No metric data available from source`;
+    return r.status || "Unknown";
+  }
+  return `${r.status}: ${reasons.join("; ")}`;
+}
+
 // ════════════════════════════════════════════════════════════════
 //  METRICS DEEP DIVE — Critical-only + pattern detection
 //  Filters out normal/moderate — shows only actionable PE findings
@@ -4264,17 +4875,65 @@ function statusPillStyle(status) {
 let _deepDiveCharts = [];   // track Chart.js instances for cleanup
 let _deepDiveData = null;   // last fetched timeseries payload
 
+// ── Deep Dive metric visibility ──
+// By default only core metrics (CPU, Memory, Disk BW) are shown.
+// Extended metrics (IOPS, latency, cached/uncached) are behind a toggle.
+let _ddShowExtendedMetrics = false;
+
 // ── Deep Dive time range picker ──
 let _deepDiveHoursBack = 24;
+let _deepDiveCustomWindow = null; // {start_utc, end_utc} in ISO UTC
+
+// ── Spike row drill-down ──────────────────────────────────────
+// Called via onclick from spike table rows. Pads the spike window by 1h each
+// side so the chart shows context around the anomaly. This is the key
+// architectural decision: the API call uses the anomaly's timestamp, not now().
+function openSpikeWindow(spikeStart, spikeEnd) {
+  const PAD_MS = 60 * 60 * 1000; // 1h padding each side
+  const t0 = new Date(spikeStart).getTime() - PAD_MS;
+  const t1 = new Date(spikeEnd).getTime()   + PAD_MS;
+  _deepDiveCustomWindow = {
+    start_utc: new Date(t0).toISOString(),
+    end_utc:   new Date(t1).toISOString(),
+  };
+  // Clear time-pill active state — we're now in custom window mode
+  document.querySelectorAll(".dd-time-pill").forEach(p => p.classList.remove("dd-time-active"));
+  if (typeof loadMetricsDeepDive === "function") loadMetricsDeepDive();
+}
 
 function setDeepDiveHours(el) {
   const hours = parseInt(el.dataset.ddHours) || 24;
   _deepDiveHoursBack = hours;
+  _deepDiveCustomWindow = null;
   // Update active pill styling
   document.querySelectorAll(".dd-time-pill").forEach(p => p.classList.remove("dd-time-active"));
   el.classList.add("dd-time-active");
   // Auto-reload if data was already fetched
   if (_deepDiveData) loadMetricsDeepDive();
+}
+
+function setDeepDiveCustomRange() {
+  const sEl = document.getElementById("dd-start-utc");
+  const eEl = document.getElementById("dd-end-utc");
+  if (!sEl || !eEl || !sEl.value || !eEl.value) {
+    toast("warn", "Custom window", "Pick both Start and End UTC values.");
+    return;
+  }
+  const s = new Date(sEl.value);
+  const e = new Date(eEl.value);
+  if (!(s instanceof Date) || isNaN(s) || !(e instanceof Date) || isNaN(e) || e <= s) {
+    toast("error", "Custom window", "Invalid UTC range. End must be after Start.");
+    return;
+  }
+  _deepDiveCustomWindow = { start_utc: s.toISOString(), end_utc: e.toISOString() };
+  document.querySelectorAll(".dd-time-pill").forEach(p => p.classList.remove("dd-time-active"));
+  loadMetricsDeepDive();
+}
+
+function clearDeepDiveCustomRange() {
+  _deepDiveCustomWindow = null;
+  const active = document.querySelector('.dd-time-pill[data-dd-hours="24"]');
+  if (active) setDeepDiveHours(active);
 }
 
 function loadMetricsDeepDive() {
@@ -4297,7 +4956,8 @@ function loadMetricsDeepDive() {
   btn.textContent = "Loading…";
   loading.classList.remove("hidden");
   const baselineNote = hoursBack >= 360 ? " (15-day baseline analysis)" : hoursBack >= 168 ? " (7-day pattern analysis)" : "";
-  loadingText.textContent = `Fetching time-series for ${_lastFetchedVmIds.length} VM(s)${baselineNote}…`;
+  const customNote = _deepDiveCustomWindow ? " (custom UTC window)" : "";
+  loadingText.textContent = `Fetching time-series for ${_lastFetchedVmIds.length} VM(s)${baselineNote}${customNote}…`;
   chartsDiv.innerHTML = "";
   heatmapWrap?.classList.add("hidden");
   banner?.classList.add("hidden");
@@ -4308,10 +4968,21 @@ function loadMetricsDeepDive() {
 
   const t0 = performance.now();
 
+  // 4-minute timeout — prevents infinite hang on slow Azure responses
+  const _ddController = new AbortController();
+  const _ddTimeout = setTimeout(() => _ddController.abort(), 240_000);
+
+  const payload = { vm_ids: _lastFetchedVmIds, hours_back: hoursBack };
+  if (_deepDiveCustomWindow?.start_utc && _deepDiveCustomWindow?.end_utc) {
+    payload.start_utc = _deepDiveCustomWindow.start_utc;
+    payload.end_utc = _deepDiveCustomWindow.end_utc;
+  }
+
   fetch("/api/azure/timeseries", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ vm_ids: _lastFetchedVmIds, hours_back: hoursBack }),
+    body: JSON.stringify(payload),
+    signal: _ddController.signal,
   })
   .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
   .then(data => {
@@ -4320,25 +4991,101 @@ function loadMetricsDeepDive() {
     loading.classList.add("hidden");
     btn.disabled = false;
     const blLabel = data.baseline?.days_observed >= 15 ? ` · ${data.baseline.days_observed.toFixed(0)}d baseline ✓` : data.baseline?.days_observed >= 2 ? ` · ${data.baseline.days_observed.toFixed(0)}d` : "";
-    btn.textContent = `Refresh (${elapsed}s${blLabel})`;
+    const win = data.window || {};
+    const grain = win.grain ? ` · ${win.grain}` : "";
+    const tz = win.timezone ? ` · ${win.timezone}` : "";
+    btn.textContent = `Refresh (${elapsed}s${blLabel}${grain}${tz})`;
 
+    // Show/update custom window banner if a custom time range was applied
+    _renderDeepDiveWindowBadge(data.window);
+
+    // Phase 1: instant — lightweight banner + patterns
     _renderDeepDiveBanner(data.summary);
     _renderDeepDivePatterns(data.patterns || []);
-    _renderDeepDiveHeatmap(data.heatmap);
-    _renderDeepDiveMemoryHeatmap(data.vms);
-    _renderDeepDiveCharts(data.vms, data.summary);
-    _updatePriorityFromDeepDive(data.vms);
-    // Persist deep dive data in appData so findings/narrative/exec can use it
-    window.appData.deepDive = _buildDeepDiveSummary();
-    // Re-generate findings with deep dive evidence now available
-    triggerGenerateFindings().catch(() => {});
+
+    // Phase 2: deferred — stagger heavy Plotly heatmaps + Chart.js cards
+    const _ddDeferred = [
+      () => _renderDeepDiveHeatmap(data.heatmap),
+      () => _renderDeepDiveMemoryHeatmap(data.vms),
+      () => _renderDeepDiveCharts(data.vms, data.summary),
+      () => {
+        _updatePriorityFromDeepDive(data.vms);
+        window.appData.deepDive = _buildDeepDiveSummary();
+        _refreshExecResourceHealth();
+        triggerGenerateFindings().catch(() => {});
+      },
+    ];
+    let _ddi = 0;
+    function _nextDD() {
+      if (_ddi < _ddDeferred.length) {
+        _ddDeferred[_ddi++]();
+        requestAnimationFrame(_nextDD);
+      }
+    }
+    requestAnimationFrame(_nextDD);
   })
   .catch(err => {
     loading.classList.add("hidden");
     btn.disabled = false;
     btn.textContent = "Load Time-Series";
-    toast("error", "Deep Dive Error", err.message);
-  });
+    const msg = err.name === "AbortError" ? "Timeout — Azure took too long (4 min limit). Try fewer VMs." : err.message;
+    toast("error", "Deep Dive Error", msg);
+  })
+  .finally(() => clearTimeout(_ddTimeout));
+}
+
+// ── Custom window badge: shows the active time range above charts ─────────
+// Renders a visible pill when a custom UTC window is set, or shows the
+// preset time range label so the user always knows what period the graphs cover.
+function _renderDeepDiveWindowBadge(win) {
+  // Find or create the badge element — insert it before the spike banner
+  const banner = document.getElementById("deepdive-spike-banner");
+  if (!banner) return;
+  let badge = document.getElementById("deepdive-window-badge");
+  if (!badge) {
+    badge = document.createElement("div");
+    badge.id = "deepdive-window-badge";
+    badge.className = "flex items-center gap-2 flex-wrap rounded-lg px-3 py-2 mb-1";
+    banner.parentNode.insertBefore(badge, banner);
+  }
+
+  const w = win || {};
+  const startStr = w.start_utc ? new Date(w.start_utc).toLocaleString([], {
+    year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+  }) : null;
+  const endStr = w.end_utc ? new Date(w.end_utc).toLocaleString([], {
+    year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+  }) : null;
+
+  const isCustom = !!(_deepDiveCustomWindow?.start_utc);
+  const grain = w.grain || "auto";
+  const pts = w.data_points != null ? ` · ${w.data_points} data points` : "";
+
+  if (isCustom && startStr && endStr) {
+    badge.style.cssText = `background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.3)`;
+    badge.innerHTML =
+      `<span class="text-sm">🗓</span>` +
+      `<span class="text-[10px] font-bold text-purple-400 uppercase tracking-wider">Custom Window</span>` +
+      `<span class="text-[10px] text-Cwhite font-mono">${_esc(startStr)}</span>` +
+      `<span class="text-[9px] text-Cmuted">→</span>` +
+      `<span class="text-[10px] text-Cwhite font-mono">${_esc(endStr)}</span>` +
+      `<span class="text-[9px] text-Cmuted">· Grain: ${_esc(grain)}${pts} · Source: Azure Monitor UTC</span>` +
+      `<button onclick="clearDeepDiveCustomRange()" class="ml-auto text-[9px] px-2 py-0.5 rounded border border-purple-400/40 text-purple-300 hover:bg-purple-500/10 transition">✕ Clear</button>`;
+  } else {
+    // Preset window — show which preset is active with data provenance
+    const hours = _deepDiveHoursBack || 24;
+    const label = hours >= 720 ? "30 days" : hours >= 360 ? "15 days" : hours >= 168 ? "7 days" :
+                  hours >= 72 ? "3 days" : hours >= 48 ? "48 hours" : hours >= 24 ? "24 hours" :
+                  hours >= 12 ? "12 hours" : hours >= 6 ? "6 hours" : `${hours} hour${hours > 1 ? "s" : ""}`;
+    badge.style.cssText = `background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2)`;
+    badge.innerHTML =
+      `<span class="text-sm">📊</span>` +
+      `<span class="text-[10px] font-semibold text-Cblue">Window: Last ${_esc(label)}</span>` +
+      (endStr ? `<span class="text-[9px] text-Cmuted">up to ${_esc(endStr)}</span>` : "") +
+      `<span class="text-[9px] text-Cmuted">· Grain: ${_esc(grain)}${pts} · Source: Azure Monitor UTC</span>`;
+  }
 }
 
 // ── Banner: critical-only focus ───────────────────────────────
@@ -4359,7 +5106,9 @@ function _renderDeepDiveBanner(summary) {
     title.style.color = THEME.red;
     const blDays = _deepDiveData?.baseline?.days_observed || 0;
     const blNote = blDays >= 15 ? ` · ${blDays.toFixed(0)}-day baseline: pattern analysis active` : blDays >= 2 ? ` · ${blDays.toFixed(0)}-day observation (15d recommended for PE baseline)` : "";
-    detail.textContent = `${summary.vm_count} VM(s) analyzed over ${summary.hours_back}h — only critical spikes shown (z-score ≥ 3σ)${blNote}.`;
+    const w = _deepDiveData?.window || {};
+    const tzNote = w.timezone ? ` Timezone source: ${w.timezone}.` : "";
+    detail.textContent = `${summary.vm_count} VM(s) analyzed over ${summary.hours_back}h — only statistically significant deviations shown${blNote}.${tzNote}`;
   } else {
     banner.style.background = hexA(THEME.green, 0.08);
     banner.style.border = `1px solid ${hexA(THEME.green, 0.3)}`;
@@ -4368,7 +5117,9 @@ function _renderDeepDiveBanner(summary) {
     title.style.color = THEME.green;
     const blDays = _deepDiveData?.baseline?.days_observed || 0;
     const blNote = blDays >= 15 ? ` ${blDays.toFixed(0)}-day baseline confirms stability.` : blDays >= 2 ? ` ${blDays.toFixed(0)}-day observation — extend to 15d for full PE confidence.` : "";
-    detail.textContent = `${summary.vm_count} VM(s) analyzed over ${summary.hours_back}h — all metrics within normal operating range.${blNote}`;
+    const w = _deepDiveData?.window || {};
+    const tzNote = w.timezone ? ` Timezone source: ${w.timezone}.` : "";
+    detail.textContent = `${summary.vm_count} VM(s) analyzed over ${summary.hours_back}h — all metrics within normal operating range.${blNote}${tzNote}`;
   }
 }
 
@@ -4382,6 +5133,27 @@ function _renderDeepDivePatterns(patterns) {
   // No visible rendering — patterns feed into export report only.
 }
 
+// ── Heatmap column binning ────────────────────────────────────
+// Reduces a time-axis heatmap to at most 120 display columns by averaging
+// adjacent bins and using the midpoint timestamp. For a 360h/1h-grain window
+// this cuts Plotly's rendering work from 360 columns to 90 (4h bins) — a 4×
+// reduction in SVG/canvas operations with no visible loss of shape.
+const _HEATMAP_MAX_COLS = 120;
+function _binHeatmap(tDates, zMatrix) {
+  if (tDates.length <= _HEATMAP_MAX_COLS) return { tDates, zMatrix };
+  const binSize = Math.ceil(tDates.length / _HEATMAP_MAX_COLS);
+  const bT = [], bZ = zMatrix.map(() => []);
+  for (let i = 0; i < tDates.length; i += binSize) {
+    const hi = Math.min(i + binSize, tDates.length);
+    bT.push(tDates[Math.floor((i + hi - 1) / 2)]);
+    for (let r = 0; r < zMatrix.length; r++) {
+      const vals = zMatrix[r].slice(i, hi).filter(v => v != null && !isNaN(v));
+      bZ[r].push(vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null);
+    }
+  }
+  return { tDates: bT, zMatrix: bZ };
+}
+
 // ── Fleet CPU Heatmap (Plotly) ────────────────────────────────
 function _renderDeepDiveHeatmap(heatmap) {
   const wrap = document.getElementById("deepdive-heatmap-wrap");
@@ -4389,13 +5161,15 @@ function _renderDeepDiveHeatmap(heatmap) {
   if (!wrap || !container || !heatmap || !heatmap.vms.length) return;
 
   wrap.classList.remove("hidden");
-  container.innerHTML = "";
 
   const vmNames = heatmap.vms.map(v => v.name);
-  const z = heatmap.vms.map(v => v.values.map(x => x ?? 0));
+  const zRaw = heatmap.vms.map(v => v.values.map(x => x ?? 0));
 
-  // Use actual Date objects for Plotly date axis — avoids duplicate tick labels
-  const tDates = heatmap.timestamps.map(t => new Date(t));
+  // Bin to ≤120 display columns — reduces Plotly rendering work 3-6× on long windows
+  const { tDates, zMatrix: z } = _binHeatmap(
+    heatmap.timestamps.map(t => new Date(t)),
+    zRaw
+  );
 
   const trace = {
     z: z,
@@ -4436,8 +5210,13 @@ function _renderDeepDiveHeatmap(heatmap) {
   ];
 
   const layout = _plotlyBaseLayout({
-    margin: { l: 140, r: 60, t: 10, b: 40 },
-    height: Math.max(160, vmNames.length * 30 + 60),
+    margin: { l: 140, r: 60, t: 28, b: 40 },
+    height: Math.max(160, vmNames.length * 30 + 70),
+    title: {
+      text: `Fleet CPU Utilisation · Grain: ${_deepDiveData?.window?.grain || "1h avg"} · Source: Azure Monitor UTC`,
+      font: { size: 9, color: THEME.muted },
+      x: 0.01, xanchor: "left",
+    },
     xaxis: {
       type: "date",
       tickfont: { color: THEME.muted, size: 9 },
@@ -4454,29 +5233,32 @@ function _renderDeepDiveHeatmap(heatmap) {
     shapes: thresholdShapes,
   });
 
-  Plotly.newPlot(container, [trace], layout, _plotlyConfig());
+  // Plotly.react() diffs the existing plot on re-renders (refresh, drill-down return)
+  // instead of purge+rebuild — much faster on second+ renders.
+  Plotly.react(container, [trace], layout, _plotlyConfig());
 
-  // Enterprise: click-to-drill — click a VM row to expand its detail card
-  container.on("plotly_click", (data) => {
-    if (!data.points || !data.points.length) return;
-    const vmName = data.points[0].y;
-    const detailCard = document.querySelector(`[data-vm-detail="${vmName}"]`);
-    if (detailCard) {
-      detailCard.scrollIntoView({ behavior: "smooth", block: "center" });
-      detailCard.style.boxShadow = `0 0 20px ${hexA(THEME.blue, 0.4)}`;
-      setTimeout(() => { detailCard.style.boxShadow = ""; }, 2000);
-    }
-  });
-
-  // Enterprise: export toolbar + time sync
-  _addChartToolbar(wrap, container, () => {
-    let csv = "VM,Timestamp,CPU_Pct\n";
-    heatmap.vms.forEach(vm => {
-      heatmap.timestamps.forEach((t, ti) => { csv += `${vm.name},${t},${vm.values[ti] ?? ""}\n`; });
+  // Only wire click/toolbar/sync once — guard prevents duplicate listeners on re-render
+  if (!container.dataset.ddHeatInit) {
+    container.dataset.ddHeatInit = "1";
+    container.on("plotly_click", (data) => {
+      if (!data.points || !data.points.length) return;
+      const vmName = data.points[0].y;
+      const detailCard = document.querySelector(`[data-vm-detail="${vmName}"]`);
+      if (detailCard) {
+        detailCard.scrollIntoView({ behavior: "smooth", block: "center" });
+        detailCard.style.boxShadow = `0 0 20px ${hexA(THEME.blue, 0.4)}`;
+        setTimeout(() => { detailCard.style.boxShadow = ""; }, 2000);
+      }
     });
-    return csv;
-  });
-  _registerPlotlySync(container);
+    _addChartToolbar(wrap, container, () => {
+      let csv = "VM,Timestamp,CPU_Pct\n";
+      heatmap.vms.forEach(vm => {
+        heatmap.timestamps.forEach((t, ti) => { csv += `${vm.name},${t},${vm.values[ti] ?? ""}\n`; });
+      });
+      return csv;
+    });
+    _registerPlotlySync(container);
+  }
 }
 
 // ── GAP 6: Memory Concurrency Heatmap ─────────────────────────
@@ -4493,34 +5275,33 @@ function _renderDeepDiveMemoryHeatmap(vms) {
   for (const [vmName, vmData] of vmEntries) {
     const series = (vmData.series || {})["Available Memory Percentage"];
     if (!series || !series.length) continue;
-    vmNames.push(vmName);
-    // Invert: available → used = 100 - available
-    allSeries.push(series.map(p => ({ t: p.t, v: 100 - (p.v || 0) })));
+    // Annotate DB servers so memory 80-92% is clearly expected
+    const role = _inferRole(vmName);
+    const roleTag = _isDbRole(role) ? " [DB]" : "";
+    vmNames.push(vmName + roleTag);
+    // Show as Azure does: Available Memory % (higher = more headroom)
+    allSeries.push(series.map(p => ({ t: p.t, v: p.v || 0 })));
   }
 
   if (!vmNames.length) return;
 
   wrap.classList.remove("hidden");
-  container.innerHTML = "";
 
   // Build time buckets (use first VM's timestamps as reference)
   const refTimes = allSeries[0].map(p => p.t);
-  // Use actual Date objects for Plotly date axis — avoids duplicate tick labels
-  const tDates = refTimes.map(t => new Date(t));
 
-  // Build z-matrix (VMs × time)
+  // Build z-matrix (VMs × time) — O(N+M) Map lookup, not O(N×M) nested scan.
+  // All series share Azure-issued timestamps so direct key match is reliable.
   const z = allSeries.map(series => {
-    // Align to ref timestamps (closest match)
-    return refTimes.map(rt => {
-      const refT = new Date(rt).getTime();
-      let best = null, bestDist = Infinity;
-      for (const p of series) {
-        const d = Math.abs(new Date(p.t).getTime() - refT);
-        if (d < bestDist) { bestDist = d; best = p.v; }
-      }
-      return best ?? 0;
-    });
+    const tsMap = new Map(series.map(p => [new Date(p.t).getTime(), p.v]));
+    return refTimes.map(rt => tsMap.get(new Date(rt).getTime()) ?? 0);
   });
+
+  // Bin to ≤120 display columns for Plotly (full-res z kept for analysis + CSV)
+  const { tDates, zMatrix: zPlotly } = _binHeatmap(
+    refTimes.map(t => new Date(t)),
+    z.map(row => [...row])
+  );
 
   // Detect shared batch patterns: time slots where >50% VMs have high memory
   const nVms = vmNames.length;
@@ -4534,34 +5315,43 @@ function _renderDeepDiveMemoryHeatmap(vms) {
   }
 
   const trace = {
-    z: z,
+    z: zPlotly,
     x: tDates,
     y: vmNames,
     type: "heatmap",
     zmin: 0,
     zmax: 100,
+    // DB-aware color scale: Oracle SGA/PGA keeps 8-20% available — expected, not alarming.
+    // Red (<8%) = critical below DB floor | Orange (8%) = at DB floor
+    // Teal (12-20%) = Oracle normal operating band | Green (30%+) = healthy
     colorscale: [
-      [0,    "#0d1526"],
-      [0.3,  "#065f46"],
-      [0.5,  "#10b981"],
-      [0.7,  "#facc15"],
-      [0.8,  "#f59e0b"],
-      [0.9,  "#ef4444"],
-      [1.0,  "#dc2626"],
+      [0,    "#dc2626"],   // 0% avail → critical (>95% used)
+      [0.05, "#ef4444"],   // 5% avail → critical
+      [0.08, "#f97316"],   // 8% avail → at DB floor (warn)
+      [0.12, "#06b6d4"],   // 12% avail → Oracle expected band start (teal)
+      [0.20, "#0e7490"],   // 20% avail → Oracle expected band end (dark teal)
+      [0.30, "#10b981"],   // 30% avail → healthy
+      [1.0,  "#0d1526"],   // 100% avail → near-idle (dark)
     ],
     colorbar: {
-      title: { text: "Mem Used %", font: { color: THEME.muted, size: 10 } },
+      title: { text: "Avail Memory %", font: { color: THEME.muted, size: 10 } },
       tickfont: { color: THEME.muted, size: 9 },
       thickness: 12,
-      tickvals: [0, 25, 50, 75, 85, 100],
+      tickvals: [0, 8, 12, 20, 30, 100],
+      ticktext: ["0%", "8% (crit)", "12% DB↓", "20% DB↑", "30% ok", "100%"],
     },
     hoverongaps: false,
-    hovertemplate: "<b>%{y}</b><br>%{x|%b %d %I:%M %p}<br>Mem Used: %{z:.1f}%<extra></extra>",
+    hovertemplate: "<b>%{y}</b><br>%{x|%b %d %I:%M %p}<br>Available Memory: %{z:.1f}%<extra></extra>",
   };
 
   const layout = _plotlyBaseLayout({
-    margin: { l: 140, r: 60, t: 10, b: 40 },
-    height: Math.max(160, vmNames.length * 30 + 60),
+    margin: { l: 140, r: 60, t: 28, b: 40 },
+    height: Math.max(160, vmNames.length * 30 + 70),
+    title: {
+      text: `Fleet Avail Memory % · Teal = DB expected (8–20%) · Red = critical (<8%) · Grain: ${_deepDiveData?.window?.grain || "1h avg"}`,
+      font: { size: 9, color: THEME.muted },
+      x: 0.01, xanchor: "left",
+    },
     xaxis: {
       type: "date",
       tickfont: { color: THEME.muted, size: 9 },
@@ -4576,7 +5366,8 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     },
   });
 
-  Plotly.newPlot(container, [trace], layout, _plotlyConfig());
+  // Plotly.react() diffs existing plot on re-renders — no full SVG teardown
+  Plotly.react(container, [trace], layout, _plotlyConfig());
 
   // V2: Single merged batch pattern banner — distinguish chronic from periodic
   if (batchFindings.length) {
@@ -4588,46 +5379,100 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     // When ≥95% of time slots breach the highest threshold → chronic condition, not batch
     const isChronic = worst.count >= totalSlots * 0.95;
 
+    // Count DB servers — their high memory is expected, not a batch pattern
+    const dbCount = vmNames.filter(n => n.includes("[DB]")).length;
+    const dbNote = dbCount > 0 ? ` (${dbCount} DB server${dbCount > 1 ? 's' : ''} — high memory is expected SGA/PGA allocation)` : "";
+
     if (isChronic) {
       indicator.style.cssText = `color:${THEME.red};border-color:${hexA(THEME.red,0.4)};background:${hexA(THEME.red,0.08)}`;
-      indicator.textContent = `🔴 Persistent fleet-wide memory saturation — not batch-driven, chronic condition. All ${worst.count} observed time slots exceed ${worst.label} threshold on ≥50% of servers. This requires capacity expansion, not schedule adjustment.`;
+      indicator.textContent = `🔴 Persistent fleet-wide memory saturation — not batch-driven, chronic condition. All ${worst.count} observed time slots exceed ${worst.label} threshold on ≥50% of servers.${dbNote} ${dbCount < nVms ? 'This requires capacity expansion, not schedule adjustment.' : 'Verify non-DB servers before concluding capacity issue.'}`;
     } else {
       indicator.style.cssText = `color:${THEME.amber};border-color:${hexA(THEME.amber,0.3)};background:${hexA(THEME.amber,0.06)}`;
       const subtext = batchFindings.map(f => `${f.count} slots at ${f.label}`).join(" · ");
-      indicator.textContent = `⚡ Shared batch pattern detected: ${worst.count} time slots where ≥50% of servers show memory ${worst.label} — persistent concurrent batch overlap across observation window. (${subtext})`;
+      indicator.textContent = `⚡ Shared batch pattern detected: ${worst.count} time slots where ≥50% of servers show memory ${worst.label} — persistent concurrent batch overlap across observation window.${dbNote} (${subtext})`;
     }
+    // Remove any existing indicator from a previous render before appending
+    wrap.querySelector(".dd-mem-batch-indicator")?.remove();
+    indicator.classList.add("dd-mem-batch-indicator");
     wrap.appendChild(indicator);
   }
 
-  // Enterprise: click-to-drill — click a VM row to expand its detail card
-  container.on("plotly_click", (data) => {
-    if (!data.points || !data.points.length) return;
-    const vmName = data.points[0].y;
-    const detailCard = document.querySelector(`[data-vm-detail="${vmName}"]`);
-    if (detailCard) {
-      detailCard.scrollIntoView({ behavior: "smooth", block: "center" });
-      detailCard.style.boxShadow = `0 0 20px ${hexA(THEME.cyan, 0.4)}`;
-      setTimeout(() => { detailCard.style.boxShadow = ""; }, 2000);
-    }
-  });
-
-  // Enterprise: export toolbar + time sync
-  _addChartToolbar(wrap, container, () => {
-    let csv = "VM,Timestamp,Mem_Used_Pct\n";
-    vmNames.forEach((vm, vi) => {
-      refTimes.forEach((t, ti) => { csv += `${vm},${t},${z[vi][ti]?.toFixed(1) ?? ""}\n`; });
+  // Only wire click/toolbar/sync once — guard prevents duplicate listeners on re-render
+  if (!container.dataset.ddMemHeatInit) {
+    container.dataset.ddMemHeatInit = "1";
+    container.on("plotly_click", (data) => {
+      if (!data.points || !data.points.length) return;
+      const vmName = data.points[0].y;
+      const detailCard = document.querySelector(`[data-vm-detail="${vmName}"]`);
+      if (detailCard) {
+        detailCard.scrollIntoView({ behavior: "smooth", block: "center" });
+        detailCard.style.boxShadow = `0 0 20px ${hexA(THEME.cyan, 0.4)}`;
+        setTimeout(() => { detailCard.style.boxShadow = ""; }, 2000);
+      }
     });
-    return csv;
-  });
-  _registerPlotlySync(container);
+    _addChartToolbar(wrap, container, () => {
+      let csv = "VM,Timestamp,Mem_Avail_Pct\n";
+      vmNames.forEach((vm, vi) => {
+        refTimes.forEach((t, ti) => { csv += `${vm},${t},${z[vi][ti]?.toFixed(1) ?? ""}\n`; });
+      });
+      return csv;
+    });
+    _registerPlotlySync(container);
+  }
 }
 
 // Unit-aware peak formatter — converts raw bytes to GB, others to %
 function _formatPeak(metricKey, value) {
+  const mk = metricKey || "";
   if (metricKey === "Available Memory Bytes" || (typeof value === 'number' && value > 1e6)) {
     return (value / 1073741824).toFixed(1) + " GB";
   }
+  if (mk.includes("Latency")) {
+    return `${Number(value).toFixed(1)} ms`;
+  }
+  if (mk.includes("Operations/Sec")) {
+    return `${Number(value).toFixed(1)} ops/s`;
+  }
+  // Show memory as Available % — matches Azure Portal convention
+  const isMemAvail = (metricKey || "").includes("Memory") && !(metricKey || "").includes("Bytes");
+  if (isMemAvail) {
+    return value.toFixed(1) + "% available";
+  }
   return value + "%";
+}
+
+// Format deviation text with correct sign/direction for the metric
+function _formatDeviation(spike) {
+  const mn = (spike.metric || "").toLowerCase();
+  const isMemory = mn.includes("memory") && !mn.includes("bytes");
+  const isLatency = mn.includes("latency");
+  const isOps = mn.includes("operations/sec") || mn.includes("iops");
+  const zAbs = Math.abs(spike.z_score).toFixed(1);
+  const sevWord = zAbs >= 4 ? "extreme" : zAbs >= 3 ? "significant" : "notable";
+  if (isMemory) {
+    // Memory available dropped — show as "below mean" and convert mean to used
+    const usedMean = (100 - spike.mean).toFixed(1);
+    return `${sevWord} deviation below avail baseline (avg ${spike.mean}% avail, ${usedMean}% used)`;
+  }
+  if (isLatency) {
+    return `${sevWord} latency elevation (avg ${Number(spike.mean).toFixed(2)} ms)`;
+  }
+  if (isOps) {
+    return `${sevWord} I/O rate deviation (avg ${Number(spike.mean).toFixed(2)} ops/s)`;
+  }
+  return `${sevWord} deviation above baseline (avg ${spike.mean}%)`;
+}
+
+// Confidence tier badge
+function _confBadge(conf) {
+  if (!conf) return "";
+  const colors = {
+    "observed":    { c: THEME.green,  bg: THEME.green },
+    "inferred":    { c: THEME.amber,  bg: THEME.amber },
+    "weak-signal": { c: THEME.red,    bg: THEME.red },
+  };
+  const cc = colors[conf] || colors["weak-signal"];
+  return `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded ml-1" style="color:${cc.c};background:${hexA(cc.bg,0.12)}">${conf}</span>`;
 }
 
 // ── Per-VM Time-Series Charts — grouped server cards (GAP 1) ──
@@ -4636,11 +5481,23 @@ function _renderDeepDiveCharts(vms, summary) {
   if (!chartsDiv) return;
 
   const metricConfig = [
-    { key: "Percentage CPU",                    label: "CPU %",            color: THEME.blue,   warn: 80 },
-    { key: "Available Memory Percentage",       label: "Available Mem %",  color: THEME.cyan,   warn: 20, invert: true },
+    { key: "Percentage CPU",                    label: "CPU %",            color: THEME.blue,   warn: 80, core: true },
+    { key: "Available Memory Percentage",       label: "Available Mem %",  color: THEME.cyan,   warn: 20, core: true },
     { key: "Available Memory Bytes",            label: "Available Memory Bytes", color: THEME.cyan, warn: 0, unit: "bytes" },
-    { key: "OS Disk Bandwidth Consumed Percentage",   label: "OS Disk BW %",   color: THEME.amber,  warn: 80 },
-    { key: "Data Disk Bandwidth Consumed Percentage", label: "Data Disk BW %", color: THEME.purple, warn: 80 },
+    { key: "OS Disk Bandwidth Consumed Percentage",   label: "OS Disk BW %",   color: THEME.amber,  warn: 80, core: true },
+    { key: "Data Disk Bandwidth Consumed Percentage", label: "Data Disk BW %", color: THEME.purple, warn: 80, core: true },
+    { key: "OS Disk IOPS Consumed Percentage",  label: "OS Disk IOPS %", color: "#f97316", warn: 80 },
+    { key: "Data Disk IOPS Consumed Percentage",label: "Data Disk IOPS %", color: "#a855f7", warn: 80 },
+    { key: "VM Cached IOPS Consumed Percentage", label: "VM Cached IOPS %", color: "#0ea5e9", warn: 80 },
+    { key: "VM Uncached IOPS Consumed Percentage", label: "VM Uncached IOPS %", color: "#14b8a6", warn: 80 },
+    { key: "VM Cached Bandwidth Consumed Percentage", label: "VM Cached BW %", color: "#22c55e", warn: 80 },
+    { key: "VM Uncached Bandwidth Consumed Percentage", label: "VM Uncached BW %", color: "#eab308", warn: 80 },
+    { key: "OS Disk Latency",                   label: "OS Disk Latency (ms)", color: "#f43f5e", warn: 15, unit: "ms" },
+    { key: "Data Disk Latency",                 label: "Data Disk Latency (ms)", color: "#ec4899", warn: 15, unit: "ms" },
+    { key: "OS Disk Read Operations/Sec",       label: "OS Read IOPS", color: "#60a5fa", warn: 0, unit: "ops/s" },
+    { key: "OS Disk Write Operations/Sec",      label: "OS Write IOPS", color: "#93c5fd", warn: 0, unit: "ops/s" },
+    { key: "Data Disk Read Operations/Sec",     label: "Data Read IOPS", color: "#c084fc", warn: 0, unit: "ops/s" },
+    { key: "Data Disk Write Operations/Sec",    label: "Data Write IOPS", color: "#d8b4fe", warn: 0, unit: "ops/s" },
   ];
 
   // Separate VMs with critical spikes from clean VMs
@@ -4657,7 +5514,15 @@ function _renderDeepDiveCharts(vms, summary) {
   if (criticalVms.length) {
     const critHeader = document.createElement("div");
     critHeader.className = "flex items-center gap-2 mt-2";
-    critHeader.innerHTML = `<span class="text-sm">🚨</span><h4 class="text-[10px] font-bold uppercase tracking-widest text-red-400" style="letter-spacing:0.15em">Requires Investigation — ${criticalVms.length} Server${criticalVms.length > 1 ? "s" : ""}</h4><span class="text-[9px] text-Cmuted ml-auto">${_deepDiveHoursBack}h window</span>`;
+    const _critWindowLabel = _deepDiveCustomWindow?.start_utc
+      ? (() => {
+          const s = new Date(_deepDiveCustomWindow.start_utc);
+          const e = new Date(_deepDiveCustomWindow.end_utc);
+          const hrs = ((e - s) / 3600000).toFixed(0);
+          return `${hrs}h custom window`;
+        })()
+      : `${_deepDiveHoursBack}h window`;
+    critHeader.innerHTML = `<span class="text-sm">🚨</span><h4 class="text-[10px] font-bold uppercase tracking-widest text-red-400" style="letter-spacing:0.15em">Requires Investigation — ${criticalVms.length} Server${criticalVms.length > 1 ? "s" : ""}</h4><span class="text-[9px] text-Cmuted ml-auto">${_esc(_critWindowLabel)}</span>`;
     chartsDiv.appendChild(critHeader);
 
     // E2: Sort/filter controls
@@ -4667,7 +5532,7 @@ function _renderDeepDiveCharts(vms, summary) {
       <div class="flex items-center gap-1.5">
         <span class="text-[9px] text-Cmuted font-semibold">Sort</span>
         <select id="dd-sort-select" class="bg-Cbg border border-Cborder rounded-md px-2 py-0.5 text-[10px] text-Cwhite focus:outline-none focus:border-Cblue cursor-pointer">
-          <option value="mem">MEM % ↓</option>
+          <option value="mem">MEM AVAIL % ↓</option>
           <option value="spikes">Spike Count ↓</option>
           <option value="latest">Latest Spike ↓</option>
           <option value="name">Name A→Z</option>
@@ -4683,6 +5548,13 @@ function _renderDeepDiveCharts(vms, summary) {
         <button data-dd-type="all" class="dd-type-pill dd-type-active px-1.5 py-0.5 rounded text-[9px] font-semibold border border-Cborder/50 text-Cmuted">All</button>
         <button data-dd-type="db" class="dd-type-pill px-1.5 py-0.5 rounded text-[9px] font-semibold border border-Cborder/50 text-Cmuted">DB</button>
         <button data-dd-type="app" class="dd-type-pill px-1.5 py-0.5 rounded text-[9px] font-semibold border border-Cborder/50 text-Cmuted">APP</button>
+        <button data-dd-type="sre" class="dd-type-pill px-1.5 py-0.5 rounded text-[9px] font-semibold border border-Cborder/50 text-Cmuted">SRE</button>
+      </div>
+      <div class="flex items-center gap-1.5 ml-auto">
+        <label class="flex items-center gap-1.5 cursor-pointer select-none" title="Show IOPS, latency, cached/uncached bandwidth metrics in charts and tables">
+          <input type="checkbox" id="dd-extended-metrics-toggle" class="accent-blue-500 w-3 h-3 cursor-pointer"${_ddShowExtendedMetrics ? " checked" : ""}>
+          <span class="text-[9px] text-Cmuted font-semibold">Extended Metrics</span>
+        </label>
       </div>
     `;
     chartsDiv.appendChild(controls);
@@ -4703,36 +5575,59 @@ function _renderDeepDiveCharts(vms, summary) {
         for (const s of arr) { latestSpike = Math.max(latestSpike, new Date(s.peak_time).getTime()); }
       }
       const _memSt = st["Available Memory Percentage"];
-      const memUsed = _memSt
-        ? (_memSt.min_anomalous && _memSt.p5 != null ? 100 - _memSt.p5 : 100 - _memSt.min)
-        : 0;
+      const memAvail = _memSt
+        ? (_memSt.min_anomalous && _memSt.p5 != null ? _memSt.p5 : _memSt.min ?? 100)
+        : 100;
+      const memPressure = 100 - memAvail;  // for sort/filter comparison
       const role = _inferRole(vmName);
-      return { vmName, vmData, memUsed, spikeCount, latestSpike, role };
+      return { vmName, vmData, memAvail, memPressure, spikeCount, latestSpike, role };
     });
 
     function renderFilteredGrid() {
       const sortBy = document.getElementById("dd-sort-select")?.value || "mem";
       const threshold = parseInt(document.getElementById("dd-threshold-input")?.value || "0");
-      const typeFilter = document.querySelector(".dd-type-pill.dd-type-active")?.dataset.ddType || "all";
+      const activePills = [...controls.querySelectorAll(".dd-type-pill.dd-type-active")].map(b => b.dataset.ddType);
+      const showAll = activePills.includes("all") || activePills.length === 0;
 
-      let filtered = cardDataArr.filter(d => d.memUsed >= threshold);
-      if (typeFilter === "db") filtered = filtered.filter(d => d.role.includes("DB"));
-      else if (typeFilter === "app") filtered = filtered.filter(d => d.role.includes("APP"));
+      let filtered = cardDataArr.filter(d => d.memPressure >= threshold);
+      if (!showAll) {
+        filtered = filtered.filter(d => {
+          if (activePills.includes("db") && d.role.includes("DB")) return true;
+          if (activePills.includes("app") && (d.role === "APP" || d.role === "SERVER")) return true;
+          if (activePills.includes("sre") && d.role === "SRE") return true;
+          return false;
+        });
+      }
 
       filtered.sort((a, b) => {
-        if (sortBy === "mem") return b.memUsed - a.memUsed;
+        if (sortBy === "mem") return a.memAvail - b.memAvail;  // lowest available first (most pressure)
         if (sortBy === "spikes") return b.spikeCount - a.spikeCount;
         if (sortBy === "latest") return b.latestSpike - a.latestSpike;
         return a.vmName.localeCompare(b.vmName);
       });
 
+      // Filter metricConfig based on extended metrics toggle
+      const activeMetricConfig = _ddShowExtendedMetrics ? metricConfig : metricConfig.filter(m => m.core);
+
+      // Destroy existing Chart.js instances before clearing DOM
+      _deepDiveCharts.forEach(c => { try { c.destroy(); } catch(e){} });
+      _deepDiveCharts = [];
       grid.innerHTML = "";
-      for (const d of filtered) {
-        _renderVmServerCard(d.vmName, d.vmData, metricConfig, grid);
-      }
+      // Stagger card rendering across frames to avoid Firefox slowdown
       if (!filtered.length) {
         grid.innerHTML = `<div class="col-span-3 text-center text-Cmuted text-xs py-4">No servers match current filters.</div>`;
+        return;
       }
+      let _ci = 0;
+      const BATCH_SIZE = 3; // render 3 cards per frame
+      function _nextBatch() {
+        const end = Math.min(_ci + BATCH_SIZE, filtered.length);
+        for (; _ci < end; _ci++) {
+          _renderVmServerCard(filtered[_ci].vmName, filtered[_ci].vmData, activeMetricConfig, grid);
+        }
+        if (_ci < filtered.length) requestAnimationFrame(_nextBatch);
+      }
+      requestAnimationFrame(_nextBatch);
     }
 
     renderFilteredGrid();
@@ -4740,16 +5635,45 @@ function _renderDeepDiveCharts(vms, summary) {
     // Wire controls
     document.getElementById("dd-sort-select")?.addEventListener("change", renderFilteredGrid);
     const thresholdInput = document.getElementById("dd-threshold-input");
+    let _thresholdDebounce = null;
     thresholdInput?.addEventListener("input", () => {
       document.getElementById("dd-threshold-label").textContent = thresholdInput.value + "%";
-      renderFilteredGrid();
+      if (_thresholdDebounce) clearTimeout(_thresholdDebounce);
+      _thresholdDebounce = setTimeout(renderFilteredGrid, 200);
     });
     controls.querySelectorAll(".dd-type-pill").forEach(btn => {
       btn.addEventListener("click", () => {
-        controls.querySelectorAll(".dd-type-pill").forEach(b => b.classList.remove("dd-type-active"));
-        btn.classList.add("dd-type-active");
+        const isAll = btn.dataset.ddType === "all";
+        if (isAll) {
+          // All resets everything
+          controls.querySelectorAll(".dd-type-pill").forEach(b => b.classList.remove("dd-type-active"));
+          btn.classList.add("dd-type-active");
+        } else {
+          // Toggle this pill on/off
+          btn.classList.toggle("dd-type-active");
+          // Remove All when specific types selected
+          controls.querySelector('.dd-type-pill[data-dd-type="all"]')?.classList.remove("dd-type-active");
+          // If nothing selected, re-activate All
+          const anyActive = controls.querySelector('.dd-type-pill.dd-type-active');
+          if (!anyActive) {
+            controls.querySelector('.dd-type-pill[data-dd-type="all"]')?.classList.add("dd-type-active");
+          }
+        }
         renderFilteredGrid();
       });
+    });
+
+    // Extended Metrics toggle — re-renders grid + detail when toggled
+    const extToggle = document.getElementById("dd-extended-metrics-toggle");
+    extToggle?.addEventListener("change", () => {
+      _ddShowExtendedMetrics = extToggle.checked;
+      renderFilteredGrid();
+      // Destroy any Chart.js instances in the detail card before clearing DOM,
+      // otherwise orphaned canvas contexts accumulate and stall Firefox GC.
+      _deepDiveCharts.forEach(c => { try { c.destroy(); } catch(e){} });
+      _deepDiveCharts = [];
+      const detailArea = document.getElementById("deepdive-detail-area");
+      if (detailArea) detailArea.innerHTML = "";
     });
 
     // Expanded detail area (empty until card clicked)
@@ -4800,16 +5724,23 @@ function _renderDeepDiveCharts(vms, summary) {
   }
 }
 
-// ── I2: Role inference from VM naming convention ──────────────
+// ── I2: Role inference — prefer backend type from _discoveredVMs,
+//    fall back to hostname regex when backend type unavailable ──
 function _inferRole(vmName) {
+  // 1. Check backend-assigned type (authoritative — uses Azure tags + hostname)
   const n = (vmName || "").toLowerCase();
-  if (/^prbe|prod.*db|scpo.*db/.test(n)) return "PROD-DB";
-  if (/^drbe|dr.*db/.test(n)) return "DR-DB";
-  if (/^tabe|test.*db|uat.*db/.test(n)) return "TEST-DB";
-  if (/^prb[^e]|prod.*app|batch.*app/.test(n)) return "BATCH-APP";
-  if (/^dabe|^dsbe|da.*db/.test(n)) return "DA-DB";
-  if (/app|web|ui/.test(n)) return "APP";
-  if (/db|ora|sql/.test(n)) return "DB";
+  if (typeof _discoveredVMs !== "undefined" && _discoveredVMs.length) {
+    const match = _discoveredVMs.find(v =>
+      (v.name || "").toLowerCase() === n || (v.resource_id || "").toLowerCase().endsWith("/" + n)
+    );
+    if (match?.type) return match.type;
+  }
+  // 2. Fallback: hostname substring checks (aligned with backend _infer_server_type)
+  //    Check specific keywords — do NOT match broad prefixes like "prbe" which
+  //    catch app servers (prbe471502001) alongside DB servers (prbe471503001).
+  if (/db|ora|sql|pg|mysql|mongo|redis|cosmos|warehouse|dw/.test(n)) return "DB";
+  if (/sre|batch|sch|job|worker|cron|ctm|ctrl|infra|ops|mgmt|monitor/.test(n)) return "SRE";
+  if (/app|web|ui|api|gateway/.test(n)) return "APP";
   return "SERVER";
 }
 
@@ -4846,24 +5777,34 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   }
 
   // Determine dominant metric — single large callout
-  const cpuMax = stats["Percentage CPU"]?.max ?? 0;
-  // Use P5 (100 - P95 of available) for card display to ignore single-point dips.
-  // Fall back to inverted min only when P5 is not available.
+  // Use P95 for headline (representative peak), not max (single-point outlier)
+  const cpuStats = stats["Percentage CPU"];
+  const cpuP95 = cpuStats?.p95 ?? cpuStats?.max ?? 0;
+  const cpuMax = cpuStats?.max ?? 0;
+  // Memory: show lowest available % (P5 or min) — lower = more pressure
   const memAvailStats = stats["Available Memory Percentage"];
-  const memMax = memAvailStats
+  const memLowest = memAvailStats
     ? (memAvailStats.min_anomalous && memAvailStats.p5 != null
-      ? 100 - memAvailStats.p5
-      : 100 - memAvailStats.min)
-    : 0;
-  const diskMax = stats["OS Disk Bandwidth Consumed Percentage"]?.max ?? 0;
-  let domLabel, domVal, domColor;
-  if (memMax >= cpuMax && memMax >= diskMax) {
-    domLabel = "MEM"; domVal = memMax; domColor = THEME.cyan;
-  } else if (cpuMax >= diskMax) {
-    domLabel = "CPU"; domVal = cpuMax; domColor = THEME.blue;
+      ? memAvailStats.p5
+      : memAvailStats.min ?? 100)
+    : 100;
+  const diskStats = stats["OS Disk Bandwidth Consumed Percentage"];
+  const diskP95 = diskStats?.p95 ?? diskStats?.max ?? 0;
+  let domLabel, domVal, domColor, domStatType;
+  // Pick the metric under most pressure:
+  // CPU/Disk: highest % = worst; Memory: lowest available % = worst
+  // Convert to a common "pressure" score for comparison
+  const memPressure = 100 - memLowest;  // high pressure = low available
+  if (memPressure >= cpuP95 && memPressure >= diskP95) {
+    domLabel = "MEM"; domVal = memLowest; domColor = THEME.cyan; domStatType = "min avail";
+  } else if (cpuP95 >= diskP95) {
+    domLabel = "CPU"; domVal = cpuP95; domColor = THEME.blue; domStatType = "P95";
   } else {
-    domLabel = "DISK"; domVal = diskMax; domColor = THEME.amber;
+    domLabel = "DISK"; domVal = diskP95; domColor = THEME.amber; domStatType = "P95";
   }
+  // If P95 < max by a large margin, note the outlier
+  const domMaxVal = domLabel === "CPU" ? cpuMax : domLabel === "DISK" ? (diskStats?.max ?? 0) : 0;
+  const domHasOutlier = domMaxVal > domVal * 1.3 && domMaxVal > domVal + 10;
 
   const card = document.createElement("div");
   card.className = "rounded-xl border p-3 cursor-pointer transition hover:scale-[1.01] group";
@@ -4871,7 +5812,8 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   card.style.background = hexA(THEME.red, 0.04);
 
   // 100% saturation → pulsing red border
-  if (domVal >= 100) {
+  // For CPU/Disk: domVal >= 100; For MEM (available): domVal <= 0
+  if (domLabel === "MEM" ? domVal <= 0 : domVal >= 100) {
     card.classList.add("saturated-pulse");
   }
 
@@ -4886,7 +5828,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   let sparkSvg = "";
   if (sparkSource.length > 4) {
     let vals = sparkSource.map(p => p.v);
-    if (domLabel === "MEM") vals = vals.map(v => 100 - v); // invert available → used
+    // Memory stays as Available % — no inversion needed (matches Azure Portal)
     const mn = Math.min(...vals), mx = Math.max(...vals);
     const rng = mx - mn || 1;
     const w = 80, h = 24;
@@ -4895,14 +5837,34 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     sparkSvg = `<svg width="${w}" height="${h}" class="opacity-60 group-hover:opacity-100 transition"><polyline points="${pts}" fill="none" stroke="${domColor}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
   }
 
-  const sevLabel = hasSustained ? "CRITICAL SUSTAINED" : highestSev >= 3 ? "CRITICAL" : "WARNING";
-  const sevColor = hasSustained ? THEME.purple : highestSev >= 3 ? THEME.red : THEME.amber;
+  // Two-stage severity: z-score + absolute threshold gate
+  // For CPU/Disk: high value = pressure. For MEM (available %): low value = pressure.
+  const _absFloor = { CPU: 50, MEM: 30, DISK: 50 };
+  const domFloor = _absFloor[domLabel] || 50;
+  // For memory, "meaningful" pressure means available is LOW (≤ 30%)
+  const absIsMeaningful = domLabel === "MEM" ? domVal <= domFloor : domVal >= domFloor;
+  // DB memory leniency: 8-20% available is expected (SGA/PGA uses 80-92%)
+  const isDbMem = _isDbRole(_inferRole(vmName)) && domLabel === "MEM" && domVal >= 8;
+
+  let sevLabel, sevColor;
+  if (isDbMem && !hasSustained) {
+    sevLabel = domVal < 8 ? "WARNING" : "HEALTHY";
+    sevColor = domVal < 8 ? THEME.amber : THEME.green;
+  } else if (hasSustained && absIsMeaningful) {
+    sevLabel = "CRITICAL SUSTAINED"; sevColor = THEME.purple;
+  } else if (highestSev >= 3 && absIsMeaningful) {
+    sevLabel = "CRITICAL"; sevColor = THEME.red;
+  } else if (highestSev >= 3 && !absIsMeaningful) {
+    sevLabel = "ELEVATED"; sevColor = THEME.amber;  // downgraded — z high but abs low
+  } else {
+    sevLabel = "WARNING"; sevColor = THEME.amber;
+  }
 
   // E3: Trend direction — current vs 2h ago
   const twoHoursMs = 2 * 60 * 60 * 1000;
   let trendArrow = "", trendDelta = "";
   if (sparkSource.length > 4) {
-    let tVals = sparkSource.map(p => ({ t: new Date(p.t).getTime(), v: domLabel === "MEM" ? 100 - p.v : p.v }));
+    let tVals = sparkSource.map(p => ({ t: new Date(p.t).getTime(), v: p.v }));
     const latest = tVals[tVals.length - 1];
     const twoHAgo = tVals.filter(p => (latest.t - p.t) >= twoHoursMs);
     const ref = twoHAgo.length ? twoHAgo[twoHAgo.length - 1] : tVals[0];
@@ -4911,7 +5873,11 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     else if (delta < -2) { trendArrow = "↓"; trendDelta = `${delta.toFixed(0)}%`; }
     else { trendArrow = "→"; trendDelta = "flat"; }
   }
-  const trendColor = trendArrow === "↑" ? THEME.red : trendArrow === "↓" ? THEME.green : THEME.muted;
+  // For memory (Available %), rising = good (more free), falling = bad (pressure)
+  // For CPU/Disk, rising = bad, falling = good
+  const trendColor = domLabel === "MEM"
+    ? (trendArrow === "↓" ? THEME.red : trendArrow === "↑" ? THEME.green : THEME.muted)
+    : (trendArrow === "↑" ? THEME.red : trendArrow === "↓" ? THEME.green : THEME.muted);
 
   // I2: Role tag
   const role = _inferRole(vmName);
@@ -4919,10 +5885,27 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   const vmEnvColor = vmEnv === "PROD" ? THEME.red : vmEnv === "TEST" ? THEME.amber : vmEnv === "DEV" ? THEME.cyan : "";
   const vmEnvBadge = vmEnv ? `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${vmEnvColor};background:${hexA(vmEnvColor,0.12)}">${vmEnv}</span>` : "";
 
-  // P1: Projected breach (for 70-79% range)
+  // P1: Projected breach
+  // CPU/Disk: breach when rising toward 80%. Memory: breach when available drops below 20%.
   let breachLabel = "";
-  if (domVal >= 70 && domVal < 80 && trendArrow === "↑" && sparkSource.length > 4) {
-    let tVals = sparkSource.map(p => ({ t: new Date(p.t).getTime(), v: domLabel === "MEM" ? 100 - p.v : p.v }));
+  if (domLabel === "MEM") {
+    // Memory: low available trending downward
+    if (domVal <= 30 && domVal > 15 && trendArrow === "↓" && sparkSource.length > 4) {
+      let tVals = sparkSource.map(p => ({ t: new Date(p.t).getTime(), v: p.v }));
+      const latest = tVals[tVals.length - 1];
+      const ref2h = tVals.filter(p => (latest.t - p.t) >= twoHoursMs);
+      const ref = ref2h.length ? ref2h[ref2h.length - 1] : tVals[0];
+      const ratePerMs = (latest.v - ref.v) / (latest.t - ref.t);
+      if (ratePerMs < 0) {
+        const msToBreak = (latest.v - 15) / Math.abs(ratePerMs);
+        const hoursToBreak = msToBreak / (60 * 60 * 1000);
+        if (hoursToBreak > 0 && hoursToBreak < 24) {
+          breachLabel = `< 15% avail in ~${hoursToBreak.toFixed(0)}h`;
+        }
+      }
+    }
+  } else if (domVal >= 70 && domVal < 80 && trendArrow === "↑" && sparkSource.length > 4) {
+    let tVals = sparkSource.map(p => ({ t: new Date(p.t).getTime(), v: p.v }));
     const latest = tVals[tVals.length - 1];
     const ref2h = tVals.filter(p => (latest.t - p.t) >= twoHoursMs);
     const ref = ref2h.length ? ref2h[ref2h.length - 1] : tVals[0];
@@ -4936,6 +5919,23 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     }
   }
 
+  // Waveform shape for the dominant metric (compact badge on card)
+  const waveforms = vmData.waveforms || {};
+  const domWaveKey = domLabel === "MEM" ? "Available Memory Percentage"
+    : domLabel === "DISK" ? "OS Disk Bandwidth Consumed Percentage"
+    : "Percentage CPU";
+  let domWave = waveforms[domWaveKey];
+  // DB-aware: rewrite alarming memory waveform labels for DB servers in expected band
+  // _rewriteWaveformForDb expects "used %" — convert from available
+  if (domLabel === "MEM" && domWave) {
+    const _thr = window.appData?.resource?.kpis?.thresholds || RESOURCE_THRESHOLDS;
+    domWave = _rewriteWaveformForDb(domWave, role, 100 - domVal, _thr);
+  }
+  const waveRiskColors = { none: THEME.green, low: THEME.cyan, medium: THEME.amber, high: THEME.red, critical: THEME.purple };
+  const waveBadge = domWave
+    ? `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded cursor-help" style="color:${waveRiskColors[domWave.risk] || THEME.muted};background:${hexA(waveRiskColors[domWave.risk] || THEME.muted, 0.12)}" title="${domWave.meaning}">${domWave.icon} ${domWave.label}</span>`
+    : "";
+
   card.innerHTML = `
     <div class="flex items-start justify-between gap-2 mb-1.5">
       <div class="min-w-0 flex-1">
@@ -4943,10 +5943,11 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           <span class="text-xs font-bold text-Cwhite truncate">${escapeHtml(vmName)}</span>
           <span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.border,0.4)}">${role}</span>
           ${vmEnvBadge}
+          ${waveBadge}
         </div>
         <div class="flex items-center gap-2 mt-1">
           <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
-          <span class="text-[9px] text-Cmuted">${criticalCount} spike${criticalCount > 1 ? "s" : ""}</span>
+          <span class="text-[9px] text-Cmuted">${criticalCount} anomal${criticalCount > 1 ? "ies" : "y"}</span>
           ${breachLabel ? `<span class="text-[8px] font-bold px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
         </div>
       </div>
@@ -4956,9 +5957,10 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           <span class="text-xs font-bold" style="color:${trendColor}">${trendArrow}</span>
         </div>
         <div class="flex items-center gap-1 justify-end">
-          <span class="text-[8px] font-bold uppercase tracking-wider" style="color:${domColor}">${domLabel}</span>
+          <span class="text-[8px] font-bold uppercase tracking-wider" style="color:${domColor}">${domLabel} ${domStatType}</span>
           ${trendDelta ? `<span class="text-[8px] font-mono" style="color:${trendColor}">${trendDelta}</span>` : ""}
         </div>
+        ${domHasOutlier ? `<div class="text-[7px] text-Cmuted mt-0.5" title="Single-point spike to ${domMaxVal.toFixed(0)}% — P95 shown instead">peak ${domMaxVal.toFixed(0)}% ⚠</div>` : ""}
       </div>
     </div>
     <div class="flex items-center justify-between">
@@ -4971,6 +5973,10 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   card.addEventListener("click", () => {
     const detailArea = document.getElementById("deepdive-detail-area");
     if (!detailArea) return;
+    // Destroy existing Chart.js instances before clearing DOM — prevents orphaned
+    // canvas contexts that pile up and trigger Firefox's slow-script warning.
+    _deepDiveCharts.forEach(c => { try { c.destroy(); } catch(e){} });
+    _deepDiveCharts = [];
     detailArea.innerHTML = "";
     // Highlight selected card
     container.querySelectorAll("[data-vm-selected]").forEach(c => {
@@ -4981,7 +5987,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     card.setAttribute("data-vm-selected", "1");
     card.style.borderColor = THEME.red;
     card.style.boxShadow = `0 0 0 2px ${hexA(THEME.red, 0.3)}`;
-    _renderVmDeepDiveCard(vmName, vmData, metricConfig, detailArea, true);
+    _renderVmDeepDiveCard(vmName, vmData, _ddShowExtendedMetrics ? metricConfig : metricConfig.filter(m => m.core), detailArea, true);
     // Smooth scroll directly to the drilldown
     requestAnimationFrame(() => {
       detailArea.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -5010,20 +6016,23 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   }
 
   // VM header with stats
-  const cpuStats = stats["Percentage CPU"];
+  const cpuStatsH = stats["Percentage CPU"];
   const memStats = stats["Available Memory Percentage"];
+  const grainTag = vmData.grain ? ` <span class="text-[7px] px-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.border,0.3)}" title="All stats computed from ${vmData.grain}-average samples. Azure Portal may use coarser grain (e.g. 6h for 30d view) which smooths peaks.">${vmData.grain} grain</span>` : "";
   let headerStats = "";
-  if (cpuStats) {
-    const maxTag = cpuStats.max_anomalous
-      ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Max ${cpuStats.max}% may be a single-point spike — P95 is ${cpuStats.p95}%">single-point</span>`
+  if (cpuStatsH) {
+    const maxTag = cpuStatsH.max_anomalous
+      ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Max ${cpuStatsH.max}% may be a single-point spike — P95 is ${cpuStatsH.p95}%">single-point</span>`
       : "";
-    headerStats += `<span class="text-Cblue">CPU avg ${cpuStats.mean}% · max ${cpuStats.max}% ${maxTag}· P95 ${cpuStats.p95}%</span>`;
+    const maxSrc = cpuStatsH.max_source === "azure_max_agg" ? "" : "";
+    const maxSrcTitle = cpuStatsH.max_source === "azure_max_agg" ? " title=\"Max from Azure Maximum aggregation (true peak, not average)\"" : "";
+    headerStats += `<span class="text-Cblue" title="${cpuStatsH.p95_note || ''}">CPU avg ${cpuStatsH.mean}% · <span${maxSrcTitle}>max ${cpuStatsH.max}%</span> ${maxTag}· P95 ${cpuStatsH.p95}%</span>${grainTag}`;
   }
   if (memStats) {
     const memMinTag = memStats.min_anomalous
       ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Min ${memStats.min}% may be a single-point dip — P5 is ${memStats.p5 ?? 'N/A'}%">single-point</span>`
       : "";
-    headerStats += `${cpuStats ? " · " : ""}<span class="text-Ccyan">Mem avail ${memStats.mean}% · min ${memStats.min}% ${memMinTag}</span>`;
+    headerStats += `${cpuStatsH ? " · " : ""}<span class="text-Ccyan">Mem avail ${memStats.mean}% · min ${memStats.min}% ${memMinTag}</span> <span class="text-[7px] px-0.5 rounded cursor-help" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)}" title="Source: Available Memory Percentage (Azure Monitor Average). Higher = more free memory.">ℹ</span>`;
   }
 
   let criticalCount = 0;
@@ -5046,9 +6055,48 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     </div>
   `;
 
+  // Always show disk IO telemetry summary (avg/max), even when no spikes.
+  // Hidden by default — only visible when "Extended Metrics" toggle is on.
+  if (_ddShowExtendedMetrics) {
+  const ioMetrics = [
+    ["OS Disk Latency", "OS Latency", "ms"],
+    ["Data Disk Latency", "Data Latency", "ms"],
+    ["OS Disk IOPS Consumed Percentage", "OS IOPS %", "%"],
+    ["Data Disk IOPS Consumed Percentage", "Data IOPS %", "%"],
+    ["VM Cached IOPS Consumed Percentage", "Cached IOPS %", "%"],
+    ["VM Uncached IOPS Consumed Percentage", "Uncached IOPS %", "%"],
+    ["OS Disk Read Operations/Sec", "OS Read IOPS", "ops/s"],
+    ["OS Disk Write Operations/Sec", "OS Write IOPS", "ops/s"],
+    ["Data Disk Read Operations/Sec", "Data Read IOPS", "ops/s"],
+    ["Data Disk Write Operations/Sec", "Data Write IOPS", "ops/s"],
+  ];
+  const ioRows = ioMetrics.map(([k, lbl, unit]) => {
+    const s = stats[k];
+    if (!s) {
+      return `<tr class="border-t border-Cborder/20"><td class="py-1 pr-3 text-[9px] text-Cmuted">${lbl}</td><td class="py-1 pr-3 text-[9px] text-Cmuted">N/A</td><td class="py-1 text-[9px] text-Cmuted">N/A</td></tr>`;
+    }
+    const avg = Number(s.mean ?? 0).toFixed(2);
+    const mx = Number(s.max ?? 0).toFixed(2);
+    return `<tr class="border-t border-Cborder/20"><td class="py-1 pr-3 text-[9px] text-Cwhite">${lbl}</td><td class="py-1 pr-3 text-[9px] text-Cmuted font-mono">${avg} ${unit}</td><td class="py-1 text-[9px] text-Cmuted font-mono">${mx} ${unit}</td></tr>`;
+  }).join("");
+  const ioSection = document.createElement("div");
+  ioSection.className = "rounded-lg border border-Cborder/40 bg-Cbg/50 p-3";
+  ioSection.innerHTML = `
+    <div class="text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">Disk IO Telemetry (Azure Monitor)</div>
+    <div class="text-[8px] text-Cmuted mb-1">Source timezone: UTC (display may follow browser locale)</div>
+    <table class="w-full text-left"><thead><tr class="text-[8px] text-Cmuted uppercase tracking-wider"><th class="pb-1 pr-3">Metric</th><th class="pb-1 pr-3">Average</th><th class="pb-1">Maximum</th></tr></thead><tbody>${ioRows}</tbody></table>
+  `;
+  card.appendChild(ioSection);
+  } // end _ddShowExtendedMetrics guard
+
+  // (waveform badges removed — Signal Pattern Analysis section below covers all patterns)
+
   // Critical spike detail table — P2: group recurring events
+  // Filter spikes to only show metrics matching the current visibility toggle
+  const _coreMetricKeys = new Set(metricConfig.map(m => m.key));
   const allCriticalSpikes = [];
   for (const [metricName, spikeList] of Object.entries(spikes)) {
+    if (!_coreMetricKeys.has(metricName)) continue; // skip metrics not in active config
     for (const s of spikeList) allCriticalSpikes.push({ ...s, metric: metricName });
   }
   if (allCriticalSpikes.length) {
@@ -5091,7 +6139,6 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           ? new Date(s.end).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
           : new Date(s.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         const peakTime = new Date(s.peak_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const deviation = ((s.peak - s.mean) / s.std).toFixed(1);
 
         // Bug 3+4: severity-aware labels (sustained, absolute threshold)
         const sev = (s.severity || "critical").toUpperCase().replace("_", " ");
@@ -5100,15 +6147,24 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           ? `<span class="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
           : "";
 
-        return `<tr class="border-t border-red-500/15">
-          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}">${sev}${detectionTag}</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cwhite">${escapeHtml(metricLabel)}</td>
+        // Source lineage tooltip
+        const srcMetric = s.source_metric || s.metric;
+        const srcAgg = s.aggregation || "Average";
+        const srcGrain = s.grain || "";
+        const srcFormula = s.formula ? ` | Derived: ${s.formula}` : "";
+        const lineageTitle = `Source: ${srcMetric} (${srcAgg}, ${srcGrain})${srcFormula}`;
+        const sevReason = s.severity_reason || "";
+
+        return `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${detectionTag}${_confBadge(s.confidence)}</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cwhite" title="${lineageTitle}">${escapeHtml(metricLabel)}${s.is_derived ? ' <span class="text-[7px] px-0.5 rounded" style="color:'+THEME.cyan+';background:'+hexA(THEME.cyan,0.12)+'">derived</span>' : ''}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s.metric, s.peak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${s.duration_min}min</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">peak @ ${peakTime}</td>
-          <td class="py-1.5 text-[10px] text-Cmuted">${deviation}σ above mean (μ=${s.mean}%)</td>
+          <td class="py-1.5 text-[10px] text-Cmuted">${_formatDeviation(s)}</td>
+          <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
         </tr>`;
+
       } else {
         // Recurring pattern — collapsed row
         const s0 = group[0];
@@ -5125,20 +6181,48 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           : group.some(g => g.severity === "critical") ? "CRITICAL" : "WARNING";
         const sevColor = worstSev.includes("SUSTAINED") ? THEME.purple : worstSev === "WARNING" ? THEME.amber : THEME.red;
 
-        return `<tr class="border-t border-red-500/15" style="background:${hexA(THEME.amber, 0.04)}">
-          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}">${worstSev} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">RECURRING</span></td>
+        // Evidence-backed recurring label
+        const confLabel = group[0].confidence;
+        const distinctDays = [...new Set(group.map(g => new Date(g.peak_time).toDateString()))].length;
+        const patternLabel = distinctDays >= 5 ? "scheduled job pattern" : distinctDays >= 3 ? "likely recurring" : "possible pattern";
+        const patternColor = distinctDays >= 5 ? THEME.amber : distinctDays >= 3 ? THEME.cyan : THEME.muted;
+
+        const minStart = group.reduce((a, g) => g.start < a ? g.start : a, group[0].start);
+        const maxEnd   = group.reduce((a, g) => g.end   > a ? g.end   : a, group[0].end);
+        return `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" style="background:${hexA(THEME.amber, 0.04)}" title="Click to reload deep dive for this recurring pattern window" onclick="openSpikeWindow(${JSON.stringify(minStart)},${JSON.stringify(maxEnd)})">
+          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}">${worstSev} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">RECURRING</span>${_confBadge(confLabel)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite">${escapeHtml(metricLabel)} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">${group.length}×</span></td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s0.metric, maxPeak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${dayLabel} pattern</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">~${avgDur}min each</td>
-          <td class="py-1.5 pr-3 text-[10px] text-amber-400 font-semibold">scheduled job pattern</td>
+          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${patternColor}">${patternLabel} <span class="text-[8px] text-Cmuted">(${distinctDays}d)</span></td>
           <td class="py-1.5 text-[10px] text-Cmuted">peak ${_formatPeak(s0.metric, maxPeak)}, avg duration ${avgDur}min</td>
+          <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
         </tr>`;
       }
     }).join("");
 
+    // Sparse-data warning: if any metric has <24 datapoints, warn
+    const sparseMetrics = availableMetrics.filter(mc => {
+      const pts = metrics[mc.key];
+      return pts && pts.length > 0 && pts.length < 24;
+    });
+    const sparseWarn = sparseMetrics.length
+      ? `<div class="text-[9px] px-2 py-1 rounded mb-1.5" style="color:${THEME.amber};background:${hexA(THEME.amber,0.08)};border:1px solid ${hexA(THEME.amber,0.2)}">⚠ Low data density for ${sparseMetrics.map(m => m.label).join(", ")} — interpretations may be less reliable</div>`
+      : "";
+
+    // Provenance line
+    const firstPts = Object.values(metrics).find(a => a && a.length > 1);
+    let grainLabel = "";
+    if (firstPts && firstPts.length >= 2) {
+      const gap = (new Date(firstPts[1].t) - new Date(firstPts[0].t)) / 60000;
+      grainLabel = gap < 60 ? `${gap.toFixed(0)}min` : `${(gap/60).toFixed(0)}h`;
+    }
+    const provLine = `<div class="text-[8px] text-Cmuted mb-1">Source: Azure Monitor · Aggregation: Average · Grain: ${grainLabel || "auto"} · Datapoints: ${firstPts?.length || "?"}</div>`;
+
     spikeTable.innerHTML = `
       <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Critical Spike Events</div>
+      ${provLine}${sparseWarn}
       <table class="w-full text-left"><thead>
         <tr class="text-[9px] text-Cmuted uppercase tracking-wider">
           <th class="pb-1 pr-3">Severity</th><th class="pb-1 pr-3">Metric</th>
@@ -5151,30 +6235,205 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     card.appendChild(spikeTable);
   }
 
+  // ── Signal Pattern Analysis (waveform shapes) ──────────────
+  // Only show actionable patterns (critical/high) in detail.
+  // Healthy metrics collapsed into a single summary line.
+  const wfData = vmData.waveforms || {};
+  // Filter to core metrics only when extended toggle is off
+  const _coreKeys = new Set(metricConfig.map(m => m.key));
+  const wfEntries = Object.entries(wfData).filter(([k]) => _coreKeys.has(k));
+  if (wfEntries.length) {
+    const wfSection = document.createElement("div");
+    wfSection.className = "rounded-lg border border-Cborder/40 bg-Cbg/50 p-3 space-y-1";
+    const riskOrder = { critical: 0, high: 1, medium: 2, low: 3, none: 4 };
+    const riskColorsD = { none: THEME.green, low: THEME.cyan, medium: THEME.amber, high: THEME.red, critical: THEME.purple };
+    wfEntries.sort((a, b) => (riskOrder[a[1].risk] ?? 5) - (riskOrder[b[1].risk] ?? 5));
+    const metricShort = k =>
+      k.includes("CPU") ? "CPU" :
+      k.includes("Memory") ? "Memory" :
+      k.includes("OS Disk") && k.includes("IOPS") ? "OS IOPS" :
+      k.includes("Data Disk") && k.includes("IOPS") ? "Data IOPS" :
+      k.includes("OS Disk") && k.includes("Bandwidth") ? "OS Disk BW" :
+      k.includes("Data Disk") && k.includes("Bandwidth") ? "Data Disk BW" :
+      k.includes("Cached") ? "Cached BW" :
+      k.includes("Uncached") ? "Uncached BW" :
+      k.includes("OS Disk") ? "OS Disk" :
+      k.includes("Data Disk") ? "Data Disk" : k;
+
+    // Separate actionable vs healthy
+    const actionable = []; // critical, high, medium
+    const healthy = [];    // low, none
+    for (const [metric, wf] of wfEntries) {
+      let dWf = wf;
+      if (metric.includes("Memory")) {
+        const memStat = vmData.stats?.["Available Memory Percentage"];
+        const memUsed = memStat?.min != null ? 100 - memStat.min : (memStat?.mean != null ? 100 - memStat.mean : 0);
+        const _thr = window.appData?.resource?.kpis?.thresholds || RESOURCE_THRESHOLDS;
+        dWf = _rewriteWaveformForDb(wf, ddRole, memUsed, _thr);
+      }
+      const entry = { metric, wf, dWf };
+      if (dWf.risk === "critical" || dWf.risk === "high" || dWf.risk === "medium") actionable.push(entry);
+      else healthy.push(entry);
+    }
+
+    let wfRows = "";
+    // ── Actionable patterns: full detail with new intelligence fields ──
+    for (const { metric, wf, dWf } of actionable) {
+      const rc = riskColorsD[dWf.risk] || THEME.muted;
+      const det = wf.details || {};
+
+      // Peak tag
+      const peakTag = det.peak_used_pct != null
+        ? `<span class="text-[8px] font-mono px-1 py-0.5 rounded" style="color:${det.peak_used_pct >= 85 ? THEME.red : det.peak_used_pct >= 65 ? THEME.amber : THEME.green};background:${hexA(det.peak_used_pct >= 85 ? THEME.red : det.peak_used_pct >= 65 ? THEME.amber : THEME.green, 0.1)}">peak ${det.peak_used_pct.toFixed(0)}%</span>`
+        : "";
+
+      // Headroom tag
+      const hdTag = det.headroom_pct != null
+        ? `<span class="text-[8px] font-mono px-1 py-0.5 rounded" style="color:${det.headroom_pct <= 15 ? THEME.red : det.headroom_pct <= 30 ? THEME.amber : THEME.green};background:${hexA(det.headroom_pct <= 15 ? THEME.red : det.headroom_pct <= 30 ? THEME.amber : THEME.green, 0.1)}">${det.headroom_pct.toFixed(0)}% free</span>`
+        : "";
+
+      // DB expected band rewrite badge
+      const dbBandTag = (metric.includes("Memory") && dWf !== wf)
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)}">DB EXPECTED</span>`
+        : "";
+
+      // Confidence label with color coding
+      const confLabel = dWf.confidence_label || (dWf.confidence >= 0.75 ? "observed" : dWf.confidence >= 0.55 ? "inferred" : "weak-signal");
+      const confColor = confLabel === "observed" ? THEME.green : confLabel === "inferred" ? THEME.amber : THEME.muted;
+      const confPct = dWf.confidence != null ? `${(dWf.confidence * 100).toFixed(0)}%` : "";
+      const confTag = `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded cursor-help"
+        style="color:${confColor};background:${hexA(confColor,0.1)}"
+        title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${wf.recurrence_days || 0} breach days, ${(det.cv || 0).toFixed(2)} CV."
+        >${confLabel} ${confPct}</span>`;
+
+      // Recurrence days tag
+      const recurDays = wf.recurrence_days || 0;
+      const recurTag = recurDays > 0
+        ? `<span class="text-[7px] font-mono px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.muted,0.08)}" title="${recurDays} distinct days with threshold breach">↺ ${recurDays}d</span>`
+        : "";
+
+      // Duration above threshold tag
+      const durHrs = wf.duration_above_threshold_hrs || 0;
+      const durTag = durHrs >= 1
+        ? `<span class="text-[7px] font-mono px-1 py-0.5 rounded" style="color:${durHrs >= 8 ? THEME.red : THEME.amber};background:${hexA(durHrs >= 8 ? THEME.red : THEME.amber, 0.1)}" title="${durHrs.toFixed(1)}h above threshold">⏱ ${durHrs.toFixed(0)}h above</span>`
+        : "";
+
+      // Change point badge
+      const cpTag = (dWf.shape === "change_point" || det.change_point_idx != null)
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded" style="color:#f472b6;background:${hexA('#f472b6',0.1)}" title="Regime shift detected: level changed from ${det.before_mean || '?'}% to ${det.after_mean || '?'}%">REGIME SHIFT</span>`
+        : "";
+
+      // Concurrent pressure badge
+      const concTag = dWf.concurrent_pressure
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded animate-pulse" style="color:${THEME.red};background:${hexA(THEME.red,0.15)}" title="Concurrent pressure: ${(dWf.concurrent_metrics||[]).join(' + ')} all under load simultaneously">🔥 CONCURRENT</span>`
+        : "";
+
+      // Secondary pattern
+      const secShape = dWf.secondary_shape;
+      const secCatalog = secShape ? { sawtooth: {label:"Cyclic",icon:"⚡"}, diurnal: {label:"Diurnal",icon:"🌓"}, trending_up:{label:"Trending ↑",icon:"📈"}, random_spikes:{label:"Spikes",icon:"🎯"}, plateau:{label:"Sustained",icon:"▬"}, change_point:{label:"Shift",icon:"⚠️"}, weekend_dip:{label:"Wknd Dip",icon:"📅"}, flat_low:{label:"Flat Low",icon:"✅"} }[secShape] : null;
+      const secTag = secCatalog
+        ? `<span class="text-[7px] font-mono px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.muted,0.08)}" title="Secondary pattern: ${secCatalog.label}">also: ${secCatalog.icon} ${secCatalog.label}</span>`
+        : "";
+
+      wfRows += `
+        <div class="flex items-start gap-3 py-2 border-b border-Cborder/20 last:border-0 hover:bg-white/[0.015] rounded transition">
+          <span class="text-lg shrink-0 mt-0.5">${dWf.icon}</span>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5 flex-wrap mb-0.5">
+              <span class="text-[11px] font-bold text-Cwhite">${metricShort(metric)}</span>
+              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
+              <span class="text-[8px] font-bold uppercase px-1 py-0.5 rounded" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
+              ${confTag}${peakTag}${hdTag}${durTag}${recurTag}${cpTag}${concTag}${secTag}${dbBandTag}
+            </div>
+            <div class="text-[9px] text-Cwhite/80 leading-relaxed">${dWf.meaning || ""}</div>
+            <div class="text-[9px] mt-0.5 font-medium" style="color:${THEME.cyan}">→ ${dWf.action || ""}</div>
+          </div>
+        </div>`;
+    }
+
+    // ── Healthy patterns: collapsed single line ──
+    let healthySummary = "";
+    if (healthy.length) {
+      const hNames = healthy.map(h => metricShort(h.metric)).join(", ");
+      healthySummary = `
+        <div class="flex items-center gap-2 pt-1.5 mt-1 border-t border-Cborder/20">
+          <span class="text-sm">✓</span>
+          <span class="text-[9px] text-Cmuted">${healthy.length} metric${healthy.length > 1 ? "s" : ""} within normal range</span>
+          <span class="text-[8px] text-Cmuted/60">${hNames}</span>
+        </div>`;
+    }
+
+    const headerLabel = actionable.length
+      ? `⚠ ${actionable.length} Pattern${actionable.length > 1 ? "s" : ""} Requiring Attention`
+      : `✓ All Patterns Normal`;
+    const headerColor = actionable.length ? "text-amber-400" : "text-green-400";
+    wfSection.innerHTML = `
+      <div class="text-[10px] font-bold ${headerColor} uppercase tracking-widest mb-1.5">${headerLabel}</div>
+      ${wfRows}${healthySummary}
+    `;
+    card.appendChild(wfSection);
+  }
+
   // ── Unified multi-metric chart (dual Y-axes) ──────────────
   // CPU + Disk on left axis, Memory (inverted to "used") on right axis
-  const unifiedMetrics = [
-    { key: "Percentage CPU",                          label: "CPU %",       color: THEME.blue,   axis: "y", dash: [] },
-    { key: "Available Memory Percentage",              label: "Mem Used %",  color: THEME.red,    axis: "y1", dash: [], invert: true },
-    { key: "OS Disk Bandwidth Consumed Percentage",    label: "OS Disk %",   color: THEME.amber,  axis: "y", dash: [4, 2] },
-    { key: "Data Disk Bandwidth Consumed Percentage",  label: "Data Disk %", color: THEME.purple, axis: "y", dash: [2, 2] },
+  // Core metrics always shown; extended (IOPS/BW) only when toggle is on
+  const _allUnifiedMetrics = [
+    { key: "Percentage CPU",                          label: "CPU %",                  color: THEME.blue,   axis: "y", dash: [], core: true },
+    { key: "Available Memory Percentage",              label: "Available Mem %",        color: THEME.cyan,   axis: "y1", dash: [], core: true },
+    { key: "OS Disk Bandwidth Consumed Percentage",    label: "OS Disk %",              color: THEME.amber,  axis: "y", dash: [4, 2], core: true },
+    { key: "Data Disk Bandwidth Consumed Percentage",  label: "Data Disk %",            color: THEME.purple, axis: "y", dash: [2, 2], core: true },
+    { key: "OS Disk IOPS Consumed Percentage",         label: "OS IOPS %",              color: "#f97316",  axis: "y", dash: [6, 3] },
+    { key: "Data Disk IOPS Consumed Percentage",       label: "Data IOPS %",            color: "#a855f7",  axis: "y", dash: [3, 3] },
+    { key: "VM Cached IOPS Consumed Percentage",       label: "Cached IOPS %",          color: "#0ea5e9",  axis: "y", dash: [1, 2] },
+    { key: "VM Uncached IOPS Consumed Percentage",     label: "Uncached IOPS %",        color: "#14b8a6",  axis: "y", dash: [8, 2] },
   ];
+  const unifiedMetrics = _ddShowExtendedMetrics ? _allUnifiedMetrics : _allUnifiedMetrics.filter(m => m.core);
 
   const datasetsForChart = [];
   let unifiedLabels = null;
   const allAnnotations = {};
   const _pendingAnnotations = [];
 
+  // Downsample large time-series to prevent Firefox canvas overload.
+  // Uses largest-triangle-three-bucket (LTTB-lite): keeps visual shape.
+  const MAX_PTS = 500;
+  function _downsample(arr, n) {
+    if (arr.length <= n) return arr;
+    const step = (arr.length - 2) / (n - 2);
+    const out = [arr[0]];
+    for (let i = 1; i < n - 1; i++) {
+      const lo = Math.floor(1 + (i - 1) * step);
+      const hi = Math.min(Math.floor(1 + i * step), arr.length - 1);
+      let best = lo, bestA = -1;
+      const prev = out[out.length - 1];
+      const nextAvg = arr.slice(hi, Math.min(hi + Math.ceil(step), arr.length))
+        .reduce((s, v) => s + (typeof v === 'number' ? v : 0), 0) / Math.ceil(step);
+      for (let j = lo; j <= hi; j++) {
+        const a = Math.abs((j - (out.length - 1)) * (nextAvg - (typeof prev === 'number' ? prev : 0))
+          - ((out.length - 1) - (out.length - 1)) * ((typeof arr[j] === 'number' ? arr[j] : 0) - (typeof prev === 'number' ? prev : 0)));
+        if (a > bestA) { bestA = a; best = j; }
+      }
+      out.push(arr[best]);
+    }
+    out.push(arr[arr.length - 1]);
+    return out;
+  }
+
   for (const um of unifiedMetrics) {
     const pts = metrics[um.key];
     if (!pts || !pts.length) continue;
-    if (!unifiedLabels) unifiedLabels = pts.map(p => new Date(p.t));
+    // Downsample both labels and values together
+    const rawLabels = pts.map(p => new Date(p.t));
     let vals = pts.map(p => p.v);
-    if (um.invert) vals = vals.map(v => 100 - v); // available → used
+    // Memory now shown as Azure-native Available % — no inversion needed
+    if (!unifiedLabels) {
+      unifiedLabels = pts.length > MAX_PTS ? _downsample(rawLabels, MAX_PTS) : rawLabels;
+    }
+    const dsVals = pts.length > MAX_PTS ? _downsample(vals, MAX_PTS) : vals;
 
     datasetsForChart.push({
       label: um.label,
-      data: vals,
+      data: dsVals,
       borderColor: um.color,
       backgroundColor: "transparent",
       borderWidth: 1.5,
@@ -5354,6 +6613,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        animation: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: false },
@@ -5431,8 +6691,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
             position: "right",
             beginAtZero: true,
             suggestedMax: 100,
-            title: { display: true, text: "Mem Used %", color: THEME.red, font: { size: 9 } },
-            ticks: { color: hexA(THEME.red, 0.6), font: { size: 9 }, callback: v => v + "%" },
+            title: { display: true, text: "Available Memory %", color: THEME.cyan, font: { size: 9 } },
+            ticks: { color: hexA(THEME.cyan, 0.6), font: { size: 9 }, callback: v => v + "%" },
             grid: { drawOnChartArea: false },
           },
         },
@@ -5861,12 +7121,129 @@ const FINDING_STYLES = {
 
 // ── Init ──────────────────────────────────────────────────────
 function initFindingsTab() {
-  // Nothing to wire at boot — buttons use inline onclick handlers.
-  // Findings auto-fire when the insights tab becomes active (setActiveView).
+  // Wire the "Refresh narrative" button in the 4-pillar accordion header
+  const refreshBtn = document.getElementById("btn-refresh-narrative");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", async () => {
+      refreshBtn.disabled = true;
+      const orig = refreshBtn.textContent;
+      refreshBtn.textContent = "Refreshing…";
+      try {
+        // Step 1: re-sync all appData from backend session cache
+        await refreshAuditContext();
+        // Step 2: force re-run findings with fresh payload (all 4 pillars)
+        await triggerGenerateFindings({ force: true });
+        // Step 3: realign executive dashboard grade
+        if (typeof renderOverview === "function") {
+          try { await renderOverview(); } catch (_) {}
+        }
+        toast("success", "PE Review refreshed",
+          "All 4 pillars reloaded — Batch, Infrastructure, SOW, UI Benchmark");
+      } catch (err) {
+        toast("error", "Refresh failed", String(err?.message || err));
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = orig;
+      }
+    });
+  }
 }
 
 // ── Trigger AI-driven findings (Gemini / NIM cross-pillar synthesis) ─────
 // ── Build SLA triage digest for findings payload ──────────────────────────
+// ── SLA Baseline vs Matrix comparison payload ─────────────────
+// Cross-checks:
+//   (A) SLA matrix expected-completion time (sla_hours) vs pe_config defaults
+//   (B) SLA matrix expected-completion time vs actual Ctrl-M batch runtime
+// Produces structured delta objects for the findings engine to consume.
+function _buildSlaComparison() {
+  const batchData    = window.appData?.batch;
+  const slaIntel     = window.appData?.slaIntelligence;
+  const peDefaults   = batchData?.pe_defaults || {};
+  const topJobs      = batchData?.top_jobs || [];
+  const wfSummary    = (window.appData?.slaMatrix?.workflow_summary) || [];
+  const batchSlaWfs  = (window.appData?.batchSlaInfo?.workflows) || [];
+
+  if (!batchData && !slaIntel) return null;
+
+  const defaultDaily  = Number(peDefaults.daily_hrs  || 6.0);
+  const defaultWeekly = Number(peDefaults.weekly_hrs || 8.0);
+
+  // ── A: SLA matrix expected-completion vs pe_config defaults ──────────────
+  // Find workflows where the contracted SLA is significantly different from
+  // the PE default for that schedule type.
+  const VARIANCE_THRESHOLD_PCT = 25; // flag when >25% difference
+  const defaultDeltas = [];
+  const wfSource = wfSummary.length > 0 ? wfSummary : batchSlaWfs;
+  for (const wf of wfSource) {
+    const slaHrs  = Number(wf.sla_hours || wf.sla_h || 0);
+    if (slaHrs <= 0) continue;
+    const btype   = (wf.batch_type || "DAILY").toUpperCase();
+    const defHrs  = btype === "WEEKLY" ? defaultWeekly : defaultDaily;
+    const diffPct = ((slaHrs - defHrs) / defHrs) * 100;
+    if (Math.abs(diffPct) >= VARIANCE_THRESHOLD_PCT) {
+      defaultDeltas.push({
+        workflow:   wf.workflow || wf.sub_application || "?",
+        batch_type: btype,
+        matrix_sla_hrs: slaHrs,
+        default_hrs:    defHrs,
+        diff_pct:       Math.round(diffPct * 10) / 10,
+        tighter:        slaHrs < defHrs,
+      });
+    }
+  }
+
+  // ── B: SLA matrix expected-completion vs actual batch runtime ────────────
+  // Match top_jobs from batch against SLA matrix workflows and compute gap.
+  const BREACH_VARIANCE_PCT = 15; // flag when runtime > 85% of contracted SLA
+  const runtimeDeltas = [];
+  const wfByName = {};
+  for (const wf of wfSource) {
+    const name = (wf.workflow || wf.sub_application || "").toUpperCase();
+    if (name) wfByName[name] = wf;
+  }
+  for (const job of topJobs) {
+    const jobName = (job.Job_Name || job.job_name || "").toUpperCase();
+    const subApp  = (job.Sub_Application || job.sub_application || "").toUpperCase();
+    // Try to match by sub_application first, then job name
+    const wf = wfByName[subApp] || wfByName[jobName];
+    const slaHrs   = Number(job.sla_hrs || wf?.sla_hours || wf?.sla_h || 0);
+    const peakHrs  = Number(job.peak_hrs || 0);
+    if (slaHrs <= 0 || peakHrs <= 0) continue;
+    const bufPct   = ((slaHrs - peakHrs) / slaHrs) * 100;
+    const usedPct  = 100 - bufPct;
+    if (usedPct >= (100 - BREACH_VARIANCE_PCT)) {
+      runtimeDeltas.push({
+        job_name:       job.Job_Name || job.job_name || "?",
+        sub_app:        job.Sub_Application || job.sub_application || "",
+        matrix_sla_hrs: slaHrs,
+        peak_runtime_hrs: peakHrs,
+        buffer_pct:     Math.round(bufPct * 10) / 10,
+        used_pct:       Math.round(usedPct * 10) / 10,
+        sla_source:     job.sla_source || "default",
+        is_breach:      bufPct < 0,
+      });
+    }
+  }
+  runtimeDeltas.sort((a, b) => a.buffer_pct - b.buffer_pct);
+
+  // ── Summary ──────────────────────────────────────────────────────────────
+  const hasSlaMatrix = !!(window.appData?.batch?.sla_source?.type === "sla_matrix"
+    || slaIntel?.intelligence?.valid_rows > 0);
+
+  return {
+    has_sla_matrix:     hasSlaMatrix,
+    default_daily_hrs:  defaultDaily,
+    default_weekly_hrs: defaultWeekly,
+    default_deltas:     defaultDeltas.slice(0, 20),
+    runtime_deltas:     runtimeDeltas.slice(0, 20),
+    tighter_than_default: defaultDeltas.filter(d => d.tighter).length,
+    looser_than_default:  defaultDeltas.filter(d => !d.tighter).length,
+    near_breach_count:  runtimeDeltas.filter(d => !d.is_breach && d.used_pct >= 85).length,
+    breach_count:       runtimeDeltas.filter(d => d.is_breach).length,
+  };
+}
+
 // Returns structured arrays of: low-buffer jobs, breaching jobs with no
 // resource evidence (unexplained), and workflow-level triage from BatchSLA.
 function _buildSlaTriage() {
@@ -5979,6 +7356,16 @@ function _buildSlaTriage() {
 }
 
 // ── Build the rule-engine payload from whatever is currently in appData ─
+// Compact waveform summary for findings/narrative payloads
+function _summarizeWaveforms(waveforms) {
+  if (!waveforms || !Object.keys(waveforms).length) return null;
+  const out = {};
+  for (const [metric, wf] of Object.entries(waveforms)) {
+    out[metric] = { shape: wf.shape, label: wf.label, risk: wf.risk, confidence: wf.confidence };
+  }
+  return out;
+}
+
 // ── Deep Dive Summary builder — distills time-series evidence for findings/narrative ──
 function _buildDeepDiveSummary() {
   if (!_deepDiveData) return null;
@@ -6028,9 +7415,19 @@ function _buildDeepDiveSummary() {
       }
     }
 
-    const memUsed = st["Available Memory Percentage"]?.min != null
-      ? 100 - st["Available Memory Percentage"].min : null;
+    const memAvailMin = st["Available Memory Percentage"]?.min ?? null;
+    const memUsed = memAvailMin != null ? 100 - memAvailMin : null;
     const cpuMax = st["Percentage CPU"]?.max ?? null;
+    const diskIopsMax = Math.max(
+      st["OS Disk IOPS Consumed Percentage"]?.max ?? 0,
+      st["Data Disk IOPS Consumed Percentage"]?.max ?? 0,
+      st["VM Cached IOPS Consumed Percentage"]?.max ?? 0,
+      st["VM Uncached IOPS Consumed Percentage"]?.max ?? 0,
+    ) || null;
+    const diskLatencyMax = Math.max(
+      st["OS Disk Latency"]?.max ?? 0,
+      st["Data Disk Latency"]?.max ?? 0,
+    ) || null;
 
     perVm.push({
       vm: vmName,
@@ -6038,8 +7435,11 @@ function _buildDeepDiveSummary() {
       spike_count: spikeCount,
       mem_used_max: memUsed,
       cpu_max: cpuMax,
+      disk_iops_max: diskIopsMax,
+      disk_latency_max_ms: diskLatencyMax,
       trend,
       spikes: spikeDetails.slice(0, 5), // top 5 per VM
+      waveforms: _summarizeWaveforms(vmData.waveforms || {}),
     });
   }
 
@@ -6091,30 +7491,85 @@ function _buildDeepDiveSummary() {
 
 function _buildFindingsPayload() {
   const ad = window.appData || {};
+  const _filtered = ad.batch ? _filterBatchUtility(ad.batch) : null;
+  const bk = ad.batch?.kpis || null;
+
+  // data_coverage lives at batch ROOT (not inside kpis) — enrich batch_kpis explicitly
+  // Gap 2 fix: backend reads (req.batch_kpis or {}).get("data_coverage")
+  const dataCoverage = ad.batch?.data_coverage || ad.batch?.kpis?.data_coverage || null;
+  const batchKpisEnriched = bk ? { ...bk, data_coverage: dataCoverage } : null;
+
+  // Pillar 3 — SOW compare: prefer live comparison, fall back to manual entry
+  const sowCompare = ad.sowCompare || _buildSowCompareFromManual() || null;
+  const sowDfu     = sowCompare?.dfu_actual  || sowCompare?.dfu     || 0;
+  const sowDfuBase = sowCompare?.dfu_target  || sowCompare?.dfu_sow || 0;
+
   return {
-    batch_kpis:    ad.batch?.kpis        || null,
-    top_jobs:      ad.batch?.top_jobs    || null,
-    top_breaches:  ad.batch?.top_breaches|| null,
-    window:        ad.batch?.window      || null,
-    anomalies:     ad.batch?.anomalies   || null,
-    sub_stats:     ad.batch?.sub_stats   || null,
-    resource_kpis: ad.resource?.kpis     || null,
-    servers:       ad.resource?.servers  || ad.servers || null,
-    sla_matrix:    ad.slaMatrix          || null,
-    sla_ceilings:  ad.slaCeilings        || null,
-    benchmark:     ad.benchmark          || null,
-    sow_compare:   ad.sowCompare         || null,
-    issues:        ad.issues             || null,
-    customer_name: ad.customerName       || null,
-    sla_intel:     ad.slaIntelligence    || null,
-    // SLA triage: low-buffer jobs + unexplained breaches for targeted findings
-    sla_triage:    _buildSlaTriage(),
-    // Deep dive time-series evidence (spikes, patterns) — when available
-    deep_dive:     _buildDeepDiveSummary(),
+    // Pillar 1 — Batch + SLA
+    batch_kpis:     batchKpisEnriched,
+    top_jobs:       _filtered?.top_jobs     || null,
+    top_breaches:   _filtered?.top_breaches || null,
+    window:         ad.batch?.window        || null,
+    anomalies:      ad.batch?.anomalies     || null,
+    sub_stats:      ad.batch?.sub_stats     || null,
+    sla_triage:     _buildSlaTriage(),
+    sla_comparison: _buildSlaComparison(),
+
+    // Pillar 2 — Infrastructure
+    resource_kpis: ad.resource?.kpis    || null,
+    servers:       ad.resource?.servers || ad.servers || null,
+
+    // Pillar 3 — SOW / DFU volume
+    sow_compare:  sowCompare,
+    sow_dfu:      sowDfu,
+    sow_dfu_base: sowDfuBase,
+
+    // Pillar 4 — UI Benchmark
+    benchmark: ad.benchmark || null,
+
+    // Supporting
+    sla_matrix:      ad.slaMatrix       || null,
+    // Filter sla_ceilings to only valid numeric values — Pydantic rejects nulls/strings
+    // and would return HTTP 422 if any ceiling value is null (e.g. when SLA matrix has
+    // batch types with missing SLA hours).
+    sla_ceilings: (() => {
+      const raw = ad.slaCeilings;
+      if (!raw || typeof raw !== 'object') return null;
+      const clean = Object.fromEntries(
+        Object.entries(raw).filter(([, v]) => typeof v === 'number' && isFinite(v) && v > 0)
+      );
+      return Object.keys(clean).length ? clean : null;
+    })(),
+    issues:          ad.issues          || null,
+    customer_name:   ad.customerName    || null,
+    sla_intel:       ad.slaIntelligence || null,
+    volume_analysis: _buildVolumeAnalysis(),
+    deep_dive:       _buildDeepDiveSummary(),
   };
 }
 
-async function triggerGenerateFindings() {
+// ── Debounced findings trigger — prevents cascade storm ──────
+// Multiple callers (batch, resource, deep-dive, exec) all fire
+// triggerGenerateFindings in rapid succession. Without debounce,
+// this causes 4-6 concurrent API calls + DOM re-renders that
+// freeze Firefox. 400ms debounce collapses the burst into one call.
+let _findingsDebounceTimer = null;
+let _findingsInFlight = false;
+let _findingsErrCount = 0;      // consecutive error count — stops cascade toasts
+let _findingsLastErrMsg = "";   // dedup repeated identical error messages
+
+async function triggerGenerateFindings({ force = false } = {}) {
+  // If a request is already in flight, just schedule a re-run after it finishes
+  if (_findingsInFlight) {
+    if (!_findingsDebounceTimer) {
+      _findingsDebounceTimer = setTimeout(() => {
+        _findingsDebounceTimer = null;
+        triggerGenerateFindings().catch(() => {});
+      }, 400);
+    }
+    return;
+  }
+
   const loading = document.getElementById("findings-loading");
   if (loading) loading.classList.remove("hidden");
 
@@ -6122,15 +7577,18 @@ async function triggerGenerateFindings() {
   // The LLM runs in the background via triggerSmartFindings afterwards.
   const payload = _buildFindingsPayload();
 
-  // Skip if there's nothing to analyse
+  // Skip if there's nothing to analyse — force=true bypasses this for manual refresh
   const ad = window.appData || {};
   const hasData = !!(ad.batch || ad.resource) ||
                   !!(payload.batch_kpis || payload.resource_kpis ||
+                     payload.benchmark || payload.sow_compare ||
                      (payload.top_jobs && payload.top_jobs.length));
-  if (!hasData) {
+  if (!hasData && !force) {
     if (loading) loading.classList.add("hidden");
     return;
   }
+
+  _findingsInFlight = true;
 
   try {
     const res = await fetch("/api/generate-findings", {
@@ -6140,9 +7598,17 @@ async function triggerGenerateFindings() {
     });
     if (!res.ok) {
       const msg = await res.text();
-      toast("error", "Findings error", msg.slice(0, 200));
+      _findingsErrCount++;
+      // Show at most ONE toast per unique error to prevent cascade storm
+      if (_findingsErrCount <= 1 || msg !== _findingsLastErrMsg) {
+        _findingsLastErrMsg = msg;
+        const detail = res.status === 422 ? "Payload validation error — check SLA ceilings format" : msg.slice(0, 200);
+        toast("error", "Findings error", detail);
+      }
       return;
     }
+    _findingsErrCount = 0;
+    _findingsLastErrMsg = "";
     const data = await res.json();
 
     // /api/generate-findings already returns the Finding shape directly —
@@ -6150,9 +7616,13 @@ async function triggerGenerateFindings() {
     const findings = Array.isArray(data.findings) ? data.findings : [];
 
     window.appData.findings = { findings, summary: data.summary };
+    // Invalidate downstream caches so exec dashboard re-reads fresh data
+    window._execCache = null;
+    window._findingsLastHash = null;
     renderFindings(findings);
     renderFindingsSummary(data.summary || {});
     renderFindingsDonut(data.summary || {});
+    renderPeReviewSections(data, window.appData.smartFindings || null);
 
     // Background: LLM smart analysis (non-blocking — never delays the table)
     triggerSmartFindings(payload).catch(() => {});
@@ -6163,6 +7633,7 @@ async function triggerGenerateFindings() {
   } catch (err) {
     _handleFetchError(err);
   } finally {
+    _findingsInFlight = false;
     const loading = document.getElementById("findings-loading");
     if (loading) loading.classList.add("hidden");
   }
@@ -6195,6 +7666,14 @@ async function triggerSmartFindings(payload) {
   renderSmartVerdict(data.verdict || null);
   renderSmartNextActions(data.next_actions || []);
   renderSmartOpenGaps(data.open_gaps || []);
+  // Sync the 4-pillar review sections with smart verdict data
+  renderPeReviewSections(
+    { findings: (window.appData.findings?.findings) || [],
+      summary:   window.appData.findings?.summary   || {},
+      data_coverage:  data.data_coverage  || {},
+      audit_coverage: data.audit_coverage || {} },
+    data
+  );
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -6353,6 +7832,135 @@ function renderFindingsDonut(summary) {
 }
 
 // ── Render findings verdict hero + table ──────────────────────
+// ── Findings table helpers ───────────────────────────────────────────────────
+function _short(text, max = 72) {
+  if (!text) return "";
+  return text.length > max ? text.slice(0, max - 1) + "…" : text;
+}
+
+let _findingsViewMode = "finding"; // "finding" | "root"
+
+function _setFindingsMode(mode) {
+  _findingsViewMode = mode;
+  const btnF = document.getElementById("btn-mode-finding");
+  const btnR = document.getElementById("btn-mode-rootcause");
+  if (btnF) {
+    btnF.className = `px-2.5 py-1 font-semibold transition-colors border-r border-Cborder/50 ${mode === "finding" ? "bg-Cpurple/30 text-Cwhite" : "bg-transparent text-Cmuted"}`;
+  }
+  if (btnR) {
+    btnR.className = `px-2.5 py-1 font-semibold transition-colors ${mode === "root" ? "bg-Cpurple/30 text-Cwhite" : "bg-transparent text-Cmuted"}`;
+  }
+  _applyFindingsSort();
+}
+
+function groupFindingsByRootCause(findings) {
+  const map = new Map();
+  for (const f of findings) {
+    const key = (f.root_cause || "UNCLASSIFIED").replace(/_/g, " ").trim().toUpperCase() || "UNCLASSIFIED";
+    if (!map.has(key)) map.set(key, { root: key, crit: 0, warn: 0, info: 0, ok: 0, examples: [], sources: new Set() });
+    const g = map.get(key);
+    if (f.level === "critical") g.crit++;
+    else if (f.level === "warning") g.warn++;
+    else if (f.level === "ok") g.ok++;
+    else g.info++;
+    if (g.examples.length < 5) g.examples.push(f);
+    if (f.source) g.sources.add((f.source || "").toUpperCase());
+  }
+  return [...map.values()].sort((a, b) => b.crit - a.crit || b.warn - a.warn);
+}
+
+// Drawer open/close
+window.peOpenFinding = function(idx) {
+  const arr = window._lastRealFindings || [];
+  const f = arr[idx];
+  if (!f) return;
+  const d     = document.getElementById("pe-finding-drawer");
+  const body  = document.getElementById("pe-finding-drawer-body");
+  const title = document.getElementById("pe-finding-drawer-title");
+  const pill  = document.getElementById("pe-finding-drawer-pillar");
+  if (!d || !body || !title) return;
+  if (pill) {
+    const SRC_LBL = { batch:"BATCH", sla:"SLA", resource:"INFRA", benchmark:"UI BENCH", sow:"SOW", issues:"ISSUES" };
+    const sev = (f.level || "info").toUpperCase();
+    const sevCol = sev === "CRITICAL" ? "#f43f5e" : sev === "WARNING" ? "#f59e0b" : sev === "OK" ? "#10d96e" : "#6b7db3";
+    pill.innerHTML = `<span style="color:${sevCol}">${sev}</span>${f.source ? ` · ${SRC_LBL[f.source] || f.source.toUpperCase()}` : ""}`;
+  }
+  title.textContent = f.text || "Finding detail";
+  const _row = (label, val, col) => val ? `<div class="rounded-lg p-3" style="background:#0d1526;border:1px solid #213060">
+    <div class="text-[8px] uppercase tracking-widest font-bold mb-1" style="color:${col || "#6b7db3"}">${label}</div>
+    <div class="text-[11px] leading-relaxed" style="color:#e2e8f0">${_esc(val)}</div>
+  </div>` : "";
+  body.innerHTML = [
+    _row("⚡ Root Cause",         (f.root_cause || "").replace(/_/g, " ") || "—",  "#f59e0b"),
+    _row("📋 Business Impact",    f.impact || "—",                                  "#3b82f6"),
+    _row("→ Recommended Action",  f.recommendation || "—",                          "#10d96e"),
+    f.sub    ? _row("Context",  f.sub,    "#8899bb") : "",
+    f.evidence ? _row("Evidence", f.evidence, "#6b7db3") : "",
+    _row("Evidence Class", (f.evidence_class || "N/A").toUpperCase(), "#6b7db3"),
+    _row("Confidence", f.confidence != null ? `${f.confidence}%` : "N/A", "#6b7db3"),
+  ].join("");
+  d.style.transform = "translateX(0)";
+  const bd = document.getElementById("pe-finding-backdrop");
+  if (bd) bd.classList.remove("hidden");
+};
+
+window.peCloseDrawer = function() {
+  const d = document.getElementById("pe-finding-drawer");
+  if (d) d.style.transform = "translateX(100%)";
+  const bd = document.getElementById("pe-finding-backdrop");
+  if (bd) bd.classList.add("hidden");
+};
+
+function renderFindingsAsRootCause(findings) {
+  const tbody = document.getElementById("findings-tbody");
+  const thead = document.getElementById("findings-thead");
+  if (!tbody) return;
+  const groups = groupFindingsByRootCause(findings);
+  if (thead) {
+    thead.innerHTML = `<tr class="border-b border-Cborder/60 text-[10px] uppercase tracking-wider text-Cmuted bg-Ccard2/20">
+      <th class="px-4 py-2.5 min-w-[220px]">Root Cause</th>
+      <th class="px-3 py-2.5 w-28">Severity</th>
+      <th class="px-3 py-2.5 w-28">Breakdown</th>
+      <th class="px-3 py-2.5">Top Recommended Action</th>
+      <th class="px-3 py-2.5 w-20">Pillars</th>
+    </tr>`;
+  }
+  tbody.innerHTML = groups.map(g => {
+    const sev = g.crit > 0 ? "CRITICAL" : g.warn > 0 ? "WARNING" : g.ok > 0 ? "OK" : "INFO";
+    const col = sev === "CRITICAL" ? "#f43f5e" : sev === "WARNING" ? "#f59e0b" : sev === "OK" ? "#10d96e" : "#6b7db3";
+    const sample = g.examples[0] || {};
+    const action = _short(sample.recommendation || sample.impact || "—", 70);
+    const pills  = [...g.sources].map(s =>
+      `<span class="text-[8px] px-1.5 py-0.5 rounded" style="background:${hexA(THEME.muted,.1)};color:${THEME.muted}">${s}</span>`
+    ).join(" ");
+    const detId = `rcdet-${g.root.replace(/\W/g,"_")}`;
+    return `<tr class="border-b border-white/5 hover:bg-white/[0.03] cursor-pointer"
+        style="border-left:3px solid ${hexA(col,.5)}"
+        onclick="const d=document.getElementById('${detId}');d.classList.toggle('hidden');this.querySelector('.fchev').textContent=d.classList.contains('hidden')?'▸':'▾'">
+      <td class="px-4 py-2.5 font-semibold text-[11px]" style="color:${col}">${_esc(g.root)}<span class="fchev ml-2 text-[11px] text-Cmuted/50">▸</span></td>
+      <td class="px-3 py-2.5"><span class="text-[9px] font-bold px-2 py-0.5 rounded-full" style="background:${hexA(col,.15)};color:${col}">${sev}</span></td>
+      <td class="px-3 py-2.5 text-[10px]" style="color:#6b7db3">${g.crit}C · ${g.warn}W · ${g.info}I</td>
+      <td class="px-3 py-2.5 text-[10px]" style="color:#e2e8f0">${_esc(action)}</td>
+      <td class="px-3 py-2.5 text-[8px]">${pills}</td>
+    </tr>
+    <tr id="${detId}" class="hidden border-b border-white/5" style="background:${hexA(col,.03)};border-left:3px solid ${hexA(col,.5)}">
+      <td colspan="5" class="px-5 py-3">
+        <div class="text-[10px] font-semibold text-Cmuted mb-2">${g.examples.length} finding(s) under this root cause:</div>
+        ${g.examples.map((f) => {
+          const fc = f.level==='critical'?'#f43f5e':f.level==='warning'?'#f59e0b':f.level==='ok'?'#10d96e':'#6b7db3';
+          const fIdx = (window._lastRealFindings||[]).indexOf(f);
+          return `<div class="rounded p-2 mb-1.5 text-[10px] cursor-pointer hover:bg-white/5"
+               style="background:#0d1526;border:1px solid #213060"
+               onclick="event.stopPropagation();window.peOpenFinding(${fIdx})">
+            <span class="text-[8px] font-bold px-1.5 py-0.5 rounded mr-1.5" style="background:${hexA(fc,.15)};color:${fc}">${(f.level||"info").toUpperCase()}</span>
+            ${_esc(_short(f.text, 100))}
+          </div>`;
+        }).join("")}
+      </td>
+    </tr>`;
+  }).join("");
+}
+
 function renderFindings(findings) {
   window._lastFindings = findings;
   try {
@@ -6453,15 +8061,12 @@ function renderFindings(findings) {
   const hero = document.getElementById("findings-verdict-hero");
   if (hero) hero.style.borderColor = hexA(glowColor, .5);
 
-  // Narrative text
+  // Narrative text — render as structured lines, not a single blob
   const verdictText = document.getElementById("findings-verdict-text");
   if (verdictText && narrativeFinding && narrativeFinding.sub) {
     const raw = narrativeFinding.sub;
     const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
-    // Strip labels (Scope:, Impact:, etc.) and join as flowing prose
-    const labelPattern = /^(Scope|Compliance|Root causes? identified|Impact|Evidence|Decision|Primary blocker):\s*/i;
-    const cleanLines = lines.map(l => l.replace(labelPattern, ""));
-    verdictText.textContent = cleanLines.join(" ");
+    verdictText.innerHTML = lines.map(l => `<span style="display:block;margin-bottom:4px">${escapeHtml(l)}</span>`).join('');
   }
 
   // Evidence confidence bar
@@ -6486,7 +8091,316 @@ function renderFindings(findings) {
   _applyFindingsSort();
 }
 
-// ── Findings: column defs + sort / column-picker helpers ─────
+/**
+ * renderPeReviewSections()
+ * Drives the 4 live accordion subsections of "Completed the PE Review" from
+ * the FindingsResponse. Called every time findings are re-generated or smart
+ * verdict returns. Each section pulls from the corresponding appData pillar.
+ */
+function renderPeReviewSections(findingsResp, smartVerdictData) {
+  const findings = findingsResp?.findings || [];
+  const coverage = findingsResp?.data_coverage || {};
+  const summary  = findingsResp?.summary || {};
+  const ad       = window.appData || {};
+
+  // The card is hidden by default — unhide as soon as we have any findings data
+  const card = document.getElementById("pe-narrative-card");
+  if (card) card.classList.remove("hidden");
+
+  // Filter findings by source → styled HTML cards
+  const _cards = (source) => findings
+    .filter(f => f.source === source)
+    .map(f => {
+      const col = f.level === "critical" ? "#f43f5e"
+                : f.level === "warning"  ? "#f59e0b"
+                : f.level === "ok"       ? "#10d96e" : "#6b7db3";
+      const bg  = f.level === "critical" ? "rgba(244,63,94,0.08)"
+                : f.level === "warning"  ? "rgba(245,158,11,0.08)"
+                : f.level === "ok"       ? "rgba(16,217,110,0.08)"
+                : "rgba(107,125,179,0.08)";
+      const rec  = f.recommendation
+        ? `<div class="mt-1 text-xs" style="color:#6b7db3">→ ${_esc(f.recommendation)}</div>` : "";
+      const evid = f.evidence
+        ? `<div class="mt-0.5 font-mono" style="font-size:9px;color:#4b5e8a">Evidence: ${_esc(f.evidence)}</div>` : "";
+      return `<div class="rounded-lg p-3 mb-2 border" style="background:${bg};border-color:${col}30">
+        <div class="flex items-start gap-2">
+          <span class="text-sm">${f.icon || "•"}</span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-semibold" style="color:${col}">${_esc(f.text)}</div>
+            ${f.sub ? `<div class="text-xs mt-0.5" style="color:#8899bb">${_esc(f.sub)}</div>` : ""}
+            ${rec}${evid}
+          </div>
+          <span class="font-bold uppercase px-1.5 py-0.5 rounded"
+            style="font-size:9px;background:${col}22;color:${col};white-space:nowrap">${f.level}</span>
+        </div>
+      </div>`;
+    }).join("") || `<div class="text-xs py-2" style="color:#6b7db3">No findings for this pillar.</div>`;
+
+  const _badge = (ok) => ok
+    ? `<span class="font-bold px-1.5 py-0.5 rounded" style="font-size:9px;background:#10d96e22;color:#10d96e">LOADED</span>`
+    : `<span class="font-bold px-1.5 py-0.5 rounded" style="font-size:9px;background:#f43f5e22;color:#f43f5e">MISSING</span>`;
+
+  // ── Section 1: Data Volume Analysis (SOW / DFU / SKU) ────────────────────
+  const sec1 = document.getElementById("pe-review-data-volume");
+  if (sec1) {
+    // Read from PDF-parsed SOW first, then fall back to manual form fields
+    const sow = ad.sowCompare || (() => {
+      const m = _buildSowCompareFromManual();
+      if (!m?.metrics?.length) return null;
+      const dfu = m.metrics.find(x => x.key === "daily_dfu");
+      const sku = m.metrics.find(x => x.key === "daily_sku");
+      if (!dfu && !sku) return null;
+      return {
+        dfu_actual: dfu?.actual || null, dfu_target: dfu?.sow || null,
+        sku_actual: sku?.actual || null, sku_target: sku?.sow || null,
+        metrics: m.metrics, _manual: true,
+      };
+    })() || {};
+    const dfuActual = sow.dfu_actual != null ? sow.dfu_actual : "—";
+    const dfuTarget = sow.dfu_target != null ? sow.dfu_target : "—";
+    const dfuPct    = (sow.dfu_achievement_pct != null)
+      ? sow.dfu_achievement_pct.toFixed(1) + "%" 
+      : (sow.dfu_actual != null && sow.dfu_target > 0 
+        ? (sow.dfu_actual / sow.dfu_target * 100).toFixed(1) + "%" 
+        : "—");
+    const skuActual = sow.sku_actual != null ? sow.sku_actual : "—";
+    const skuTarget = sow.sku_target != null ? sow.sku_target : "—";
+    // Coverage is true when backend confirmed it OR when manual data exists
+    const sowDataLoaded = coverage.sow || !!(sow.dfu_actual || sow.sku_actual);
+    // Build metrics rows for manual entry
+    const extraRows = (sow.metrics || []).filter(m => m.key !== "daily_dfu" && m.key !== "daily_sku")
+      .map(m => {
+        const pct = m.pct != null ? m.pct : (m.sow > 0 && m.actual != null ? +(m.actual / m.sow * 100).toFixed(1) : null);
+        const col = pct == null ? "#6b7db3" : pct > 110 ? "#f43f5e" : pct >= 70 ? "#10d96e" : "#f59e0b";
+        return `<div class="rounded p-2 text-center col-span-1" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">${_esc(m.label || m.key)}</div>
+          <div class="text-sm font-bold" style="color:${col}">${m.actual != null ? m.actual.toLocaleString() : "—"}</div>
+          ${m.sow != null ? `<div class="text-[8px]" style="color:#4b5e8a">SOW: ${m.sow.toLocaleString()}</div>` : ""}
+        </div>`;
+      }).join("");
+    sec1.innerHTML = `
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-semibold text-Cwhite">Data Source</span>
+        ${_badge(sowDataLoaded)}
+        <span class="text-xs" style="color:#6b7db3">${sow._manual ? "Manual entry" : "DFU / SKU vs SOW Contract Details"}</span>
+      </div>
+      ${sowDataLoaded ? `<div class="grid grid-cols-3 gap-2 mb-3">
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">DFU Actual</div>
+          <div class="text-sm font-bold text-Cwhite">${_esc(String(dfuActual))}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">DFU SOW Target</div>
+          <div class="text-sm font-bold text-Cwhite">${_esc(String(dfuTarget))}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Achievement</div>
+          <div class="text-sm font-bold" style="color:${dfuPct === '—' ? '#6b7db3' : parseFloat(dfuPct) >= 80 ? '#10d96e' : '#f43f5e'}">${dfuPct}</div>
+        </div>
+        ${skuActual !== "—" ? `
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">SKU Actual</div>
+          <div class="text-sm font-bold text-Cwhite">${_esc(String(skuActual))}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">SKU Target</div>
+          <div class="text-sm font-bold text-Cwhite">${_esc(String(skuTarget))}</div>
+        </div>` : ""}
+        ${extraRows}
+      </div>` : `<div class="text-xs mb-3" style="color:#6b7db3">Upload SOW PDF or enter DFU/SKU in the DFU/SKU tab to populate volume analysis.</div>`}
+      ${_cards("sow")}`;
+  }
+
+  // ── Section 2: Batch Execution & SLA Compliance ───────────────────────────
+  const sec2 = document.getElementById("pe-review-batch-sla");
+  if (sec2) {
+    const bk    = ad.batch?.kpis || {};
+    const comp  = bk.compliance_pct          != null ? bk.compliance_pct.toFixed(1)          + "%" : "—";
+    const wComp = bk.batch_window_compliance  != null ? bk.batch_window_compliance.toFixed(1) + "%" : "—";
+    const breach   = bk.jobs_breach  ?? "—";
+    const atRisk   = bk.jobs_at_risk ?? "—";
+    const slaSource = ad.slaCeilings ? "Customer XLSX" : "PE defaults";
+    sec2.innerHTML = `
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-semibold text-Cwhite">Data Source</span>
+        ${_badge(coverage.batch)}
+        <span class="text-xs" style="color:#6b7db3">Batch Review + SLA Matrix</span>
+        <span class="font-semibold px-1.5 py-0.5 rounded" style="font-size:9px;background:#3b82f622;color:#3b82f6">${_esc(slaSource)}</span>
+      </div>
+      ${coverage.batch ? `<div class="grid grid-cols-4 gap-2 mb-3">
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Job Compliance</div>
+          <div class="text-sm font-bold" style="color:${comp === '—' ? '#6b7db3' : parseFloat(comp) === 100 ? '#10d96e' : parseFloat(comp) >= 90 ? '#f59e0b' : '#f43f5e'}">${comp}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Window Compliance</div>
+          <div class="text-sm font-bold" style="color:${wComp === '—' ? '#6b7db3' : parseFloat(wComp) >= 95 ? '#10d96e' : '#f43f5e'}">${wComp}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Breaches</div>
+          <div class="text-sm font-bold" style="color:${breach === '—' ? '#6b7db3' : Number(breach) === 0 ? '#10d96e' : '#f43f5e'}">${breach}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">At Risk</div>
+          <div class="text-sm font-bold" style="color:${atRisk === '—' ? '#6b7db3' : Number(atRisk) === 0 ? '#10d96e' : '#f59e0b'}">${atRisk}</div>
+        </div>
+      </div>` : `<div class="text-xs mb-3" style="color:#6b7db3">Upload Ctrl-M CSV to populate batch analysis.</div>`}
+      ${_cards("batch")}${_cards("sla")}`;
+  }
+
+  // ── Section 3: Infrastructure Utilization & Resource Health ──────────────
+  const sec3 = document.getElementById("pe-review-infra");
+  if (sec3) {
+    const rk     = ad.resource?.kpis || {};
+    const grade  = rk.fleet_grade  || "—";
+    const avgCpu = rk.avg_cpu != null ? rk.avg_cpu.toFixed(1) + "%" : "—";
+    const avgMem = rk.avg_mem != null ? rk.avg_mem.toFixed(1) + "%" : "—";
+    const nCrit  = rk.n_critical ?? "—";
+    const nSrv   = rk.total_servers ?? (ad.servers?.length ?? "—");
+    const gradeCol = grade === "A" ? "#10d96e" : grade === "B" ? "#3b82f6" : grade === "C" ? "#f59e0b" : "#f43f5e";
+    sec3.innerHTML = `
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-semibold text-Cwhite">Data Source</span>
+        ${_badge(coverage.resource)}
+        <span class="text-xs" style="color:#6b7db3">Resource Review</span>
+      </div>
+      ${coverage.resource ? `<div class="grid grid-cols-4 gap-2 mb-3">
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Fleet Grade</div>
+          <div class="text-sm font-bold" style="color:${gradeCol}">${grade}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Avg CPU</div>
+          <div class="text-sm font-bold text-Cwhite">${avgCpu}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Avg Memory</div>
+          <div class="text-sm font-bold text-Cwhite">${avgMem}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Critical Hosts</div>
+          <div class="text-sm font-bold" style="color:${nCrit === '—' ? '#6b7db3' : Number(nCrit) === 0 ? '#10d96e' : '#f43f5e'}">${nCrit} / ${nSrv}</div>
+        </div>
+      </div>` : `<div class="text-xs mb-3" style="color:#6b7db3">Upload resource report to populate infra analysis.</div>`}
+      ${_cards("resource")}`;
+  }
+
+  // ── Section 4: UAT / UI Benchmark Validation ─────────────────────────────
+  const sec4 = document.getElementById("pe-review-ui-benchmark");
+  if (sec4) {
+    const bench     = ad.benchmark || {};
+    const totalTx   = bench.total_transactions ?? (bench.rows?.length ?? "—");
+    const degraded  = bench.degraded ?? "—";
+    const passRate  = (typeof totalTx === "number" && totalTx > 0)
+      ? ((totalTx - (bench.degraded || 0)) / totalTx * 100).toFixed(1) + "%" : "—";
+    const worstDelta = bench.worst_delta_pct != null
+      ? "+" + bench.worst_delta_pct.toFixed(0) + "%" : "—";
+    sec4.innerHTML = `
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-semibold text-Cwhite">Data Source</span>
+        ${_badge(coverage.benchmark)}
+        <span class="text-xs" style="color:#6b7db3">UI Benchmark XLSX</span>
+      </div>
+      ${coverage.benchmark ? `<div class="grid grid-cols-4 gap-2 mb-3">
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Transactions</div>
+          <div class="text-sm font-bold text-Cwhite">${totalTx}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Degraded</div>
+          <div class="text-sm font-bold" style="color:${degraded === '—' ? '#6b7db3' : Number(degraded) === 0 ? '#10d96e' : '#f43f5e'}">${degraded}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Pass Rate</div>
+          <div class="text-sm font-bold" style="color:${passRate === '—' ? '#6b7db3' : parseFloat(passRate) >= 90 ? '#10d96e' : '#f59e0b'}">${passRate}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+          <div class="text-xs" style="color:#6b7db3">Worst Δ</div>
+          <div class="text-sm font-bold" style="color:${worstDelta === '—' ? '#6b7db3' : parseFloat(worstDelta) > 20 ? '#f43f5e' : '#f59e0b'}">${worstDelta}</div>
+        </div>
+      </div>` : `<div class="text-xs mb-3" style="color:#6b7db3">Upload UI Benchmark XLSX to populate UAT analysis.</div>`}
+      ${_cards("benchmark")}`;
+  }
+
+  // ── Update accordion summary labels with live finding counts ─────────────
+  // Each <details> has a <summary> with a subtitle <span> — patch it with
+  // live counts so the user can see state without expanding.
+  const _patchSummary = (containerId, label, pillarSources) => {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const details = container.closest("details");
+    if (!details) return;
+    const subtitle = details.querySelector("summary span.text-xs");
+    if (!subtitle) return;
+    const pFindings = findings.filter(f => pillarSources.includes(f.source));
+    const nCrit = pFindings.filter(f => f.level === "critical").length;
+    const nWarn = pFindings.filter(f => f.level === "warning").length;
+    const nOk   = pFindings.filter(f => f.level === "ok").length;
+    if (nCrit > 0) {
+      subtitle.textContent = `${nCrit} critical · ${nWarn} warning`;
+      subtitle.style.color = "#f43f5e";
+    } else if (nWarn > 0) {
+      subtitle.textContent = `${nWarn} warning`;
+      subtitle.style.color = "#f59e0b";
+    } else if (nOk > 0 || (pFindings.length === 0 && (
+      (containerId === "pe-review-batch-sla"   && coverage.batch)    ||
+      (containerId === "pe-review-infra"       && coverage.resource) ||
+      (containerId === "pe-review-data-volume" && coverage.sow)      ||
+      (containerId === "pe-review-ui-benchmark"&& coverage.benchmark)
+    ))) {
+      subtitle.textContent = "✓ No issues detected";
+      subtitle.style.color = "#10d96e";
+    } else {
+      subtitle.textContent = label;
+      subtitle.style.color = "#6b7db3";
+    }
+  };
+  _patchSummary("pe-review-data-volume",    "DFU / SKU vs SOW Contract Details", ["sow"]);
+  _patchSummary("pe-review-batch-sla",      "Batch Review + SLA Matrix",         ["batch", "sla"]);
+  _patchSummary("pe-review-infra",          "Resource Review",                   ["resource"]);
+  _patchSummary("pe-review-ui-benchmark",   "UI Benchmark XLSX",                 ["benchmark"]);
+
+  // Auto-expand the section with the most critical findings
+  const sectionSources = [
+    { id: "pe-review-batch-sla",      sources: ["batch","sla"] },
+    { id: "pe-review-infra",          sources: ["resource"]    },
+    { id: "pe-review-data-volume",    sources: ["sow"]         },
+    { id: "pe-review-ui-benchmark",   sources: ["benchmark"]   },
+  ];
+  let maxCrit = -1, maxId = null;
+  for (const { id, sources } of sectionSources) {
+    const n = findings.filter(f => sources.includes(f.source) && f.level === "critical").length;
+    if (n > maxCrit) { maxCrit = n; maxId = id; }
+  }
+  if (maxCrit > 0 && maxId) {
+    const el = document.getElementById(maxId)?.closest("details");
+    if (el) el.open = true;
+  }
+
+  // ── Verdict badge + reason ────────────────────────────────────────────────
+  const badge  = document.getElementById("pe-review-verdict-badge");
+  const reason = document.getElementById("pe-review-verdict-reason");
+  const verdict = smartVerdictData?.verdict || {};
+  if (badge) {
+    const dec = verdict.decision
+      || (summary.critical > 0 ? "BLOCKED" : summary.warning > 0 ? "CONDITIONAL" : "APPROVED");
+    const col = dec === "APPROVED" ? "#10d96e" : dec === "CONDITIONAL" ? "#f59e0b" : "#f43f5e";
+    badge.textContent   = dec;
+    badge.style.color   = col;
+    badge.style.borderColor = col + "55";
+    badge.style.background  = col + "18";
+  }
+  if (reason) {
+    reason.textContent = verdict.summary || verdict.headline
+      || (summary.critical > 0
+        ? `${summary.critical} critical issue(s) must be resolved before sign-off`
+        : summary.warning > 0
+          ? `${summary.warning} warning(s) require acknowledgement`
+          : "All pillars reviewed — ready for sign-off");
+  }
+}
+
+
 const _FCOL_DEFS = [
   { id: "severity",   label: "Severity",       w: "w-24" },
   { id: "root_cause", label: "Root Cause",      w: "w-36" },
@@ -6600,6 +8514,12 @@ function _applyFindingsSort() {
   const vis = window._findingsCols;
   const flt = window._findingsFilter;
 
+  // Check view mode FIRST — root cause groups bypass normal sort/render
+  if (_findingsViewMode === "root") {
+    renderFindingsAsRootCause(allFindings);
+    return;
+  }
+
   // Apply filter
   let findings;
   switch (flt) {
@@ -6698,7 +8618,7 @@ function _applyFindingsSort() {
     const sv      = SV_ST[f.level] || SV_ST.info;
     const rc      = (f.root_cause || "").replace(/_/g, " ").trim() || "—";
     const impact  = (f.impact || "").trim() || "—";
-    const action  = (f.recommendation || "").trim() || "—";
+    const action  = _short((f.recommendation || "").trim() || "—", 50);
     const ecColor = EC_CLR[f.evidence_class] || THEME.muted;
     const ecLbl   = EC_LBL[f.evidence_class] || "—";
     const srcLbl  = SRC_LBL[f.source] || (f.source || "").toUpperCase() || "—";
@@ -6706,25 +8626,26 @@ function _applyFindingsSort() {
     const detId   = `finding-det-${idx}`;
     const bdrClr  = SEV_BDR[f.level] || THEME.muted;
     const bdrAlpha = f.level === "critical" ? 0.7 : f.level === "warning" ? 0.45 : 0.2;
-    // Root cause cell color: amber for critical, amber/70 for warning, default for others
     const rcColor = f.level === "critical" ? THEME.amber
                   : f.level === "warning"  ? hexA(THEME.amber, .8)
                   : "rgba(240,244,255,.75)";
-    // Only show ec badge in finding cell when Evidence column is hidden
     const showEcBadge = !visSet.has("evidence");
     const isCrit = f.level === "critical";
+    // Hover tooltip: sub + impact (hidden from row, shown on hover)
+    const hoverTip = [f.sub, f.impact].filter(Boolean).join(" · ");
+    // Global idx for drawer
+    const gIdx = (window._lastRealFindings || []).indexOf(f);
 
     return `<tr data-idx="${idx}"
   class="hover:bg-white/[0.04] transition-colors cursor-pointer border-b border-white/5 group${isCrit ? " findings-crit-row" : ""}"
   style="border-left:3px solid ${hexA(bdrClr, bdrAlpha)};${isCrit ? `background:rgba(244,63,94,.025)` : ""}"
-  onclick="const d=document.getElementById('${detId}');d.classList.toggle('hidden');this.querySelector('.fchev').textContent=d.classList.contains('hidden')?'▸':'▾'">
+  onclick="window.peOpenFinding(${gIdx >= 0 ? gIdx : idx})">
   <td class="pl-3 pr-2 py-2.5 w-8">
     <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0${isCrit ? " findings-crit-blink" : ""}"
           style="background:${sv.dot};box-shadow:0 0 ${isCrit ? "12" : "8"}px ${hexA(sv.dot, isCrit ? .75 : .45)}"></span>
   </td>
-  <td class="px-2 py-2.5" style="min-width:220px;max-width:340px">
-    <div class="text-[11px] font-semibold text-Cwhite leading-snug">${_esc(f.text)}</div>
-    ${f.sub ? `<div class="text-[9px] text-Cmuted mt-0.5 leading-relaxed line-clamp-2" title="${_esc(f.sub)}">${_esc(f.sub)}</div>` : ""}
+  <td class="px-2 py-2.5" style="min-width:220px;max-width:320px" title="${_esc(hoverTip)}">
+    <div class="text-[11px] font-semibold text-Cwhite leading-snug">${_esc(_short(f.text, 72))}</div>
     <div class="flex items-center gap-1.5 mt-1 flex-wrap">
       <span class="text-[8px] font-bold px-1.5 py-0.5 rounded"
             style="background:${hexA(srcClr,.15)};color:${srcClr};border:1px solid ${hexA(srcClr,.3)}">${srcLbl}</span>
@@ -6737,34 +8658,16 @@ function _applyFindingsSort() {
   </td>` : ""}
   ${visSet.has("root_cause") ? `<td class="px-3 py-2.5 text-[10px] font-medium w-36" style="color:${rcColor}">${_col(rc, 30)}</td>` : ""}
   ${visSet.has("impact")     ? `<td class="px-3 py-2.5 text-[10px] text-Cwhite/70 w-44">${_col(impact, 50)}</td>` : ""}
-  ${visSet.has("action")     ? `<td class="px-3 py-2.5 text-[10px] text-Cwhite/70 w-44">${_col(action, 50)}</td>` : ""}
+  ${visSet.has("action")     ? `<td class="px-3 py-2.5 text-[10px] text-Cwhite/70 w-44" title="${_esc(f.recommendation||'')}">
+    ${_esc(action)}
+  </td>` : ""}
   ${visSet.has("evidence")   ? `<td class="px-3 py-2.5 w-20 text-center">
     <span class="inline-flex text-[8px] px-1.5 py-0.5 rounded"
           style="background:${hexA(ecColor,.1)};color:${ecColor};border:1px solid ${hexA(ecColor,.25)}"
           title="${_esc(f.evidence || ecLbl)}">${ecLbl}</span>
   </td>` : ""}
   <td class="px-2 py-2.5 w-8 text-center">
-    <span class="fchev text-[11px] text-Cmuted/50 group-hover:text-Cmuted transition-colors">▸</span>
-  </td>
-</tr>
-<tr id="${detId}" class="hidden border-b border-white/5"
-    style="background:${hexA(bdrClr, .04)};border-left:3px solid ${hexA(bdrClr, bdrAlpha)}">
-  <td colspan="${colspan}" class="pl-5 pr-4 py-3.5">
-    <div class="grid grid-cols-3 gap-6 text-[10px]">
-      <div>
-        <div class="text-[8px] uppercase tracking-widest font-bold mb-1.5" style="color:${THEME.amber}">⚡ Root Cause</div>
-        <div class="text-Cwhite/85 leading-relaxed">${_esc(rc)}</div>
-      </div>
-      <div>
-        <div class="text-[8px] uppercase tracking-widest font-bold mb-1.5" style="color:${THEME.blue}">📋 Business Impact</div>
-        <div class="text-Cwhite/85 leading-relaxed">${_esc(impact)}</div>
-      </div>
-      <div>
-        <div class="text-[8px] uppercase tracking-widest font-bold mb-1.5" style="color:${THEME.green}">→ Recommended Action</div>
-        <div class="text-Cwhite/85 leading-relaxed">${_esc(action)}</div>
-        ${f.evidence ? `<div class="text-Cmuted mt-2 text-[8px] italic">${_esc(f.evidence)}</div>` : ""}
-      </div>
-    </div>
+    <span class="text-[11px] text-Cmuted/50 group-hover:text-Cmuted transition-colors">→</span>
   </td>
 </tr>`;
   }).join("");
@@ -6819,57 +8722,159 @@ async function refreshAuditContext() {
     window.appData.auditContext = data;
 
     // ── Restore appData from session-cache slots when browser state is empty ──
-    // This covers page-reload / tab-switch scenarios where data was uploaded
-    // in a previous page load or via API.
+    // Only restore if this tab has an active session (user uploaded files
+    // in this tab).  Prevents stale data from a previous engagement bleeding
+    // into a fresh page load in a new tab/window.
+    //
+    // IMPORTANT: We also re-render panels when restoring so the user sees
+    // their data immediately after a same-tab reload (F5 / browser refresh).
     const slots = data.slots || {};
     const ad = window.appData;
-    if (!ad.batch && slots.batch_kpis) {
-      const extra = data.extra || {};
-      ad.batch = {
-        kpis:          slots.batch_kpis           || null,
-        top_jobs:      slots.batch_top_jobs        || null,
-        window:        slots.daily_window_series   || null,
-        anomalies:     slots.regression_df         || null,
-        sub_stats:     slots.sub_stats             || null,
-        daily_jobs:    extra.daily_jobs             || null,
-        hourly_counts: extra.hourly_counts          || null,
-      };
-    }
-    if (!ad.slaMatrix && slots.sla_matrix_kpis) {
-      ad.slaMatrix = {
-        kpis:             slots.sla_matrix_kpis       || null,
-        job_summary:      slots.sla_job_summary       || slots.job_summary || null,
-        workflow_summary: slots.workflow_sla_summary   || null,
-      };
-    }
-    if (!ad.sowCompare && slots.sow_contract) {
-      ad.sowCompare = {
-        _contract:    slots.sow_contract   || null,
-        volume_vs_sow: slots.volume_vs_sow || null,
-      };
-    }
-    if (!ad.slaCeilings && slots.batch_kpis) {
-      // Reconstruct SLA ceilings from config (already set by upload)
-      try {
-        const cfgRes = await fetch("/api/config");
-        if (cfgRes.ok) {
-          const cfg = await cfgRes.json();
-          const ceil = {};
-          if (cfg.daily_sla_hrs)   ceil.DAILY   = cfg.daily_sla_hrs;
-          if (cfg.weekly_sla_hrs)  ceil.WEEKLY  = cfg.weekly_sla_hrs;
-          if (cfg.monthly_sla_hrs) ceil.MONTHLY = cfg.monthly_sla_hrs;
-          if (cfg.custom_sla_hrs)  ceil.CUSTOM  = cfg.custom_sla_hrs;
-          if (Object.keys(ceil).length) ad.slaCeilings = ceil;
+    if (_isSessionActive()) {
+      let _restored = false;
+      if (!ad.batch && slots.batch_kpis) {
+        const extra = data.extra || {};
+        // Prefer full last_batch payload (has filename, top_breaches,
+        // sla_heatmap, hour_heatmap, data_coverage, sla_source, etc.)
+        if (extra.last_batch && extra.last_batch.kpis) {
+          ad.batch = extra.last_batch;
+        } else {
+          ad.batch = {
+            kpis:          slots.batch_kpis           || null,
+            top_jobs:      slots.batch_top_jobs        || null,
+            window:        slots.daily_window_series   || null,
+            anomalies:     slots.regression_df         || null,
+            sub_stats:     slots.sub_stats             || null,
+            daily_jobs:    extra.daily_jobs             || null,
+            hourly_counts: extra.hourly_counts          || null,
+          };
         }
-      } catch {}
-    }
+        // Restore customer name from batch payload
+        if (ad.batch.customer_name) {
+          ad.customerName = ad.batch.customer_name;
+        }
+        // Restore embedded SLA matrix if present
+        if (ad.batch.sla_matrix && !ad.slaMatrix) {
+          ad.slaMatrix = ad.batch.sla_matrix;
+        }
+        _restored = true;
+      }
+      if (!ad.slaMatrix && slots.sla_matrix_kpis) {
+        ad.slaMatrix = {
+          kpis:             slots.sla_matrix_kpis       || null,
+          job_summary:      slots.sla_job_summary       || slots.job_summary || null,
+          workflow_summary: slots.workflow_sla_summary   || null,
+        };
+      }
+      if (!ad.sowCompare && slots.sow_contract) {
+        ad.sowCompare = {
+          _contract:    slots.sow_contract   || null,
+          volume_vs_sow: slots.volume_vs_sow || null,
+        };
+      }
+      // Restore benchmark (UAT evidence) from server cache after reload
+      if (!ad.benchmark && data.extra?.last_benchmark?.rows?.length) {
+        ad.benchmark = data.extra.last_benchmark;
+        try { _renderBenchmark(ad.benchmark); } catch (e) { console.warn("[pe-dashboard] restore benchmark:", e); }
+      }
+      if (!ad.slaCeilings && slots.batch_kpis) {
+        // Reconstruct SLA ceilings from config (already set by upload)
+        try {
+          const cfgRes = await fetch("/api/config");
+          if (cfgRes.ok) {
+            const cfg = await cfgRes.json();
+            const ceil = {};
+            if (cfg.daily_sla_hrs)   ceil.DAILY   = cfg.daily_sla_hrs;
+            if (cfg.weekly_sla_hrs)  ceil.WEEKLY  = cfg.weekly_sla_hrs;
+            if (cfg.monthly_sla_hrs) ceil.MONTHLY = cfg.monthly_sla_hrs;
+            if (cfg.custom_sla_hrs)  ceil.CUSTOM  = cfg.custom_sla_hrs;
+            if (Object.keys(ceil).length) ad.slaCeilings = ceil;
+          }
+        } catch {}
+      }
+      // ── Re-render panels with restored data so user sees results on reload ──
+      // Stagger across animation frames so the browser can paint between phases
+      // and avoid triggering Firefox's "page is slowing down" warning.
+      // Phase order: customer name → batch charts → resource table → findings
+      if (_restored) {
+        const _restorePhases = [];
+        if (ad.batch) {
+          _restorePhases.push(() => {
+            try {
+              renderBatchReview(ad.batch);
+              _renderBatchIntakeCard(ad.batch);
+              if (ad.customerName) {
+                applyCustomerName(ad.customerName, { runs: ad.batch.kpis?.total_runs, filename: ad.batch.filename });
+              }
+            } catch(e) { console.warn("[pe-dashboard] restore batch:", e); }
+          });
+        }
+        if (ad.resource?.servers) {
+          _restorePhases.push(() => {
+            try { renderResourceTable(ad.resource.servers); }
+            catch(e) { console.warn("[pe-dashboard] restore resource:", e); }
+          });
+        }
+        // Findings last — after all panels have painted
+        _restorePhases.push(() => { triggerGenerateFindings().catch(() => {}); });
+
+        let _rpi = 0;
+        function _nextRestorePhase() {
+          if (_rpi < _restorePhases.length) {
+            _restorePhases[_rpi++]();
+            requestAnimationFrame(_nextRestorePhase);
+          }
+        }
+        requestAnimationFrame(_nextRestorePhase);
+      }
+    } // end _isSessionActive guard
   } catch {
     // Non-fatal — health bar is cosmetic
   }
 }
 
 // ── PE Review Narrative (structured 4-section report) ────────
+let _narrativeDebounce = null;
+
+// ── Full PE Review refresh — "browser refresh" semantics ─────────────────
+// Re-syncs the audit context from the server session cache, then re-runs the
+// findings rule engine, which cascades to the narrative + consultant.
+// Wired to the "Refresh Narrative" button so any data changed/uploaded in
+// this session is reflected across the entire PE Review in one click.
+let _peReviewRefreshing = false;
+async function refreshPeReview() {
+  if (_peReviewRefreshing) return;
+  _peReviewRefreshing = true;
+  const btn = document.getElementById("pe-narr-refresh-btn");
+  const origHtml = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg> Refreshing…`;
+  }
+  try {
+    // 1. Pull latest session-cache state from server (restores any slot
+    //    this tab doesn't have yet — batch, SLA, SOW, benchmark)
+    await refreshAuditContext();
+    // 2. Re-run the deterministic findings rule engine with the fresh
+    //    payload. This cascades to PE Narrative + PE Consultant internally.
+    await triggerGenerateFindings();
+    toast("success", "PE Review refreshed", "Findings, narrative and verdict regenerated from latest session data.");
+  } catch (err) {
+    _handleFetchError(err);
+  } finally {
+    _peReviewRefreshing = false;
+    if (btn && origHtml != null) { btn.disabled = false; btn.innerHTML = origHtml; }
+  }
+}
+
 async function triggerPeNarrative() {
+  // Debounce: collapse rapid-fire calls into one (500ms)
+  if (_narrativeDebounce) clearTimeout(_narrativeDebounce);
+  return new Promise(resolve => {
+    _narrativeDebounce = setTimeout(() => { _triggerPeNarrativeImpl().then(resolve).catch(resolve); }, 500);
+  });
+}
+async function _triggerPeNarrativeImpl() {
   const card    = document.getElementById("pe-narrative-card");
   const loading = document.getElementById("pe-narr-loading");
   const btn     = document.getElementById("pe-narr-refresh-btn");
@@ -6882,19 +8887,7 @@ async function triggerPeNarrative() {
 
   // ── Build sow_compare: SOW PDF response takes priority; fall back to
   // manual DFU/SKU inputs the user typed in the SOW Contract tab. ────────
-  let sow_compare = ad.sowCompare || null;
-  if (!sow_compare) {
-    const sc      = ad.sowContract || {};
-    const dfuBase = parseFloat(document.getElementById("sow-dfu-baseline")?.value) || sc.manual_dfu_baseline || 0;
-    const dfuAct  = parseFloat(document.getElementById("sow-dfu-actual")?.value)   || sc.manual_dfu_actual   || 0;
-    const skuBase = parseFloat(document.getElementById("sow-sku-baseline")?.value) || sc.manual_sku_baseline || 0;
-    const skuAct  = parseFloat(document.getElementById("sow-sku-actual")?.value)   || sc.manual_sku_actual   || 0;
-    if (dfuBase > 0 || skuBase > 0) {
-      sow_compare = {};
-      if (dfuBase > 0) sow_compare["Daily DFU"] = { sow: dfuBase, actual: dfuAct > 0 ? dfuAct : null };
-      if (skuBase > 0) sow_compare["Daily SKU"] = { sow: skuBase, actual: skuAct > 0 ? skuAct : null };
-    }
-  }
+  let sow_compare = ad.sowCompare || _buildSowCompareFromManual() || null;
 
   const payload = {
     batch:         ad.batch        || null,
@@ -7241,56 +9234,61 @@ async function renderOverview() {
   if (content) content.classList.add("hidden");
 
   // Gather payload
-  const bk = window.appData.batch?.kpis || window.appData.batch || {};
-  const rk = window.appData.resource?.kpis || window.appData.resource || {};
-  const payload = {
-    batch_kpis:    bk,
-    top_jobs:      window.appData.batch?.top_jobs     || [],
-    top_breaches:  window.appData.batch?.top_breaches || [],
-    resource_kpis: rk,
-    servers:       window.appData.servers?.length ? window.appData.servers : (window.appData.resource?.servers || []),
-    sla_data:      window.appData.slaMatrix || {},
-    sub_stats:     window.appData.batch?.sub_stats    || [],
-    window:        window.appData.batch?.window       || [],
-    hourly_counts: window.appData.batch?.hourly_counts || {},
-    benchmark:     window.appData.benchmark || null,
-    sow_compare:   window.appData.sowCompare || null,
-    findings:      window._lastFindings || [],
-    daily_jobs:    window.appData.batch?.daily_jobs   || {},
-    customer_name: window.appData.customerName || null,
-    deep_dive:     window.appData.deepDive || _buildDeepDiveSummary(),
-  };
-
-  // ── Fast-path: if cached exec data exists and source data unchanged, reuse
-  const payloadHash = JSON.stringify(payload).length; // cheap proxy
-  if (window._execCache && window._execCacheHash === payloadHash) {
-    if (loading) loading.classList.add("hidden");
-    if (content) content.classList.remove("hidden");
-    const data = window._execCache;
-    _renderExecDecisionStrip(data);
-    _renderExecKPIs(data.kpis);
-    _renderExecNarrative(data.narrative);
-    _renderExecBenchmarkSummary(window.appData.benchmark);
-    _renderExecHotSpots(data);
-    _renderExecResourceHealth(data.server_heatmap, data.kpis);
-    _renderExecTopRiskJobs(data.job_sla_bars);
-    _renderExecSowPanel(data.sow_panel);
-    requestAnimationFrame(() => {
-      _renderExecSLABars(data.job_sla_bars);
-      _renderExecTemporal(data.temporal, data.kpis);
-      _renderExecBreachCalendar(data.breach_calendar);
-      _renderExecConcurrency(data.concurrency);
-      _renderExecForecast(window.appData?.batch?.window || [], data.kpis?.sla_daily_hrs || 6);
-      _renderSignoffChecklistV2(data.decision);
-    });
-    return;
-  }
-
   try {
-    // Fire findings + exec-dashboard in parallel — don't block exec on findings
-    const findingsReady = (!window._lastFindings || !window._lastFindings.length)
-      ? triggerGenerateFindings().catch(() => {})
-      : Promise.resolve();
+    // BUG-W2 fix: await findings BEFORE building the payload so the exec API
+    // receives real findings for the decision gate. If findings fail, proceed
+    // with empty array — the exec API handles that gracefully.
+    if (!window._lastFindings || !window._lastFindings.length) {
+      await triggerGenerateFindings().catch(() => {});
+    }
+
+    // Build payload AFTER findings are ready so the findings array is populated
+    const bk = window.appData.batch?.kpis || window.appData.batch || {};
+    const rk = window.appData.resource?.kpis || window.appData.resource || {};
+    // Apply same exclusion filter as findings so excluded utility/export jobs
+    // don't skew the executive dashboard grade, SRI scores, or risk count.
+    const _execFiltered = window.appData.batch ? _filterBatchUtility(window.appData.batch) : null;
+    const payload = {
+      batch_kpis:    bk,
+      top_jobs:      _execFiltered?.top_jobs     || [],
+      top_breaches:  _execFiltered?.top_breaches || [],
+      resource_kpis: rk,
+      servers:       window.appData.servers?.length ? window.appData.servers : (window.appData.resource?.servers || []),
+      sla_data:      window.appData.slaMatrix || {},
+      sub_stats:     window.appData.batch?.sub_stats    || [],
+      window:        window.appData.batch?.window       || [],
+      hourly_counts: window.appData.batch?.hourly_counts || {},
+      benchmark:     window.appData.benchmark || null,
+      sow_compare:   window.appData.sowCompare || _buildSowCompareFromManual() || null,
+      findings:      window._lastFindings || [],   // now populated from await above
+      daily_jobs:    window.appData.batch?.daily_jobs   || {},
+      customer_name: window.appData.customerName || null,
+      deep_dive:     window.appData.deepDive || _buildDeepDiveSummary(),
+    };
+
+    // ── Fast-path: if cached exec data exists and source data unchanged, reuse ──
+    const _payloadStr = JSON.stringify(payload);
+    const payloadHash = `${_payloadStr.length}:${_simpleHash(_payloadStr)}`;
+    if (window._execCache && window._execCacheHash === payloadHash) {
+      if (loading) loading.classList.add("hidden");
+      if (content) content.classList.remove("hidden");
+      const data = window._execCache;
+      _renderExecDecisionStrip(data);
+      _renderExecKPIs(data.kpis);
+      _renderExecBenchmarkSummary(window.appData.benchmark);
+      _renderExecResourceHealth(data.server_heatmap, data.kpis);
+      _renderExecTopRiskJobs(data.job_sla_bars);
+      _renderExecSowPanel(data.sow_panel);
+      requestAnimationFrame(() => {
+        _renderExecSLABars(data.job_sla_bars);
+        _renderExecTemporal(data.temporal, data.kpis);
+        _renderExecBreachCalendar(data.breach_calendar);
+        _renderExecConcurrency(data.concurrency);
+        _renderExecForecast(window.appData?.batch?.window || [], data.kpis?.sla_daily_hrs || 6);
+        _renderSignoffChecklistV2(data.decision);
+      });
+      return;
+    }
 
     const res = await fetch("/api/executive-dashboard", {
       method: "POST",
@@ -7308,12 +9306,10 @@ async function renderOverview() {
     if (loading) loading.classList.add("hidden");
     if (content) content.classList.remove("hidden");
 
-    // ── Phase 1: instant — lightweight DOM writes (KPIs, strips, narrative)
+    // ── Phase 1: instant — lightweight DOM writes (KPIs, strips)
     _renderExecDecisionStrip(data);
     _renderExecKPIs(data.kpis);
-    _renderExecNarrative(data.narrative);
     _renderExecBenchmarkSummary(window.appData.benchmark);
-    _renderExecHotSpots(data);
     _renderExecResourceHealth(data.server_heatmap, data.kpis);
     _renderExecTopRiskJobs(data.job_sla_bars);
     _renderExecSowPanel(data.sow_panel);
@@ -7408,6 +9404,31 @@ function _renderExecKPIs(kpis) {
       return hrs > 0 ? Math.max(0, 100 - ((hrs - sla) / sla) * 100) : 100;
     }), wrCol);
 
+  // ── Grade advisory — cross-references deep-dive data with fleet grade ──
+  function _buildGradeAdvisory(kpis) {
+    const dd = window.appData?.deepDive;
+    if (!dd || !kpis) return null;
+    const servers = window.appData?.resource?.servers || [];
+    const dbServers = servers.filter(s => (s.type || "").toUpperCase().includes("DB"));
+    if (!dbServers.length) return null;
+
+    // Check if any DB server has chronic memory in deep-dive
+    let chronicDb = 0;
+    for (const srv of dbServers) {
+      const vmKey = Object.keys(dd).find(k => k.toLowerCase() === (srv.server || srv.host || "").toLowerCase());
+      if (!vmKey) continue;
+      const vmData = dd[vmKey];
+      const memWf = vmData?.waveforms?.["Available Memory Percentage"];
+      if (memWf && (memWf.label === "flat_high" || memWf.label === "plateau" || memWf.risk === "critical" || memWf.risk === "high")) {
+        chronicDb++;
+      }
+    }
+    if (chronicDb > 0) {
+      return `${kpis.total_servers || 0} servers · DB expected allocation (${chronicDb} within SGA/PGA band)`;
+    }
+    return null;
+  }
+
   // ── Fleet Grade — letter + gradient bullet bar ──
   const flEl = document.getElementById("exec-fleet");
   const gradePct = { "A": 95, "B": 80, "C": 65, "D": 50, "F": 25, "N/A": 0 };
@@ -7416,7 +9437,9 @@ function _renderExecKPIs(kpis) {
     flEl.textContent = kpis.fleet_grade || "—";
     flEl.style.color = gc[kpis.fleet_grade] || "#f0f4ff";
   }
-  setText("exec-fleet-sub", `${kpis.total_servers || 0} servers`);
+  // Grade advisory — check if deep-dive found chronic memory pressure on DB servers
+  const gradeAdvisory = _buildGradeAdvisory(kpis);
+  setText("exec-fleet-sub", gradeAdvisory || `${kpis.total_servers || 0} servers`);
   const flBar = document.getElementById("exec-fleet-bar");
   if (flBar) flBar.style.width = (gradePct[kpis.fleet_grade] || 0) + "%";
 
@@ -7513,6 +9536,12 @@ function _renderExecDecisionStrip(data) {
     statusEl.style.background  = hexA(tone.fg, 0.12);
   }
   setText("exec-dec-grade",    dec.grade || "—");
+  // Problem 4: grade sub-label + tooltip
+  const _GRADE_LABELS = { A: "APPROVED", B: "APPROVED WITH NOTES", C: "CONDITIONAL HOLD", D: "BLOCKED — MINOR", F: "BLOCKED — MAJOR" };
+  const grLabelEl = document.getElementById("exec-dec-grade-label");
+  const grWrapEl  = document.getElementById("exec-grade-wrap");
+  if (grLabelEl) grLabelEl.textContent = _GRADE_LABELS[dec.grade] || "";
+  if (grWrapEl)  grWrapEl.title = `Grade ${dec.grade || "—"} = ${_GRADE_LABELS[dec.grade] || "—"}  ·  Score ${dec.score ?? "—"}/100\nA ≥ 90  B ≥ 75  C ≥ 60  D ≥ 45  F < 45`;
   setText("exec-dec-blockers", String(dec.blockers_count ?? 0));
   setText("exec-dec-reason",   dec.reason || "—");
   setText("exec-dec-days",     String(dec.days_covered ?? "—"));
@@ -7671,18 +9700,14 @@ function _renderExecBreachCalendar(payload) {
     }],
     annotations: [
       {
+        // Problem 3: anchor SLA label to LEFT (Y-axis) side, not floating right edge
         xref: "paper", yref: "y",
-        x: 1, y: ceiling, xanchor: "left", yanchor: "middle",
+        x: 0.01, y: ceiling, xanchor: "left", yanchor: "bottom",
         text: `SLA: ${ceiling}h`,
         font: { size: 10, color: "#f43f5e", family: "monospace" },
         showarrow: false,
-      },
-      {
-        xref: "paper", yref: "y",
-        x: 1, y: ceiling * 0.9, xanchor: "left", yanchor: "top",
-        text: `Buffer: ${(ceiling*0.1).toFixed(1)}h`,
-        font: { size: 8, color: "#94a3b8" },
-        showarrow: false,
+        bgcolor: "rgba(13,21,38,0.7)",
+        borderpad: 2,
       },
     ],
     showlegend: false,
@@ -7865,16 +9890,11 @@ function _renderExecSowPanel(panel) {
   if (!card) return;
 
   if (!panel?.available) {
-    if (grid)  grid.classList.add("hidden");
-    if (empty) empty.classList.remove("hidden");
-    if (stat)  {
-      stat.textContent = "NOT LOADED";
-      stat.style.color = "#94a3b8";
-      stat.style.borderColor = "#475569";
-      stat.style.background  = "rgba(148,163,184,0.12)";
-    }
+    // Collapse entirely — don't waste executive dashboard space
+    card.classList.add("hidden");
     return;
   }
+  card.classList.remove("hidden");
   if (grid)  grid.classList.remove("hidden");
   if (empty) empty.classList.add("hidden");
 
@@ -7921,7 +9941,10 @@ function _renderExecSowPanel(panel) {
       const deltas = volumeRows.map(r => ({
         label: r.label || r.key,
         delta: Number(r.actual || 0) - Number(r.sow || 0),
-        pct:   Number(r.pct || 0),
+        // Problem 2: compute pct from actual/sow when backend returns 0
+        pct:   Number(r.pct || 0) || (Number(r.sow || 0) > 0
+          ? Math.round(Number(r.actual || 0) / Number(r.sow || 0) * 100)
+          : (Number(r.actual || 0) > 0 ? 999 : 0)),
       })).sort((a,b) => Math.abs(b.delta) - Math.abs(a.delta));
       const top = deltas[0];
       if (deltaEl && top) {
@@ -7963,24 +9986,33 @@ function _renderExecSowPanel(panel) {
     }
   }
 
-  // Col 2: SLA narrative
+  // Col 2: SLA reference — breach detail lives in Breach Calendar, not here (Problem 2)
   const slaSum = document.getElementById("exec-sow-sla-summary");
   if (slaSum) {
-    const ceiling = window._execCache?.kpis?.sla_daily_hrs ?? "—";
-    const breachCount = window._execCache?.decision?.breach_days ?? 0;
-    const totalDays   = window._execCache?.decision?.total_days  ?? 0;
-    slaSum.textContent = totalDays
-      ? `Contracted ceiling: ${ceiling}h. ${breachCount} of ${totalDays} days breached.`
-      : `Contracted ceiling: ${ceiling}h.`;
+    const ceiling = panel.sla_hrs ?? window._execCache?.kpis?.sla_daily_hrs ?? "—";
+    slaSum.innerHTML = ceiling !== "—"
+      ? `<span class="font-semibold text-Cwhite/90">Contracted SLA ceiling: ${ceiling}h</span> per batch window.`
+      : `<span class="text-Cmuted">SLA ceiling not specified — upload SOW document to set the contracted target.</span>`;
   }
 
-  // Col 3: Capacity
-  const capEl = document.getElementById("exec-sow-capacity");
+  // Col 3: Capacity — hide entire column when no data (Problem 2)
+  const capEl    = document.getElementById("exec-sow-capacity");
+  const capColEl = document.getElementById("exec-sow-cap-col");
+  const sowGrid  = document.getElementById("exec-sow-grid");
   if (capEl) {
     const cap = panel.capacity || [];
     if (!cap.length) {
-      capEl.innerHTML = `<p class="text-[11px] text-Cmuted">No capacity baselines in SOW.</p>`;
+      if (capColEl) capColEl.classList.add("hidden");
+      if (sowGrid) {
+        sowGrid.classList.remove("lg:grid-cols-3");
+        sowGrid.classList.add("lg:grid-cols-2");
+      }
     } else {
+      if (capColEl) capColEl.classList.remove("hidden");
+      if (sowGrid) {
+        sowGrid.classList.remove("lg:grid-cols-2");
+        sowGrid.classList.add("lg:grid-cols-3");
+      }
       capEl.innerHTML = cap.map(c => {
         const tone3 = c.status === "Within baseline" ? "#10d96e"
                     : c.status === "Approaching limit" ? "#f59e0b" : "#f43f5e";
@@ -8267,13 +10299,18 @@ function _renderExecSLABars(jobs) {
       line: { color: "#f43f5e", width: 2, dash: "dash" },
     }],
     annotations: [{
-      x: sla, y: -0.3, text: `SLA ${sla}h`, showarrow: false,
-      font: { size: 9, color: "#f43f5e" }, xanchor: "left",
+      // Problem 3: pin SLA label to the top of the dashed line, not floating bottom-right
+      xref: "x", yref: "paper",
+      x: sla, y: 1.02, xanchor: "center", yanchor: "bottom",
+      text: `SLA: ${sla}h`, showarrow: false,
+      font: { size: 9, color: "#f43f5e", family: "monospace" },
+      bgcolor: "rgba(13,21,38,0.7)", borderpad: 2,
     }],
     showlegend: false,
     bargap: 0.15,
   };
 
+  _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _EXEC_CFG);
 }
 
@@ -8320,7 +10357,15 @@ function _renderExecHeatmap(servers) {
     yaxis: { ..._EXEC_LAYOUT_BASE.yaxis, autorange: "reversed" },
   };
 
+  _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _EXEC_CFG);
+}
+
+// ── Re-render Resource Health with latest deep dive data ──
+function _refreshExecResourceHealth() {
+  const cache = window._execCache;
+  if (!cache?.server_heatmap?.length) return;
+  _renderExecResourceHealth(cache.server_heatmap, cache.kpis);
 }
 
 // ── NEW: Resource Health Summary (replaces raw heatmap in Row 2) ─
@@ -8344,16 +10389,91 @@ function _renderExecResourceHealth(servers, kpis) {
                    : fleetGrade === "C" ? "#f59e0b" : "#f43f5e";
   const total = servers.length;
 
-  // Compute per-metric aggregates
-  const cpuVals  = servers.map(s => s.cpu || 0).filter(v => v > 0);
-  const memVals  = servers.map(s => s.mem || 0).filter(v => v > 0);
-  const diskVals = servers.map(s => s.disk || 0);
+  // ── Observation window: determine data source + duration ──
+  const resourceServers = window.appData?.resource?.servers || [];
+  const isAzure = resourceServers.some(s => s.source === "azure_monitor");
+  const dd = window.appData?.deepDive;
+  const ddHours = dd?.hours_back || _deepDiveHoursBack || 0;
+  const ddDaysObs = dd?.baseline?.days_observed || 0;
+  // Deep dive time-series stats (authoritative when ≥15d baseline)
+  const ddVms = _deepDiveData?.vms || {};
+  const hasDeepDive = Object.keys(ddVms).length > 0;
+  const hasSufficientBaseline = ddDaysObs >= 15;
+
+  let dataSourceLabel = "";
+  let dataQualityTag = "";
+  if (isAzure && hasDeepDive) {
+    const daysLabel = ddDaysObs >= 2 ? `${ddDaysObs}d` : ddHours >= 24 ? `${Math.round(ddHours / 24)}d` : `${ddHours}h`;
+    dataSourceLabel = `Azure Monitor · ${daysLabel} window`;
+    if (hasSufficientBaseline) {
+      dataQualityTag = `<div class="text-[7px] font-bold px-1 py-0.5 rounded mt-0.5" style="color:#10d96e;background:rgba(16,217,110,0.1)">✓ ${ddDaysObs}d baseline</div>`;
+    } else if (ddDaysObs >= 2) {
+      dataQualityTag = `<div class="text-[7px] font-bold px-1 py-0.5 rounded mt-0.5" style="color:#f59e0b;background:rgba(245,158,11,0.1)">⚠ ${ddDaysObs}d — 15d recommended</div>`;
+    }
+  } else if (isAzure) {
+    dataSourceLabel = "Azure Monitor · snapshot";
+    dataQualityTag = `<div class="text-[7px] font-bold px-1 py-0.5 rounded mt-0.5" style="color:#f59e0b;background:rgba(245,158,11,0.1)">Load Time-Series for baseline</div>`;
+  } else {
+    dataSourceLabel = "Document upload · point-in-time";
+  }
+
+  // ── Build enriched server metrics: prefer deep dive stats over snapshot ──
+  const enriched = servers.map(s => {
+    const host = s.host || "";
+    // Try to find matching deep dive VM data (by hostname)
+    const ddKey = Object.keys(ddVms).find(k =>
+      k.toLowerCase() === host.toLowerCase() ||
+      k.toLowerCase().startsWith(host.toLowerCase().split(".")[0])
+    );
+    const vmStats = ddKey ? (ddVms[ddKey].stats || {}) : null;
+
+    if (vmStats) {
+      // Use time-series derived stats (P95 for sustained load, max for peak)
+      const cpuSt = vmStats["Percentage CPU"];
+      const memSt = vmStats["Available Memory Percentage"];
+      const diskSt = vmStats["OS Disk Bandwidth Consumed Percentage"];
+      return {
+        host,
+        cpu:  cpuSt?.p95 ?? cpuSt?.mean ?? s.cpu ?? 0,
+        cpuPeak: cpuSt?.max ?? s.cpu ?? 0,
+        cpuAvg: cpuSt?.mean ?? s.cpu ?? 0,
+        mem:  memSt ? (100 - (memSt.p5 ?? memSt.min ?? 0)) : (s.mem ?? 0),
+        memPeak: memSt ? (100 - (memSt.min ?? 0)) : (s.mem ?? 0),
+        memAvg: memSt ? (100 - (memSt.mean ?? 0)) : (s.mem ?? 0),
+        disk: diskSt?.p95 ?? diskSt?.mean ?? s.disk ?? 0,
+        diskPeak: diskSt?.max ?? s.disk ?? 0,
+        _source: "timeseries",
+      };
+    }
+    return {
+      host,
+      cpu: s.cpu ?? 0, cpuPeak: s.cpu ?? 0, cpuAvg: s.cpu ?? 0,
+      mem: s.mem ?? 0, memPeak: s.mem ?? 0, memAvg: s.mem ?? 0,
+      disk: s.disk ?? 0, diskPeak: s.disk ?? 0,
+      _source: "snapshot",
+    };
+  });
+
+  const timeseriesCount = enriched.filter(e => e._source === "timeseries").length;
+
+  // Compute per-metric aggregates from enriched data
+  const cpuVals  = enriched.map(s => s.cpu).filter(v => v > 0);
+  const memVals  = enriched.map(s => s.mem).filter(v => v > 0);
+  const diskVals = enriched.map(s => s.disk);
+  const cpuPeaks = enriched.map(s => s.cpuPeak).filter(v => v > 0);
+  const memPeaks = enriched.map(s => s.memPeak).filter(v => v > 0);
+  const diskPeaks = enriched.map(s => s.diskPeak);
   const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
   const peak = arr => arr.length ? Math.max(...arr) : 0;
 
-  const avgCpu = avg(cpuVals), peakCpu = peak(cpuVals);
-  const avgMem = avg(memVals), peakMem = peak(memVals);
-  const avgDisk = avg(diskVals), peakDisk = peak(diskVals);
+  // Use P95 for "avg" (sustained load) and max for "peak"
+  const avgCpu = avg(cpuVals), peakCpu = peak(cpuPeaks);
+  const avgMem = avg(memVals), peakMem = peak(memPeaks);
+  const avgDisk = avg(diskVals), peakDisk = peak(diskPeaks);
+
+  // Metric label changes based on data source
+  const metricLabel = hasDeepDive ? "P95" : "Avg";
+  const peakLabel = hasDeepDive ? "Max" : "Peak";
 
   const statusFor = (avgV, peakV) => {
     if (peakV >= RESOURCE_THRESHOLDS.cpu_warn) return { icon: "🔴", label: "CRITICAL", color: "#f43f5e" };
@@ -8366,16 +10486,16 @@ function _renderExecResourceHealth(servers, kpis) {
 
   // Risk distribution
   const bands = { critical: 0, warning: 0, healthy: 0 };
-  servers.forEach(s => {
-    const p = Math.max(s.cpu || 0, s.mem || 0, s.disk || 0);
+  enriched.forEach(s => {
+    const p = Math.max(s.cpuPeak, s.memPeak, s.diskPeak);
     if (p >= RESOURCE_THRESHOLDS.cpu_warn) bands.critical++;
     else if (p >= RESOURCE_THRESHOLDS.cpu_ok) bands.warning++;
     else bands.healthy++;
   });
 
   // 3 worst servers by peak metric
-  const worst3 = servers
-    .map(s => ({ host: s.host, peak: Math.max(s.cpu||0, s.mem||0, s.disk||0), cpu: s.cpu||0, mem: s.mem||0, disk: s.disk||0 }))
+  const worst3 = enriched
+    .map(s => ({ host: s.host, peak: Math.max(s.cpuPeak, s.memPeak, s.diskPeak), cpu: s.cpuPeak, mem: s.memPeak, disk: s.diskPeak }))
     .sort((a, b) => b.peak - a.peak)
     .slice(0, 3);
   const worstMetric = s => s.mem >= s.cpu && s.mem >= s.disk ? "MEM" : s.cpu >= s.disk ? "CPU" : "DISK";
@@ -8385,9 +10505,13 @@ function _renderExecResourceHealth(servers, kpis) {
     <!-- Fleet grade + 3-metric columns -->
     <div class="flex items-center gap-3 mb-2">
       <div class="text-3xl font-extrabold" style="color:${gradeColor}">${fleetGrade}</div>
-      <div>
+      <div class="flex-1">
         <div class="text-[9px] uppercase tracking-widest text-Cmuted">Fleet Grade</div>
-        <div class="text-[11px] text-Cwhite">${total} server${total!==1?'s':''}</div>
+        <div class="text-[11px] text-Cwhite">${total} server${total!==1?'s':''}${timeseriesCount > 0 ? ` · ${timeseriesCount} with time-series` : ''}</div>
+      </div>
+      <div class="text-right">
+        <div class="text-[8px] uppercase tracking-widest text-Cmuted">${dataSourceLabel}</div>
+        ${dataQualityTag}
       </div>
     </div>
     <!-- CPU / Memory / Disk strip -->
@@ -8395,19 +10519,19 @@ function _renderExecResourceHealth(servers, kpis) {
       <div class="rounded-lg border border-Cborder/30 bg-Cbg/40 p-1.5">
         <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold">CPU</div>
         <div class="text-[13px] font-bold text-Cwhite">${avgCpu.toFixed(1)}%</div>
-        <div class="text-[9px] text-Cmuted">Peak ${peakCpu.toFixed(1)}%</div>
+        <div class="text-[9px] text-Cmuted">${metricLabel} · ${peakLabel} ${peakCpu.toFixed(0)}%</div>
         <div class="text-[9px] font-bold" style="color:${cpuStatus.color}">${cpuStatus.icon} ${cpuStatus.label}</div>
       </div>
       <div class="rounded-lg border border-Cborder/30 bg-Cbg/40 p-1.5">
         <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold">MEMORY</div>
         <div class="text-[13px] font-bold text-Cwhite">${avgMem.toFixed(1)}%</div>
-        <div class="text-[9px] text-Cmuted">Peak ${peakMem.toFixed(1)}%</div>
+        <div class="text-[9px] text-Cmuted">${metricLabel} · ${peakLabel} ${peakMem.toFixed(0)}%</div>
         <div class="text-[9px] font-bold" style="color:${memStatus.color}">${memStatus.icon} ${memStatus.label}</div>
       </div>
       <div class="rounded-lg border border-Cborder/30 bg-Cbg/40 p-1.5">
         <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold">DISK</div>
         <div class="text-[13px] font-bold text-Cwhite">${avgDisk.toFixed(1)}%</div>
-        <div class="text-[9px] text-Cmuted">Peak ${peakDisk.toFixed(1)}%</div>
+        <div class="text-[9px] text-Cmuted">${metricLabel} · ${peakLabel} ${peakDisk.toFixed(0)}%</div>
         <div class="text-[9px] font-bold" style="color:${diskStatus.color}">${diskStatus.icon} ${diskStatus.label}</div>
       </div>
     </div>
@@ -8529,6 +10653,7 @@ function _renderExecSubAppBars(subs) {
     showlegend: false,
   };
 
+  _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _EXEC_CFG);
 }
 
@@ -8578,6 +10703,7 @@ function _renderExecBubble(subs) {
     showlegend: false,
   };
 
+  _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _EXEC_CFG);
 }
 
@@ -8638,6 +10764,7 @@ function _renderExecTemporal(temporal, kpis) {
     bargap: 0.05,
   };
 
+  _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _EXEC_CFG);
 }
 
@@ -8882,11 +11009,11 @@ function _renderSignoffChecklist(data) {
   // severity: "blocker" → fails block sign-off, "warning" → conditional only
   const rules = [
     {
-      label: "Evidence coverage ≥ 30 days",
+      label: "Evidence coverage ≥ 15 days",
       actual: `${evidenceDays}d`,
-      pass: evidenceDays >= 30,
+      pass: evidenceDays >= 15,
       severity: "blocker",
-      hint: evidenceDays < 30 ? `Only ${evidenceDays} day(s) on file — need ${30 - evidenceDays} more for full audit confidence.` : "Sufficient history.",
+      hint: evidenceDays < 15 ? `Only ${evidenceDays} day(s) on file — need ${15 - evidenceDays} more for full audit confidence.` : "Sufficient history.",
     },
     {
       label: "Confidence ≥ 90%",
@@ -9127,6 +11254,7 @@ function _renderExecForecast(windowData, slaHrs) {
     });
   }
 
+  _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _plotlyConfig());
 
   // Enterprise: export toolbar for forecast data
@@ -9140,7 +11268,14 @@ function _renderExecForecast(windowData, slaHrs) {
 
 
 // ── Red Flags & RCA ───────────────────────────────────────────
+let _redFlagsDebounce = null;
 async function triggerRedFlags() {
+  return new Promise(resolve => {
+    clearTimeout(_redFlagsDebounce);
+    _redFlagsDebounce = setTimeout(() => { _triggerRedFlagsImpl().then(resolve).catch(resolve); }, 400);
+  });
+}
+async function _triggerRedFlagsImpl() {
   const btn = document.getElementById("rf-refresh-btn");
   if (btn) { btn.disabled = true; btn.textContent = "Generating…"; }
 
@@ -9266,7 +11401,15 @@ function _renderRedFlagsResults(data) {
 // Hardwires SLA Matrix + PE Findings + Red Flags into a single
 // consultant verdict. Renders into #pe-consultant-panel.
 // ─────────────────────────────────────────────────────────────
+let _consultantDebounce = null;
 async function triggerPeConsultant() {
+  // Debounce: collapse rapid-fire calls into one (600ms)
+  if (_consultantDebounce) clearTimeout(_consultantDebounce);
+  return new Promise(resolve => {
+    _consultantDebounce = setTimeout(() => { _triggerPeConsultantImpl().then(resolve).catch(resolve); }, 600);
+  });
+}
+async function _triggerPeConsultantImpl() {
   // Run when at least 2 of 5 data sources are loaded
   const sm  = window.appData.slaMatrix;
   const fd  = window.appData.findings;
@@ -9526,10 +11669,18 @@ function _renderPeConsultant(data) {
 function renderSlaHeatmap(data) {
   const section   = document.getElementById("sla-heatmap-section");
   const container = document.getElementById("sla-heatmap-container");
-  if (!container || !data) return;
+  if (!container) return;
+  // Clear stale content whenever data is absent — prevents old heatmap persisting
+  // after a file is removed or replaced with a file that has no heatmap data.
+  if (!data) {
+    container.innerHTML = "";
+    if (section) section.classList.add("hidden");
+    return;
+  }
 
   const { jobs = [], dates = [], cells = [], limit = 6.0 } = data;
   if (!jobs.length || !dates.length) {
+    container.innerHTML = "";
     if (section) section.classList.add("hidden");
     return;
   }
@@ -9564,16 +11715,23 @@ function renderSlaHeatmap(data) {
 
   const shortDates = dates.map(fmtDate);
 
+  // ── Highlight dates that were detected as spikes in the window chart ──
+  const spikeSet = new Set((window._batchWindowSpikes || []).map(s => s.date));
+
   let html = `
     <table class="text-[10px] border-collapse min-w-max">
       <thead>
         <tr>
           <th class="sticky left-0 z-10 bg-Ccard text-left pr-3 pb-1 text-Cmuted font-semibold
                       whitespace-nowrap" style="min-width:150px">Job</th>
-          ${shortDates.map((d, i) =>
-            `<th class="pb-1 px-0.5 text-Cmuted font-normal text-center whitespace-nowrap"
-                 title="${_esc(dates[i])}">${_esc(d)}</th>`
-          ).join("")}
+          ${shortDates.map((d, i) => {
+            const isSpike = spikeSet.has(dates[i]);
+            const spikeStyle = isSpike ? `background:${hexA(THEME.amber,0.18)};border-bottom:2px solid ${THEME.amber}` : "";
+            const spikeTitle = isSpike ? ` ⚡ Spike day` : "";
+            return `<th class="pb-1 px-0.5 text-Cmuted font-normal text-center whitespace-nowrap"
+                 style="${spikeStyle}"
+                 title="${_esc(dates[i])}${spikeTitle}">${_esc(d)}${isSpike ? '<br><span style="color:' + THEME.amber + ';font-size:8px">⚡</span>' : ""}</th>`;
+          }).join("")}
         </tr>
       </thead>
       <tbody>`;
@@ -9586,8 +11744,10 @@ function renderSlaHeatmap(data) {
         const c  = lookup[`${job}||${date}`];
         const bg = cellColor(c);
         const tt = cellTitle(c);
-        return `<td class="px-0.5 py-0.5 text-center" title="${tt}" style="min-width:22px">
-          <div style="width:20px;height:15px;background:${bg};border-radius:2px;margin:auto"></div>
+        const isSpike = spikeSet.has(date);
+        const spikeBorder = isSpike ? `border:1px solid ${hexA(THEME.amber,0.5)}` : "";
+        return `<td class="px-0.5 py-0.5 text-center" title="${tt}${isSpike ? " ⚡" : ""}" style="min-width:22px${isSpike ? ";background:" + hexA(THEME.amber,0.06) : ""}">
+          <div style="width:20px;height:15px;background:${bg};border-radius:2px;margin:auto;${spikeBorder}"></div>
         </td>`;
       }).join("")}
     </tr>`;
@@ -9615,10 +11775,17 @@ function renderSlaHeatmap(data) {
 function renderHourHeatmap(data) {
   const section   = document.getElementById("hour-heatmap-section");
   const container = document.getElementById("hour-heatmap-container");
-  if (!container || !data) return;
+  if (!container) return;
+  // Clear stale content when data is absent
+  if (!data) {
+    container.innerHTML = "";
+    if (section) section.classList.add("hidden");
+    return;
+  }
 
   const { sub_apps = [], hours = [], cells = [] } = data;
   if (!sub_apps.length || !cells.length) {
+    container.innerHTML = "";
     if (section) section.classList.add("hidden");
     return;
   }
@@ -9736,8 +11903,9 @@ async function loadConfig() {
     if (monthly  && cfg.monthly_sla_hrs)      monthly.value  = cfg.monthly_sla_hrs;
     if (bench    && cfg.benchmark_threshold)  bench.value    = cfg.benchmark_threshold;
 
-    // Restore customer chip from persisted config (set when last Ctrl-M file was uploaded)
-    if (cfg.customer_name) {
+    // Restore customer chip only if this tab has an active session
+    // (prevents old customer name from bleeding into a new engagement)
+    if (cfg.customer_name && _isSessionActive()) {
       applyCustomerName(cfg.customer_name);
     }
 
@@ -10030,7 +12198,7 @@ async function runFinalJudgment() {
   }
 }
 
-function loadSettings() { loadConfig(); _loadAzureStatusBadge(); checkAzureIdentity(); }
+function loadSettings() { loadConfig(); _loadAzureStatusBadge(); checkAzureIdentity({ loadSubscriptions: false }); }
 
 function toggleSettingsKey() {
   const el = document.getElementById("settings-api-key");
@@ -10159,12 +12327,17 @@ async function saveConfig() {
 //  AZURE MONITOR — live-fetch integration (personal identity via az login)
 // ═══════════════════════════════════════════════════════════════
 
-async function checkAzureIdentity() {
+async function checkAzureIdentity(opts = {}) {
+  const loadSubscriptions = !!opts.loadSubscriptions;
+  const timeoutMs = Number(opts.timeoutMs || 3000);
   const el = document.getElementById("az-identity-status");
   if (!el) return;
   el.innerHTML = '<span class="text-Cmuted">Checking…</span>';
   try {
-    const res = await fetch("/api/azure/auth-status");
+    const ctl = new AbortController();
+    const tm = setTimeout(() => ctl.abort(), timeoutMs);
+    const res = await fetch("/api/azure/auth-status", { signal: ctl.signal });
+    clearTimeout(tm);
     const d = await res.json();
     const loginBtn  = document.getElementById("az-browser-login-btn");
     const logoutBtn = document.getElementById("az-browser-logout-btn");
@@ -10183,8 +12356,12 @@ async function checkAzureIdentity() {
       if (loginBtn)  loginBtn.classList.add("hidden");
       if (logoutBtn) logoutBtn.classList.remove("hidden");
       if (statusEl2) { statusEl2.textContent = `✅ Signed in as ${displayName || userId}`; statusEl2.className = "text-xs text-Cgreen"; }
-      loadAzureSubscriptions("");
+      if (loadSubscriptions) loadAzureSubscriptions("");
       _updateUploadAzureStatus(true, displayName || userId, { tenant_id: d.tenant_id || "", method: d.method || "" });
+      // Start polling VM cache readiness on dashboard load — if cache is
+      // already hot (from a prior session) this completes in one tick.
+      _pollVmCacheReady(statusEl2);
+      _startAzureAutoSync();
     } else {
       el.innerHTML =
         `<div class="flex items-center gap-2">` +
@@ -10209,11 +12386,59 @@ function _esc(s) { const d = document.createElement("div"); d.textContent = s ||
 async function azureBrowserLogin() {
   const btn      = document.getElementById("az-browser-login-btn");
   const statusEl = document.getElementById("az-browser-login-status");
+
+  // Quick server reachability check before blocking the button
+  try {
+    const ping = await fetch("/api/health", { method: "GET",
+      signal: AbortSignal.timeout(2000) });
+    if (!ping.ok) throw new Error("server unhealthy");
+  } catch {
+    if (statusEl) {
+      statusEl.textContent = "❌ Server not reachable — start the server with start.bat then refresh this page.";
+      statusEl.className = "text-xs text-Cred";
+    }
+    toast("error", "Server offline", "Run start.bat to start the PE Dashboard server, then refresh.");
+    return;
+  }
+
   if (btn) { btn.disabled = true; btn.textContent = "Opening browser…"; }
-  if (statusEl) { statusEl.textContent = "Waiting for browser sign-in…"; statusEl.className = "text-xs text-Cmuted"; }
+  if (statusEl) {
+    statusEl.textContent = "Opening Microsoft sign-in page in your browser…";
+    statusEl.className = "text-xs text-Cmuted";
+  }
+
+  // Progressive status hints so the user knows what to do at each stage
+  // First hint fires early: the server may be loading the Azure SDK (first login after
+  // server start can take 60-120s on machines with AV scanning crypto libraries).
+  const sdkHintTimer = setTimeout(() => {
+    if (statusEl) {
+      statusEl.textContent = "Loading Azure SDK… this can take up to 2 minutes on first sign-in. Please wait.";
+      statusEl.className = "text-xs text-Camber";
+    }
+  }, 5000);
+  const progressHintTimer = setTimeout(() => {
+    if (statusEl) {
+      statusEl.textContent = "Still loading — check your default browser for the Microsoft login tab.";
+      statusEl.className = "text-xs text-Camber";
+    }
+  }, 30000);
+  const mfaHintTimer = setTimeout(() => {
+    if (statusEl) {
+      statusEl.innerHTML =
+        `<span>Complete MFA in your browser, then return here.</span>` +
+        `<br><span class="text-Cmuted">If the page says "connection refused" after sign-in, ` +
+        `click <strong>Try Again</strong> below — a different port will be used.</span>`;
+      statusEl.className = "text-xs text-Camber";
+    }
+  }, 60000);
 
   try {
-    const res  = await fetch("/api/azure/browser-login", { method: "POST" });
+    const ctl = new AbortController();
+    const timeoutMs = 300000; // 5 minutes — allows for slow AV-scanned SDK import + MFA
+    const tm = setTimeout(() => ctl.abort(), timeoutMs);
+    const res  = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
+    clearTimeout(tm);
+    clearTimeout(sdkHintTimer);
     const data = await res.json();
     if (!res.ok) {
       const msg = data?.detail || `HTTP ${res.status}`;
@@ -10264,6 +12489,10 @@ async function azureBrowserLogin() {
     if (statusEl) { statusEl.textContent = `✅ Signed in as ${data.name || data.display_name || "?"}`; statusEl.className = "text-xs text-Cgreen"; }
     toast("success", "Azure browser login", `Signed in as ${data.display_name || data.name || "?"}`);
 
+    // ── Post-login: start polling VM cache readiness so first search is instant ──
+    _pollVmCacheReady(statusEl);
+    _startAzureAutoSync();
+
     // Update the fetch modal if it's open
     const notConf = document.getElementById("azure-modal-not-configured");
     const form    = document.getElementById("azure-modal-form");
@@ -10271,14 +12500,70 @@ async function azureBrowserLogin() {
     if (form)    form.classList.remove("hidden");
 
   } catch (err) {
-    if (statusEl) { statusEl.textContent = `❌ ${err?.message || err}`; statusEl.className = "text-xs text-Cred"; }
-    toast("error", "Browser login error", err?.message || String(err));
+    const isNetworkErr = !err?.name || err.name === "TypeError" ||
+      (err?.message || "").toLowerCase().includes("networkerror") ||
+      (err?.message || "").toLowerCase().includes("failed to fetch");
+    const msg = (err && err.name === "AbortError")
+      ? "Timed out waiting for sign-in. Please try again and complete login in your browser."
+      : isNetworkErr
+        ? "Cannot reach server. Start the server with start.bat, then refresh the page and try again."
+        : (err?.message || String(err));
+    if (statusEl) {
+      statusEl.textContent = `❌ ${msg}`;
+      statusEl.className = "text-xs text-Cred";
+    }
+    toast("error", "Browser login error", msg);
   } finally {
+    clearTimeout(sdkHintTimer);
+    clearTimeout(progressHintTimer);
+    clearTimeout(mfaHintTimer);
     if (btn && !btn.classList.contains("hidden")) {
       btn.disabled = false;
       btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg> Sign in with Browser';
     }
   }
+}
+
+// ── VM cache pre-warm poll ────────────────────────────────────────────────────────────
+// After login, polls /api/azure/vm-cache-status every 3s until ready.
+// Updates the login status element with a progress indicator so the user
+// knows the VM inventory is loading in the background.
+let _vmCachePollTimer = null;
+async function _pollVmCacheReady(statusEl, maxWaitMs = 90000) {
+  if (_vmCachePollTimer) clearInterval(_vmCachePollTimer);
+  const t0 = Date.now();
+  _vmCachePollTimer = setInterval(async () => {
+    try {
+      if (Date.now() - t0 > maxWaitMs) {
+        clearInterval(_vmCachePollTimer);
+        return;
+      }
+      const res = await fetch("/api/azure/vm-cache-status", { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return;
+      const st = await res.json();
+      if (st.status === "warming") {
+        if (statusEl) {
+          statusEl.textContent = "⏳ Loading VM inventory in background…";
+          statusEl.className = "text-xs text-Camber";
+        }
+      } else if (st.status === "ready") {
+        clearInterval(_vmCachePollTimer);
+        const vmWord = st.vm_count === 1 ? "VM" : "VMs";
+        if (statusEl) {
+          statusEl.textContent = `✅ VM inventory ready — ${st.vm_count} ${vmWord} cached. Search is now instant.`;
+          statusEl.className = "text-xs text-Cgreen";
+        }
+        // Also update the Azure search placeholder to indicate cache is hot
+        const searchInput = document.getElementById("az-vm-search-input");
+        if (searchInput && searchInput.placeholder.includes("Loading")) {
+          searchInput.placeholder = `Search VMs (${st.vm_count} cached)…`;
+        }
+      } else if (st.status === "error") {
+        clearInterval(_vmCachePollTimer);
+        // Don't show an error — search will still work, just slower
+      }
+    } catch (_) { /* ignore poll errors */ }
+  }, 3000);
 }
 
 async function azureBrowserLogout() {
@@ -10287,60 +12572,145 @@ async function azureBrowserLogout() {
     // Show sign-in, hide sign-out
     const loginBtn  = document.getElementById("az-browser-login-btn");
     const logoutBtn = document.getElementById("az-browser-logout-btn");
-    if (loginBtn)  loginBtn.classList.remove("hidden");
+    if (loginBtn) {
+      loginBtn.classList.remove("hidden");
+      loginBtn.disabled = false;   // MUST reset — successful login hides button while still disabled
+      loginBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg> Sign in with Browser';
+    }
     if (logoutBtn) logoutBtn.classList.add("hidden");
     const statusEl = document.getElementById("az-browser-login-status");
     if (statusEl) { statusEl.textContent = "Browser session cleared."; statusEl.className = "text-xs text-Cmuted"; }
+    // Stop all background polling on logout
+    if (_vmCachePollTimer) { clearInterval(_vmCachePollTimer); _vmCachePollTimer = null; }
+    _stopAzureAutoSync();
     // Refresh identity
-    checkAzureIdentity();
+    checkAzureIdentity({ loadSubscriptions: false });
     toast("info", "Signed out", "Browser credential cleared. Will fall back to az login.");
   } catch (_) {}
+}
+
+// ── Azure auto-sync: refreshes VM inventory cache every 15 minutes ────────
+// Runs in the background once the user is signed in. When deep-dive charts
+// are visible (data already loaded), it silently pre-warms the VM cache so
+// that the next manual refresh hits a warm backend and responds faster.
+let _azureAutoSyncTimer = null;
+function _startAzureAutoSync() {
+  _stopAzureAutoSync();
+  _azureAutoSyncTimer = setInterval(async () => {
+    try {
+      const res = await fetch("/api/azure/vm-cache-status", { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return;
+      const st = await res.json();
+      // If cache has gone stale, nudge the server to re-warm it
+      if (st.status === "idle" || st.status === "error") {
+        // A lightweight POST to browser-login endpoint would be intrusive,
+        // so just log that cache expired — user will get fresh data on next load
+        return;
+      }
+      // If deep dive data is stale (loaded > 15 min ago), auto-reload silently
+      if (_deepDiveData && _lastFetchedVmIds?.length && st.status === "ready") {
+        const chartsDiv = document.getElementById("deepdive-charts");
+        const hasCharts = chartsDiv && chartsDiv.children.length > 0;
+        if (hasCharts) {
+          // Auto-reload — show toast so user knows data was refreshed
+          await loadMetricsDeepDive();
+          toast("info", "Azure data refreshed", "Deep-dive metrics refreshed automatically.");
+        }
+      }
+    } catch (_) { /* ignore auto-sync errors */ }
+  }, 15 * 60 * 1000); // every 15 minutes
+}
+function _stopAzureAutoSync() {
+  if (_azureAutoSyncTimer) { clearInterval(_azureAutoSyncTimer); _azureAutoSyncTimer = null; }
 }
 
 async function loadAzureSubscriptions(defaultSubId) {
   const sel = document.getElementById("az-subscription-id");
   if (!sel) return;
-  sel.innerHTML = '<option value="">Loading subscriptions…</option>';
-  try {
-    const cfgRes = await fetch("/api/azure/status");
-    const cfgData = await cfgRes.json();
-    const savedSubId = cfgData.azure_subscription_id_set ? cfgData.azure_subscription_id_value : "";
-    const savedRg = cfgData.azure_resource_group_set ? cfgData.azure_resource_group_value : "";
 
-    const res = await fetch("/api/azure/subscriptions");
-    const d = await res.json();
-    if (d.ok && d.subscriptions.length > 0) {
-      sel.innerHTML = '';
-      let selected = false;
-      d.subscriptions.forEach(s => {
-        const opt = document.createElement("option");
-        opt.value = s.id;
-        opt.textContent = `${s.name} (${s.id.slice(0,8)}…)`;
-        if (savedSubId && s.id === savedSubId) {
-          opt.selected = true;
-          selected = true;
-        } else if (!savedSubId && defaultSubId && s.id === defaultSubId) {
-          opt.selected = true;
-          selected = true;
-        } else if (!savedSubId && !defaultSubId && s.is_default) {
-          opt.selected = true;
-          selected = true;
-        }
-        sel.appendChild(opt);
-      });
-      // Ensure one option is selected even if metadata does not mark default.
-      if (!selected && sel.options.length > 0) {
-        sel.selectedIndex = 0;
-      }
+  // Prefill saved subscription immediately (no spinner) so the modal is
+  // usable before the slow subscriptions API call completes.
+  let savedSubId = "", savedRg = "";
+  try {
+    const cfgFast = await fetch("/api/azure/status");
+    const cfgFastData = await cfgFast.json();
+    savedSubId = cfgFastData.azure_subscription_id_set ? cfgFastData.azure_subscription_id_value : "";
+    savedRg    = cfgFastData.azure_resource_group_set  ? cfgFastData.azure_resource_group_value  : "";
+    if (savedSubId) {
+      sel.innerHTML = `<option value="${_esc(savedSubId)}">${_esc(savedSubId)}</option>`;
+      sel.value = savedSubId;
       _autoSaveAzureConfig();
-      loadAzureResourceGroups(sel.value, savedRg);
+      loadAzureResourceGroups(savedSubId, savedRg);
     } else {
-      const msg = d.error ? `No subscriptions found — ${d.error}` : "No subscriptions found — check az login";
-      sel.innerHTML = `<option value="">${_esc(msg)}</option>`;
+      sel.innerHTML = '<option value="">Loading subscriptions…</option>';
     }
-  } catch (_) {
-    sel.innerHTML = '<option value="">Failed to load subscriptions</option>';
+  } catch (_) { /* continue */ }
+
+  // Fetch subscription list — may be instant (from cache) or fast (config
+  // fallback with _cache_warming=true meaning background fetch is running).
+  async function _fetchAndPopulate(isRetry) {
+    try {
+      const res = await fetch("/api/azure/subscriptions");
+      const d = await res.json();
+
+      if (d.ok && d.subscriptions.length > 0 && !d._cache_warming) {
+        // Full list ready — populate dropdown
+        sel.innerHTML = '';
+        let selected = false;
+        d.subscriptions.forEach(s => {
+          const opt = document.createElement("option");
+          opt.value = s.id;
+          opt.textContent = s.name !== s.id ? `${s.name} (${s.id.slice(0,8)}…)` : s.id;
+          if (savedSubId && s.id === savedSubId) { opt.selected = true; selected = true; }
+          else if (!savedSubId && defaultSubId && s.id === defaultSubId) { opt.selected = true; selected = true; }
+          else if (!savedSubId && !defaultSubId && s.is_default) { opt.selected = true; selected = true; }
+          sel.appendChild(opt);
+        });
+        if (!selected && sel.options.length > 0) sel.selectedIndex = 0;
+        _autoSaveAzureConfig();
+        loadAzureResourceGroups(sel.value, savedRg);
+
+      } else if (d._cache_warming) {
+        // Background fetch still in progress — poll every 2s (SDK path is fast)
+        const _pollSubs = (attemptsLeft) => {
+          if (attemptsLeft <= 0) return; // give up after ~30s
+          setTimeout(async () => {
+            try {
+              const r2 = await fetch("/api/azure/subscriptions");
+              const d2 = await r2.json();
+              if (d2.ok && d2.subscriptions.length > 0 && !d2._cache_warming) {
+                sel.innerHTML = '';
+                let selected = false;
+                d2.subscriptions.forEach(s => {
+                  const opt = document.createElement("option");
+                  opt.value = s.id;
+                  opt.textContent = s.name !== s.id ? `${s.name} (${s.id.slice(0,8)}\u2026)` : s.id;
+                  if (savedSubId && s.id === savedSubId) { opt.selected = true; selected = true; }
+                  else if (!savedSubId && defaultSubId && s.id === defaultSubId) { opt.selected = true; selected = true; }
+                  else if (!savedSubId && !defaultSubId && s.is_default) { opt.selected = true; selected = true; }
+                  sel.appendChild(opt);
+                });
+                if (!selected && sel.options.length > 0) sel.selectedIndex = 0;
+                _autoSaveAzureConfig();
+                loadAzureResourceGroups(sel.value, savedRg);
+              } else if (d2._cache_warming) {
+                _pollSubs(attemptsLeft - 1);
+              }
+            } catch (_) { _pollSubs(attemptsLeft - 1); }
+          }, 2000);
+        };
+        _pollSubs(15); // up to 15 × 2s = 30s
+
+      } else if (!savedSubId) {
+        const msg = d.error ? `No subscriptions — ${d.error}` : "No subscriptions — check az login";
+        sel.innerHTML = `<option value="">${_esc(msg)}</option>`;
+      }
+      // If savedSubId was already shown and list unavailable, keep it.
+    } catch (_) {
+      if (!sel.value) sel.innerHTML = '<option value="">Failed to load subscriptions</option>';
+    }
   }
+  _fetchAndPopulate(false);
 }
 
 async function loadAzureResourceGroups(subscriptionId, preSelectRg) {
@@ -10601,7 +12971,7 @@ async function azureModalSignOut() {
     toast("info", "Signed out", "Browser credential cleared.");
     _refreshModalAuthBar();
     // Also refresh Settings page if present
-    checkAzureIdentity();
+    checkAzureIdentity({ loadSubscriptions: true });
   } catch (_) {}
 }
 
@@ -10659,10 +13029,13 @@ async function azureLoadRGs() {
 
 /* ── Cached discovered VMs ── */
 let _discoveredVMs = [];
+let _selectedVmIds = new Set();   // Persistent selection — survives filter switches
 
 /* ── Helper: show discovered VMs in step 2 ── */
 function _showDiscoveredVMs(data, statusEl, statusMsg) {
   _discoveredVMs = data.vms || [];
+  // Fresh discovery → select none by default so user picks what they need
+  _selectedVmIds = new Set();
   if (!_discoveredVMs.length) {
     if (statusEl) { statusEl.textContent = "No VMs found."; statusEl.className = "text-xs text-amber-400"; }
     return;
@@ -10782,8 +13155,10 @@ function _renderVMTable(vms) {
       const typeBreakdown = {};
       grouped[cust].forEach(({vm}) => { typeBreakdown[vm.type] = (typeBreakdown[vm.type]||0) + 1; });
       const badges = Object.entries(typeBreakdown).map(([t,c]) => `${t}:${c}`).join(" · ");
+      const allSelected = grouped[cust].every(({vm}) => _selectedVmIds.has(vm.resource_id));
+      const someSelected = grouped[cust].some(({vm}) => _selectedVmIds.has(vm.resource_id));
       html += `<tr class="bg-Cbg/60 border-t border-Cborder">
-        <td class="px-2 py-1.5"><input type="checkbox" checked class="azure-cust-check rounded border-Cborder"
+        <td class="px-2 py-1.5"><input type="checkbox" ${allSelected ? 'checked' : ''} ${!allSelected && someSelected ? 'indeterminate' : ''} class="azure-cust-check rounded border-Cborder"
             onchange="azureToggleCustomer(this, '${_escHtml(cust)}')" title="Select/deselect all ${_escHtml(cust)} VMs" /></td>
         <td colspan="6" class="px-2 py-1.5">
           <span class="text-[10px] font-bold text-Cwhite">${_escHtml(cust)}</span>
@@ -10796,8 +13171,9 @@ function _renderVMTable(vms) {
       const colors = typeColors[vm.type] || typeColors.APP;
       const app = vm.application || (vm.tags||{}).Application || (vm.tags||{}).application || "";
       const sub = vm.subscription_id ? vm.subscription_id.slice(0,8) + "…" : "";
+      const isChecked = _selectedVmIds.has(vm.resource_id);
       html += `<tr class="hover:bg-Cbg/40 azure-vm-row" data-type="${vm.type}" data-customer="${_escHtml(cust)}" data-idx="${idx}">
-        <td class="px-2 py-1.5"><input type="checkbox" checked class="azure-vm-check rounded border-Cborder" data-rid="${_escHtml(vm.resource_id)}" data-customer="${_escHtml(cust)}" onchange="_updateSelectedCount()" /></td>
+        <td class="px-2 py-1.5"><input type="checkbox" ${isChecked ? 'checked' : ''} class="azure-vm-check rounded border-Cborder" data-rid="${_escHtml(vm.resource_id)}" data-customer="${_escHtml(cust)}" onchange="_onVmCheckChange(this)" /></td>
         <td class="px-2 py-1.5 text-Cwhite font-mono text-[11px]">${_escHtml(vm.name)}</td>
         <td class="px-2 py-1.5">
           <select class="azure-type-select bg-transparent border rounded px-1 py-0.5 text-[10px] font-bold ${colors}" data-idx="${idx}"
@@ -10821,11 +13197,24 @@ function _renderVMTable(vms) {
 function azureToggleCustomer(headerCb, customer) {
   document.querySelectorAll(`.azure-vm-check[data-customer="${customer}"]`).forEach(cb => {
     cb.checked = headerCb.checked;
+    _syncVmSelection(cb);
   });
   _updateSelectedCount();
 }
 
 function _escHtml(s) { const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+
+/* ── Track checkbox change → persist in _selectedVmIds ── */
+function _onVmCheckChange(cb) {
+  _syncVmSelection(cb);
+  _updateSelectedCount();
+}
+function _syncVmSelection(cb) {
+  const rid = cb.dataset.rid;
+  if (!rid) return;
+  if (cb.checked) _selectedVmIds.add(rid);
+  else _selectedVmIds.delete(rid);
+}
 
 /* ── Type override by user ── */
 function azureChangeVMType(idx, newType) {
@@ -10843,31 +13232,57 @@ function azureChangeVMType(idx, newType) {
   document.getElementById("azure-vm-sre-badge").textContent = `SRE ${counts.SRE}`;
 }
 
-/* ── Select / deselect all ── */
+/* ── Select / deselect all (works across ALL VMs, not just visible) ── */
 function azureSelectAll(checked) {
+  if (checked) {
+    _discoveredVMs.forEach(v => _selectedVmIds.add(v.resource_id));
+  } else {
+    _selectedVmIds.clear();
+  }
+  // Update visible checkboxes to match
   document.querySelectorAll(".azure-vm-check").forEach(cb => cb.checked = checked);
-  document.getElementById("azure-vm-checkall").checked = checked;
+  const allCb = document.getElementById("azure-vm-checkall");
+  if (allCb) allCb.checked = checked;
   _updateSelectedCount();
 }
 function azureToggleAll(checked) {
-  document.querySelectorAll(".azure-vm-check").forEach(cb => cb.checked = checked);
+  // Toggle only the currently visible filtered VMs
+  document.querySelectorAll(".azure-vm-check").forEach(cb => {
+    cb.checked = checked;
+    _syncVmSelection(cb);
+  });
   _updateSelectedCount();
 }
 
 function _updateSelectedCount() {
-  const checks = document.querySelectorAll(".azure-vm-check:checked");
   const el = document.getElementById("azure-selected-count");
-  if (el) el.textContent = `${checks.length} of ${_discoveredVMs.length} selected`;
+  if (el) el.textContent = `${_selectedVmIds.size} of ${_discoveredVMs.length} selected`;
 }
 
-/* ── Type filter ── */
+/* ── Type filter — multi-select: click ALL resets, click DB/APP/SRE toggles ── */
 function azureFilterType(type) {
-  // Update button styles
-  document.querySelectorAll(".azure-type-filter").forEach(b => {
-    b.classList.toggle("bg-Cblue/20", b.dataset.type === type);
-  });
-  // Filter rows
-  const filtered = type === "ALL" ? _discoveredVMs : _discoveredVMs.filter(v => v.type === type);
+  const allBtn = document.querySelector('.azure-type-filter[data-type="ALL"]');
+  const typeBtns = document.querySelectorAll('.azure-type-filter:not([data-type="ALL"])');
+
+  if (type === "ALL") {
+    // ALL resets — deactivate specific types, activate ALL
+    typeBtns.forEach(b => b.classList.remove("bg-Cblue/20"));
+    allBtn?.classList.add("bg-Cblue/20");
+  } else {
+    // Toggle the clicked type
+    const btn = document.querySelector(`.azure-type-filter[data-type="${type}"]`);
+    btn?.classList.toggle("bg-Cblue/20");
+    // Deactivate ALL
+    allBtn?.classList.remove("bg-Cblue/20");
+    // If nothing active, re-activate ALL
+    const anyActive = document.querySelector('.azure-type-filter:not([data-type="ALL"]).bg-Cblue\\/20');
+    if (!anyActive) allBtn?.classList.add("bg-Cblue/20");
+  }
+
+  // Collect active type filters
+  const activeTypes = [...document.querySelectorAll('.azure-type-filter.bg-Cblue\\/20')].map(b => b.dataset.type);
+  const showAll = activeTypes.includes("ALL") || activeTypes.length === 0;
+  const filtered = showAll ? _discoveredVMs : _discoveredVMs.filter(v => activeTypes.includes(v.type));
   _renderVMTable(filtered);
   _updateSelectedCount();
 }
@@ -10880,16 +13295,9 @@ async function runAzureFetch() {
   const statusEl = document.getElementById("azure-fetch-status");
   const hours    = parseInt(document.getElementById("azure-modal-hours")?.value || "24");
 
-  // Collect selected VM metadata (not just IDs — avoids redundant API calls)
-  const selectedIds = [];
-  const selectedVms = [];
-  document.querySelectorAll(".azure-vm-check:checked").forEach(cb => {
-    if (!cb.dataset.rid) return;
-    selectedIds.push(cb.dataset.rid);
-    // Find the full VM record from discovered VMs
-    const vm = _discoveredVMs.find(v => v.resource_id === cb.dataset.rid);
-    if (vm) selectedVms.push(vm);
-  });
+  // Collect selected VM metadata from persistent selection set
+  const selectedIds = [..._selectedVmIds];
+  const selectedVms = _discoveredVMs.filter(v => _selectedVmIds.has(v.resource_id));
 
   if (!selectedIds.length) {
     if (statusEl) { statusEl.textContent = "Select at least one VM to fetch metrics for."; statusEl.classList.remove("hidden"); statusEl.className = "text-xs text-amber-400"; }
@@ -10910,6 +13318,7 @@ async function runAzureFetch() {
     window.appData.servers  = payload.servers || [];
     window.appData.upload   = payload;
     window._execCache = null;
+    _markSessionActive();  // track session boundary
     closeAzureModal();
     setActiveView("resource");
 
@@ -10923,7 +13332,8 @@ async function runAzureFetch() {
     if (durPicker) { durPicker.classList.remove("hidden"); durPicker.value = String(hours); }
 
     renderResourceReview(payload);
-    triggerGenerateFindings().catch(() => {});
+    // Defer findings — let browser paint resource view first
+    setTimeout(() => { triggerGenerateFindings().catch(() => {}); }, 100);
 
     const k = payload.kpis || {};
     const elapsed = payload.fetch_time_seconds ? ` (${payload.fetch_time_seconds}s)` : "";
@@ -10943,10 +13353,16 @@ async function runAzureFetch() {
  * reads progress events, updates UI, returns final payload or null on error.
  */
 async function _fetchAzureWithProgress(body, btn, statusEl) {
+  // 5-minute timeout for the entire SSE stream — prevents infinite hang
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300_000);
+
+  try {
   const res = await fetch("/api/azure/fetch-resources-stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: controller.signal,
   });
 
   if (!res.ok) {
@@ -11002,6 +13418,16 @@ async function _fetchAzureWithProgress(body, btn, statusEl) {
   }
 
   return payload;
+  } catch (err) {
+    if (err.name === "AbortError") {
+      if (statusEl) { statusEl.textContent = "❌ Timeout — Azure took too long (5 min limit)"; statusEl.className = "text-xs text-red-400"; }
+      toast("error", "Azure timeout", "The request took longer than 5 minutes. Try fewer VMs or a shorter time range.");
+      return null;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /* ── Re-fetch with different duration from Resource Review page ── */
@@ -11024,8 +13450,10 @@ async function azureRefetchDuration(hours) {
     window.appData.servers  = payload.servers || [];
     window.appData.upload   = payload;
     window._execCache = null;
+    _markSessionActive();  // track session boundary
     renderResourceReview(payload);
-    triggerGenerateFindings().catch(() => {});
+    // Defer findings — let browser paint resource view first
+    setTimeout(() => { triggerGenerateFindings().catch(() => {}); }, 100);
 
     const k = payload.kpis || {};
     const elapsed = payload.fetch_time_seconds ? ` (${payload.fetch_time_seconds}s)` : "";
@@ -11200,14 +13628,53 @@ function _renderSlaCommitmentsPanel() {
             : `· <span class="text-Camber" title="Showing XLSX last-run data. Run SLA Matrix with Ctrl-M upload for live runtime.">⚠ using XLSX last-run — upload Ctrl-M for live data</span>`}
         </div>
         <div class="overflow-x-auto rounded-lg border border-Cborder/40">
+          ${(() => {
+            // ── SLA Standard vs Matrix comparison notice ──────────────────
+            // Shows inline when both batch and SLA matrix are loaded.
+            // Compares pe_config defaults with matrix SLA values per workflow.
+            const cmp = _buildSlaComparison();
+            if (!cmp) return "";
+            const pd = window.appData?.batch?.pe_defaults || {};
+            const defD = Number(pd.daily_hrs || 6.0).toFixed(1);
+            const defW = Number(pd.weekly_hrs || 8.0).toFixed(1);
+            const parts = [];
+            if (cmp.tighter_than_default > 0) {
+              parts.push(`<span class="text-Cred font-semibold">${cmp.tighter_than_default} workflow(s) have tighter-than-default SLA</span>`);
+            }
+            if (cmp.looser_than_default > 0) {
+              parts.push(`<span class="text-Cmuted">${cmp.looser_than_default} workflow(s) have extended SLA window</span>`);
+            }
+            if (cmp.breach_count > 0) {
+              parts.push(`<span class="text-Cred font-bold">${cmp.breach_count} job(s) already breaching contracted SLA</span>`);
+            }
+            if (cmp.near_breach_count > 0) {
+              parts.push(`<span class="text-Camber font-semibold">${cmp.near_breach_count} job(s) consuming &ge;85% of contracted SLA</span>`);
+            }
+            if (!parts.length && !cmp.has_sla_matrix) {
+              return `<div class="text-[9px] text-Camber/80 px-3 py-2 border-b border-Camber/20 bg-Camber/5 flex items-center gap-2">
+                <span>&#x1F4D0;</span>
+                <span>PE Standard Baseline active &mdash; Daily <strong>${defD}h</strong> &middot; Weekly <strong>${defW}h</strong>. Upload BatchSLA_info.xlsx to compare against per-job contracted targets.</span>
+              </div>`;
+            }
+            const alertClass = (cmp.breach_count > 0 || cmp.tighter_than_default > 0)
+              ? "text-Camber/90 bg-Camber/5 border-Camber/20"
+              : "text-Cmuted/80 bg-Cbg/40 border-Cborder/20";
+            return parts.length > 0 ? `<div class="text-[9px] px-3 py-2 border-b ${alertClass} flex flex-wrap items-center gap-x-3 gap-y-0.5">
+              <span class="font-bold text-[8px] uppercase tracking-wider opacity-70">SLA vs Baseline</span>
+              <span class="opacity-50">PE default: Daily ${defD}h &middot; Weekly ${defW}h</span>
+              <span class="opacity-30">&bull;</span>
+              ${parts.join(' <span class="opacity-30">&middot;</span> ')}
+              <button onclick="triggerGenerateFindings().catch(()=>{})" class="ml-auto text-[8px] font-semibold text-Cgreen hover:underline cursor-pointer">Push to PE Findings &rarr;</button>
+            </div>` : "";
+          })()}
           <table class="w-full text-[10px]">
             <thead><tr class="border-b border-Cborder/40 bg-Cbg/60">
               <th class="text-left py-1.5 px-2 text-Cmuted font-semibold">Workflow</th>
               <th class="text-left py-1.5 px-2 text-Cmuted font-semibold">Type</th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Contracted SLA window from Tier 1 (XLSX) · Tier 2 (SOW) · Tier 3 (default)">SLA</th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Ctrl-M: worst-case per-run elapsed. XLSX: last known run from BatchSLA_info Current end time − Start Time">Runtime</th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="(SLA_h − runtime_h) / SLA_h × 100 · negative = BREACH · blank = SLA_MISSING or RT_MISSING">Buffer %</th>
-              <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="OK · LONG_JOB · AT_RISK · BREACH · SLA_MISSING · RUNTIME_MISSING · FAILED">Status</th>
+              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="SLA (Expected Completion) — the agreed time window by which this workflow must finish. Source tiers: 1 = XLSX contract · 2 = SOW ceiling · 3 = PE system default. Badge shows which tier was used.">SLA <span class="text-[8px] font-normal opacity-60">(Expected Completion)</span></th>
+              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Ctrl-M peak runtime: worst-case elapsed time per run across the observation period. XLSX tag = last-known run snapshot (not live Ctrl-M data).">Runtime</th>
+              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
+              <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
             </tr></thead>
             <tbody>
               ${topWfs.map(w => {
@@ -11429,9 +13896,14 @@ function _applySlaManualOverride() {
     }),
   }).catch(() => {}); // best-effort
 
-  // Re-render the commitments panel and re-run the SLA matrix if batch data exists
+  // Re-render the commitments panel and re-run both SLA Matrix + Batch Review sequentially
   _renderSlaCommitmentsPanel();
-  if (window.appData.batch) triggerSlaMatrix();
+  if (window.appData.batch) {
+    (async () => {
+      await triggerSlaMatrix();
+      await _refreshBatchFromServer("Batch Review updated with manual SLA windows");
+    })().catch(() => {});
+  }
 
   const msg = document.getElementById("sla-manual-msg");
   if (msg) {
@@ -11542,14 +14014,14 @@ function _renderSlaMatrix(data) {
       + ` · formula: (OK+LONG_JOB+AT_RISK) ÷ eligible × 100`
       + (data.failed_runs ? ` · ${data.failed_runs} FAILED excluded from denominator` : ``)
       + (data.window_total_days != null
-           ? ` · window: ${(data.window_total_days||0)-(data.window_breach_days||0)}/${data.window_total_days} windows OK`
+           ? ` · window: ${(data.window_total_days||0)-(data.window_breach_days||0)}/${data.window_total_days} days OK`
            : ``);
   }
-  // Show window context if available (X of Y sub-app windows breached)
+  // Show window context if available (X of Y days breached)
   const compSubEl = document.getElementById("slak-compliance-sub");
   if (compSubEl && data.window_total_days != null && data.window_breach_days != null) {
     const pass = data.window_total_days - data.window_breach_days;
-    compSubEl.textContent = `${pass}/${data.window_total_days} windows pass · Window`;
+    compSubEl.textContent = `${pass}/${data.window_total_days} days pass · Window`;
     compSubEl.className = `text-[10px] ${data.window_breach_days > 0 ? "text-Cred" : "text-Cmuted"}`;
   }
 
@@ -11562,7 +14034,7 @@ function _renderSlaMatrix(data) {
       // Classic "window failed but no single job breached" — explain why
       compNote.classList.remove("hidden");
       compNote.textContent = `ℹ Window = total elapsed time (first job start → last job end). `
-        + `${wbDays} sub-app window(s) where the batch collectively ran late, even though no individual job `
+        + `${wbDays} day(s) where the batch collectively ran late, even though no individual job `
         + `exceeded its own SLA ceiling. Possible causes: late job start, queue delays, or too many `
         + `jobs running sequentially without overlap.`;
     } else if (wbDays === 0 && breachCount === 0) {
@@ -11653,6 +14125,28 @@ function _renderSlaMatrix(data) {
 
   // Store for findings engine
   window.appData.slaMatrix = data;
+  _markSessionActive();  // track session boundary
+
+  // ── Sync SLA-enriched window compliance back to batch KPIs ──
+  // When SLA XLSX is uploaded after batch CSV, the batch_window_compliance
+  // in appData.batch.kpis is stale (computed with default SLA ceiling).
+  // Update it with the SLA Matrix's authoritative window compliance so
+  // Executive Dashboard gauges reflect the correct values.
+  if (window.appData.batch?.kpis && data.window_compliance_pct != null) {
+    window.appData.batch.kpis.batch_window_compliance = data.window_compliance_pct;
+    window.appData.batch.kpis.window_breach_days = data.window_breach_days || 0;
+    window.appData.batch.kpis.window_total_days  = data.window_total_days || 0;
+    // Also update SLA ceiling if the matrix provides it; sync global SLA_DAILY_HRS (FIX 6.1)
+    if (data.sla_hrs > 0) {
+      window.appData.batch.kpis.sla_ceiling = data.sla_hrs;
+      window.appData.batch.kpis.daily_limit_hrs = data.sla_hrs;
+      SLA_DAILY_HRS = Number(data.sla_hrs) || SLA_DAILY_HRS;
+    }
+  }
+  // Invalidate exec dashboard cache so it recomputes with fresh SLA data
+  window._execCache = null;
+  window._execCacheHash = null;
+
   refreshDataStatus();
   refreshAuditContext().catch(() => {});  // update health bar
 
@@ -11690,25 +14184,6 @@ function _renderSlaMatrix(data) {
     (data.at_risk_runs   || 0) === 0;
 
   if (data.job_summary?.length) {
-    // Aggregated format (no per-job breakdown) — show placeholder instead of table
-    if (data.data_format === "aggregated") {
-      if (jobWrap) jobWrap.classList.add("hidden");
-      // Show informational placeholder
-      const existingPlaceholder = document.getElementById("sla-aggregated-placeholder");
-      if (!existingPlaceholder) {
-        const phDiv = document.createElement("div");
-        phDiv.id = "sla-aggregated-placeholder";
-        phDiv.className = "rounded-xl border border-Camber/30 bg-Camber/5 px-4 py-3 text-[11px] text-Cwhite/90 flex items-start gap-2";
-        phDiv.innerHTML = `
-          <span class="text-Camber text-base mt-0.5">&#x26A0;</span>
-          <div>
-            <div class="font-semibold text-Camber mb-0.5">Job-level data not available</div>
-            <div class="text-Cmuted">This Ctrl-M file contains only sub-application-level totals — individual job names are not present. SLA compliance is computed at workflow level only. Upload a file with per-job rows to enable job-level analysis.</div>
-          </div>`;
-        const jobWrapParent = jobWrap?.parentElement;
-        if (jobWrapParent) jobWrapParent.appendChild(phDiv);
-      }
-    } else {
     if (jobWrap) jobWrap.classList.remove("hidden");
     const tableEl = jobTbody?.closest("table");
 
@@ -11794,7 +14269,6 @@ function _renderSlaMatrix(data) {
         jobWrap.appendChild(more);
       }
     }
-    } // end else (per_job)
   } else {
     if (jobWrap) jobWrap.classList.add("hidden");
   }
@@ -12509,11 +14983,9 @@ function initBenchmarkUploader() {
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Cpurple","bg-Cpurple/5"); })
   );
-  dz.addEventListener("dragleave", (e) => {
-    if (dz.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5");
-  });
-  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); })
+  );
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Cpurple", "bg-Cpurple/5");
@@ -12546,8 +15018,10 @@ async function uploadBenchmarkFile(file) {
     }
     const data = await res.json();
     window.appData.benchmark = data;
+    _markSessionActive();  // track session boundary
     refreshDataStatus();
     _renderBenchmark(data);
+    triggerGenerateFindings().catch(() => {});
     toast("success", "Benchmark loaded", `${data.total_transactions} transactions compared`);
   } catch (err) {
     _handleFetchError(err);
@@ -12556,168 +15030,375 @@ async function uploadBenchmarkFile(file) {
   }
 }
 
+// ── Benchmark state ───────────────────────────────────────────
+let _benchData     = null;
+let _benchShowAll  = false;
+let _benchRegressionChart = null;
+
+function _benchFmtSec(s) {
+  s = Number(s) || 0;
+  if (s < 60) return s.toFixed(1) + "s";
+  const m = Math.floor(s / 60), sec = Math.round(s % 60);
+  return sec ? `${m}m ${sec}s` : `${m}m`;
+}
+
+function _benchVolumeBand(r) {
+  const recs = r.records;
+  if (!recs) return "";
+  if (recs < 10000)  return "small";
+  if (recs < 100000) return "medium";
+  return "large";
+}
+
+function _benchResetFilters() {
+  const fa = document.getElementById("bench-filter-action");
+  const fv = document.getElementById("bench-filter-volume");
+  if (fa) fa.value = "";
+  if (fv) fv.value = "";
+  _benchShowAll = false;
+  _benchUpdateShowAllBtn();
+  _benchApplyFilter();
+}
+
+function _benchToggleShowAll() {
+  _benchShowAll = !_benchShowAll;
+  _benchUpdateShowAllBtn();
+  _benchApplyFilter();
+}
+
+function _benchUpdateShowAllBtn() {
+  const btn = document.getElementById("bench-show-all-btn");
+  if (!btn) return;
+  if (_benchShowAll) {
+    btn.textContent = "Show Critical Only";
+    btn.classList.add("border-Cpurple/60", "text-Cwhite");
+    btn.classList.remove("text-Cmuted");
+  } else {
+    btn.textContent = "Show All";
+    btn.classList.remove("border-Cpurple/60", "text-Cwhite");
+    btn.classList.add("text-Cmuted");
+  }
+}
+
+function _benchApplyFilter() {
+  if (!_benchData) return;
+  const actionFilter  = (document.getElementById("bench-filter-action")?.value  || "").toLowerCase();
+  const volumeFilter  =  document.getElementById("bench-filter-volume")?.value  || "";
+  const allRows = (_benchData.rows || []);
+
+  const filtered = allRows.filter(r => {
+    if (actionFilter && (r.action || "").toLowerCase() !== actionFilter) return false;
+    if (volumeFilter && _benchVolumeBand(r) !== volumeFilter)             return false;
+    if (!_benchShowAll && (r.status === "OK" || r.status === "N/A"))      return false;
+    return true;
+  });
+
+  _benchRenderTable(filtered, _benchData.threshold_pct, _benchData.batch_perf_summary);
+  _benchRenderMiniChart(filtered);
+}
+
 function _renderBenchmark(data) {
+  _benchData    = data;
+  _benchShowAll = false;
   document.getElementById("bench-empty")?.classList.add("hidden");
   document.getElementById("bench-no-data-prompt")?.classList.add("hidden");
   document.getElementById("bench-loaded-chip")?.classList.remove("hidden");
   document.getElementById("bench-kpi-row")?.classList.remove("hidden");
   document.getElementById("bench-table-wrap")?.classList.remove("hidden");
-  // Update loaded label
+
   const isBatchPerf = !!(data.batch_perf_summary);
+  const rows = data.rows || [];
+
+  // Loaded label
   const cats = data.categories || [];
-  const catLabel = isBatchPerf ? ` · batch runtime comparison` : (cats.length > 0 ? ` · ${cats.length} categories` : "");
+  const catLabel = isBatchPerf ? " · batch runtime" : (cats.length > 0 ? ` · ${cats.length} categories` : "");
   const lbl = document.getElementById("bench-loaded-label");
   if (lbl) lbl.textContent = `${data.filename || "Benchmark"} · ${data.total_transactions} ${isBatchPerf ? "jobs" : "transactions"}${catLabel}`;
 
-  // Relabel comparison table headers for batch perf mode
-  if (isBatchPerf) {
-    const ths = document.querySelectorAll("#bench-tbody")?.closest("table")?.querySelectorAll("thead th") || [];
-    const labels = ["Job", "Before (s)", "After (s)", "Delta %", "Δ sec", "Status"];
-    ths.forEach((th, i) => { if (labels[i]) th.textContent = labels[i]; });
-  }
+  // ── BAND A: KPI strip ────────────────────────────────────────
+  const withBase = rows.filter(r => r.baseline_sec > 0);
+  const okCount  = rows.filter(r => r.status === "OK").length;
+  const breachCount = rows.filter(r => r.status === "BREACH").length;
+  const watchCount  = rows.filter(r => r.status === "WATCH").length;
+  const total    = rows.length;
+  const passRate = withBase.length > 0 ? Math.round(okCount / withBase.length * 100) : null;
 
-  // KPI strip — relabel for batch perf mode
-  const totalLbl  = document.querySelector("#bench-kpi-row [id='bk-total']")?.closest(".rounded-xl")?.querySelector(".text-\\[10px\\]");
-  const slaLbl    = document.querySelector("#bench-kpi-row [id='bk-sla-breach']")?.closest(".rounded-xl")?.querySelector(".text-\\[10px\\]");
-  const avgLbl    = document.querySelector("#bench-kpi-row [id='bk-avg-delta']")?.closest(".rounded-xl")?.querySelector(".text-\\[10px\\]");
-  if (isBatchPerf) {
-    if (totalLbl)  totalLbl.textContent  = "Total Jobs";
-    if (slaLbl)    slaLbl.textContent    = "New Jobs";
-    if (avgLbl)    avgLbl.textContent    = "Net Time Saved";
-  }
-
-  setText("bk-total", String(data.total_transactions));
-  const degEl = document.getElementById("bk-degraded");
-  if (degEl) { degEl.textContent = String(data.degraded); degEl.className = `text-2xl font-bold ${data.degraded > 0 ? "text-Cred" : "text-Cgreen"}`; }
-  const slaEl = document.getElementById("bk-sla-breach");
-  if (slaEl) {
-    if (isBatchPerf) {
-      const bp = data.batch_perf_summary;
-      slaEl.textContent = String(bp.new_only || 0);
-      slaEl.className = "text-2xl font-bold text-Cblue";
+  const passEl = document.getElementById("bk-pass-rate");
+  const passSub = document.getElementById("bk-pass-rate-sub");
+  if (passEl) {
+    if (passRate !== null) {
+      passEl.textContent = passRate + "%";
+      passEl.className = `text-2xl font-bold ${passRate >= 90 ? "text-Cgreen" : passRate >= 70 ? "text-Camber" : "text-Cred"}`;
+      if (passSub) passSub.textContent = `${okCount}/${withBase.length} pass`;
     } else {
-      slaEl.textContent = String(data.sla_breaches);
-      slaEl.className = `text-2xl font-bold ${data.sla_breaches > 0 ? "text-Camber" : "text-Cgreen"}`;
-    }
-  }
-  const avgEl = document.getElementById("bk-avg-delta");
-  if (avgEl) {
-    if (isBatchPerf) {
-      const net = _n(data.batch_perf_summary.net_delta_secs);
-      const netMin = Math.abs(net / 60).toFixed(1);
-      avgEl.textContent = (net >= 0 ? "+" : "-") + netMin + " min";
-      avgEl.className = `text-2xl font-bold ${net >= 0 ? "text-Cgreen" : "text-Cred"}`;
-    } else {
-      const v = _n(data.avg_delta_pct);
-      avgEl.textContent = (v > 0 ? "+" : "") + v.toFixed(1) + "%";
-      avgEl.className = `text-2xl font-bold ${v > _n(data.threshold_pct) ? "text-Cred" : v > 0 ? "text-Camber" : "text-Cgreen"}`;
+      passEl.textContent = "N/A";
+      passEl.className = "text-2xl font-bold text-Cmuted";
+      if (passSub) passSub.textContent = "no baseline";
     }
   }
 
-  const bannerEl = document.getElementById("bench-summary-banner");
-  const summaryEl= document.getElementById("bench-summary-text");
+  // Worst regression
+  const worstRow = [...withBase].sort((a, b) => b.delta_pct - a.delta_pct)[0];
+  const worstEl  = document.getElementById("bk-worst-reg");
+  const worstName= document.getElementById("bk-worst-reg-name");
+  if (worstEl) {
+    if (worstRow && worstRow.delta_pct > 0) {
+      worstEl.textContent = "+" + worstRow.delta_pct.toFixed(1) + "%";
+      worstEl.className = `text-2xl font-bold ${worstRow.status === "BREACH" ? "text-Cred" : "text-Camber"}`;
+      if (worstName) { worstName.textContent = (worstRow.action ? worstRow.action + ": " : "") + worstRow.transaction; worstName.title = worstRow.transaction; }
+    } else {
+      worstEl.textContent = "—";
+      worstEl.className   = "text-2xl font-bold text-Cgreen";
+      if (worstName) worstName.textContent = "no regressions";
+    }
+  }
+
+  // Transactions
+  setText("bk-total", String(total));
+
+  // Max concurrent users
+  const concurs = rows.map(r => r.concurrent_users || 0).filter(v => v > 0);
+  const maxConcur = concurs.length > 0 ? Math.max(...concurs) : null;
+  const concurEl = document.getElementById("bk-max-concurrent");
+  if (concurEl) {
+    concurEl.textContent = maxConcur != null ? String(maxConcur) : "—";
+    concurEl.className   = "text-2xl font-bold text-Cblue";
+  }
+
+  // Coverage tag
+  const covEl  = document.getElementById("bk-coverage");
+  const covSub = document.getElementById("bk-coverage-sub");
+  const cov    = data.coverage_summary;
+  if (covEl) {
+    if (cov && cov.flows && cov.flows.length > 0) {
+      const n = cov.flows.length;
+      covEl.textContent = n <= 5 ? "Core flows" : n <= 15 ? "Partial coverage" : "Full stack";
+      covEl.className   = "text-sm font-bold text-Cpurple leading-tight";
+      if (covSub) covSub.textContent = `${n} flows · ${(cov.actions || []).length} action types`;
+    } else {
+      covEl.textContent = String(total) + " txns";
+      if (covSub) covSub.textContent = "";
+    }
+  }
+
+  // Summary banner
+  const bannerEl  = document.getElementById("bench-summary-banner");
+  const summaryEl = document.getElementById("bench-summary-text");
   if (bannerEl && summaryEl && data.summary) {
     bannerEl.classList.remove("hidden");
     summaryEl.textContent = data.summary;
-    bannerEl.className = `rounded-xl border px-5 py-3 ${data.degraded > 0 ? "border-Camber/40 bg-Camber/10" : "border-Cgreen/40 bg-Cgreen/10"}`;
+    bannerEl.className = `rounded-xl border px-5 py-3 ${breachCount > 0 ? "border-Cred/40 bg-Cred/10" : watchCount > 0 ? "border-Camber/40 bg-Camber/10" : "border-Cgreen/40 bg-Cgreen/10"}`;
   }
 
-  // ── Category summary cards ──────────────────────────────────
+  // ── BAND B: Table + mini chart ───────────────────────────────
+  _benchUpdateShowAllBtn();
+  _benchApplyFilter();   // renders table with default filter (BREACH+WATCH only)
+
+  // ── BAND C: Coverage + Evidence ──────────────────────────────
+  _benchRenderCoverage(data);
+  _benchRenderEvidence(data.evidence_sentences || []);
+
+  // Existing sub-panels
   _renderBenchCategories(data);
-
-  // ── Fill Rate panel ─────────────────────────────────────────
   _renderBenchFillRate(data);
-
-  // ── Observations panel ──────────────────────────────────────
   _renderBenchObservations(data);
+}
 
-  // ── Main comparison table (grouped by category) ─────────────
+function _benchRenderTable(rows, threshold, batchPerfSummary) {
   const tbody = document.getElementById("bench-tbody");
-  if (tbody) {
-    const bps = data.batch_perf_summary;
-    let html = "";
+  if (!tbody) return;
+  let html = "";
 
-    if (bps) {
-      // Batch perf mode: render top regressions and improvements only
-      const reg  = bps.top_regressions  || [];
-      const impr = bps.top_improvements || [];
-      const thresh = _n(data.threshold_pct);
+  if (batchPerfSummary && rows.length === 0) {
+    // Batch perf mode — show summary line only
+    const bp = batchPerfSummary;
+    html = `<tr><td colspan="8" class="py-6 text-center text-xs text-Cmuted">
+      ${bp.regressions} regression(s) · ${bp.improvements} improvement(s) across ${bp.total_jobs} jobs.
+      Use "Show All" to view individual job rows.
+    </td></tr>`;
+    tbody.innerHTML = html; return;
+  }
 
-      const renderBpRow = (e) => {
-        const dSecs = _n(e.delta_secs);   // positive = improvement
-        const dPct  = _n(e.delta_pct);    // positive = regression
-        const dColor = dPct > thresh ? "text-Cred font-bold" : dPct > 0 ? "text-Camber" : "text-Cgreen";
-        const stBg  = dPct > thresh ? "bg-Cred/20 text-Cred" : dPct < -5 ? "bg-Cgreen/20 text-Cgreen" : "bg-Cmuted/20 text-Cmuted";
-        const status = dPct > thresh ? "REGRESSED" : dPct < -5 ? "IMPROVED" : "STABLE";
-        return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
-          <td class="py-2 pr-4 text-Cwhite font-semibold text-xs">${_esc(e.job)}</td>
-          <td class="py-2 pr-4 text-right text-Cmuted font-mono text-xs">${_n(e.old_secs).toFixed(1)}s</td>
-          <td class="py-2 pr-4 text-right font-mono text-xs ${dPct > 0 ? "text-Camber" : "text-Cgreen"}">${_n(e.new_secs).toFixed(1)}s</td>
-          <td class="py-2 pr-4 text-right text-xs ${dColor}">${dPct > 0 ? "+" : ""}${dPct.toFixed(1)}%</td>
-          <td class="py-2 pr-4 text-right font-mono text-xs ${dSecs >= 0 ? "text-Cgreen" : "text-Cred"}">${dSecs >= 0 ? "+" : ""}${dSecs.toFixed(0)}s</td>
-          <td class="py-2 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${stBg}">${status}</span></td>
-        </tr>`;
-      };
+  if (!rows.length) {
+    const msg = _benchShowAll ? "No transactions found." : "No BREACH or WATCH findings. Toggle 'Show All' to view all rows.";
+    tbody.innerHTML = `<tr><td colspan="8" class="py-8 text-center">
+      <div class="text-xl mb-2">${_benchShowAll ? "📭" : "✅"}</div>
+      <div class="text-sm font-semibold text-Cwhite">${_benchShowAll ? "No data" : "All transactions within tolerance"}</div>
+      <div class="text-xs text-Cmuted mt-1">${msg}</div>
+    </td></tr>`;
+    return;
+  }
 
-      if (reg.length) {
-        html += `<tr class="bg-Cbg/80"><td colspan="6" class="py-2.5 px-2">
-          <span class="text-xs font-bold text-Cred uppercase tracking-wider">Top Regressions</span>
-          <span class="ml-2 text-[10px] text-Cmuted">${bps.regressions} total · showing worst ${reg.length}</span>
-        </td></tr>`;
-        reg.forEach(e => { html += renderBpRow(e); });
-      }
-      if (impr.length) {
-        html += `<tr class="bg-Cbg/80"><td colspan="6" class="py-2.5 px-2">
-          <span class="text-xs font-bold text-Cgreen uppercase tracking-wider">Top Improvements</span>
-          <span class="ml-2 text-[10px] text-Cmuted">${bps.improvements} total · showing best ${impr.length}</span>
-        </td></tr>`;
-        impr.forEach(e => { html += renderBpRow(e); });
-      }
-      if (!reg.length && !impr.length) {
-        html = `<tr><td colspan="6" class="py-8 text-center text-Cmuted text-xs">All ${bps.total_jobs} jobs within tolerance — no regressions or significant improvements.</td></tr>`;
-      }
-      tbody.innerHTML = html;
-    } else {
-    // Normal mode: group by category
-    const rows = data.rows || [];
-    const catOrder = [];
-    const catMap = {};
-    rows.forEach((r) => {
-      const c = r.category || "General";
-      if (!catMap[c]) { catMap[c] = []; catOrder.push(c); }
-      catMap[c].push(r);
+  // Group by category if multiple categories
+  const cats = [...new Set(rows.map(r => r.category || "General"))];
+  const showCats = cats.length > 1;
+
+  const ST = {
+    BREACH: { bg: "bg-Cred/15",   bd: "border-l-2 border-Cred",   badge: "bg-Cred/20 text-Cred",   dot: "🔴" },
+    WATCH:  { bg: "bg-Camber/10", bd: "border-l-2 border-Camber", badge: "bg-Camber/20 text-Camber",dot: "🟡" },
+    OK:     { bg: "",              bd: "",                          badge: "bg-Cgreen/20 text-Cgreen",dot: "🟢" },
+    "N/A":  { bg: "",              bd: "",                          badge: "bg-Cmuted/20 text-Cmuted", dot: "⚪" },
+  };
+  const dCol = (d) => d > (threshold * 2) ? "text-Cred font-bold" : d > threshold ? "text-Camber font-bold" : d < -5 ? "text-Cgreen" : "text-Cmuted";
+
+  cats.forEach(cat => {
+    const catRows = rows.filter(r => (r.category || "General") === cat);
+    if (showCats) {
+      html += `<tr class="bg-Cbg/80"><td colspan="8" class="py-2 px-2">
+        <span class="text-[10px] font-bold text-Cpurple uppercase tracking-wider">${_esc(cat)}</span>
+        <span class="ml-2 text-[10px] text-Cmuted">${catRows.length} items</span>
+      </td></tr>`;
+    }
+    catRows.forEach(r => {
+      const sv  = ST[r.status] || ST["N/A"];
+      const d   = _n(r.delta_pct);
+      const hasBase = r.baseline_sec > 0;
+      const slaFmt = r.sla_sec ? _benchFmtSec(r.sla_sec) : "—";
+      const recFmt = r.records ? _n(r.records).toLocaleString() : "—";
+      const curSec = _n(r.current_sec);
+      const baseDisp = hasBase ? _benchFmtSec(r.baseline_sec) : "—";
+      const slaOver  = r.sla_sec && curSec > r.sla_sec;
+      html += `<tr class="border-b border-Cborder/30 hover:bg-Ccard/40 ${sv.bg} ${sv.bd}"
+               title="${_esc(r.comments || '')}">
+        <td class="py-2 pr-3 text-Cwhite font-semibold text-xs">${_esc(r.transaction)}</td>
+        <td class="py-2 pr-3 text-center">
+          ${r.action ? `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-Cpurple/20 text-Cpurple">${_esc(r.action)}</span>` : '<span class="text-Cmuted">—</span>'}
+        </td>
+        <td class="py-2 pr-3 text-right font-mono text-xs text-Cmuted">${baseDisp}</td>
+        <td class="py-2 pr-3 text-right font-mono text-xs ${slaOver ? "text-Cred font-bold" : "text-Cwhite"}">${_benchFmtSec(curSec)}</td>
+        <td class="py-2 pr-3 text-right text-xs ${hasBase ? dCol(d) : "text-Cmuted"}">${hasBase ? (d > 0 ? "+" : "") + d.toFixed(1) + "%" : "—"}</td>
+        <td class="py-2 pr-3 text-right font-mono text-xs text-Cmuted">${recFmt}</td>
+        <td class="py-2 pr-3 text-right font-mono text-xs ${slaOver ? "text-Cred" : "text-Cmuted"}">${slaFmt}</td>
+        <td class="py-2 text-center">
+          <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${sv.badge}">${sv.dot} ${r.status}</span>
+        </td>
+      </tr>`;
     });
+  });
 
-    catOrder.forEach((cat) => {
-      const catRows = catMap[cat];
-      const passed = catRows.filter(r => r.status === "GREEN" || (r.pass_fail && r.pass_fail.toLowerCase() === "pass")).length;
-      html += `<tr class="bg-Cbg/80 sticky top-0 z-10">
-        <td colspan="7" class="py-2.5 px-2">
-          <span class="text-xs font-bold text-Cpurple uppercase tracking-wider">${_esc(cat)}</span>
-          <span class="ml-2 text-[10px] text-Cmuted">${catRows.length} items · ${passed} passed</span>
-        </td></tr>`;
-      catRows.forEach((r) => {
-        const stBg = r.status === "RED"   ? "bg-Cred/20 text-Cred"     :
-                     r.status === "AMBER" ? "bg-Camber/20 text-Camber" :
-                     r.status === "GREEN" ? "bg-Cgreen/20 text-Cgreen" : "bg-Cmuted/20 text-Cmuted";
-        const dCol = r.delta_pct > data.threshold_pct ? "text-Cred font-bold" :
-                     r.delta_pct > 0                  ? "text-Camber" :
-                     r.delta_pct < -5                 ? "text-Cgreen" : "text-Cmuted";
-        const pfBadge = r.pass_fail
-          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${r.pass_fail.toLowerCase()==='pass' ? 'bg-Cgreen/20 text-Cgreen' : 'bg-Cred/20 text-Cred'}">${_esc(r.pass_fail)}</span>`
-          : "";
-        html += `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
-          <td class="py-2 pr-4 text-Cwhite font-semibold text-xs">${_esc(r.transaction)}${pfBadge}</td>
-          <td class="py-2 pr-4 text-right text-Cmuted font-mono text-xs">${_n(r.baseline_sec).toFixed(1)}</td>
-          <td class="py-2 pr-4 text-right font-mono text-xs ${_n(r.current_sec) > _n(r.baseline_sec) ? "text-Camber" : "text-Cgreen"}">${_n(r.current_sec).toFixed(1)}</td>
-          <td class="py-2 pr-4 text-right text-xs ${dCol}">${_n(r.delta_pct) > 0 ? "+" : ""}${_n(r.delta_pct).toFixed(1)}%</td>
-          <td class="py-2 pr-4 text-right text-Cmuted text-xs">${r.sla_sec != null ? _n(r.sla_sec).toFixed(1) : "—"}</td>
-          <td class="py-2 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${stBg}">${r.status}</span></td>
-        </tr>`;
-      });    });
-    tbody.innerHTML = html;
-    }   // end else (normal mode)
-  }     // end if (tbody)
+  tbody.innerHTML = html;
+}
+
+function _benchRenderMiniChart(rows) {
+  const panel = document.getElementById("bench-chart-panel");
+  const canvas = document.getElementById("bench-regression-chart");
+  if (!panel || !canvas) return;
+
+  const withDelta = rows.filter(r => r.baseline_sec > 0 && r.delta_pct > 0)
+                        .sort((a, b) => b.delta_pct - a.delta_pct)
+                        .slice(0, 5);
+
+  if (!withDelta.length) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+
+  const labels = withDelta.map(r => {
+    const name = (r.action ? r.action + ": " : "") + r.transaction;
+    return name.length > 22 ? name.slice(0, 22) + "…" : name;
+  });
+  const deltas = withDelta.map(r => r.delta_pct);
+  const colors = withDelta.map(r => r.status === "BREACH" ? "rgba(239,68,68,0.75)" : "rgba(245,158,11,0.75)");
+
+  if (_benchRegressionChart) { _benchRegressionChart.destroy(); _benchRegressionChart = null; }
+  _benchRegressionChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        data: deltas,
+        backgroundColor: colors,
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              const r = withDelta[ctx.dataIndex];
+              const parts = [`Δ ${r.delta_pct.toFixed(1)}%`, `${_benchFmtSec(r.baseline_sec)} → ${_benchFmtSec(r.current_sec)}`];
+              if (r.records) parts.push(`${r.records.toLocaleString()} records`);
+              if (r.concurrent_users) parts.push(`${r.concurrent_users} user(s)`);
+              return parts;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: "#6b7280", font: { size: 9 }, callback: v => "+" + v + "%" },
+          grid:  { color: "rgba(255,255,255,0.05)" },
+        },
+        y: { ticks: { color: "#9ca3af", font: { size: 9 } }, grid: { display: false } },
+      },
+    },
+  });
+}
+
+function _benchRenderCoverage(data) {
+  const panel = document.getElementById("bench-coverage-panel");
+  if (!panel) return;
+  const cov = data.coverage_summary;
+  if (!cov) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+
+  // Flows
+  const flowsEl = document.getElementById("bench-flows-badges");
+  if (flowsEl) {
+    flowsEl.innerHTML = (cov.flows || []).map(f =>
+      `<span class="px-2 py-0.5 rounded-full text-[9px] font-semibold bg-Cpurple/20 text-Cpurple border border-Cpurple/30">${_esc(f)}</span>`
+    ).join("") || '<span class="text-Cmuted text-xs">—</span>';
+  }
+
+  // Actions
+  const actEl = document.getElementById("bench-actions-badges");
+  if (actEl) {
+    actEl.innerHTML = (cov.actions || []).map(a =>
+      `<span class="px-2 py-0.5 rounded-full text-[9px] font-semibold bg-Cblue/20 text-Cblue border border-Cblue/30">${_esc(a)}</span>`
+    ).join("") || '<span class="text-Cmuted text-xs">—</span>';
+  }
+
+  // Record volumes
+  const recEl = document.getElementById("bench-record-vol");
+  if (recEl) {
+    if (cov.record_min != null) {
+      recEl.innerHTML = `min: ${_n(cov.record_min).toLocaleString()}<br>med: ${_n(cov.record_median).toLocaleString()}<br>max: ${_n(cov.record_max).toLocaleString()}`;
+    } else {
+      recEl.textContent = "not captured";
+    }
+  }
+
+  // Concurrency
+  const concEl = document.getElementById("bench-concurrency");
+  if (concEl) {
+    if (cov.concurrent_max != null) {
+      concEl.innerHTML = `median: ${cov.concurrent_median}<br>max: ${cov.concurrent_max}`;
+    } else {
+      concEl.textContent = "not captured";
+    }
+  }
+}
+
+function _benchRenderEvidence(sentences) {
+  const el = document.getElementById("bench-evidence-list");
+  if (!el) return;
+  if (!sentences.length) {
+    el.innerHTML = '<div class="text-xs text-Cmuted">No evidence sentences — upload file with Action + Records columns.</div>';
+    return;
+  }
+  el.innerHTML = sentences.map(s => {
+    const isBreach = s.includes("SLA BREACH") || s.includes("BREACH threshold");
+    const isWatch  = s.includes("watch band");
+    const dot = isBreach ? "bg-Cred"   : isWatch ? "bg-Camber" : "bg-Cgreen";
+    const tx  = isBreach ? "text-Cred/90" : isWatch ? "text-Camber/90" : "text-Cwhite/70";
+    return `<div class="flex items-start gap-2 text-[11px] leading-relaxed">
+      <span class="mt-1.5 w-1.5 h-1.5 rounded-full ${dot} shrink-0"></span>
+      <span class="${tx}">${_esc(s.replace(/^"|"$/g, ""))}</span>
+    </div>`;
+  }).join("");
 }
 
 function _renderBenchCategories(data) {
@@ -12921,11 +15602,9 @@ function initSlaIntakeUploader() {
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Camber","bg-Camber/5"); })
   );
-  dz.addEventListener("dragleave", (e) => {
-    if (dz.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Camber","bg-Camber/5");
-  });
-  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Camber","bg-Camber/5"); });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Camber","bg-Camber/5"); })
+  );
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Camber", "bg-Camber/5");
@@ -12968,6 +15647,7 @@ async function _uploadSlaIntakeFile(file) {
     // Store for the SLA Matrix tab
     window.appData.slaMatrix = data;
     window.appData.slaMatrixFilename = file.name;
+    _markSessionActive();  // track session boundary
 
     // Run SLA intelligence engine (rich analysis with schema detection + traceability)
     if (file.name.toLowerCase().match(/\.(xlsx|xls|csv)$/)) {
@@ -13008,6 +15688,13 @@ async function _uploadSlaIntakeFile(file) {
 
     toast("success", "SLA Matrix loaded",
       `${data.total_runs} runs · ${data.compliance_pct.toFixed(1)}% compliance`);
+
+    // ── Dynamic batch refresh: propagate new SLA ceilings to batch charts ──
+    // Wait briefly for /api/sla-intelligence to finish persisting (it runs
+    // concurrently above) then re-run the batch analysis with the new SLA data.
+    if (window.appData.batch) {
+      setTimeout(() => _refreshBatchFromServer("SLA Matrix applied to batch analysis"), 400);
+    }
   } catch (err) {
     _handleFetchError(err);
   } finally {
@@ -13031,6 +15718,45 @@ function _renderSlaIntakeCard(data, filename) {
   if (brEl) {
     brEl.textContent = String(data.breaching_runs);
     brEl.className   = `text-lg font-extrabold mt-0.5 ${data.breaching_runs > 0 ? "text-Cred" : "text-Cgreen"}`;
+  }
+
+  // ── Remove SLA Matrix button ──────────────────────────────────
+  // Wires up (or re-wires) the remove button each time the card renders.
+  const removeBtn = document.getElementById("sla-result-remove");
+  if (removeBtn) {
+    // Clone to remove any previous listener
+    const fresh = removeBtn.cloneNode(true);
+    removeBtn.parentNode.replaceChild(fresh, removeBtn);
+    fresh.addEventListener("click", async () => {
+      fresh.textContent = "Removing…";
+      fresh.disabled = true;
+      try {
+        await fetch("/api/sla-matrix/clear", { method: "POST" });
+        window.appData.slaMatrix = null;
+        window.appData.slaMatrixFilename = null;
+        window.appData.slaCeilings = null;
+        window.appData.slaIntelligence = null;
+        // Bust exec cache — grade must be recalculated with default ceilings
+        window._execCache     = null;
+        window._execCacheHash = null;
+        // Hide the result card
+        document.getElementById("sla-result-card")?.classList.add("hidden");
+        // Reset the SLA Matrix tab
+        _renderSlaMatrix(null);
+        // Reset the dot
+        const dot = document.getElementById("sla-status-dot");
+        if (dot) dot.className = "w-2 h-2 rounded-full bg-Cborder shrink-0";
+        toast("info", "SLA Matrix removed", "Batch analysis will revert to default SLA ceilings");
+        // Refresh batch charts with default ceilings
+        if (window.appData.batch) {
+          await _refreshBatchFromServer("Reverted to default SLA ceilings");
+        }
+      } catch (e) {
+        toast("error", "Remove failed", String(e));
+        fresh.textContent = "Remove";
+        fresh.disabled = false;
+      }
+    });
   }
 }
 
@@ -13080,40 +15806,12 @@ function _renderSlaIntelligencePanel(intel) {
   _renderSlaIntelligenceDetail(intel);
 }
 
-// ── New Engagement — wipe all server-side session data ────────────────────
-async function clearSessionData() {
-  if (!confirm(
-    "Hard Reset — clear everything?\n\n" +
-    "This wipes the current customer's batch data, resource data, SOW, " +
-    "findings, and all session state on both server and browser.\n\n" +
-    "The page will reload automatically."
-  )) return;
-
-  try {
-    const res = await fetch("/api/clear-session", { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}) });
-    if (!res.ok) throw new Error(await res.text());
-
-    // Delete persisted SOW baseline from backend config store
-    await fetch("/api/sow/baseline", { method: "DELETE" }).catch(() => {});
-
-    // Full page reload — this is the only reliable way to wipe ALL state:
-    // charts, panels, exclusion sets, file inputs, app globals, DOM nodes.
-    // Trying to individually reset every element always misses something.
-    window.location.reload();
-  } catch (err) {
-    toast("error", "Hard reset failed", String(err).slice(0, 120));
-  }
-}
-
 function _renderSlaIntelligenceDetail(intel) {
   const panel = document.getElementById("sla-intelligence-detail");
   if (!panel) return;
 
   const info = intel.intelligence || {};
   const trace = intel.traceability || {};
-
   const warnings = info.warnings || [];
   const contracts = (info.contracts || []).slice(0, 30);
 
@@ -13223,6 +15921,175 @@ function _renderSlaIntelligenceDetail(intel) {
 }
 
 
+// ── New Engagement — wipe all server-side session data ────────────────────
+async function clearSessionData() {
+  if (!confirm(
+    "Clear all session data?\n\n" +
+    "This removes the current customer's SOW, findings, resource data and " +
+    "batch results so the next engagement starts clean.\n\n" +
+    "The server will NOT restart — only the in-memory session is cleared."
+  )) return;
+
+  try {
+    const res = await fetch("/api/clear-session", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}) });
+    if (!res.ok) throw new Error(await res.text());
+
+    // ── 1. Destroy ALL chart instances ────────────────────────────────────
+    for (const key of Object.keys(charts)) {
+      try { charts[key]?.destroy(); } catch(e) {}
+      charts[key] = null;
+    }
+    _deepDiveCharts.forEach(c => { try { c.destroy(); } catch(e) {} });
+    _deepDiveCharts = [];
+    for (const el of _syncedPlotlyCharts) {
+      try { Plotly.purge(el); } catch(e) {}
+    }
+    _syncedPlotlyCharts.clear();
+    ["exec-chart-breach","exec-chart-heatmap","exec-chart-resource-health",
+     "exec-chart-risk","exec-chart-temporal","exec-chart-waterfall",
+     "exec-chart-forecast","resourceHeatmapContainer","batchHeatmapContainer"
+    ].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && el._fullLayout) { try { Plotly.purge(el); } catch(e) {} }
+    });
+
+    // ── 2. Wipe browser-side app state ───────────────────────────────────
+    window.appData        = {};
+    window._lastFindings  = [];
+    window._execCache     = null;
+    window._execCacheHash = null;
+    window._slaData       = null;
+    window._deepDiveData  = null;
+    _clearSessionMarker();
+
+    // ── 3. Upload / Intake tab ────────────────────────────────────────────
+    document.getElementById("upload-result")?.classList.add("hidden");
+    document.getElementById("dataset-chip")?.classList.add("hidden");
+    document.getElementById("batch-result-card")?.classList.add("hidden");
+    document.getElementById("bench-result-card")?.classList.add("hidden");
+    document.getElementById("sla-intelligence-panel")?.classList.add("hidden");
+    document.getElementById("sla-intelligence-detail")?.classList.add("hidden");
+    // Batch SLA upload result strip
+    document.getElementById("batch-sla-source-banner")?.classList.add("hidden");
+
+    // ── 4. Batch Review tab ───────────────────────────────────────────────
+    applyCustomerName("");
+    _batchManualExclude.clear();
+    _batchManualInclude.clear();
+
+    // Hide the whole review body, show the no-data state
+    document.getElementById("batch-review-body")?.classList.add("hidden");
+    document.getElementById("batch-empty")?.classList.remove("hidden");
+    document.getElementById("batch-no-data-prompt")?.classList.remove("hidden");
+    document.getElementById("batch-loaded-chip")?.classList.add("hidden");
+    document.getElementById("batch-source-watermark")?.classList.add("hidden");
+    document.getElementById("batch-data-warnings")?.classList.add("hidden");
+    document.getElementById("sla-heatmap-section")?.classList.add("hidden");
+    document.getElementById("window-sla-drill")?.classList.add("hidden");
+    document.getElementById("failed-runs-drill")?.classList.add("hidden");
+
+    // Clear dataset chip and table body (correct ID: top-jobs-tbody)
+    document.getElementById("batch-dataset-chip") && (document.getElementById("batch-dataset-chip").textContent = "");
+    const topJobsTbody = document.getElementById("top-jobs-tbody");
+    if (topJobsTbody) topJobsTbody.innerHTML = "";
+    document.getElementById("sla-heatmap-container") && (document.getElementById("sla-heatmap-container").innerHTML = "");
+
+    // Remove dynamically-injected utility panel
+    document.getElementById("batch-utility-panel")?.remove();
+
+    // Reset all KPI card values to "—"
+    ["bk-elapsed","bk-elapsed-sub","bk-summed","bk-summed-sub","bk-worst","bk-worst-sub",
+     "bk-compliance","bk-compliance-sub","bk-window-compliance","bk-window-compliance-sub",
+     "bk-breach-sub","bk-failed","bk-failed-sub","bk-sla-source","bk-sla-source-sub"
+    ].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = "—"; });
+    ["bk-breach","bk-atrisk","bk-ok"].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = "0"; });
+    document.getElementById("bk-buffer-badge") && (document.getElementById("bk-buffer-badge").textContent = "—");
+
+    // Reset intake cards (BatchSLA XLSX result + intake dot)
+    document.getElementById("batch-sla-info-result")?.remove();
+    const bsla_dot = document.getElementById("batch-sla-info-dot");
+    if (bsla_dot) bsla_dot.className = "w-2 h-2 rounded-full bg-Cmuted/40 shrink-0";
+
+    // ── 5. Resource Review tab ────────────────────────────────────────────
+    document.getElementById("resource-review-body")?.classList.add("hidden");
+    document.getElementById("resource-empty")?.classList.remove("hidden");
+    const resTbody = document.getElementById("resource-tbody");
+    if (resTbody) resTbody.innerHTML = "";
+    document.getElementById("resource-heatmap") && (document.getElementById("resource-heatmap").innerHTML = "");
+
+    // ── 6. SLA Matrix tab ─────────────────────────────────────────────────
+    document.getElementById("sla-empty")?.classList.remove("hidden");
+    ["sla-triage-section","sla-compliance-section","sla-jobs-section",
+     "sla-breach-section","sla-intelligence-detail"
+    ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
+    const slaTbody = document.getElementById("sla-job-tbody");
+    if (slaTbody) slaTbody.innerHTML = "";
+
+    // ── 7. Findings tab ───────────────────────────────────────────────────
+    window._lastRealFindings = [];
+    document.getElementById("findings-empty")?.classList.remove("hidden");
+    document.getElementById("findings-loading")?.classList.add("hidden");
+    ["findings-list","findings-summary-strip","findings-filter-bar"
+    ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
+    const findingsTbody = document.getElementById("findings-tbody");
+    if (findingsTbody) findingsTbody.innerHTML = "";
+    document.getElementById("findings-count-badge") && (document.getElementById("findings-count-badge").textContent = "");
+    // Clear verdict hero and audit coverage panels (dynamically injected)
+    document.getElementById("findings-verdict-hero")?.remove();
+    document.getElementById("findings-audit-coverage")?.remove();
+
+    // ── 8. Executive Dashboard tab ────────────────────────────────────────
+    // exec-content holds all rendered panels; exec-no-data is the empty state
+    document.getElementById("exec-no-data")?.classList.remove("hidden");
+    document.getElementById("exec-content")?.classList.add("hidden");
+    document.getElementById("exec-loading")?.classList.add("hidden");
+    // Also hide legacy ID variants in case template uses them
+    ["exec-customer-banner","exec-audit-pulse","exec-kpi-strip","exec-chart-section"
+    ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
+
+    // ── 9. Benchmark tab ─────────────────────────────────────────────────
+    document.getElementById("bench-empty")?.classList.remove("hidden");
+    ["bench-result-section","bench-loaded"
+    ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
+
+    // ── 10. SOW tab ───────────────────────────────────────────────────────
+    ["sow-dfu-baseline","sow-dfu-actual","sow-sku-baseline","sow-sku-actual",
+     "sow-orders-baseline","sow-orders-actual","sow-batchjobs-baseline","sow-batchjobs-actual",
+     "sow-users-baseline","sow-users-actual","sow-cpu-baseline","sow-cpu-actual",
+     "sow-mem-baseline","sow-mem-actual","sow-disk-baseline","sow-disk-actual",
+     "sow-sla-daily","sow-sla-weekly","sow-sla-monthly",
+     "sow-m-customer","sow-m-contract-years","sow-m-annual-fee"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    });
+    document.getElementById("sow-manual-panel")?.classList.add("hidden");
+    document.getElementById("sow-volume-comparison")?.classList.add("hidden");
+    fetch("/api/sow/baseline", { method: "DELETE" }).catch(() => {});
+    document.getElementById("sow-empty")?.classList.remove("hidden");
+    document.getElementById("sow-contract-grid")?.classList.add("hidden");
+
+    // ── 11. Status dots ───────────────────────────────────────────────────
+    ["ds-batch","ds-resource","ds-issues","ds-sow","ds-gemini"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.className = "w-2 h-2 rounded-full status-dot-muted shrink-0 transition-all duration-300";
+    });
+    ["ds-batch-label","ds-resource-label"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "";
+    });
+
+    // ── 12. Navigate back to Upload tab ──────────────────────────────────
+    setActiveView("upload");
+
+    toast("success", "Session cleared", "Ready for a new engagement. Re-upload all files.");
+  } catch (err) {
+    toast("error", "Clear failed", String(err).slice(0, 120));
+  }
+}
+
+
 /** Zone D — Benchmark file upload on the Intake page */
 function initBenchIntakeUploader() {
   const dz    = document.getElementById("bench-intake-drop-zone");
@@ -13238,11 +16105,9 @@ function initBenchIntakeUploader() {
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Cpurple","bg-Cpurple/5"); })
   );
-  dz.addEventListener("dragleave", (e) => {
-    if (dz.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5");
-  });
-  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); })
+  );
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Cpurple", "bg-Cpurple/5");
@@ -13287,6 +16152,7 @@ async function _uploadBenchIntakeFile(file) {
     }
     const data = body;
     window.appData.benchmark = data;
+    _markSessionActive();  // track session boundary
 
     // Update dot
     if (dot) { dot.className = "w-2 h-2 rounded-full bg-Cpurple animate-pulse shrink-0"; }
@@ -13335,12 +16201,12 @@ function initBatchSlaInfoUploader() {
       dz.classList.add("border-Cteal", "bg-Cteal/5");
     })
   );
-  dz.addEventListener("dragleave", (e) => {
-    if (dz.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation();
-    dz.classList.remove("border-Cteal", "bg-Cteal/5");
-  });
-  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cteal", "bg-Cteal/5"); });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dz.classList.remove("border-Cteal", "bg-Cteal/5");
+    })
+  );
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Cteal", "bg-Cteal/5");
@@ -13386,20 +16252,6 @@ async function _uploadBatchSlaInfoFile(file) {
     window.appData = window.appData || {};
     window.appData.batchSlaInfo = body;
 
-    // If the backend recomputed batch KPIs with the new per-job SLAs, patch
-    // appData.batch.kpis so the gauge + compliance tiles show accurate values.
-    if (body.updated_batch_kpis && window.appData.batch) {
-      window.appData.batch.kpis = { ...window.appData.batch.kpis, ...body.updated_batch_kpis };
-      // Sync the global SLA_DAILY_HRS to the recomputed ceiling
-      if (body.updated_batch_kpis.daily_limit_hrs) {
-        SLA_DAILY_HRS = Number(body.updated_batch_kpis.daily_limit_hrs) || SLA_DAILY_HRS;
-      }
-      // Re-render gauge and all KPI tiles with the updated numbers
-      renderSlaBufferChart(window.appData.batch.kpis);
-      renderBatchKpis(window.appData.batch.kpis);
-      renderBatchSlaSourceTags(window.appData.batch.sla_source || null, window.appData.batch.kpis);
-    }
-
     // Build slaCeilings from workflow SLA data if not already set from SLA Matrix upload
     // This ensures PE Findings has SLA context even when only BatchSLA is uploaded
     if (!window.appData.slaCeilings && body.workflows?.length > 0) {
@@ -13424,13 +16276,23 @@ async function _uploadBatchSlaInfoFile(file) {
     // Refresh SLA Commitments panel immediately so SLA Matrix tab shows the new data
     _renderSlaCommitmentsPanel();
 
-    // Re-run SLA Matrix with the new XLSX SLAs applied (uses full job_runs_df from server)
+    // Re-render Batch Review with updated per-job SLAs — recomputes gauge, compliance,
+    // and top-breaches table using the XLSX-resolved SLA ceilings, not global defaults.
+    // Then re-run SLA Matrix sequentially so it uses the refreshed window.appData.batch.
+    // If no batch data yet, the stale banner will auto-show when batch is uploaded later.
     if (window.appData?.batch) {
-      // Await so workflow_summary is ready before we re-render the commitments panel
-      try {
+      (async () => {
+        await _refreshBatchFromServer("Batch Review updated with customer SLA contracts");
         await triggerSlaMatrix();
-        _renderSlaCommitmentsPanel();
-      } catch (_) {}
+        // After successful refresh, sla_source.type will be "sla_matrix" or "batch_sla_xlsx".
+        // Only show the amber stale banner if NEITHER type is set (refresh failed or
+        // server restarted — in that case _refreshBatchFromServer already updated
+        // the banner via _applyBatchSlaInfoToBanner, so avoid double-showing).
+        const slaSrcType = window.appData?.batch?.sla_source?.type;
+        if (slaSrcType !== "batch_sla_xlsx" && slaSrcType !== "sla_matrix") {
+          _renderSlaStaleWarningBanner();
+        }
+      })().catch(() => { _renderSlaStaleWarningBanner(); });
     }
 
     const wfCount  = body.workflow_count || 0;
@@ -13562,12 +16424,12 @@ function initSowUploadZone() {
       dz.classList.add("border-Ccyan", "bg-Ccyan/5");
     })
   );
-  dz.addEventListener("dragleave", (e) => {
-    if (dz.contains(e.relatedTarget)) return;
-    e.preventDefault(); e.stopPropagation();
-    dz.classList.remove("border-Ccyan", "bg-Ccyan/5");
-  });
-  dz.addEventListener("dragend", (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Ccyan", "bg-Ccyan/5"); });
+  ["dragleave", "dragend"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dz.classList.remove("border-Ccyan", "bg-Ccyan/5");
+    })
+  );
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     dz.classList.remove("border-Ccyan", "bg-Ccyan/5");
@@ -13617,9 +16479,13 @@ async function _uploadSowFile(file) {
     _renderSowContractPanel(window.appData.sowContract);
     refreshAuditContext().catch(() => {});  // update health bar
 
-    // Re-run SLA Matrix so SOW Tier 2 ceilings are applied to compliance numbers
+    // Re-run SLA Matrix then Batch Review sequentially so SOW Tier 2 ceilings
+    // are reflected in both tabs with consistent compliance numbers.
     if (window.appData?.batch) {
-      triggerSlaMatrix().catch(() => {});
+      (async () => {
+        await triggerSlaMatrix();
+        await _refreshBatchFromServer("Batch Review updated with SOW Tier 2 SLA ceilings");
+      })().catch(() => {});
     }
 
     if (dot) dot.className = "w-2 h-2 rounded-full bg-Ccyan animate-pulse";
@@ -13644,6 +16510,13 @@ async function _uploadSowFile(file) {
     ).join(" → ");
     toast("success", "SOW parsed",
       `${filled} metric(s)${slaSummary ? " · SLA: " + slaSummary : ""}${volSummary ? " · Vol: " + volSummary : ""} — Tier 2 ceilings active`);
+
+    // Surface AI validation warnings if any values were rejected
+    const aiWarnings = contract._ai_validation_warnings || [];
+    if (aiWarnings.length) {
+      toast("warning", "SOW data validation",
+        `${aiWarnings.length} value(s) rejected as out-of-range: ${aiWarnings.slice(0, 2).join("; ")}${aiWarnings.length > 2 ? "..." : ""}`);
+    }
 
   } catch (err) {
     _handleFetchError(err);
@@ -13691,9 +16564,46 @@ function _renderSowIntakeCard(data, filename) {
 //  SOW CONTRACT INTELLIGENCE TAB
 // ═══════════════════════════════════════════════════════════════
 const _SOW_FIELDS = [
-  { key: "daily_dfu", baseId: "sow-dfu", label: "Daily DFU" },
-  { key: "daily_sku", baseId: "sow-sku", label: "Daily SKU Count" },
+  { key: "daily_dfu",          baseId: "sow-dfu",       label: "Daily DFU" },
+  { key: "daily_sku",          baseId: "sow-sku",       label: "Daily SKU Count" },
+  { key: "daily_orders",       baseId: "sow-orders",    label: "Daily Orders" },
+  { key: "batch_jobs",         baseId: "sow-batchjobs", label: "Batch Jobs / Day" },
+  { key: "peak_users",         baseId: "sow-users",     label: "Peak Concurrent Users" },
+  { key: "cpu_baseline_pct",   baseId: "sow-cpu",       label: "CPU Utilisation %" },
+  { key: "mem_baseline_pct",   baseId: "sow-mem",       label: "Memory Utilisation %" },
+  { key: "disk_baseline_pct",  baseId: "sow-disk",      label: "Disk Utilisation %" },
 ];
+
+// ── Open the standalone manual SOW entry panel ───────────────────────────
+function openSowManualEntry() {
+  document.getElementById("sow-empty")?.classList.add("hidden");
+  document.getElementById("sow-manual-panel")?.classList.remove("hidden");
+  // Re-bind all inputs (only binds once due to flag)
+  _bindSowManualInputs();
+  // Restore any previously stored values
+  loadSowBaseline();
+}
+
+// ── Clear all manual SOW fields and backend baseline ─────────────────────
+async function clearSowManual() {
+  ["sow-dfu-baseline","sow-dfu-actual","sow-sku-baseline","sow-sku-actual",
+   "sow-orders-baseline","sow-orders-actual","sow-batchjobs-baseline","sow-batchjobs-actual",
+   "sow-users-baseline","sow-users-actual","sow-cpu-baseline","sow-cpu-actual",
+   "sow-mem-baseline","sow-mem-actual","sow-disk-baseline","sow-disk-actual",
+   "sow-sla-daily","sow-sla-weekly","sow-sla-monthly",
+   "sow-m-customer","sow-m-contract-years","sow-m-annual-fee"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+  try { await fetch("/api/sow/baseline", { method: "DELETE" }); } catch (_) {}
+  window.appData = window.appData || {};
+  window.appData.sowCompare = null;
+  window._execCacheHash = null;
+  document.getElementById("sow-chart-wrap")?.classList.add("hidden");
+  document.getElementById("sow-table-wrap")?.classList.add("hidden");
+  document.getElementById("sow-save-msg")?.classList.add("hidden");
+  toast("info", "SOW data cleared", "All manual targets and comparison results removed.");
+}
 
 // ── Called on nav to SOW tab — restore from appData if already loaded ──
 function initSowTab() {
@@ -13825,7 +16735,9 @@ function _renderSowContractPanel(contract) {
       const skuBaseline = document.getElementById("sow-sku-baseline");
       // Only auto-fill if field is empty (don't overwrite user input)
       if (dfuBaseline && !dfuBaseline.value) dfuBaseline.value = maxVol;
-      if (skuBaseline && !skuBaseline.value) skuBaseline.value = Math.round(maxVol * 0.1); // ~10% typical SKU ratio
+      // Only auto-fill SKU if the SOW contract actually mentions SKU data
+      const hasSku = c.daily_sku || c.manual_sku_baseline || Object.values(volY2).some(v => v?.sku_count > 0);
+      if (skuBaseline && !skuBaseline.value && hasSku) skuBaseline.value = c.daily_sku || Math.round(maxVol * 0.1);
     }
   }
 
@@ -13843,13 +16755,14 @@ function _renderSowContractPanel(contract) {
   _renderSlaCommitmentsPanel();
 }
 
-// ── Bind manual inputs → live appData + SOW Contract panel refresh ────────
+// ── Bind manual inputs → live appData + full pipeline propagation ─────────
 let _sowManualBound = false;
+let _sowSaveDebounce = null;
 function _bindSowManualInputs() {
   if (_sowManualBound) return;
   _sowManualBound = true;
 
-  const bind = (id, key) => {
+  const bindNum = (id, key) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", () => {
@@ -13862,18 +16775,261 @@ function _bindSowManualInputs() {
         delete window.appData.sowContract[key];
       }
       _renderSowVolumeComparison();
-      // When both baseline fields are cleared, reset sowCompare so narrative shows no stale SOW data
-      const dfuCleared = !(parseFloat(document.getElementById("sow-dfu-baseline")?.value) > 0);
-      const skuCleared = !(parseFloat(document.getElementById("sow-sku-baseline")?.value) > 0);
-      if (dfuCleared && skuCleared) window.appData.sowCompare = null;
-      // Re-trigger PE Narrative so Data Volume section picks up the new DFU/SKU values
-      triggerPeNarrative().catch(() => {});
+      _syncSowCompareFromManual();
+      window._execCacheHash = null;
+      if (_sowSaveDebounce) clearTimeout(_sowSaveDebounce);
+      _sowSaveDebounce = setTimeout(() => {
+        _persistSowBaseline();
+        triggerGenerateFindings().catch(() => {});
+        triggerPeNarrative().catch(() => {});
+      }, 600);
     });
   };
-  bind("sow-dfu-baseline", "manual_dfu_baseline");
-  bind("sow-dfu-actual",   "manual_dfu_actual");
-  bind("sow-sku-baseline", "manual_sku_baseline");
-  bind("sow-sku-actual",   "manual_sku_actual");
+  const bindStr = (id, key) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", () => {
+      window.appData = window.appData || {};
+      window.appData.sowContract = window.appData.sowContract || {};
+      if (el.value.trim()) {
+        window.appData.sowContract[key] = el.value.trim();
+      } else {
+        delete window.appData.sowContract[key];
+      }
+      window._execCacheHash = null;
+    });
+  };
+
+  // Volume targets
+  bindNum("sow-dfu-baseline",      "manual_dfu_baseline");
+  bindNum("sow-dfu-actual",        "manual_dfu_actual");
+  bindNum("sow-sku-baseline",      "manual_sku_baseline");
+  bindNum("sow-sku-actual",        "manual_sku_actual");
+  bindNum("sow-orders-baseline",   "manual_orders_baseline");
+  bindNum("sow-orders-actual",     "manual_orders_actual");
+  bindNum("sow-batchjobs-baseline","manual_batchjobs_baseline");
+  bindNum("sow-batchjobs-actual",  "manual_batchjobs_actual");
+  bindNum("sow-users-baseline",    "manual_users_baseline");
+  bindNum("sow-users-actual",      "manual_users_actual");
+  // Resource baselines
+  bindNum("sow-cpu-baseline",      "manual_cpu_baseline");
+  bindNum("sow-cpu-actual",        "manual_cpu_actual");
+  bindNum("sow-mem-baseline",      "manual_mem_baseline");
+  bindNum("sow-mem-actual",        "manual_mem_actual");
+  bindNum("sow-disk-baseline",     "manual_disk_baseline");
+  bindNum("sow-disk-actual",       "manual_disk_actual");
+  // SLA windows (no actual — save as SLA window ceilings)
+  const bindSla = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", () => {
+      if (_sowSaveDebounce) clearTimeout(_sowSaveDebounce);
+      _sowSaveDebounce = setTimeout(() => {
+        _persistSowBaseline();
+        triggerGenerateFindings().catch(() => {});
+      }, 600);
+    });
+  };
+  bindSla("sow-sla-daily");
+  bindSla("sow-sla-weekly");
+  bindSla("sow-sla-monthly");
+  // Identity fields
+  bindStr("sow-m-customer",       "customer_name");
+  bindStr("sow-m-contract-years", "contract_years");
+  bindStr("sow-m-annual-fee",     "annual_fee");
+}
+
+// ── Sync sowCompare from all manual inputs ────────────────────────────────
+function _syncSowCompareFromManual() {
+  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
+  const sc = window.appData?.sowContract || {};
+
+  const fields = [
+    { key: "daily_dfu",    label: "Daily DFU",              base: _n("sow-dfu-baseline")      || sc.manual_dfu_baseline      || 0, act: _n("sow-dfu-actual")       || sc.manual_dfu_actual       || 0 },
+    { key: "daily_sku",    label: "Daily SKU Count",        base: _n("sow-sku-baseline")      || sc.manual_sku_baseline      || 0, act: _n("sow-sku-actual")       || sc.manual_sku_actual       || 0 },
+    { key: "daily_orders", label: "Daily Orders",           base: _n("sow-orders-baseline")   || sc.manual_orders_baseline   || 0, act: _n("sow-orders-actual")    || sc.manual_orders_actual    || 0 },
+    { key: "batch_jobs",   label: "Batch Jobs / Day",       base: _n("sow-batchjobs-baseline")|| sc.manual_batchjobs_baseline|| 0, act: _n("sow-batchjobs-actual") || sc.manual_batchjobs_actual || 0 },
+    { key: "peak_users",   label: "Peak Concurrent Users",  base: _n("sow-users-baseline")    || sc.manual_users_baseline    || 0, act: _n("sow-users-actual")     || sc.manual_users_actual     || 0 },
+  ];
+  const metrics = fields
+    .filter(f => f.base > 0)
+    .map(f => ({ key: f.key, label: f.label, sow: f.base, actual: f.act > 0 ? f.act : null }));
+
+  if (!metrics.length) {
+    window.appData = window.appData || {};
+    window.appData.sowCompare = null;
+    return;
+  }
+  window.appData = window.appData || {};
+  window.appData.sowCompare = window.appData.sowCompare || {};
+  window.appData.sowCompare.metrics = metrics;
+  if (window.appData.sowContract) {
+    window.appData.sowCompare._contract = window.appData.sowContract;
+  }
+}
+
+// ── Persist baseline to backend (fire-and-forget) ────────────────────────
+async function _persistSowBaseline() {
+  const _n = (id) => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? null : v; };
+  const baseline = {};
+
+  // Volume targets
+  const nf = [
+    ["sow-dfu-baseline",       "daily_dfu"],
+    ["sow-sku-baseline",       "daily_sku"],
+    ["sow-orders-baseline",    "daily_orders"],
+    ["sow-batchjobs-baseline", "batch_jobs"],
+    ["sow-users-baseline",     "peak_users"],
+    ["sow-cpu-baseline",       "cpu_baseline_pct"],
+    ["sow-mem-baseline",       "mem_baseline_pct"],
+    ["sow-disk-baseline",      "disk_baseline_pct"],
+  ];
+  nf.forEach(([id, key]) => { const v = _n(id); if (v != null && v > 0) baseline[key] = v; });
+
+  if (!Object.keys(baseline).length) return;
+  try {
+    await fetch("/api/sow/baseline", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(baseline),
+    });
+  } catch (_) {}
+
+  // Also persist SLA windows if entered
+  const daily   = _n("sow-sla-daily");
+  const weekly  = _n("sow-sla-weekly");
+  const monthly = _n("sow-sla-monthly");
+  if (daily != null || weekly != null || monthly != null) {
+    const winPayload = {};
+    if (daily   != null && daily   > 0) winPayload.daily_hrs   = daily;
+    if (weekly  != null && weekly  > 0) winPayload.weekly_hrs  = weekly;
+    if (monthly != null && monthly > 0) winPayload.monthly_hrs = monthly;
+    if (Object.keys(winPayload).length) {
+      try {
+        await fetch("/api/sow/sla-windows/manual", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(winPayload),
+        });
+      } catch (_) {}
+    }
+  }
+}
+
+// ── Build sow_compare from manual inputs (used by exec + findings payloads) ──
+function _buildSowCompareFromManual() {
+  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
+  const sc = window.appData?.sowContract || {};
+
+  const fields = [
+    { key: "daily_dfu",    label: "Daily DFU",             base: _n("sow-dfu-baseline")       || sc.manual_dfu_baseline       || 0, act: _n("sow-dfu-actual")        || sc.manual_dfu_actual        || 0 },
+    { key: "daily_sku",    label: "Daily SKU Count",       base: _n("sow-sku-baseline")       || sc.manual_sku_baseline       || 0, act: _n("sow-sku-actual")        || sc.manual_sku_actual        || 0 },
+    { key: "daily_orders", label: "Daily Orders",          base: _n("sow-orders-baseline")    || sc.manual_orders_baseline    || 0, act: _n("sow-orders-actual")     || sc.manual_orders_actual     || 0 },
+    { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _n("sow-batchjobs-baseline") || sc.manual_batchjobs_baseline || 0, act: _n("sow-batchjobs-actual")  || sc.manual_batchjobs_actual  || 0 },
+    { key: "peak_users",   label: "Peak Concurrent Users", base: _n("sow-users-baseline")     || sc.manual_users_baseline     || 0, act: _n("sow-users-actual")      || sc.manual_users_actual      || 0 },
+  ];
+  const metrics = fields.filter(f => f.base > 0).map(f => ({
+    key: f.key, label: f.label, sow: f.base, actual: f.act > 0 ? f.act : null,
+  }));
+  return metrics.length ? { metrics } : null;
+}
+
+// ── Volume Analysis: synthesizes SOW contract + manual inputs + batch stats
+// into a single normalized payload for the PE Findings data-volume section.
+// Called from _buildFindingsPayload() and re-evaluated on every SOW change.
+function _buildVolumeAnalysis() {
+  const ad    = window.appData || {};
+  const sc    = ad.sowContract   || {};
+  const sowCmp = ad.sowCompare   || {};
+  const bk    = ad.batch?.kpis   || {};
+  const batchCov = ad.batch?.data_coverage || {};
+  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
+
+  // All manual baseline/actual fields
+  const manualFields = [
+    { key: "daily_dfu",    label: "Daily DFU",             base: _n("sow-dfu-baseline")       || sc.manual_dfu_baseline       || 0, act: _n("sow-dfu-actual")        || sc.manual_dfu_actual        || 0 },
+    { key: "daily_sku",    label: "Daily SKU Count",       base: _n("sow-sku-baseline")       || sc.manual_sku_baseline       || 0, act: _n("sow-sku-actual")        || sc.manual_sku_actual        || 0 },
+    { key: "daily_orders", label: "Daily Orders",          base: _n("sow-orders-baseline")    || sc.manual_orders_baseline    || 0, act: _n("sow-orders-actual")     || sc.manual_orders_actual     || 0 },
+    { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _n("sow-batchjobs-baseline") || sc.manual_batchjobs_baseline || 0, act: _n("sow-batchjobs-actual")  || sc.manual_batchjobs_actual  || 0 },
+    { key: "peak_users",   label: "Peak Concurrent Users", base: _n("sow-users-baseline")     || sc.manual_users_baseline     || 0, act: _n("sow-users-actual")      || sc.manual_users_actual      || 0 },
+  ];
+
+  const hasPdfItems = !!(sowCmp.items?.length);
+  const hasManual   = manualFields.some(f => f.base > 0);
+  const hasContract = !!(sc.customer_name || sc.annual_fee || sc.sla_windows);
+
+  if (!hasPdfItems && !hasManual && !hasContract) return null;
+
+  const source = hasPdfItems ? "sow_pdf" : hasManual ? "manual" : "session_cache";
+  const metrics = [];
+
+  // Priority: SOW PDF compare items
+  if (hasPdfItems) {
+    for (const item of sowCmp.items) {
+      const pct = item.pct || (item.actual && item.sow ? +(item.actual / item.sow * 100).toFixed(1) : null);
+      const zone = item.zone || (pct != null
+        ? (pct > 110 ? "EXCEEDS" : pct >= 70 ? "ACCEPTABLE" : "UNDER")
+        : null);
+      metrics.push({
+        key:        item.metric?.toLowerCase().replace(/\s+/g, '_') || item.key || "metric",
+        label:      item.metric || item.key || "Metric",
+        contracted: item.sow    || null,
+        actual:     item.actual || null,
+        pct, zone,
+        status:     item.status || null,
+      });
+    }
+  }
+
+  // Add manual fields not already covered by PDF
+  for (const f of manualFields) {
+    if (f.base <= 0) continue;
+    if (metrics.some(m => m.key === f.key)) continue;  // already from PDF
+    const pct = f.act > 0 ? +(f.act / f.base * 100).toFixed(1) : null;
+    metrics.push({
+      key: f.key, label: f.label,
+      contracted: f.base, actual: f.act > 0 ? f.act : null,
+      pct,
+      zone: pct ? (pct > 110 ? "EXCEEDS" : pct >= 70 ? "ACCEPTABLE" : "UNDER") : null,
+      source: "manual",
+    });
+  }
+
+  // Batch stats for throughput ratio
+  const totalRuns  = parseInt(bk.total_runs  || 0) || 0;
+  const totalJobs  = parseInt(bk.total_jobs  || 0) || 0;
+  const dateSpan   = parseInt(batchCov.date_span_days || bk.date_span_days || 0) || 1;
+  const uniqueDates = ad.batch?.window?.length || dateSpan;
+
+  // Contract summary fields from SOW PDF
+  const contractStart  = sc.start_date    || sc.contract_start || null;
+  const contractEnd    = sc.end_date      || sc.contract_end   || null;
+  const annualFee      = sc.annual_fee    || null;
+  const maxItemLoc     = sowCmp.max_item_locations || sc.max_item_locations || null;
+  const volumeByYear   = sowCmp.volume_by_year    || sc.volume_by_year    || null;
+
+  if (!metrics.length && !hasContract) return null;
+
+  const dfuMetric = metrics.find(m => m.key?.includes("dfu"));
+  const skuMetric = metrics.find(m => m.key?.includes("sku"));
+
+  return {
+    metrics,
+    contracted_daily_dfu: dfuMetric?.contracted || null,
+    actual_daily_dfu:     dfuMetric?.actual     || null,
+    contracted_daily_sku: skuMetric?.contracted || null,
+    actual_daily_sku:     skuMetric?.actual     || null,
+    total_runs:           totalRuns,
+    total_jobs:           totalJobs,
+    date_span_days:       dateSpan,
+    unique_run_dates:     uniqueDates,
+    max_item_locations:   maxItemLoc,
+    volume_by_year:       volumeByYear,
+    annual_fee:           annualFee,
+    contract_start:       contractStart,
+    contract_end:         contractEnd,
+    source,
+    has_actuals:          metrics.some(m => m.actual != null),
+    has_contracted:       metrics.some(m => m.contracted != null),
+  };
 }
 
 // ── SOW Volume Comparison: visual red/green % achievement bars ──────────
@@ -13881,20 +17037,14 @@ function _renderSowVolumeComparison() {
   const panel = document.getElementById("sow-volume-comparison");
   if (!panel) return;
 
+  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
   const sc  = window.appData?.sowContract || {};
   const metrics = [
-    {
-      label:    "Daily DFU",
-      baseline: parseFloat(document.getElementById("sow-dfu-baseline")?.value) || sc.manual_dfu_baseline || 0,
-      actual:   parseFloat(document.getElementById("sow-dfu-actual")?.value)   || sc.manual_dfu_actual   || 0,
-      unit:     "items",
-    },
-    {
-      label:    "Daily SKU",
-      baseline: parseFloat(document.getElementById("sow-sku-baseline")?.value) || sc.manual_sku_baseline || 0,
-      actual:   parseFloat(document.getElementById("sow-sku-actual")?.value)   || sc.manual_sku_actual   || 0,
-      unit:     "SKUs",
-    },
+    { label: "Daily DFU",             unit: "items",   baseline: _n("sow-dfu-baseline")       || sc.manual_dfu_baseline       || 0, actual: _n("sow-dfu-actual")        || sc.manual_dfu_actual        || 0 },
+    { label: "Daily SKU Count",       unit: "SKUs",    baseline: _n("sow-sku-baseline")       || sc.manual_sku_baseline       || 0, actual: _n("sow-sku-actual")        || sc.manual_sku_actual        || 0 },
+    { label: "Daily Orders",          unit: "orders",  baseline: _n("sow-orders-baseline")    || sc.manual_orders_baseline    || 0, actual: _n("sow-orders-actual")     || sc.manual_orders_actual     || 0 },
+    { label: "Batch Jobs / Day",      unit: "jobs",    baseline: _n("sow-batchjobs-baseline") || sc.manual_batchjobs_baseline || 0, actual: _n("sow-batchjobs-actual")  || sc.manual_batchjobs_actual  || 0 },
+    { label: "Peak Concurrent Users", unit: "users",   baseline: _n("sow-users-baseline")     || sc.manual_users_baseline     || 0, actual: _n("sow-users-actual")      || sc.manual_users_actual      || 0 },
   ];
 
   const rows = metrics.filter(m => m.baseline > 0 || m.actual > 0);
@@ -13947,20 +17097,34 @@ async function loadSowBaseline() {
           window.appData.sowContract = synth;
         }
         _renderSowContractPanel(window.appData.sowContract);
+        // Restore SLA window inputs in manual form
+        const sw = synth.sla_windows || {};
+        if (sw.DAILY?.limit_hours)   { const el = document.getElementById("sow-sla-daily");   if (el && !el.value) el.value = sw.DAILY.limit_hours; }
+        if (sw.WEEKLY?.limit_hours)  { const el = document.getElementById("sow-sla-weekly");  if (el && !el.value) el.value = sw.WEEKLY.limit_hours; }
+        if (sw.MONTHLY?.limit_hours) { const el = document.getElementById("sow-sla-monthly"); if (el && !el.value) el.value = sw.MONTHLY.limit_hours; }
       }
     }
     // Restore baseline form values — always override so stored values are always visible
     const rb = await fetch("/api/sow/baseline");
     if (rb.ok) {
       const data = await rb.json();
+      let restored = 0;
       _SOW_FIELDS.forEach(({ key, baseId }) => {
         if (data[key] != null) {
           const el = document.getElementById(`${baseId}-baseline`);
-          if (el) el.value = data[key];   // always restore, not just when empty
+          if (el) { el.value = data[key]; restored++; }
         }
       });
+      // If values were restored and no PDF is loaded, surface the manual panel
+      if (restored > 0 && !window.appData?.sowContract?.customer_name) {
+        document.getElementById("sow-empty")?.classList.add("hidden");
+        document.getElementById("sow-manual-panel")?.classList.remove("hidden");
+        _bindSowManualInputs();
+      }
     }
     _autoFillSowActuals();
+    // Sync sowCompare from restored baseline so all consumers see SOW data
+    _syncSowCompareFromManual();
   } catch (_) {}
 }
 
@@ -13993,16 +17157,49 @@ async function saveSowBaseline() {
     if (!isNaN(aVal) && aVal > 0) actuals[key]  = aVal;
   });
 
-  if (Object.keys(baseline).length === 0) {
+  // Also save SLA windows if set
+  const _n = (id) => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? null : v; };
+  const slaWindows = {};
+  const daily   = _n("sow-sla-daily");
+  const weekly  = _n("sow-sla-weekly");
+  const monthly = _n("sow-sla-monthly");
+  if (daily   != null && daily   > 0) slaWindows.DAILY   = { limit_hours: daily };
+  if (weekly  != null && weekly  > 0) slaWindows.WEEKLY  = { limit_hours: weekly };
+  if (monthly != null && monthly > 0) slaWindows.MONTHLY = { limit_hours: monthly };
+
+  // Identity fields feed sowContract for the grid
+  const customer = document.getElementById("sow-m-customer")?.value?.trim();
+  const years    = _n("sow-m-contract-years");
+  const fee      = _n("sow-m-annual-fee");
+
+  if (Object.keys(baseline).length === 0 && Object.keys(slaWindows).length === 0) {
     toast("error", "No targets set", "Enter at least one SOW target value before comparing.");
     return;
   }
   const msgEl = document.getElementById("sow-save-msg");
   try {
-    await fetch("/api/sow/baseline", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(baseline),
-    });
+    if (Object.keys(baseline).length) {
+      await fetch("/api/sow/baseline", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(baseline),
+      });
+    }
+    if (Object.keys(slaWindows).length) {
+      await fetch("/api/sow/sla-windows/manual", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ windows: slaWindows }),
+      });
+    }
+    // Populate sowContract with identity + SLA windows so the contract grid shows
+    window.appData = window.appData || {};
+    window.appData.sowContract = window.appData.sowContract || {};
+    if (customer) window.appData.sowContract.customer_name = customer;
+    if (years)    window.appData.sowContract.contract_years = years;
+    if (fee)      window.appData.sowContract.annual_fee = fee;
+    if (Object.keys(slaWindows).length) window.appData.sowContract.sla_windows = slaWindows;
+    if (customer || Object.keys(slaWindows).length) {
+      _renderSowContractPanel(window.appData.sowContract);
+    }
     const res  = await fetch("/api/sow/compare", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ actuals }),
@@ -14010,6 +17207,8 @@ async function saveSowBaseline() {
     const data = await res.json();
     window.appData = window.appData || {};
     window.appData.sowCompare = data;
+    window._execCacheHash = null;  // invalidate exec dashboard cache
+    _markSessionActive();  // track session boundary
     refreshDataStatus();
     _renderSowComparison(data);
     triggerGenerateFindings().catch(() => {});
@@ -14026,7 +17225,7 @@ async function saveSowBaseline() {
 }
 
 function _renderSowComparison(data) {
-  // Ensure grid is visible
+  // Always show grid (contains chart-wrap + table-wrap) and hide empty state
   document.getElementById("sow-empty")?.classList.add("hidden");
   document.getElementById("sow-contract-grid")?.classList.remove("hidden");
   document.getElementById("sow-chart-wrap")?.classList.remove("hidden");
@@ -14054,11 +17253,13 @@ function _renderSowComparison(data) {
     barsEl.innerHTML = data.metrics.map((m) => {
       const pct    = Math.min(m.pct, 150);
       const barPct = (pct / 150 * 100).toFixed(1);
-      const color  = m.status === "OPTIMAL"  ? "#22d3ee" :
-                     m.status === "MODERATE" ? "#f59e0b" : "#f43f5e";
-      const statusBg = m.status === "OPTIMAL"  ? "bg-Ccyan/20 text-Ccyan" :
-                       m.status === "MODERATE" ? "bg-Camber/20 text-Camber" :
-                       "bg-Cred/20 text-Cred";
+      // Standard: 70-110% = acceptable (green). <70% = amber, >110% = red.
+      const color  = m.pct > 110                     ? "#f43f5e"  // exceeds
+                   : m.pct >= 70                     ? "#22d3ee"  // within 70-110% window
+                   : "#f59e0b";                                   // below 70% floor
+      const statusBg = m.pct > 110                   ? "bg-Cred/20 text-Cred"
+                     : m.pct >= 70                   ? "bg-Ccyan/20 text-Ccyan"
+                     : "bg-Camber/20 text-Camber";
       return `<div class="space-y-1.5">
         <div class="flex items-center justify-between text-[11px]">
           <span class="font-semibold text-Cwhite">${_esc(m.label)}</span>
@@ -14069,16 +17270,17 @@ function _renderSowComparison(data) {
           </div>
         </div>
         <div class="relative h-4 rounded-lg overflow-hidden bg-Cbg border border-Cborder">
-          <div class="absolute inset-y-0 left-0 bg-Cred/20" style="width:${(70/150*100).toFixed(1)}%"></div>
-          <div class="absolute inset-y-0 bg-Camber/20" style="left:${(70/150*100).toFixed(1)}%;width:${((90-70)/150*100).toFixed(1)}%"></div>
-          <div class="absolute inset-y-0 bg-Cgreen/20" style="left:${(90/150*100).toFixed(1)}%;width:${((110-90)/150*100).toFixed(1)}%"></div>
+          <!-- Zone bands: <70% amber, 70-110% green (full standard window), >110% red -->
+          <div class="absolute inset-y-0 left-0 bg-Camber/20" style="width:${(70/150*100).toFixed(1)}%"></div>
+          <div class="absolute inset-y-0 bg-Cgreen/15" style="left:${(70/150*100).toFixed(1)}%;width:${((110-70)/150*100).toFixed(1)}%"></div>
           <div class="absolute inset-y-0 bg-Cred/15" style="left:${(110/150*100).toFixed(1)}%;right:0"></div>
           <div class="absolute inset-y-0 w-px bg-white/30" style="left:${(100/150*100).toFixed(1)}%"></div>
           <div class="absolute inset-y-0 left-0 rounded-lg transition-all duration-700" style="width:${barPct}%;background:${color};opacity:0.8"></div>
         </div>
         <div class="flex justify-between text-[9px] text-Cmuted font-mono">
-          <span>0</span><span>70%</span><span>90%</span><span>100%</span><span>110%</span><span>150%+</span>
+          <span>0</span><span class="text-Camber">70%</span><span>90%</span><span>100%</span><span class="text-Cred">110%</span><span>150%+</span>
         </div>
+        ${m.pct > 110 || m.pct < 70 ? `<div class="text-[9px] text-Camber font-semibold">⚠ Outside 70%–110% standard process window — formal review &amp; acknowledgment required</div>` : ""}
       </div>`;
     }).join("");
   }
@@ -14087,11 +17289,12 @@ function _renderSowComparison(data) {
   const tbody = document.getElementById("sow-table-tbody");
   if (tbody && data.metrics?.length) {
     tbody.innerHTML = data.metrics.map((m) => {
-      const stBg = m.status === "OPTIMAL"  ? "bg-Ccyan/15 text-Ccyan" :
-                   m.status === "MODERATE" ? "bg-Camber/20 text-Camber" :
+      const stBg = (m.status === "OPTIMAL" || m.status === "ACCEPTABLE") ? "bg-Ccyan/15 text-Ccyan" :
+                   m.status === "LOW"                                     ? "bg-Camber/20 text-Camber" :
                    "bg-Cred/20 text-Cred";
-      const pctColor = m.pct >= 90 && m.pct <= 110 ? "text-Ccyan font-bold" :
-                       m.pct >= 70                  ? "text-Camber font-semibold" : "text-Cred font-bold";
+      // Standard: 70-110% = green/cyan. <70% = amber, >110% = red.
+      const pctColor = m.pct >= 70 && m.pct <= 110 ? "text-Ccyan font-bold" :
+                       m.pct >= 70                  ? "text-Cred font-bold" : "text-Camber font-semibold";
       return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
         <td class="py-2.5 pr-4 font-semibold text-Cwhite">${_esc(m.label)}</td>
         <td class="py-2.5 pr-4 text-right text-Cmuted font-mono">${_fmt(m.sow)}</td>

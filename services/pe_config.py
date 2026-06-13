@@ -82,7 +82,19 @@ SLA_ATRISK_PCT:   float = 15.0   # % buffer threshold → AT_RISK below this
 SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
 
 # ── Benchmark ─────────────────────────────────────────────────────────────────
-BENCH_THRESHOLD_PCT: float = 10.0   # % degradation → RED
+BENCH_THRESHOLD_PCT: float = 10.0   # % degradation threshold → WATCH boundary
+
+# Action-type SLA defaults for UI benchmark (seconds).
+# WATCH triggers when current is within 10% of SLA, BREACH when current > SLA.
+# Override via pe_config.json: {"benchmark_action_sla": {"Load": 5, "Export": 15, ...}}
+BENCHMARK_ACTION_SLA: dict[str, float] = {
+    "Load":            3.0,
+    "Export":         10.0,
+    "Save":            5.0,
+    "Import":         15.0,
+    "SRE Process Run": 10.0,
+    "Other":           0.0,   # 0 = no SLA for "Other"
+}
 
 # ── Anomaly detection ─────────────────────────────────────────────────────────
 ANOMALY_Z_THRESHOLD: float = 2.0    # z-score cutoff for statistical outliers
@@ -122,16 +134,21 @@ CTRLM_COLUMN_MAP: dict = {
 UTILITY_JOB_PATTERNS: list = [
     # FileWatcher (Ctrl-M native utility — marks data arrival, not batch logic)
     # Matches: filewatcher, file_watcher, ctrl_m_file_watcher, fw_anything, anything_fw
-    "file_watcher", "filewatcher", "ctrl_m_file_watcher", "fw_",
+    "file_watcher", "filewatcher", "ctrl_m_file_watcher", "fw_", "_fw",
     # DB maintenance (backup, restore, index, stats)
     "db_backup", "database_backup", "dbbackup", "db_maint", "db_maintenance",
     "db_restore", "dbcleanup", "db_cleanup", "purge_db", "truncate_log",
     "archive_log", "archive_logs", "db_stats", "update_stats", "rebuild_index",
     "index_rebuild", "shrink_db",
+    # DB stats gathering (e.g. GATHER_DB_STATS_D, GATHER_DB_STATS_W)
+    "gather_db_stats",
+    # Type4 forecast delete (Ctrl-M cleanup utility, not batch SLA job)
+    "delete_type4_fcst", "delete_type",
     # Generic backup jobs (any job whose name contains 'backup')
     "backup",
-    # Export / outbound file delivery (Ctrl-M job that pushes a file, not batch calc)
-    "sftp_export", "sftp_send", "ftp_export", "outbound_file",
+    # Outbound file delivery — always file push, never batch computation
+    # (e.g. EXPORT_OUTBOUND_DEMAND_D, EXPORT_OUTBOUND_FF_D, MOVE_FILE_TO_OUTBOX_D)
+    "export_outbound", "move_file_to_outbox", "outbound_file",
     # Generic export pattern (e.g. export_report, daily_export, file_export)
     "_export", "export_",
     # Health check / monitoring heartbeat (when combined with high frequency → cyclic)

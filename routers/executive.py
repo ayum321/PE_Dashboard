@@ -65,6 +65,31 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
 
     sla_ceiling = float(bk.get("daily_limit_hrs") or pe_config.SLA_DAILY_HRS)
 
+    # ── Per-sub-app ceiling map (BUG-M2/BUG-W5 fix) ─────────────
+    # Prefer the shared build_ceiling_map result stored at compute time;
+    # fall back to building it now from session_cache._batch_sla_xlsx.
+    _ceiling_map: dict[str, float] = {}
+    try:
+        from services import session_cache as _sc_cm
+        from services import compliance_engine as _ce_exec
+        from services import config_store as _cs_exec
+        _ceiling_map = _sc_cm.ac_get("ceiling_map") or {}
+        if not _ceiling_map:
+            _xlsx_cfg = (_cs_exec.get("_batch_sla_xlsx") or
+                         _cs_exec.get("batch_sla_xlsx") or None)
+            _all_sas = list({
+                (j.get("Sub_Application") or j.get("sub_application") or "")
+                for j in top_jobs if (j.get("Sub_Application") or j.get("sub_application"))
+            })
+            if _xlsx_cfg and _all_sas:
+                _ceiling_map = _ce_exec.build_ceiling_map(
+                    sub_applications=_all_sas,
+                    xlsx_config=_xlsx_cfg,
+                    pe_config_ref=pe_config,
+                )
+    except Exception:
+        pass
+
     # ── Averages ────────────────────────────────────────────────
     known = [s for s in servers if _f(s.get("cpu_used")) > 0 or _f(s.get("mem_used")) > 0]
     avg_cpu  = _avg(known, "cpu_used")
@@ -81,20 +106,36 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     # ── Formula 1: RFCS ─────────────────────────────────────────
     rfcs = calc_rfcs(fail_rate, avg_cpu, avg_mem, crit_count)
 
-    # ── Formula 2: SRI per job ───────────────────────────────────
+    # ── Formula 2: SRI per job (per-sub-app ceiling + outlier 3× cap) ──────────
     job_sla_bars = []
     for j in top_jobs[:20]:
+        sub = (j.get("Sub_Application") or j.get("sub_application") or "").upper().strip()
+        job_ceiling = float(_ceiling_map.get(sub) or sla_ceiling)
         peak = _f(j.get("peak_hrs"))
-        buf  = _f(j.get("buffer_pct"), 50.0)
-        sri  = calc_sri(peak, sla_ceiling, avg_cpu)
-        status = "BREACH" if buf < 0 else ("AT_RISK" if buf < 15 else "OK")
+        buf_raw = j.get("buffer_pct")           # None = truly unknown — do NOT default to 50
+
+        # Outlier guard: cap SRI at 1.0 when peak ≥ 3× ceiling (don't break 0–1 scale)
+        if job_ceiling > 0 and peak >= job_ceiling * 3.0:
+            sri    = 1.0
+            status = "BREACH"
+            buf    = min(float(buf_raw) if buf_raw is not None else -1.0, -1.0)
+        else:
+            sri = calc_sri(peak, job_ceiling, avg_cpu)
+            if buf_raw is None:
+                status = "UNKNOWN"
+                buf = None
+            else:
+                buf = float(buf_raw)
+                status = "BREACH" if buf < 0 else ("AT_RISK" if buf < 15 else "OK")
+
         job_sla_bars.append({
-            "job_name":   j.get("Job_Name", "?"),
-            "peak_hrs":   round(peak, 2),
-            "sla_ceiling": sla_ceiling,
-            "buffer_pct": round(buf, 1),
-            "sri":        round(sri, 3),
-            "status":     status,
+            "job_name":    j.get("Job_Name", "?"),
+            "sub_app":     j.get("Sub_Application") or j.get("sub_application", ""),
+            "peak_hrs":    round(peak, 2),
+            "sla_ceiling": round(job_ceiling, 3),
+            "buffer_pct":  round(buf, 1) if buf is not None else None,
+            "sri":         round(sri, 3),
+            "status":      status,
         })
     job_sla_bars.sort(key=lambda x: x["sri"], reverse=True)
 
@@ -109,29 +150,85 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     }
 
     if not hourly_jobs and window:
-        # Fallback heuristic when real hourly data not available
-        total_batch_hrs = sum(_f(w.get("total_hrs")) for w in window)
+        # Fallback heuristic: weighted distribution matching real batch ramp-and-drain shape.
+        # Batch windows typically spike at start (20:00-22:00) then drain through to ~04:00.
+        # GAP-D4: removed flat 0.12 factor and dead total_batch_hrs variable.
         days = len(window) or 1
+        avg_jobs_per_day = total_jobs / days
+        BATCH_HOUR_WEIGHTS = {
+            20: 0.18, 21: 0.16, 22: 0.13, 23: 0.10,
+             0: 0.09,  1: 0.08,  2: 0.07,  3: 0.06,  4: 0.05,
+        }
         for h in range(24):
-            is_batch_window = h >= 20 or h <= 4
-            hourly_jobs[h] = round(total_jobs / days * (0.12 if is_batch_window else 0.02))
+            w_factor = BATCH_HOUR_WEIGHTS.get(h, 0.01)
+            hourly_jobs[h]  = round(avg_jobs_per_day * w_factor)
             hourly_fails[h] = round(hourly_jobs[h] * fail_rate / 100.0)
 
     temporal = calc_jrtos(hourly_jobs, hourly_fails, peak_cpu)
 
-    # ── Formula 4+5: Sub-app metrics (SRI, CRS, RFCS per group) ─
-    sub_app_metrics = build_sub_app_metrics(top_jobs, servers, sla_ceiling)
+    # ── Formula 4+5: Sub-app metrics (BUG-W5 fix — pass ceiling_map for per-sub-app SRI/CRS) ─
+    sub_app_metrics = build_sub_app_metrics(top_jobs, servers, sla_ceiling,
+                                            ceiling_map=_ceiling_map)
 
     # ── OSHS computation ─────────────────────────────────────────
     batch_score    = derive_batch_score(compliance, fail_rate)
     resource_score = derive_resource_score(avg_cpu, avg_mem, avg_disk)
 
-    sla_compliance = _f(sla_data.get("compliance_pct"), compliance)
+    # BUG-M5 fix: use explicit None sentinel — never seed window-level compliance
+    # from job-level compliance. They measure different things.
+    sla_compliance_raw = sla_data.get("compliance_pct")   # None = SLA Matrix not run
     sla_breaches   = int(sla_data.get("breaching_runs") or bk.get("jobs_breach") or 0)
     sla_total      = int(sla_data.get("total_runs") or total_jobs or 1)
-    sla_score      = derive_sla_score(sla_compliance, sla_breaches, sla_total)
+    if sla_compliance_raw is not None:
+        sla_score = derive_sla_score(float(sla_compliance_raw), sla_breaches, sla_total)
+    else:
+        # SLA Matrix not run — derive from batch job-level compliance as best-effort
+        sla_score = derive_sla_score(compliance, sla_breaches, sla_total)
 
     oshs = calc_oshs(batch_score, resource_score, sla_score)
+
+    # BUG-W1 fix: apply findings penalty to OSHS after computation.
+    # Critical findings each penalise 3pts; warnings 0.5pts. Cap at 15pts total.
+    findings_list = body.findings or []
+    _crit_f = [f for f in findings_list if str(f.get("level", "")).lower() == "critical"]
+    _warn_f = [f for f in findings_list if str(f.get("level", "")).lower() == "warning"]
+    findings_penalty = round(min(15.0, len(_crit_f) * 3.0 + len(_warn_f) * 0.5), 1)
+    if findings_penalty > 0:
+        _adj_score = max(0.0, oshs["score"] - findings_penalty)
+        oshs = dict(oshs)
+        oshs["score"]             = round(_adj_score, 1)
+        oshs["findings_penalty"]  = findings_penalty
+        # Re-derive grade from adjusted score
+        if _adj_score >= 90:   oshs["grade"] = "A+"
+        elif _adj_score >= 80: oshs["grade"] = "A"
+        elif _adj_score >= 70: oshs["grade"] = "B"
+        elif _adj_score >= 60: oshs["grade"] = "C"
+        elif _adj_score >= 50: oshs["grade"] = "D"
+        else:                  oshs["grade"] = "F"
+    else:
+        oshs = dict(oshs)
+        oshs["findings_penalty"] = 0.0
+
+    # Patch F — blend findings_penalty_score (from /api/generate-findings) into OSHS
+    # at 20% weight so executive grade stays in sync with findings engine grade.
+    try:
+        from services import session_cache as _sc_exec
+        _fp_score = _sc_exec.ac_get("findings_penalty_score")
+        if _fp_score is not None:
+            _fp = float(_fp_score)
+            oshs["score"] = round(oshs["score"] * 0.80 + _fp * 0.20, 1)
+            oshs["findings_blended"] = True
+            oshs["findings_score"]   = round(_fp, 1)
+            # Re-derive grade after blend
+            _bs = oshs["score"]
+            if _bs >= 90:   oshs["grade"] = "A+"
+            elif _bs >= 80: oshs["grade"] = "A"
+            elif _bs >= 70: oshs["grade"] = "B"
+            elif _bs >= 60: oshs["grade"] = "C"
+            elif _bs >= 50: oshs["grade"] = "D"
+            else:           oshs["grade"] = "F"
+    except Exception:
+        pass
 
     # ── Server Heatmap data ──────────────────────────────────────
     server_heatmap = []
@@ -143,15 +240,17 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
             "disk": round(_f(s.get("disk_used_max")), 1),
         })
 
-    # ── Waterfall data ───────────────────────────────────────────
+    # ── Waterfall data (BUG-M1 fix — targets are 100% of max weight, not 75%) ──
     waterfall = {
         "batch_contribution":    oshs["components"]["batch"]["contribution"],
         "resource_contribution": oshs["components"]["resource"]["contribution"],
         "sla_contribution":      oshs["components"]["sla"]["contribution"],
         "total":                 oshs["score"],
-        "batch_target":    40.0 * 0.75,   # 75% of max weight = target
-        "resource_target": 35.0 * 0.75,
-        "sla_target":      25.0 * 0.75,
+        "batch_target":    40.0,   # max weight = visual ceiling for batch bar
+        "resource_target": 35.0,   # max weight = visual ceiling for resource bar
+        "sla_target":      25.0,   # max weight = visual ceiling for SLA bar
+        "max_score":       100.0,  # anchor — JS must use this, never hardcode
+        "findings_penalty": oshs.get("findings_penalty", 0.0),
     }
 
     # ── KPI strip ────────────────────────────────────────────────
@@ -223,12 +322,13 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         servers=servers,
         window=window,
         sla_ceiling=sla_ceiling,
+        ceiling_map=_ceiling_map,          # Patch G
         findings=body.findings or [],
         customer=body.customer_name or "",
     )
 
     # ── Breach calendar with SLA ceiling overlay ─────────────────
-    breach_calendar = _build_breach_calendar(window, sla_ceiling, top_jobs)
+    breach_calendar = _build_breach_calendar(window, sla_ceiling, top_jobs, _ceiling_map)  # Patch G
 
     # ── Job concurrency timeline (worst day Gantt) ───────────────
     concurrency = _build_concurrency_timeline(
@@ -239,7 +339,7 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     sow_panel = _build_sow_panel(body.sow_compare, bk, rk, servers)
 
     # ── Sub-App Summary table (replaces treemap) ─────────────────
-    sub_app_summary = _build_sub_app_summary(top_jobs, sla_ceiling)
+    sub_app_summary = _build_sub_app_summary(top_jobs, sla_ceiling, _ceiling_map)  # Patch G
 
     # ── Session-cache enrichment: volume_vs_sow + resolved_workflow_df ──
     # These are written by sow.py and sla_matrix.py respectively.
@@ -262,8 +362,9 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         if _volume_vs_sow and isinstance(sow_panel, dict):
             sow_panel["volume_by_year"]    = _volume_vs_sow.get("volume_by_year") or {}
             sow_panel["max_item_locations"] = _volume_vs_sow.get("max_item_locations")
-        # Enrich KPIs with canonical SLA matrix data when not in the body
-        if _workflow_kpis.get("compliance_pct") is not None and kpis.get("sla_breaches") == 0:
+        # BUG-M3 fix: always write canonical compliance when SLA Matrix has run —
+        # never gate on sla_breaches == 0. Breach engagements need the canonical number most.
+        if _workflow_kpis.get("compliance_pct") is not None:
             kpis["sla_compliance_canonical"] = _workflow_kpis["compliance_pct"]
             kpis["sla_breach_days_canonical"] = _workflow_kpis.get("window_breach_days")
     except Exception:
@@ -300,6 +401,7 @@ def _compute_decision_gate(
     servers: List[Dict[str, Any]],
     window: List[Dict[str, Any]],
     sla_ceiling: float,
+    ceiling_map: Dict[str, float] | None = None,
     findings: List[Dict[str, Any]],
     customer: str,
 ) -> Dict[str, Any]:
@@ -312,20 +414,28 @@ def _compute_decision_gate(
       4. Evidence coverage >= 80% (via days covered or confidence)
       5. Zero unresolved critical findings
     """
+    ceiling_map = ceiling_map or {}
+
     # ── 1. Job SLA rate
     job_sla = float(bk.get("compliance_pct") or 100.0)
 
-    # ── 2. Window compliance (re-derive from window list to be authoritative)
-    #    Prefer elapsed_hrs (wall-clock) over total_hrs (summed parallel jobs).
+    # ── 2. Window compliance — re-derive from window list to be authoritative
+    #    Use per-row contracted ceiling via ceiling_map (Patch D key fix).
     total_days = len(window or [])
     def _win_hrs(w):
         e = _f(w.get("elapsed_hrs"))
         return e if e > 0 else _f(w.get("total_hrs"))
-    breach_days = sum(1 for w in (window or [])
-                      if _win_hrs(w) > sla_ceiling
-                      or w.get("breach") is True)
+    def _win_ceiling(w: dict) -> float:
+        _sa = str(w.get("sub_app") or w.get("Sub_Application") or "").upper()
+        return ceiling_map.get(_sa, sla_ceiling)
+
+    breach_days = sum(
+        1 for w in (window or [])
+        if _win_hrs(w) > _win_ceiling(w) or w.get("breach") is True
+    )
+    compliant_days = total_days - breach_days
     if total_days > 0:
-        window_compliance = round(((total_days - breach_days) / total_days) * 100.0, 1)
+        window_compliance = round(compliant_days / total_days * 100.0, 1)
     else:
         window_compliance = float(kpis.get("window_compliance") or 0.0)
 
@@ -505,15 +615,17 @@ def _build_breach_calendar(
     window: List[Dict[str, Any]],
     sla_ceiling: float,
     top_jobs: List[Dict[str, Any]],
+    ceiling_map: Dict[str, float] | None = None,
 ) -> Dict[str, Any]:
     """Per-day window data + SLA ceiling line + summary stats.
 
     Returns:
         days:       [{date, day_of_week, hours, ceiling, over_by, status,
-                      top_jobs: [job1, job2]}]
-        ceiling:    sla_ceiling
-        summary:    "X of Y days breached the Zh SLA ceiling | Worst: ... | Avg: ..."
+                      top_jobs: [job1, job2], sub_app}]
+        ceiling:    global sla_ceiling reference
+        summary:    "X of Y days breached contracted SLA ceiling | Worst: ... | Avg: ..."
     """
+    ceiling_map = ceiling_map or {}
     if not window:
         return {"days": [], "ceiling": sla_ceiling, "summary": "No window data available."}
 
@@ -524,8 +636,7 @@ def _build_breach_calendar(
     worst_hrs = 0.0
     total_hrs = 0.0
 
-    # Map top contributing jobs (top 2 globally — per-day attribution
-    # would require raw row-level data which isn't always present)
+    # Map top contributing jobs (top 2 globally)
     top_2_jobs = [j.get("Job_Name", "?") for j in (top_jobs or [])[:2]]
 
     for w in window:
@@ -535,12 +646,20 @@ def _build_breach_calendar(
             dow = dt.strftime("%a")
         except Exception:
             dow = ""
-        hrs = _f(w.get("elapsed_hrs") or w.get("total_hrs"))
-        over_by = round(hrs - sla_ceiling, 2)
-        if hrs > sla_ceiling:
+        # Prefer elapsed_hrs (wall-clock); only fall back to total_hrs
+        _e = _f(w.get("elapsed_hrs"))
+        _t = _f(w.get("total_hrs"))
+        hrs = _e if _e > 0 else (_t if _t > 0 else 0.0)
+
+        # Per-row contracted ceiling (Patch C key fix)
+        _sa = str(w.get("sub_app") or w.get("Sub_Application") or "").upper()
+        this_ceil = ceiling_map.get(_sa, sla_ceiling)
+        over_by = round(hrs - this_ceil, 2)
+
+        if hrs > this_ceil:
             status = "breach"
             breach_count += 1
-        elif hrs > sla_ceiling * 0.9:
+        elif hrs > this_ceil * 0.9:
             status = "near"
         else:
             status = "ok"
@@ -552,21 +671,22 @@ def _build_breach_calendar(
             "date":         date_str,
             "day_of_week":  dow,
             "hours":        round(hrs, 2),
-            "ceiling":      sla_ceiling,
+            "ceiling":      round(this_ceil, 2),   # per-row contracted ceiling
             "over_by":      over_by,
             "status":       status,
             "top_jobs":     top_2_jobs,
+            "sub_app":      _sa,
         })
 
     avg = round(total_hrs / len(days), 2) if days else 0.0
     summary = (
-        f"{breach_count} of {len(days)} days breached the {sla_ceiling}h SLA ceiling | "
+        f"{breach_count} of {len(days)} days breached contracted SLA ceiling | "
         f"Worst: {worst_day} at {worst_hrs:.1f}h | Avg: {avg}h"
     )
     return {
-        "days":     days,
-        "ceiling":  sla_ceiling,
-        "summary":  summary,
+        "days":         days,
+        "ceiling":      sla_ceiling,   # global reference value
+        "summary":      summary,
         "breach_count": breach_count,
         "total_days":   len(days),
     }
@@ -746,8 +866,10 @@ def _build_sow_panel(
 def _build_sub_app_summary(
     top_jobs: List[Dict[str, Any]],
     sla_ceiling: float,
+    ceiling_map: Dict[str, float] | None = None,
 ) -> Dict[str, Any]:
     """Aggregate top jobs by Sub_Application for a compact 5-row summary."""
+    ceiling_map = ceiling_map or {}
     by_app: Dict[str, Dict[str, Any]] = {}
     for j in top_jobs or []:
         app = (j.get("Sub_Application") or j.get("sub_app")
@@ -762,8 +884,10 @@ def _build_sub_app_summary(
     rows = []
     for app, info in by_app.items():
         peak = info["peak_hrs"]
-        buffer_pct = round(((sla_ceiling - peak) / sla_ceiling) * 100.0, 1) if sla_ceiling else 0.0
-        if peak > sla_ceiling:
+        # Per-sub_app contracted ceiling (Patch E key fix)
+        this_ceiling = ceiling_map.get(app.upper(), sla_ceiling)
+        buffer_pct = round(((this_ceiling - peak) / this_ceiling) * 100.0, 1) if this_ceiling else 0.0
+        if peak > this_ceiling:
             status = "BREACH"
         elif buffer_pct < 15:
             status = "AT_RISK"
@@ -773,7 +897,7 @@ def _build_sub_app_summary(
             "sub_app":      app,
             "job_count":    info["job_count"],
             "peak_hrs":     round(peak, 2),
-            "ceiling":      sla_ceiling,
+            "ceiling":      round(this_ceiling, 2),   # per-sub_app
             "buffer_pct":   buffer_pct,
             "status":       status,
         })

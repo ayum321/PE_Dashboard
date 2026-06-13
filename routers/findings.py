@@ -17,10 +17,14 @@ SLA ceilings read from sla_ceilings dict (uploaded XLSX) > pe_config defaults.
 """
 from __future__ import annotations
 
+import logging
+import traceback
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
+
+log = logging.getLogger("pe_dashboard.findings")
 
 from services.pe_utils import (
     STATUS_COLOR,
@@ -119,10 +123,13 @@ class AuditCoverage(BaseModel):
 
 
 class FindingsResponse(BaseModel):
-    findings:       List[Finding]
-    summary:        FindingsSummary
-    data_coverage:  DataCoverage
-    audit_coverage: Optional[AuditCoverage] = None
+    findings:             List[Finding]
+    summary:              FindingsSummary
+    data_coverage:        DataCoverage
+    audit_coverage:       Optional[AuditCoverage] = None
+    penalty_score:        float = 0.0   # 0-100 unified grade input
+    findings_grade:       str   = ""    # A/B/C/D/F
+    findings_grade_label: str   = ""    # human label
 
 
 def _fmt_hrs(v: float) -> str:
@@ -191,7 +198,8 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         ))
 
     # ─── No data at all ──────────────────────────────────────────────────────
-    if not has_batch and not has_resource:
+    _has_sow_or_bench = bool(req.sow_compare) or bool(req.benchmark) or bool(issues)
+    if not has_batch and not has_resource and not _has_sow_or_bench:
         add("info", "📂",
             "No audit data loaded",
             "Upload a Ctrl-M CSV and/or Resource Utilization report to begin PE audit analysis",
@@ -208,13 +216,27 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     batch_cov   = (req.batch_kpis or {}).get("data_coverage") or None
     if not batch_cov:
         # Frontend sends data_coverage at appData.batch.data_coverage which
-        # is NOT inside batch_kpis.  Fall back to session cache.
+        # is NOT inside batch_kpis. PATCH 1 now enriches batch_kpis with it,
+        # but fall back to session cache for older/stale sessions.
         try:
             from services import session_cache as _sc_cov
             _lb = _sc_cov.get("last_batch") or {}
-            batch_cov = _lb.get("data_coverage")
+            batch_cov = (
+                _lb.get("data_coverage")
+                or (_lb.get("kpis") or {}).get("data_coverage")
+            )
         except Exception:
             pass
+    if not batch_cov and req.batch_kpis:
+        # Final fallback: synthesise minimal coverage from available kpis
+        batch_cov = {
+            "confidence":       req.batch_kpis.get("data_confidence", 100),
+            "confidence_label": "INFERRED",
+            "date_span_days":   req.batch_kpis.get("date_span_days", 0),
+            "has_end_time":     req.batch_kpis.get("has_end_time", False),
+            "sla_source":       "customer" if bool(sla_ceil) else "default",
+            "warnings":         [],
+        }
     sla_loaded  = bool(sla_ceil)
     bench_loaded = bool(req.benchmark)
     sow_loaded   = bool(req.sow_compare)
@@ -1908,25 +1930,55 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         threshold  = _f(bench.get("threshold_pct", 10.0))
         sla_breaches_b = _i(bench.get("sla_breaches", 0))
 
-        red_rows = [r for r in rows if r.get("status") == "RED"]
-        slow_pct = (len(red_rows) / total_tx * 100) if total_tx > 0 else 0
+        # Summary-level fields — present when rows list is absent (template-upload / summary-only shape)
+        b_degraded       = _i(bench.get("degraded") or 0)
+        b_worst_delta    = _f(bench.get("worst_delta_pct") or 0)
+        b_worst_tx       = bench.get("worst_transaction") or bench.get("worst_tx") or "—"
+        b_sla_breach_cnt = _i(bench.get("sla_breach_count") or sla_breaches_b)
 
-        if slow_pct > 20:
+        # Status vocabulary: OK | WATCH | BREACH (legacy: GREEN | AMBER | RED)
+        red_rows   = [r for r in rows if r.get("status") in ("BREACH", "RED")]
+        watch_rows = [r for r in rows if r.get("status") in ("WATCH", "AMBER")]
+        slow_pct   = (len(red_rows) / total_tx * 100) if total_tx > 0 else 0
+        # Summary-based degraded pct (when rows are missing)
+        b_slow_pct = (b_degraded / total_tx * 100) if (not rows and total_tx > 0) else 0
+
+        if slow_pct > 20 or b_slow_pct > 20:
+            _nbreach = len(red_rows) if rows else b_degraded
             add("critical", "🐢",
-                f"Benchmark: {len(red_rows)}/{total_tx} transactions exceed {threshold:.0f}% threshold",
-                f"Severe UI performance degradation ({slow_pct:.1f}% slow) — investigate top offenders",
-                source="benchmark")
-        elif slow_pct > 5 or sla_breaches_b > 0:
-            add("warning", "🐢",
-                f"Benchmark: {len(red_rows)} slow transaction(s) ({slow_pct:.1f}% of total)"
-                + (f" · {sla_breaches_b} SLA breach(es)" if sla_breaches_b else ""),
-                f"Transactions above {threshold:.0f}% deviation from baseline",
+                f"Benchmark: {_nbreach}/{total_tx} transactions in BREACH (>{threshold:.0f}% regression or SLA exceeded)",
+                f"Severe UI performance degradation — investigate top offenders",
+                source="benchmark", evidence_class="measured",
+                root_cause="UI_PERFORMANCE_REGRESSION")
+        elif red_rows or b_sla_breach_cnt > 0 or (not rows and b_degraded > 0 and b_worst_delta > threshold):
+            _nbreach = len(red_rows) or b_degraded
+            _wdstr = (f" · worst: '{b_worst_tx}' +{b_worst_delta:.0f}%"
+                      if not rows and b_worst_tx != "—" else "")
+            add("warning", "📉",
+                f"Benchmark: {_nbreach} BREACH/degraded transaction(s)"
+                + (f" · {b_sla_breach_cnt} SLA breach(es)" if b_sla_breach_cnt else "")
+                + (f" · {len(watch_rows)} on WATCH" if watch_rows else "")
+                + _wdstr,
+                f"Transactions exceeding {threshold:.0f}% regression threshold or contractual SLA"
+                + (f". Worst: '{b_worst_tx}'" if not rows and b_worst_tx != "—" else ""),
+                source="benchmark", evidence_class="measured",
+                root_cause="UI_PERFORMANCE_REGRESSION")
+        elif watch_rows or (not rows and b_worst_delta > threshold):
+            _nw = len(watch_rows) or (1 if b_worst_delta > 0 else 0)
+            _wdstr = (f". Worst: '{b_worst_tx}' +{b_worst_delta:.0f}%"
+                      if not rows and b_worst_tx != "—" else "")
+            add("warning", "👀",
+                f"Benchmark: {_nw}/{total_tx} transaction(s) on WATCH — within 10% of SLA or {threshold:.0f}-{threshold*2:.0f}% regressed"
+                + _wdstr,
+                "No breaches, but these flows are trending toward SLA limits — monitor under production load",
                 source="benchmark")
         elif total_tx > 0:
+            _wdstr = (f" — worst: '{b_worst_tx}' +{b_worst_delta:.0f}%"
+                      if b_worst_tx != "—" and b_worst_delta > 0 else "")
             add("ok", "⚡",
-                f"Benchmark: All {total_tx} transactions within {threshold:.0f}% of baseline",
+                f"Benchmark: All {total_tx} transactions within {threshold:.0f}% of baseline{_wdstr}",
                 "UI performance meets contractual benchmark targets",
-                source="benchmark")
+                source="benchmark", evidence_class="measured")
 
         # Worst offender
         if rows:
@@ -2039,27 +2091,50 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         # SOW data is present — mark coverage.  Contract data (sla_windows,
         # volume_by_year) counts even when compare items are not yet entered.
         cov.sow = True
-        items    = sow_cmp.get("items") or []
-        exceeded = [i for i in items if i.get("zone") in ("HIGH", "EXCEEDS")]
-        low_util = [i for i in items if i.get("zone") in ("LOW", "UNDER")]
-        optimal  = [i for i in items if i.get("zone") in ("OPTIMAL", "OK")]
+        # Support both canonical shape {metrics:[{key,label,sow,actual,pct,status}]}
+        # (from /api/sow/compare and manual entry) and legacy {items:[...]} shape.
+        _raw_items = sow_cmp.get("metrics") or sow_cmp.get("items") or []
+        # Normalise: canonical shape uses {status} directly; legacy may use {zone}.
+        items: list = []
+        for _m in _raw_items:
+            if not isinstance(_m, dict):
+                continue
+            _status = _m.get("status") or _m.get("zone") or ""
+            # Compute status from pct when not already set
+            if not _status and _m.get("pct") is not None:
+                _pct = _f(_m["pct"])
+                _status = ("HIGH" if _pct > 110
+                           else "OPTIMAL" if _pct >= 90
+                           else "ACCEPTABLE" if _pct >= 70
+                           else "LOW")
+            items.append({**_m, "status": _status, "label": _m.get("label") or _m.get("key") or "?"})
+        # Standard: 70%-110% = acceptable window. Only outside this needs review.
+        exceeded = [i for i in items if i.get("status") in ("HIGH", "EXCEEDS")]
+        low_util = [i for i in items if i.get("status") in ("LOW", "UNDER")]
+        in_range = [i for i in items if i.get("status") in ("OPTIMAL", "ACCEPTABLE")]
 
         if exceeded:
-            names = ", ".join(i.get("metric") or "?" for i in exceeded[:3])
+            names = ", ".join(i.get("label") or i.get("metric") or "?" for i in exceeded[:3])
             add("critical", "📈",
-                f"SOW exceeded: {len(exceeded)} metric(s) above contract ceiling",
-                f"Metrics: {names} — volume above 110% of contracted SOW, commercial review required",
-                source="sow")
-        elif low_util:
-            names = ", ".join(i.get("metric") or "?" for i in low_util[:3])
+                f"SOW volume above 110% ceiling: {len(exceeded)} metric(s) exceed contracted limit",
+                f"Metrics: {names} — above 110% of approved SOW. Per standard process, "
+                f"consumption must remain within 70%-110%. Formal review and acknowledgment required.",
+                source="sow",
+                recommendation="Raise commercial review with client. Document deviation formally before sign-off.",
+                evidence_class="measured")
+        if low_util:
+            names = ", ".join(i.get("metric") or i.get("label") or "?" for i in low_util[:3])
             add("warning", "📉",
-                f"SOW under-utilised: {len(low_util)} metric(s) below 70%",
-                f"Metrics: {names} — validate actuals with client before sign-off",
-                source="sow")
-        elif optimal:
+                f"SOW volume below 70% floor: {len(low_util)} metric(s) under-utilised",
+                f"Metrics: {names} — below 70% of approved SOW. Per standard process, "
+                f"consumption must remain within 70%-110%. Formal acknowledgment required.",
+                source="sow",
+                recommendation="Validate test scenarios are representative. Formally acknowledge deviation with client.",
+                evidence_class="measured")
+        if in_range and not exceeded and not low_util:
             add("ok", "📊",
-                f"SOW utilisation optimal: {len(optimal)} metric(s) in 90–110% zone",
-                "Volume consumption aligns with contracted SOW targets",
+                f"SOW utilisation within 70%-110% standard process window: {len(in_range)} metric(s)",
+                "Volume consumption aligns with contracted SOW targets — no formal review required.",
                 source="sow")
 
     # ── Legacy SOW DFU direct check ───────────────────────────────────────────
@@ -2674,6 +2749,38 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     summary="Run rule-based PE Audit Findings engine v2",
 )
 async def generate_findings(body: FindingsRequest) -> FindingsResponse:
+    try:
+        return await _generate_findings_impl(body)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        log.error("generate_findings: unhandled exception — %s\n%s", exc, tb)
+        # Return a valid response with a single error finding rather than a 500.
+        # This keeps the UI functional while the RCA is logged above.
+        err_finding = Finding(
+            level="warning", icon="⚠️",
+            text=f"Findings engine error: {type(exc).__name__}: {str(exc)[:120]}",
+            sub="An unexpected error occurred in the PE Findings rule engine. "
+                "Check server logs for the full traceback. Re-upload source files and retry.",
+            source="", confidence=0, evidence_class="unavailable",
+            root_cause="ENGINE_ERROR",
+        )
+        return FindingsResponse(
+            findings=[err_finding],
+            summary=FindingsSummary(warning=1, total=1),
+            data_coverage=DataCoverage(),
+            audit_coverage=AuditCoverage(
+                evidence_30day="missing", sla_source="missing",
+                waivers="missing", ui_signoff="missing",
+                automation_status="missing", volume_vs_sow="missing",
+                confidence=0, confidence_label="INSUFFICIENT",
+            ),
+            penalty_score=0.0,
+            findings_grade="F",
+            findings_grade_label="ERROR — check server logs",
+        )
+
+
+async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
     findings, cov = _generate(body)
     summary = FindingsSummary(
         critical=sum(1 for f in findings if f.level == "critical"),
@@ -2759,9 +2866,35 @@ async def generate_findings(body: FindingsRequest) -> FindingsResponse:
         confidence_label  = _conf_label,
     )
 
+    # ── Patch I: Unified grade computation ────────────────────────────────────
+    _n_crit = sum(1 for f in findings if f.level == "critical")
+    _n_warn = sum(1 for f in findings if f.level == "warning")
+    _n_ok   = sum(1 for f in findings if f.level == "ok")
+    penalty_score = max(0.0, min(100.0,
+        100.0 - (_n_crit * 15.0) - (_n_warn * 5.0) + (_n_ok * 2.0)
+    ))
+    if   penalty_score >= 90: _grade, _glabel = "A", "APPROVED"
+    elif penalty_score >= 75: _grade, _glabel = "B", "APPROVED WITH NOTES"
+    elif penalty_score >= 60: _grade, _glabel = "C", "CONDITIONAL HOLD"
+    elif penalty_score >= 45: _grade, _glabel = "D", "BLOCKED — MINOR"
+    else:                      _grade, _glabel = "F", "BLOCKED — MAJOR"
+    # Persist so executive.py can blend it into OSHS (Patch F)
+    try:
+        from services import session_cache as _sc_f
+        _sc_f.ac_set("findings_penalty_score", round(penalty_score, 1))
+    except Exception:
+        pass
+    # ── end grade ─────────────────────────────────────────────────────────────
+
+    # Patch J: include penalty_score fields in response
     resp = FindingsResponse(
-        findings=findings, summary=summary,
-        data_coverage=cov, audit_coverage=audit_cov,
+        findings             = findings,
+        summary              = summary,
+        data_coverage        = cov,
+        audit_coverage       = audit_cov,
+        penalty_score        = round(penalty_score, 1),
+        findings_grade       = _grade,
+        findings_grade_label = _glabel,
     )
     # Cache so agent tools can list/read findings without recomputing.
     try:
@@ -2778,6 +2911,19 @@ async def generate_findings(body: FindingsRequest) -> FindingsResponse:
     summary="Apply FINDINGS OUTPUT RULES + Gemma verdict to the rule engine",
 )
 async def smart_findings(body: FindingsRequest) -> dict:
+    """Run the rule engine, then post-process via services.smart_findings."""
+    try:
+        return await _smart_findings_impl(body)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        log.error("smart_findings: unhandled exception — %s\n%s", exc, tb)
+        return {
+            "findings": [], "verdict": {}, "next_actions": [], "open_gaps": [],
+            "_error": f"{type(exc).__name__}: {str(exc)[:120]}",
+        }
+
+
+async def _smart_findings_impl(body: FindingsRequest) -> dict:
     """Run the rule engine, then post-process via services.smart_findings.
 
     The deterministic dedup + verdict + next-actions runs in-process.

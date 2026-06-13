@@ -1013,30 +1013,21 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 wdf["run_date"] = wdf["Start_Time"].dt.strftime("%Y-%m-%d")
 
             # Fix #3: use per-Sub_Application resolved SLA for the breach comparison.
-            # Comparing all workflows to global_sla_hrs (the UI-mode SLA) produces
-            # false BREACHes when e.g. WEEKLY 7h runs are compared to UI "Daily (4h)".
-            # Build a Sub_Application → resolved_sla_hrs lookup from _bsla_exact or
-            # detect_batch_type fallback.
-            _sub_sla_lookup: dict[str, float] = {}
+            # build_ceiling_map() is the SHARED source of truth — same function used by
+            # batch_calculator — so Batch Review and SLA Matrix can never diverge.
             _sub_apps_all = wdf["Sub_Application"].dropna().unique().tolist() if "Sub_Application" in wdf.columns else []
-            for _sa in _sub_apps_all:
-                _sa_norm = _norm(_sa) if callable(vars().get("_norm")) else str(_sa).strip().upper()
-                if _sa_norm in _bsla_exact:
-                    _sub_sla_lookup[str(_sa)] = _bsla_exact[_sa_norm][0]
-                else:
-                    # Fallback: detect batch_type → pe_config default
-                    try:
-                        from services.sla_merger import detect_batch_type as _dbt_w
-                        from services import pe_config as _pc_w
-                        _bt_w = _dbt_w(_sa_norm, "")
-                        _sub_sla_lookup[str(_sa)] = {
-                            "DAILY": _pc_w.SLA_DAILY_HRS,
-                            "WEEKLY": _pc_w.SLA_WEEKLY_HRS,
-                            "BIWEEKLY": _pc_w.SLA_BIWEEKLY_HRS if hasattr(_pc_w, "SLA_BIWEEKLY_HRS") else _pc_w.SLA_WEEKLY_HRS,
-                            "MONTHLY": _pc_w.SLA_MONTHLY_HRS if hasattr(_pc_w, "SLA_MONTHLY_HRS") else _pc_w.SLA_WEEKLY_HRS,
-                        }.get(_bt_w, global_sla_hrs)
-                    except Exception:
-                        _sub_sla_lookup[str(_sa)] = global_sla_hrs
+            try:
+                from services import compliance_engine as _ce_slm
+                from services import config_store as _cs_slm
+                from services import pe_config as _pc_slm
+                _sub_sla_lookup: dict[str, float] = _ce_slm.build_ceiling_map(
+                    sub_applications=_sub_apps_all,
+                    xlsx_config=_cs_slm.get("_batch_sla_xlsx") or None,
+                    pe_config_ref=_pc_slm,
+                )
+            except Exception:
+                # Safe fallback — use global SLA for all sub_apps
+                _sub_sla_lookup = {str(_sa): global_sla_hrs for _sa in _sub_apps_all}
 
             # Per-Sub_Application window: group by (Sub_Application, run_date), then
             # compare elapsed to the sub_app-specific SLA. Roll up to per-run_date
@@ -1076,14 +1067,29 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     wgrp["elapsed_hrs"] = (
                         (wgrp["last_end"] - wgrp["first_start"]).dt.total_seconds() / 3600.0
                     ).clip(lower=0).round(3)
-                    wgrp["breach"] = wgrp["elapsed_hrs"] > global_sla_hrs
-                    wgrp["sla_hrs"] = global_sla_hrs
+                    # Use build_ceiling_map fallback (schedule-type default) not global_sla_hrs
+                    # so WEEKLY jobs don't get flagged as breached against a daily ceiling.
+                    try:
+                        from services import compliance_engine as _ce_fb
+                        from services import config_store as _cs_fb
+                        from services import pe_config as _pc_fb
+                        _fallback_ceil_map = _ce_fb.build_ceiling_map(
+                            sub_applications=["BATCH"],
+                            xlsx_config=_cs_fb.get("_batch_sla_xlsx") or None,
+                            pe_config_ref=_pc_fb,
+                        )
+                        _fallback_ceil = _fallback_ceil_map.get("BATCH", global_sla_hrs)
+                    except Exception:
+                        _fallback_ceil = global_sla_hrs
+                    wgrp["breach"] = wgrp["elapsed_hrs"] > _fallback_ceil
+                    wgrp["sla_hrs"] = _fallback_ceil
 
             if not wgrp.empty:
                 w_total_days = len(wgrp)
                 w_breach_days = int(wgrp["breach"].sum())
-                if w_total_days > 0:
-                    window_comp_pct = round((1 - w_breach_days / w_total_days) * 100, 1)
+                # PROMPT 3: Do NOT compute window_comp_pct from local formula.
+                # compliance_engine is the sole authoritative source. If it fails,
+                # window_comp_pct stays None → headline shows "—" (not a wrong number).
                 w_detail_list = [
                     {"run_date": idx,
                      "elapsed_hrs": round(float(r["elapsed_hrs"]), 3),
@@ -1093,9 +1099,8 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     for idx, r in wgrp.iterrows()
                 ]
 
-                # ── Canonical window compliance via SHARED engine ───────────
-                # Identical (sub_app, date)-granular definition used by the Batch
-                # Review tab (batch_calculator). Guarantees the two tabs agree.
+                # ── Canonical window compliance via SHARED engine (sole path) ─
+                # If compliance_engine raises, window_comp_pct stays None.
                 if not wgrp_sub.empty:
                     try:
                         from services import compliance_engine as _ce
@@ -1106,10 +1111,10 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                              "sla_ceil":    float(r["resolved_sla"])}
                             for _, r in wgrp_sub.iterrows()
                         ]
-                        _ceil_map = {
-                            str(sa): float(v) for sa, v in _sub_sla_lookup.items()
-                        }
-                        _wc = _ce.compute_window_compliance(_win_recs, _ceil_map)
+                        # Use the SAME ceiling map built by build_ceiling_map() above
+                        # — keys are already UPPER, but compliance_engine looks up by
+                        # the exact sub_app string in the record, so pass as-is.
+                        _wc = _ce.compute_window_compliance(_win_recs, _sub_sla_lookup)
                         window_comp_pct = _wc["compliance_pct"]
                         w_total_days    = _wc["total_windows"]
                         w_breach_days   = _wc["breach_count"]

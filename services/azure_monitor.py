@@ -46,7 +46,17 @@ _socket.getaddrinfo = _ipv4_getaddrinfo
 # msal/oauth2cli/authcode.py:63 calls platform.uname() for is_wsl detection.
 import platform as _platform
 _platform.platform = lambda aliased=False, terse=False: "Windows"
-_platform.uname    = lambda: _platform.uname_result("Windows","","","","","")
+# uname_result constructor arity differs across Python versions (3.14 takes 5
+# positional args, 'processor' is computed lazily) — probe instead of hardcoding.
+_uname_stub = None
+for _n in (5, 6):
+    try:
+        _uname_stub = _platform.uname_result(*(["Windows"] + [""] * (_n - 1)))
+        break
+    except TypeError:
+        continue
+if _uname_stub is not None:
+    _platform.uname = lambda: _uname_stub
 
 # Fix 3: msal_extensions DPAPI hang — FilePersistenceWithDataProtection → CryptProtectData
 # hangs on Python 3.14 free-threaded. Replace with plain FilePersistence before any import.
@@ -983,9 +993,14 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
 
 
 def fetch_vm_timeseries(credential, resource_ids: List[str],
-                        hours_back: int) -> Dict[str, Any]:
+                        hours_back: int,
+                        start_utc: Optional[datetime] = None,
+                        end_utc: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Fetch time-series data + spike detection for a list of VMs.
+    
+    When start_utc/end_utc are provided they override hours_back for the
+    query window (used for custom time-range deep dives from the UI).
     
     Returns {
       vm_name: {
@@ -1000,8 +1015,14 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
     import time as _t
 
     client = MetricsQueryClient(credential)
-    end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(hours=hours_back)
+    if start_utc and end_utc:
+        end_time = end_utc
+        start_time = start_utc
+        # Derive effective hours_back for granularity selection
+        hours_back = max(1, int((end_time - start_time).total_seconds() / 3600))
+    else:
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=hours_back)
 
     # Use finer granularity for shorter time ranges
     if hours_back <= 1:
@@ -1014,6 +1035,9 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         granularity = timedelta(hours=1)
     else:
         granularity = timedelta(hours=1)
+
+    if not resource_ids:
+        return {"vms": {}, "patterns": [], "baseline": {}}
 
     t0 = _t.perf_counter()
     result = {}
@@ -1808,3 +1832,70 @@ def _build_server_records(credential, vms: List[dict],
     total_time = _time.perf_counter() - t0
     logger.info("Azure fetch complete — %d servers in %.1fs (metrics: %.1fs)", len(servers), total_time, t_metrics)
     return servers
+
+
+# ─────────────────────────────────────────────────────────────────
+# VM inventory pre-warm cache
+# ─────────────────────────────────────────────────────────────────
+# Populated by prewarm_vm_inventory (background, triggered after login).
+# clear_vm_inventory_cache wipes it on logout / credential change.
+# get_vm_prewarm_state returns the current state for the polling endpoint.
+
+_vm_inventory_cache: Dict[str, Any] = {}
+_vm_prewarm_state: Dict[str, Any] = {"status": "idle", "vm_count": 0, "ts": 0.0, "error": None}
+_vm_prewarm_lock = __import__("threading").Lock()
+
+
+def clear_vm_inventory_cache() -> None:
+    """Wipe the VM inventory cache so a different user/credential never sees stale data."""
+    global _vm_inventory_cache, _vm_prewarm_state
+    with _vm_prewarm_lock:
+        _vm_inventory_cache.clear()
+        _vm_prewarm_state = {"status": "idle", "vm_count": 0, "ts": 0.0, "error": None}
+
+
+def get_vm_prewarm_state() -> Dict[str, Any]:
+    """Return the current VM pre-warm status (no network call)."""
+    with _vm_prewarm_lock:
+        return dict(_vm_prewarm_state)
+
+
+def prewarm_vm_inventory(credential, subscription_id: str,
+                         resource_group: Optional[str] = None) -> None:
+    """Background: discover all VMs and cache them so search is instantaneous.
+
+    Runs discover_vms() once and stores the result in _vm_inventory_cache.
+    Subsequent calls to search_vms can check the cache first before hitting Azure.
+    """
+    import threading as _threading
+
+    def _worker():
+        global _vm_prewarm_state
+        with _vm_prewarm_lock:
+            if _vm_prewarm_state.get("status") == "warming":
+                return  # already running
+            _vm_prewarm_state = {"status": "warming", "vm_count": 0, "ts": __import__("time").time(), "error": None}
+        try:
+            cfg = {"credential": credential, "subscription_id": subscription_id}
+            vms = discover_vms(cfg, resource_group=resource_group)
+            with _vm_prewarm_lock:
+                _vm_inventory_cache.clear()
+                _vm_inventory_cache[subscription_id] = vms
+                _vm_prewarm_state = {
+                    "status": "ready",
+                    "vm_count": len(vms),
+                    "ts": __import__("time").time(),
+                    "error": None,
+                }
+            logger.info("VM inventory pre-warm complete — %d VMs cached for sub %s", len(vms), subscription_id)
+        except Exception as _e:
+            with _vm_prewarm_lock:
+                _vm_prewarm_state = {
+                    "status": "error",
+                    "vm_count": 0,
+                    "ts": __import__("time").time(),
+                    "error": str(_e),
+                }
+            logger.warning("VM inventory pre-warm failed: %s", _e)
+
+    _threading.Thread(target=_worker, daemon=True).start()

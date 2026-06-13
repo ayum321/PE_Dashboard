@@ -1,16 +1,21 @@
 """
-Shared window compliance calculation.
+Shared window compliance calculation AND ceiling-map construction.
 
 Both batch_calculator.compute_metrics() and sla_matrix._compute_sla_matrix()
-import and call compute_window_compliance() here.  No file computes compliance
-independently — the numbers on the Batch Review tab and SLA Matrix tab are
-always identical for the same data.
+import from here.  No module builds its own ceiling map independently — the
+numbers on the Batch Review tab and SLA Matrix tab are always identical for
+the same data.
 
 Formula (canonical):
     denominator = unique (sub_app, run_date) pairs where schedule_type is NOT
                   in pe_config.COMPLIANCE_EXCLUDED_TYPES
     numerator   = denominator rows where actual_window_hrs <= sla_ceiling_hrs
     compliance% = numerator / denominator × 100
+
+Ceiling map resolution (canonical, highest → lowest priority):
+    1. XLSX workflow SLA  — fuzzy substring match against _batch_sla_xlsx workflows
+    2. Schedule-type      — classify_schedule(sub_app) → DAILY/WEEKLY pe_config hours
+    3. DAILY default      — pe_config.SLA_DAILY_HRS
 """
 from __future__ import annotations
 
@@ -108,3 +113,87 @@ def compute_window_compliance(
         "total_windows":    total_windows,
         "excluded_windows": excluded_windows,
     }
+
+
+def build_ceiling_map(
+    sub_applications: List[str],
+    xlsx_config: Optional[Dict[str, Any]] = None,
+    pe_config_ref=None,
+) -> Dict[str, float]:
+    """Build a {sub_app_upper: sla_hrs} ceiling map.
+
+    Single source of truth used by both batch_calculator.compute_metrics()
+    and sla_matrix._compute_sla_matrix() so the two tabs never diverge.
+
+    Resolution priority (highest → lowest):
+        1. XLSX workflow SLA — fuzzy substring match against _batch_sla_xlsx workflows
+        2. Schedule-type default — classify_schedule() → DAILY/WEEKLY pe_config hours
+        3. DAILY default from pe_config
+
+    Parameters
+    ----------
+    sub_applications:
+        List of unique Sub_Application values from the Ctrl-M DataFrame.
+    xlsx_config:
+        Parsed _batch_sla_xlsx dict (from config_store). May be None when no
+        BatchSLA XLSX has been uploaded — falls back to schedule-type defaults.
+    pe_config_ref:
+        Reference to services.pe_config module. If None, it is imported lazily.
+        Passed explicitly so callers can inject a reloaded instance.
+
+    Returns
+    -------
+    Dict mapping sub_app (UPPER) → contracted SLA hours (float).
+    """
+    if pe_config_ref is None:
+        try:
+            from services import pe_config as pe_config_ref  # type: ignore[assignment]
+        except Exception:
+            pe_config_ref = None  # type: ignore[assignment]
+
+    # Safe schedule-type → hours lookup
+    def _sched_hrs(sub_app: str) -> float:
+        try:
+            from services.sla_engine import classify_schedule as _cs
+            stype = _cs(sub_app)
+        except Exception:
+            stype = "DAILY"
+        defaults: Dict[str, float] = {
+            "DAILY":         getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
+            "WEEKLY":        getattr(pe_config_ref, "SLA_WEEKLY_HRS",  8.0),
+            "TWICE_DAILY":   getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
+            "BIWEEKLY":      getattr(pe_config_ref, "SLA_BIWEEKLY_HRS", 8.0),
+            "MONTHLY":       getattr(pe_config_ref, "SLA_MONTHLY_HRS", 24.0),
+        }
+        return defaults.get(stype, getattr(pe_config_ref, "SLA_DAILY_HRS", 6.0))
+
+    # Step 1 — build XLSX pattern → sla_hrs lookup
+    _xlsx_pairs: List[tuple] = []   # [(pattern_upper, sla_hrs)]
+    if xlsx_config:
+        for wf in xlsx_config.get("workflows") or []:
+            # Accept all known field-name variants from parse_batch_sla_xlsx()
+            pat = str(
+                wf.get("workflow") or wf.get("sub_app_pattern") or ""
+            ).upper().strip()
+            sla_h = float(
+                wf.get("sla_hours") or wf.get("window_sla_hrs") or wf.get("sla_hrs") or 0
+            )
+            if pat and sla_h > 0:
+                _xlsx_pairs.append((pat, sla_h))
+
+    ceiling_map: Dict[str, float] = {}
+    for sa in sub_applications:
+        sa_upper = str(sa).upper()
+        # Priority 1: fuzzy substring match against XLSX workflow patterns
+        matched: Optional[float] = None
+        for pat, sla_h in _xlsx_pairs:
+            if pat in sa_upper or sa_upper in pat:
+                matched = sla_h
+                break
+        if matched is not None:
+            ceiling_map[sa_upper] = matched
+        else:
+            # Priority 2 / 3: schedule-type default
+            ceiling_map[sa_upper] = _sched_hrs(sa)
+
+    return ceiling_map

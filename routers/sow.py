@@ -64,10 +64,20 @@ _LABELS = {
 }
 
 def _status(pct: float) -> str:
-    if pct < 70:   return "LOW"
-    if pct < 90:   return "MODERATE"
-    if pct <= 110: return "OPTIMAL"
-    return "HIGH"
+    """Classify SOW consumption against the 70%–110% standard process window.
+
+    Standard: consumption at UAT must remain within 70%-110% of approved SOW
+    limits. Anything outside this range requires formal review and acknowledgment.
+
+    LOW       < 70%    — below standard floor, formal acknowledgment required
+    ACCEPTABLE 70–90%  — within 70-110% acceptable window (lower end)
+    OPTIMAL   90–110%  — preferred zone within 70-110% window
+    HIGH      > 110%   — above standard ceiling, formal acknowledgment required
+    """
+    if pct < 70:   return "LOW"        # deviation — below 70% floor
+    if pct < 90:   return "ACCEPTABLE" # within standard 70-110% window
+    if pct <= 110: return "OPTIMAL"    # preferred zone within standard window
+    return "HIGH"                      # deviation — above 110% ceiling
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -223,21 +233,29 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
         return SowCompareResponse(metrics=[], overall_status="N/A",
                                   summary="No SOW baseline values set. Enter targets in the form above.")
 
-    highs    = sum(1 for m in metrics if m.status == "HIGH")
-    lows     = sum(1 for m in metrics if m.status == "LOW")
-    optimals = sum(1 for m in metrics if m.status == "OPTIMAL")
+    highs       = sum(1 for m in metrics if m.status == "HIGH")
+    lows        = sum(1 for m in metrics if m.status == "LOW")
+    optimals    = sum(1 for m in metrics if m.status == "OPTIMAL")
+    acceptables = sum(1 for m in metrics if m.status == "ACCEPTABLE")
+    in_range    = optimals + acceptables  # 70-110% = within standard window
+
     if highs > 0:
         overall = "HIGH"
-        summary = f"⚠️ {highs} metric(s) exceeding SOW baseline — review capacity and contract scope."
+        summary = (f"⚠️ {highs} metric(s) above 110% of SOW — outside 70%-110% standard process window. "
+                   f"Formal review and acknowledgment required per PE standard process.")
     elif lows > len(metrics) // 2:
         overall = "LOW"
-        summary = f"📉 {lows}/{len(metrics)} metrics under-utilised vs SOW. Verify test scenarios are representative."
-    elif optimals >= len(metrics) * 0.7:
+        summary = (f"📉 {lows}/{len(metrics)} metrics below 70% of SOW — outside 70%-110% standard process window. "
+                   f"Verify test scenarios are representative. Formal acknowledgment required.")
+    elif in_range >= len(metrics) * 0.7:
         overall = "OPTIMAL"
-        summary = f"✅ {optimals}/{len(metrics)} metrics within optimal SOW range. Go-live confidence HIGH."
+        summary = (f"✅ {in_range}/{len(metrics)} metrics within 70%-110% SOW standard process window "
+                   f"({optimals} in preferred 90-110% zone, {acceptables} in 70-90% acceptable range). "
+                   f"Go-live confidence HIGH.")
     else:
         overall = "MODERATE"
-        summary = f"🟡 Mixed results — {optimals} optimal, {lows} under-utilised, {highs} over SOW."
+        summary = (f"🟡 Mixed results — {in_range} within 70-110% window, {lows} below 70%, {highs} above 110%. "
+                   f"Deviations require formal review and acknowledgment.")
 
     resp = SowCompareResponse(metrics=metrics, overall_status=overall, summary=summary)
     try:

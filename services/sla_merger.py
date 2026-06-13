@@ -60,7 +60,8 @@ _DETECT_PRIORITY = ["ADHOC", "BIWEEKLY", "QUARTERLY", "MONTHLY", "WEEKLY", "OUTB
 
 
 def _strip_env_prefix(name: str) -> str:
-    """Strip known environment prefixes (PROD_, TEST_, UAT_, etc.) from a job name."""
+    """Strip known environment prefixes (PROD_, TEST_, UAT_, etc.) and
+    leading year-number tokens (e.g. 2025_) from a job name."""
     try:
         from services import pe_config
         prefixes = pe_config.ENV_PREFIXES_TO_STRIP
@@ -69,7 +70,11 @@ def _strip_env_prefix(name: str) -> str:
     upper = name.upper()
     for pfx in prefixes:
         if upper.startswith(pfx.upper()):
-            return name[len(pfx):]
+            name = name[len(pfx):]
+            upper = name.upper()
+            break
+    # Strip leading 4-digit year token (e.g. "2025_DAILY_DMD" → "DAILY_DMD")
+    name = re.sub(r'^\d{4}[_\-]', '', name)
     return name
 
 
@@ -942,6 +947,30 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
             _sheets_used.append(_sheet_name)
 
     _explicit = sum(1 for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX")
+    # ── Engine-based SLA enrichment ────────────────────────────────────────────
+    # When no explicit SLA column was found (time-window XLSX format), use the
+    # SLA intelligence engine to extract per-workflow SLA hours from Start/End
+    # time columns.  This handles customers like Harry's USA who express SLA as
+    # a batch window (e.g. 00:00–08:00 = 8h) rather than a numeric "Expected SLA" column.
+    if _explicit == 0 and workflows:
+        try:
+            from services.sla_engine import ingest_sla_file as _ise_enrich
+            _intel = _ise_enrich(raw_bytes, filename)
+            if _intel.valid_rows > 0 and _intel.contracts:
+                _eng_map = {
+                    c.batch_name.upper(): c.sla_window_hrs
+                    for c in _intel.contracts
+                    if c.batch_name and c.sla_window_hrs and c.sla_window_hrs > 0
+                }
+                if _eng_map:
+                    for w in workflows:
+                        wf_key = _strip_env_prefix(w.get("workflow") or "").upper()
+                        if wf_key in _eng_map:
+                            w["sla_hours"] = _eng_map[wf_key]
+                            w["sla_source"] = "BATCH_SLA_XLSX"
+                    _explicit = sum(1 for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX")
+        except Exception:
+            pass
     _fallback = sum(1 for w in workflows if w.get("sla_source") in ("SOW_EXTRACTED", "GLOBAL_DEFAULT"))
     if _fallback > 0 and _explicit == 0:
         warnings.append(
