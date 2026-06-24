@@ -13978,10 +13978,34 @@ function _renderSlaCommitmentsPanel() {
   const slaW         = sowContract.sla_windows || {};
   const workflows    = batchSlaInfo.workflows  || [];
 
-  const hasSOW   = Object.keys(slaW).length > 0;
-  const hasBatch = workflows.length > 0;
+  const hasSOW    = Object.keys(slaW).length > 0;
+  const hasBatch  = workflows.length > 0;
+  const hasManual = Object.values(slaW).some(e => e?.source === "MANUAL");
 
-  if (!hasSOW && !hasBatch) return; // nothing to show yet
+  // Restore manual override ACTIVE badge if manual values are stored in appData
+  if (hasManual) {
+    const badge = document.getElementById("sla-manual-active-badge");
+    if (badge) badge.classList.remove("hidden");
+    // Auto-open the manual panel body so user sees what's active
+    const body    = document.getElementById("sla-manual-body");
+    const chevron = document.getElementById("sla-manual-chevron");
+    if (body?.classList.contains("hidden")) {
+      body.classList.remove("hidden");
+      if (chevron) chevron.style.transform = "rotate(180deg)";
+    }
+    // Restore field values + SET tags
+    const fieldMap = { DAILY: "daily", WEEKLY: "weekly", MONTHLY: "monthly" };
+    Object.entries(fieldMap).forEach(([k, t]) => {
+      if (slaW[k]?.source === "MANUAL") {
+        const inp = document.getElementById(`sla-manual-${t}`);
+        const tag = document.getElementById(`sla-manual-${t}-tag`);
+        if (inp && !inp.value) inp.value = slaW[k].limit_hours;
+        if (tag) tag.classList.remove("hidden");
+      }
+    });
+  }
+
+  if (!hasSOW && !hasBatch) return; // nothing to show in commitments panel
   panel.classList.remove("hidden");
 
   // ── Tier 2: SOW windows ──────────────────────────────────────────────
@@ -13990,8 +14014,13 @@ function _renderSlaCommitmentsPanel() {
     if (hasSOW) {
       const slaColors = { DAILY: "Ccyan", WEEKLY: "Cblue", MONTHLY: "Cpurple", BIWEEKLY: "Cteal" };
       sowEl.innerHTML = Object.entries(slaW).map(([btype, entry]) => {
-        const hrs = entry.limit_hours ?? entry;
-        const col = slaColors[btype] || "Ccyan";
+        const hrs    = entry.limit_hours ?? entry;
+        const col    = slaColors[btype] || "Ccyan";
+        const isMan  = entry?.source === "MANUAL";
+        const badgeCls = isMan
+          ? "bg-Camber/15 border-Camber/40 text-Camber"
+          : `bg-${col}/15 border-${col}/30 text-${col}`;
+        const badgeTxt = isMan ? "⚡ MANUAL" : "Tier 2 · SOW";
         return `<div class="flex items-center justify-between rounded-lg border border-${col}/20 bg-${col}/5 px-3 py-2">
           <div class="flex items-center gap-2">
             <span class="text-[10px] font-bold uppercase text-${col}">${_esc(btype)}</span>
@@ -13999,7 +14028,7 @@ function _renderSlaCommitmentsPanel() {
           </div>
           <div class="flex items-center gap-3">
             <span class="text-sm font-extrabold font-mono text-${col}">${hrs}h</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-${col}/15 border border-${col}/30 text-${col} font-semibold">Tier 2 · SOW</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded-full border font-semibold ${badgeCls}">${badgeTxt}</span>
           </div>
         </div>`;
       }).join("");
@@ -14356,6 +14385,60 @@ function _renderSlaCommitmentsPanel() {
   }
 }
 
+// ── Manual SLA Override toggle ────────────────────────────────────────────────
+window._toggleSlaManual = function() {
+  const body    = document.getElementById("sla-manual-body");
+  const chevron = document.getElementById("sla-manual-chevron");
+  if (!body) return;
+  const isOpen = !body.classList.contains("hidden");
+  body.classList.toggle("hidden", isOpen);
+  if (chevron) chevron.style.transform = isOpen ? "rotate(0deg)" : "rotate(180deg)";
+};
+
+// Per-field SET badge on input change
+window._slaManualInputChange = function(type, val) {
+  const tag = document.getElementById(`sla-manual-${type}-tag`);
+  const card = document.getElementById(`sla-manual-${type}-card`);
+  const filled = val !== "" && !isNaN(parseFloat(val));
+  if (tag)  tag.classList.toggle("hidden", !filled);
+  // subtle glow on card when filled
+  if (card) {
+    const glowMap = { daily: "ring-Cblue/20", weekly: "ring-Cpurple/20", monthly: "ring-Cteal/20" };
+    if (filled) card.style.boxShadow = "";
+    else card.style.boxShadow = "";
+  }
+};
+
+// Clear all manual fields + badges + ACTIVE badge
+window._clearSlaManual = function() {
+  ["daily", "weekly", "monthly"].forEach(t => {
+    const inp = document.getElementById(`sla-manual-${t}`);
+    const tag = document.getElementById(`sla-manual-${t}-tag`);
+    if (inp) inp.value = "";
+    if (tag) tag.classList.add("hidden");
+  });
+  const badge = document.getElementById("sla-manual-active-badge");
+  if (badge) badge.classList.add("hidden");
+  const msg = document.getElementById("sla-manual-msg");
+  if (msg) msg.classList.add("hidden");
+
+  // Wipe MANUAL entries from appData (keep XLSX/SOW sourced ones)
+  const wins = window.appData?.sowContract?.sla_windows;
+  if (wins) {
+    ["DAILY","WEEKLY","MONTHLY"].forEach(k => {
+      if (wins[k]?.source === "MANUAL") delete wins[k];
+    });
+  }
+  fetch("/api/sow/sla-windows/manual", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ daily_hrs: null, weekly_hrs: null, monthly_hrs: null }),
+  }).catch(() => {});
+
+  _renderSlaCommitmentsPanel();
+  toast("info", "Manual overrides cleared", "SLA ceilings reverted to uploaded contract values.");
+};
+
 // Apply manual SLA ceiling overrides directly to SOW windows and re-run
 function _applySlaManualOverride() {
   const daily   = parseFloat(document.getElementById("sla-manual-daily")?.value   || "");
@@ -14375,6 +14458,15 @@ function _applySlaManualOverride() {
   if (!isNaN(weekly))  window.appData.sowContract.sla_windows.WEEKLY  = { limit_hours: weekly,  source: "MANUAL" };
   if (!isNaN(monthly)) window.appData.sowContract.sla_windows.MONTHLY = { limit_hours: monthly, source: "MANUAL" };
 
+  // Show ACTIVE badge in header + SET tags per field
+  const badge = document.getElementById("sla-manual-active-badge");
+  if (badge) badge.classList.remove("hidden");
+  ["daily","weekly","monthly"].forEach(t => {
+    const v = t === "daily" ? daily : t === "weekly" ? weekly : monthly;
+    const tag = document.getElementById(`sla-manual-${t}-tag`);
+    if (tag) tag.classList.toggle("hidden", isNaN(v));
+  });
+
   // Persist to backend so SLA matrix resolver picks it up
   fetch("/api/sow/sla-windows/manual", {
     method: "POST",
@@ -14386,7 +14478,7 @@ function _applySlaManualOverride() {
     }),
   }).catch(() => {}); // best-effort
 
-  // Re-render the commitments panel and re-run both SLA Matrix + Batch Review sequentially
+  // Re-render commitments panel, then re-run both SLA Matrix + Batch Review
   _renderSlaCommitmentsPanel();
   if (window.appData.batch) {
     (async () => {
@@ -14395,16 +14487,20 @@ function _applySlaManualOverride() {
     })().catch(() => {});
   }
 
+  const parts = [
+    !isNaN(daily)   ? `DAILY = ${daily}h`   : "",
+    !isNaN(weekly)  ? `WEEKLY = ${weekly}h`  : "",
+    !isNaN(monthly) ? `MONTHLY = ${monthly}h` : "",
+  ].filter(Boolean);
+
   const msg = document.getElementById("sla-manual-msg");
   if (msg) {
-    msg.textContent = `✅ Applied: ${[
-      !isNaN(daily)   ? `DAILY=${daily}h`   : "",
-      !isNaN(weekly)  ? `WEEKLY=${weekly}h`  : "",
-      !isNaN(monthly) ? `MONTHLY=${monthly}h` : "",
-    ].filter(Boolean).join(" · ")}`;
+    msg.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4 shrink-0"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg> Applied: ${parts.join(" · ")}`;
     msg.classList.remove("hidden");
-    setTimeout(() => msg.classList.add("hidden"), 4000);
+    setTimeout(() => msg.classList.add("hidden"), 5000);
   }
+
+  toast("success", "Manual SLA override applied", parts.join(" · ") + " — SLA Matrix recalculating…");
 }
 
 // ── SLA Commitments AI Interpretation ────────────────────────────────────────
@@ -16708,6 +16804,21 @@ async function clearSessionData() {
     ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
     const slaTbody = document.getElementById("sla-job-tbody");
     if (slaTbody) slaTbody.innerHTML = "";
+
+    // Also wipe manual override panel state
+    document.getElementById("sla-commitments-panel")?.classList.add("hidden");
+    document.getElementById("sla-manual-body")?.classList.add("hidden");
+    document.getElementById("sla-manual-active-badge")?.classList.add("hidden");
+    const manChevron = document.getElementById("sla-manual-chevron");
+    if (manChevron) manChevron.style.transform = "rotate(0deg)";
+    ["daily","weekly","monthly"].forEach(t => {
+      const inp = document.getElementById(`sla-manual-${t}`);
+      const tag = document.getElementById(`sla-manual-${t}-tag`);
+      if (inp) inp.value = "";
+      if (tag) tag.classList.add("hidden");
+    });
+    const manMsg = document.getElementById("sla-manual-msg");
+    if (manMsg) manMsg.classList.add("hidden");
 
     // ── 7. Findings tab ───────────────────────────────────────────────────
     window._lastRealFindings = [];
