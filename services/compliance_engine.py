@@ -7,13 +7,17 @@ numbers on the Batch Review tab and SLA Matrix tab are always identical for
 the same data.
 
 Formula (canonical):
-    denominator = unique run_date values in scope
-    numerator   = denominator days where actual_window_hrs <= sla_ceiling_hrs
+    denominator = in-scope (Sub_Application, run_date) windows
+                  (collapses to run_date alone when no Sub_Application is present)
+    numerator   = windows where actual_window_hrs <= sla_ceiling_hrs
     compliance% = numerator / denominator × 100
 
 Canonical window rule:
-    elapsed window for a day = max(end_time) - min(start_time) grouped by date
-    compared against the resolved SLA ceiling for that day.
+    elapsed window for a (sub_app, day) = max(end_time) - min(start_time)
+    grouped by (Sub_Application, run_date), compared against THAT sub-app's
+    resolved SLA ceiling. A long cyclic/weekly sub-app never drags a daily
+    sub-app's compliance down, and excluded schedule types (CYCLIC, OUTBOUND,
+    ADHOC, …) are dropped from the denominator entirely.
 
 Ceiling map resolution (canonical, highest → lowest priority):
     1. XLSX workflow SLA  — fuzzy substring match against _batch_sla_xlsx workflows
@@ -69,7 +73,7 @@ def compute_window_compliance(
         _atrisk_pct = 15.0
         _daily_default = 6.0
 
-    daily: Dict[str, Dict[str, Any]] = {}
+    daily: Dict[Any, Dict[str, Any]] = {}
     warnings: List[str] = []
     excluded_windows = 0
 
@@ -87,10 +91,10 @@ def compute_window_compliance(
             continue
 
         elapsed = float(rec.get("elapsed_hrs") or rec.get("total_hrs") or 0.0)
+        sub_app = str(rec.get("sub_app") or rec.get("Sub_Application") or "").strip()
         ceil = rec.get("sla_ceil")
         if ceil is None:
-            sub_app = str(rec.get("sub_app") or rec.get("Sub_Application") or "").upper()
-            ceil = ceiling_map.get(sub_app)
+            ceil = ceiling_map.get(sub_app.upper())
         if ceil is None:
             ceil = _daily_default
         try:
@@ -108,10 +112,19 @@ def compute_window_compliance(
             breach = elapsed > ceil_f
         breach = bool(breach)
 
-        current = daily.get(date_str)
+        # ── Window unit key ──────────────────────────────────────────────
+        # When a Sub_Application is present, each (sub_app, date) is its OWN
+        # window judged against its OWN resolved ceiling — a long cyclic/weekly
+        # sub-app must never drag a daily sub-app's compliance down (and vice
+        # versa). When no sub_app is present (legacy per-date records), the key
+        # collapses to date alone, preserving the original per-day behaviour.
+        unit_key = (sub_app.upper(), date_str) if sub_app else ("", date_str)
+
+        current = daily.get(unit_key)
         if current is None:
-            daily[date_str] = {
+            daily[unit_key] = {
                 "run_date": date_str,
+                "sub_app": sub_app,
                 "elapsed_hrs": elapsed,
                 "sla_ceil": ceil_f,
                 "breach": breach,
@@ -128,10 +141,13 @@ def compute_window_compliance(
             else:
                 current["breach"] = bool(current.get("breach")) or breach
 
-    duplicate_days = [day for day, row in daily.items() if int(row.get("source_count", 0)) > 1]
+    duplicate_days = [
+        f"{row.get('sub_app') or '?'}@{row.get('run_date')}"
+        for row in daily.values() if int(row.get("source_count", 0)) > 1
+    ]
     if duplicate_days:
         warnings.append(
-            "Duplicate run_date records were collapsed into one daily window: "
+            "Duplicate (sub_app, run_date) records were collapsed into one window: "
             + ", ".join(sorted(duplicate_days)[:8])
         )
 
@@ -150,6 +166,14 @@ def compute_window_compliance(
             ok_count += 1
 
     compliance_pct = round((ok_count + at_risk_count) / total_windows * 100, 1) if total_windows > 0 else 0.0
+
+    # Distinct-day rollups so the UI can still show an honest "X / Y days"
+    # alongside the per-window compliance denominator.
+    distinct_days = {row.get("run_date") for row in daily.values()}
+    breach_day_set = {row.get("run_date") for row in daily.values() if bool(row.get("breach"))}
+    total_days = len(distinct_days)
+    breach_days = len(breach_day_set)
+
     return {
         "compliance_pct":   compliance_pct,
         "breach_count":     breach_count,
@@ -157,6 +181,8 @@ def compute_window_compliance(
         "at_risk_count":    at_risk_count,
         "total_windows":    total_windows,
         "excluded_windows": excluded_windows,
+        "total_days":       total_days,
+        "breach_days":      breach_days,
         "warnings":         warnings,
     }
 

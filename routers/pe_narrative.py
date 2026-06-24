@@ -26,6 +26,7 @@ class PeNarrativeRequest(BaseModel):
     batch:         Optional[Dict[str, Any]] = None
     resource:      Optional[Dict[str, Any]] = None
     sla_matrix:    Optional[Dict[str, Any]] = None
+    sla_triage:    Optional[Dict[str, Any]] = None
     sla_intel:     Optional[Dict[str, Any]] = None
     sow_compare:   Optional[Dict[str, Any]] = None
     benchmark:     Optional[Dict[str, Any]] = None
@@ -275,6 +276,10 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     if sf:
         out["smart_findings"] = sf
 
+    triage = payload.get("sla_triage") or {}
+    if triage:
+        out["sla_triage"] = triage
+
     # -- Red flags / benchmark ---------------------------------------------
     # Pass the FULL benchmark object (not just summary) so the UAT section can
     # render transaction-level evidence. Fall back to session_cache last_benchmark.
@@ -352,6 +357,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     r      = digest.get("resource")    or {}
     rk     = r.get("kpis")            or {}
     sf     = digest.get("smart_findings") or {}
+    triage = digest.get("sla_triage") or {}
     rf_sum = (digest.get("red_flags") or {}).get("summary") or {}
     si     = digest.get("sla_intel")   or {}
     sow_c  = digest.get("sow_contract")  or {}
@@ -631,6 +637,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
 
     sf_findings     = sf.get("findings") or []
     regression_note = ""
+    priority_note   = ""
     critical_count  = 0
     if sf_findings:
         regressions    = [f for f in sf_findings if "RUNTIME_REGRESSION" in str(f.get("root_cause", ""))]
@@ -641,6 +648,32 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 for f in regressions[:2]
             )
             regression_note = f" Runtime regression detected: {reg_jobs}."
+
+    if isinstance(triage, dict):
+        low_buf_jobs = triage.get("low_buffer_jobs") or []
+        unexplained  = triage.get("unexplained_breaches") or []
+        priority_src = low_buf_jobs or unexplained
+        if priority_src:
+            if low_buf_jobs:
+                sorted_low = sorted(
+                    low_buf_jobs,
+                    key=lambda j: (_num(j.get("buffer_pct"), 999), -_num(j.get("breach_rate"), 0)),
+                )
+                top_priority = sorted_low[:3]
+                names = ", ".join(
+                    f"{j.get('job_name') or j.get('Job_Name') or '?'} ({_num(j.get('buffer_pct'), 0):.1f}% buffer)"
+                    for j in top_priority
+                )
+                suffix = "…" if len(sorted_low) > 3 else ""
+                priority_note = f" Priority jobs needing attention: {names}{suffix}."
+            else:
+                top_priority = unexplained[:3]
+                names = ", ".join(
+                    f"{j.get('job_name', '?')} ({_num(j.get('margin_hrs'), 0):+.2f}h over)"
+                    for j in top_priority
+                )
+                suffix = "…" if len(unexplained) > 3 else ""
+                priority_note = f" Unexplained breaches needing attention: {names}{suffix}."
 
     if (total_runs or total_jobs) is not None:
         _runs_n  = int(total_runs or total_jobs or 0)
@@ -667,6 +700,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             f"SLA ceiling: {_sla_s}."
             + window_note
             + regression_note
+            + priority_note
             + (f" {critical_count} critical finding(s) require resolution before PE sign-off."
                if critical_count > 0 else "")
         )
@@ -1208,5 +1242,48 @@ async def _pe_narrative_inner(body: PeNarrativeRequest, customer: str) -> Dict[s
     except Exception as exc:
         log.warning("pe_narrative: _deterministic_fallback failed (%s)", exc)
         fallback = _bare_fallback(customer)
+
+    # ── AI enhancement pass (optional) ───────────────────────────────────────
+    # The deterministic fallback already carries all numbers + tables. The AI
+    # layer only rewrites the PROSE (summary + per-section narrative) for a more
+    # consultant-grade read. _validate_and_merge keeps deterministic tables and
+    # never lets the AI downgrade a verdict. If no key is configured, the model
+    # errors, or returns junk → we return the clean fallback untouched.
+    try:
+        from services import ai_engine as _ai
+        ready = _ai.is_ready()
+        if ready.get("nvidia_key") or ready.get("gemini_key"):
+            _section_ids = [s["id"] for s in _SECTIONS]
+            ai_prompt = (
+                "You are a senior Performance Engineering reviewer writing the "
+                f"PE Review narrative for customer '{customer or 'the account'}'.\n"
+                "Using ONLY the data in the DIGEST below, return a strict JSON object:\n"
+                '{\n'
+                '  "verdict": "APPROVED" | "CONDITIONAL" | "BLOCKED",\n'
+                '  "summary": "<3-4 sentence executive summary, lead with hard numbers>",\n'
+                '  "sections": [ {"id": "<section id>", "prose": "<2-4 factual sentences>"} ]\n'
+                '}\n'
+                f"Valid section ids (use each at most once): {_section_ids}.\n"
+                "Rules: be direct and factual, no hedging, lead with numbers, do NOT "
+                "invent values absent from the digest, do NOT output tables (numbers "
+                "are supplied separately). Choose the verdict strictly from the data: "
+                "any SLA breach / critical finding / sub-85% compliance => not APPROVED."
+            )
+            try:
+                ai_body = json.dumps(digest, default=str)
+            except Exception:
+                ai_body = str(digest)
+            if len(ai_body) > 16000:
+                ai_body = ai_body[:16000] + " …<truncated>"
+            ai_payload, ai_model = _ai.chat_json(
+                f"{ai_prompt}\n\nDIGEST:\n{ai_body}",
+                max_tokens=1400, temperature=0.25,
+            )
+            merged = _validate_and_merge(ai_payload, fallback, digest)
+            if isinstance(ai_model, str) and ai_model:
+                merged["model"] = ai_model
+            return merged
+    except Exception as exc:  # noqa: BLE001
+        log.info("pe_narrative: AI enhancement skipped (%s)", exc)
 
     return fallback

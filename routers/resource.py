@@ -118,9 +118,9 @@ async def process_resource(body: ResourceRequest) -> ResourceResponse:
         from services import session_cache
         session_cache.set("last_resource", payload)
         session_cache.ac_set("resource_summary", payload)
-    except Exception:
+    except Exception as cache_exc:
         import logging as _logging
-        _logging.getLogger(__name__).warning("resource cache write failed: %s", exc)
+        _logging.getLogger(__name__).warning("resource cache write failed: %s", cache_exc)
 
     return ResourceResponse(
         kpis=ResourceKpis(**payload["kpis"]),

@@ -1051,45 +1051,70 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 # Safe fallback — use global SLA for all sub_apps
                 _sub_sla_lookup = {str(_sa): global_sla_hrs for _sa in _sub_apps_all}
 
-            # Canonical daily window: first job start → last job end for the
-            # whole file on each day. This is the metric shared with Batch Review.
+            # Canonical window: first job start → last job end per
+            # (Sub_Application, run_date). Each sub-app is judged against ITS OWN
+            # resolved ceiling via the shared engine — same rule as Batch Review.
+            _has_sub = "Sub_Application" in wdf.columns and wdf["Sub_Application"].notna().any()
+            _grp_keys = ["run_date", "Sub_Application"] if _has_sub else ["run_date"]
             wgrp = (
-                wdf.groupby("run_date")
+                wdf.groupby(_grp_keys)
                 .agg(first_start=("Start_Time", "min"),
                      last_end=("End_Time", "max"),
                      job_count=("Job_Name", "nunique"))
-                .dropna()
+                .reset_index()
+                .dropna(subset=["first_start", "last_end"])
             )
+
+            # Resolve per-row schedule type for exclusion of cyclic/outbound etc.
+            def _slm_sched(_sa: str) -> str:
+                try:
+                    from services.sla_engine import classify_schedule as _csl
+                    return str(_csl(str(_sa))).upper()
+                except Exception:
+                    return ""
+
             if not wgrp.empty:
                 wgrp["elapsed_hrs"] = (
                     (wgrp["last_end"] - wgrp["first_start"]).dt.total_seconds() / 3600.0
                 ).clip(lower=0).round(3)
-                wgrp["breach"] = wgrp["elapsed_hrs"] > global_sla_hrs
-                wgrp["sla_hrs"] = global_sla_hrs
+                if _has_sub:
+                    wgrp["sla_hrs"] = wgrp["Sub_Application"].apply(
+                        lambda _sa: float(_sub_sla_lookup.get(str(_sa).upper(), global_sla_hrs))
+                    )
+                    wgrp["schedule_type"] = wgrp["Sub_Application"].apply(_slm_sched)
+                else:
+                    wgrp["sla_hrs"] = global_sla_hrs
+                    wgrp["schedule_type"] = ""
+                wgrp["breach"] = wgrp["elapsed_hrs"] > wgrp["sla_hrs"]
 
             if not wgrp.empty:
-                w_total_days = len(wgrp)
-                w_breach_days = int(wgrp["breach"].sum())
+                w_total_days = int(wgrp["run_date"].nunique())
+                w_breach_days = int(wgrp.loc[wgrp["breach"], "run_date"].nunique())
                 # PROMPT 3: Do NOT compute window_comp_pct from local formula.
                 # compliance_engine is the sole authoritative source. If it fails,
                 # window_comp_pct stays None → headline shows "—" (not a wrong number).
                 w_detail_list = [
-                    {"run_date": idx,
+                    {"run_date": str(r["run_date"]),
+                     "sub_app": str(r["Sub_Application"]) if _has_sub else "",
                      "elapsed_hrs": round(float(r["elapsed_hrs"]), 3),
                      "job_count": int(r.get("job_count", 0)),
                      "breach": bool(r["breach"]),
+                     "schedule_type": str(r.get("schedule_type", "")),
+                     "sla_ceil": float(r.get("sla_hrs", global_sla_hrs)),
                      "sla_hrs": float(r.get("sla_hrs", global_sla_hrs))}
-                    for idx, r in wgrp.iterrows()
+                    for _, r in wgrp.iterrows()
                 ]
 
                 # ── Canonical window compliance via SHARED engine (sole path) ─
-                # If compliance_engine raises, window_comp_pct stays None.
+                # Pass the real per-sub-app ceiling map (NOT {}). w_detail_list
+                # already carries per-row sla_ceil + schedule_type, so the engine
+                # judges each (sub_app, date) on its own contracted ceiling.
                 try:
                     from services import compliance_engine as _ce
-                    _wc = _ce.compute_window_compliance(w_detail_list, {})
+                    _wc = _ce.compute_window_compliance(w_detail_list, _sub_sla_lookup)
                     window_comp_pct = _wc["compliance_pct"]
-                    w_total_days    = _wc["total_windows"]
-                    w_breach_days   = _wc["breach_count"]
+                    w_total_days    = _wc.get("total_days", _wc["total_windows"])
+                    w_breach_days   = _wc.get("breach_days", _wc["breach_count"])
                     window_warnings = _wc.get("warnings") or []
                 except Exception:
                     pass

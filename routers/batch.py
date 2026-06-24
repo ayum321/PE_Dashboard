@@ -298,6 +298,14 @@ async def process_batch(file: UploadFile = File(...)) -> BatchResponse:
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="No file provided.")
 
+    try:
+        from services import session_cache as _sc_reset
+        _sc_reset.ac_clear()
+        _sc_reset.set("last_batch", {})
+        _sc_reset.set("last_sla_matrix", {})
+    except Exception:
+        pass
+
     ext = _ext(file.filename)
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -362,6 +370,14 @@ async def process_batch_multi(
             detail=f"Too many files. Maximum is {MAX_BATCH_FILES}, got {len(files)}.",
         )
 
+    try:
+        from services import session_cache as _sc_reset
+        _sc_reset.ac_clear()
+        _sc_reset.set("last_batch", {})
+        _sc_reset.set("last_sla_matrix", {})
+    except Exception:
+        pass
+
     frames: list[pd.DataFrame] = []
     filenames: list[str] = []
 
@@ -403,6 +419,25 @@ async def process_batch_multi(
 
     merged = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
+    # ── P2 #11: dedup identical job-run rows across multi-file uploads ────────
+    # Uploading the same export twice (or two files that overlap on a date range)
+    # would otherwise double-count every KPI. Hash each row on its natural
+    # identity — (Job_Name, Sub_Application, Start_Time, Run_Sec) — and drop exact
+    # duplicates. Only applied to multi-file merges; single files are untouched.
+    if len(frames) > 1:
+        _dedup_keys = [c for c in ("Job_Name", "Sub_Application", "Start_Time", "Run_Sec")
+                       if c in merged.columns]
+        if _dedup_keys:
+            _before = len(merged)
+            merged = merged.drop_duplicates(subset=_dedup_keys, keep="first").reset_index(drop=True)
+            _removed = _before - len(merged)
+            if _removed > 0:
+                import logging as _logd
+                _logd.getLogger(__name__).info(
+                    "process_batch_multi: dropped %d duplicate job-run row(s) across %d files "
+                    "(dedup keys: %s)", _removed, len(frames), _dedup_keys,
+                )
+
     try:
         payload = build_batch_payload(merged)
     except Exception as exc:
@@ -436,6 +471,13 @@ async def process_batch_multi(
 async def process_batch_json(body: BatchJsonRequest) -> BatchResponse:
     if not body.rows:
         raise HTTPException(status_code=400, detail="`rows` is empty.")
+    try:
+        from services import session_cache as _sc_reset
+        _sc_reset.ac_clear()
+        _sc_reset.set("last_batch", {})
+        _sc_reset.set("last_sla_matrix", {})
+    except Exception:
+        pass
     try:
         df = pd.DataFrame(body.rows)
         # Coerce the expected columns — the frontend may supply raw

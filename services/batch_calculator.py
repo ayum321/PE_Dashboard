@@ -329,6 +329,10 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
             pass
 
     df.columns = pd.Index([str(c).strip() for c in df.columns])
+    # Snapshot the ORIGINAL header tokens before any rename/synthesis so the
+    # content-shape classifier (below) can judge the file on its real columns.
+    _raw_cols_lower = [str(c).lower().strip() for c in df.columns]
+    _n_raw_rows = len(df)
     col_map: Dict[str, str] = {}
     for c in df.columns:
         cl = c.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
@@ -402,10 +406,28 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
 
     df.rename(columns=col_map, inplace=True)
 
-    # ── Daily-summary files: synthesise per-row job representation ────────
-    # Files like Daily_Activity_Summary.csv have one row per day with a total
-    # runtime but no Job_Name column.  We synthesise a "DAILY_BATCH" job so
-    # the rest of the pipeline sees consistent data.
+    # ── P2 #8: schema-completeness capability flags (captured pre-synthesis) ──
+    # Record which analytical columns were GENUINELY present in the source, before
+    # the graceful-degradation synthesis below fabricates defaults. Downstream can
+    # read df.attrs["capabilities"] to disable only the affected metric instead of
+    # silently presenting a default as if it were real customer data.
+    _present = set(df.columns)
+    _capabilities = {
+        "has_job_name":          "Job_Name" in _present,
+        "has_start_time":        "Start_Time" in _present,
+        "has_end_time":          "End_Time" in _present,
+        "has_sub_application":   "Sub_Application" in _present,
+        "has_status":            "Status" in _present,
+        "has_runtime":           "Run_Sec" in _present or "_duration_str" in _present,
+        # Derived capability gates (what the pipeline can legitimately compute)
+        "window_compliance":     "End_Time" in _present and "Start_Time" in _present,
+        "per_sub_app_sla":       "Sub_Application" in _present,
+        "failure_rate":          "Status" in _present,
+    }
+    try:
+        df.attrs["capabilities"] = _capabilities
+    except Exception:
+        pass
     if "Job_Name" not in df.columns and "Run_Sec" in df.columns:
         if "_job_count" in df.columns:
             # day-level summary — represent as a single synthetic job per day
@@ -479,6 +501,36 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
                 f"File does not contain Ctrl-M job execution records "
                 f"(columns: {list(df.columns)[:6]}). Upload a file with one row per job run."
             )
+
+    # ── Content-shape classifier: reject PRE-AGGREGATED summary/rollup files ──
+    # A raw Ctrl-M export has one row per job *run*. Pre-aggregated rollups (daily
+    # summaries, SLA-breach reports, correlation matrices) instead expose derived
+    # output columns. These must NOT be analysed as job logs — judging a rollup
+    # against per-job SLAs produces nonsense. Detect generically via header tokens.
+    # Require ≥2 distinct aggregation signals to avoid false-positives on a raw
+    # file that happens to carry a single "Total Runtime" column.
+    _AGG_TOKENS = (
+        "_breach", "sla_breach", "breach_count", "exceeded", "weekly_sla",
+        "monthly_sla", "correlation", "avg_runtime", "average_runtime",
+        "total_breach", "breaches", "pct_compliant", "compliance_pct",
+        "p95", "p99", "stddev", "std_dev",
+    )
+    _agg_hits = sorted({
+        tok for tok in _AGG_TOKENS
+        for col in _raw_cols_lower
+        if tok in col.replace(" ", "_").replace("-", "_")
+    })
+    # Only trip when the file ALSO lacks per-run job granularity: no real End_Time
+    # mapped (rollups rarely carry both start AND end per row) AND no per-job
+    # Run_Sec, OR the row count is implausibly small for a 30-day raw export.
+    _has_real_runtime = "Run_Sec" in df.columns or "End_Time" in df.columns
+    if len(_agg_hits) >= 2 and not _has_real_runtime:
+        raise ValueError(
+            "This looks like a pre-aggregated summary/rollup, not a raw Ctrl-M "
+            f"export (aggregation columns detected: {_agg_hits[:6]}). "
+            "Upload the raw per-job-run report (one row per job execution with "
+            "Job_Name + Start_Time), not a derived SLA/breach summary."
+        )
 
     # ── Final fallbacks ──────────────────────────────────────────
     if "Job_Name" not in df.columns:
@@ -1991,8 +2043,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             _wc["granularity"] = "day"
             window_compliance = _wc
             batch_window_comp = float(_wc.get("compliance_pct", 0.0))
-            window_breach_days = int(_wc.get("breach_count", 0))
-            n_window_days = int(_wc.get("total_windows", n_window_days))
+            # compliance_pct is measured over per-(sub_app, date) windows, but the
+            # "days breached" UI label must stay in honest CALENDAR-day units —
+            # use the engine's distinct-day rollups, not the window counts.
+            window_breach_days = int(_wc.get("breach_days", _wc.get("breach_count", 0)))
+            n_window_days = int(_wc.get("total_days", _wc.get("total_windows", n_window_days)))
         except Exception:
             batch_window_comp = round(
                 ((n_window_days - int(window["breach"].sum())) / n_window_days * 100)
