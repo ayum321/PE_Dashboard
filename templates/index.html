@@ -3571,52 +3571,149 @@
   <!-- Azure Monitor live-fetch modal — 2-step: Discover VMs → Select & Fetch -->
   <!-- Azure modal segmented control styles -->
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+
+    /* ── Industrial design system for Azure VM filter panel ── */
+    /* Anchor: Industrial — mono type, flat 1px borders, tabular nums, signal colors */
+    /* Differentiator: 2px bottom accent bar on active buttons (hardware indicator) */
+
+    /* Segmented group container */
+    .az-seg-group {
+      display: inline-flex;
+      border: 1px solid rgba(51,65,85,0.7);
+      border-radius: 4px;
+      overflow: hidden;
+      background: rgba(10,11,15,0.6);
+    }
+    .az-seg-group .az-seg-btn + .az-seg-btn { border-left: 1px solid rgba(51,65,85,0.5); }
+
     /* Base segment button */
     .az-seg-btn {
       background: transparent;
-      color: rgba(148,163,184,0.7);
+      color: rgba(100,116,139,0.8);
       cursor: pointer;
       white-space: nowrap;
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
       user-select: none;
+      font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      padding: 6px 12px;
+      border-bottom: 2px solid transparent;
+      transition: color 0.12s, background 0.12s, border-color 0.12s;
     }
-    .az-seg-btn:hover { color: #f1f5f9; background: rgba(255,255,255,0.06); }
+    .az-seg-btn:hover { color: #cbd5e1; background: rgba(255,255,255,0.05); }
 
-    /* Dot indicator inside button */
-    .az-dot { width:6px; height:6px; border-radius:50%; display:inline-block; opacity:0.7; flex-shrink:0; }
+    /* Dot indicator */
+    .az-dot { width:5px; height:5px; border-radius:50%; display:inline-block; flex-shrink:0; opacity:0.55; transition: opacity 0.12s; }
+    .az-seg-btn.az-active .az-dot { opacity:1; }
 
-    /* Count chip inside button */
-    .az-chip { font-size:9px; padding:0 4px; background:rgba(255,255,255,0.08); border-radius:3px; margin-left:3px; min-width:16px; text-align:center; color:inherit; font-variant-numeric: tabular-nums; display:inline-block; }
+    /* Count chip — Industrial: tabular, tight border */
+    .az-chip {
+      font-size: 9px; padding: 1px 5px;
+      border-radius: 2px; margin-left: 2px;
+      min-width: 18px; text-align: center;
+      color: inherit; font-variant-numeric: tabular-nums;
+      display: inline-block;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.07);
+      font-weight: 700; letter-spacing: 0;
+    }
     .az-chip:empty { display:none; }
 
-    /* Active — All (neutral) */
-    .az-seg-btn.az-active { color:#f1f5f9; background:rgba(255,255,255,0.1); }
+    /* Active — All (neutral): white bottom bar */
+    .az-seg-btn.az-active { color:#e2e8f0; background:rgba(255,255,255,0.08); border-bottom-color: rgba(148,163,184,0.55); }
+    .az-seg-btn.az-active .az-chip { background:rgba(255,255,255,0.12); border-color:rgba(255,255,255,0.18); }
 
-    /* Active — Type colors */
-    .az-type-app.az-active { color:#6ee7b7; background:rgba(16,185,129,0.18); }
-    .az-type-db.az-active  { color:#93c5fd; background:rgba(59,130,246,0.18); }
-    .az-type-sre.az-active { color:#fcd34d; background:rgba(245,158,11,0.18); }
+    /* Active — Type: signal bottom bar + fill + chip tint */
+    .az-type-app.az-active { color:#34d399; background:rgba(52,211,153,0.09); border-bottom-color:#10b981; }
+    .az-type-db.az-active  { color:#60a5fa; background:rgba(96,165,250,0.09); border-bottom-color:#3b82f6; }
+    .az-type-sre.az-active { color:#fbbf24; background:rgba(251,191,36,0.09); border-bottom-color:#f59e0b; }
+    .az-type-app.az-active .az-chip { background:rgba(52,211,153,0.18); border-color:rgba(52,211,153,0.35); }
+    .az-type-db.az-active  .az-chip { background:rgba(96,165,250,0.18); border-color:rgba(96,165,250,0.35); }
+    .az-type-sre.az-active .az-chip { background:rgba(251,191,36,0.18); border-color:rgba(251,191,36,0.35); }
 
-    /* Active — Env colors */
-    .az-env-prod.az-active { color:#fca5a5; background:rgba(239,68,68,0.18); }
-    .az-env-test.az-active { color:#7dd3fc; background:rgba(14,165,233,0.18); }
-    .az-env-uat.az-active  { color:#c4b5fd; background:rgba(139,92,246,0.18); }
-    .az-env-stg.az-active  { color:#fdba74; background:rgba(249,115,22,0.18); }
-    .az-env-dev.az-active  { color:#5eead4; background:rgba(20,184,166,0.18); }
+    /* Active — Env: signal bottom bar + fill + chip tint */
+    .az-env-prod.az-active { color:#f87171; background:rgba(248,113,113,0.09); border-bottom-color:#ef4444; }
+    .az-env-test.az-active { color:#38bdf8; background:rgba(56,189,248,0.09);  border-bottom-color:#0ea5e9; }
+    .az-env-uat.az-active  { color:#a78bfa; background:rgba(167,139,250,0.09); border-bottom-color:#8b5cf6; }
+    .az-env-stg.az-active  { color:#fb923c; background:rgba(251,146,60,0.09);  border-bottom-color:#f97316; }
+    .az-env-dev.az-active  { color:#2dd4bf; background:rgba(45,212,191,0.09);  border-bottom-color:#14b8a6; }
+    .az-env-prod.az-active .az-chip { background:rgba(248,113,113,0.2); border-color:rgba(248,113,113,0.35); }
+    .az-env-test.az-active .az-chip { background:rgba(56,189,248,0.2);  border-color:rgba(56,189,248,0.35);  }
+    .az-env-uat.az-active  .az-chip { background:rgba(167,139,250,0.2); border-color:rgba(167,139,250,0.35); }
+    .az-env-stg.az-active  .az-chip { background:rgba(251,146,60,0.2);  border-color:rgba(251,146,60,0.35);  }
+    .az-env-dev.az-active  .az-chip { background:rgba(45,212,191,0.2);  border-color:rgba(45,212,191,0.35);  }
 
-    /* Table row zebra */
-    #azure-vm-table-body tr:nth-child(even) { background: rgba(255,255,255,0.018); }
-    #azure-vm-table-body tr:hover { background: rgba(59,130,246,0.06) !important; }
+    /* Filter panel container */
+    .az-filter-panel {
+      background: rgba(5,7,12,0.5);
+      border: 1px solid rgba(51,65,85,0.65);
+      border-radius: 6px;
+      padding: 0 12px;
+    }
+    /* Filter rows with dividers */
+    .az-filter-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(51,65,85,0.3);
+    }
+    .az-filter-row:last-child { border-bottom: none; }
 
-    /* ENV badge in table cell */
-    .az-env-badge { display:inline-block; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:700; letter-spacing:0.04em; }
-    .az-env-badge.env-PROD { color:#fca5a5; background:rgba(239,68,68,0.15); }
-    .az-env-badge.env-TEST { color:#7dd3fc; background:rgba(14,165,233,0.15); }
-    .az-env-badge.env-UAT  { color:#c4b5fd; background:rgba(139,92,246,0.15); }
-    .az-env-badge.env-STG  { color:#fdba74; background:rgba(249,115,22,0.15); }
-    .az-env-badge.env-DEV  { color:#5eead4; background:rgba(20,184,166,0.15); }
+    /* Row label — mono, uppercase, muted */
+    .az-row-label {
+      font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      font-size: 8px; font-weight: 700;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: rgba(71,85,105,0.9);
+      width: 30px; flex-shrink: 0;
+    }
+
+    /* Search input — mono, Industrial */
+    .az-search {
+      font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      font-size: 11px; color: #e2e8f0;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(51,65,85,0.6);
+      border-radius: 4px; padding: 7px 12px;
+      width: 100%; outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .az-search::placeholder { color: rgba(71,85,105,0.7); }
+    .az-search:focus { border-color: rgba(59,130,246,0.55); box-shadow: 0 0 0 2px rgba(59,130,246,0.1); }
+
+    /* Table row styling */
+    #azure-vm-table-body tr:nth-child(even) { background: rgba(255,255,255,0.016); }
+    #azure-vm-table-body tr:hover { background: rgba(59,130,246,0.07) !important; }
+
+    /* ENV badge in table — left accent bar (Industrial: flat, no radius bloat) */
+    .az-env-badge {
+      display: inline-block; padding: 2px 6px 2px 5px;
+      border-radius: 2px; font-size: 9px; font-weight: 700;
+      letter-spacing: 0.07em;
+      font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      border-left: 2px solid currentColor;
+    }
+    .az-env-badge.env-PROD { color:#f87171; background:rgba(248,113,113,0.1); }
+    .az-env-badge.env-TEST { color:#38bdf8; background:rgba(56,189,248,0.1);  }
+    .az-env-badge.env-UAT  { color:#a78bfa; background:rgba(167,139,250,0.1); }
+    .az-env-badge.env-STG  { color:#fb923c; background:rgba(251,146,60,0.1);  }
+    .az-env-badge.env-DEV  { color:#2dd4bf; background:rgba(45,212,191,0.1);  }
+
+    /* Summary strip type badges */
+    .az-sum-app { color:#34d399; background:rgba(52,211,153,0.1); border-left:2px solid #10b981; }
+    .az-sum-db  { color:#60a5fa; background:rgba(96,165,250,0.1); border-left:2px solid #3b82f6; }
+    .az-sum-sre { color:#fbbf24; background:rgba(251,191,36,0.1); border-left:2px solid #f59e0b; }
+    .az-sum-app, .az-sum-db, .az-sum-sre {
+      display:inline-flex; align-items:center;
+      padding:3px 8px; border-radius:2px;
+      font-family:'IBM Plex Mono',ui-monospace,monospace;
+      font-size:10px; font-weight:700;
+      letter-spacing:0.04em; font-variant-numeric:tabular-nums;
+    }
   </style>
 
   <div id="azure-fetch-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -3703,91 +3800,77 @@
       <div id="azure-step2" class="hidden flex-1 min-h-0 flex flex-col gap-2 overflow-hidden">
 
         <!-- Summary strip -->
-        <div class="flex items-center gap-3 flex-wrap px-1">
+        <div class="flex items-center gap-2 flex-wrap px-0.5">
           <button onclick="document.getElementById('azure-step1').classList.remove('hidden');document.getElementById('azure-step2').classList.add('hidden')"
-            class="text-[10px] text-Cmuted hover:text-Cwhite transition-colors flex items-center gap-1">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+            class="flex items-center gap-1 text-[10px] font-mono text-slate-500 hover:text-slate-300 transition-colors tracking-wider uppercase">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
             Search
           </button>
-          <span class="text-Cborder/40">·</span>
-          <span id="azure-vm-total" class="text-[11px] font-bold tracking-wide text-Cwhite"></span>
-          <div class="flex items-center gap-1.5">
-            <span id="azure-vm-app-badge" class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 tabular-nums"></span>
-            <span id="azure-vm-db-badge"  class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30 tabular-nums"></span>
-            <span id="azure-vm-sre-badge" class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 tabular-nums"></span>
+          <span class="text-slate-700">|</span>
+          <span id="azure-vm-total" class="font-mono font-bold text-[13px] text-white tracking-tight tabular-nums"></span>
+          <div class="flex items-center gap-1.5 ml-1">
+            <span id="azure-vm-app-badge" class="az-sum-app"></span>
+            <span id="azure-vm-db-badge"  class="az-sum-db"></span>
+            <span id="azure-vm-sre-badge" class="az-sum-sre"></span>
           </div>
-          <div id="azure-vm-env-badges" class="flex items-center gap-1 flex-wrap pl-2 border-l border-Cborder/50"></div>
+          <div id="azure-vm-env-badges" class="flex items-center gap-1 flex-wrap pl-2 border-l border-slate-700/60"></div>
           <div class="ml-auto flex items-center gap-3">
-            <button onclick="azureSelectAll(true)"  class="text-[10px] font-semibold text-Cblue hover:text-white transition-colors">Select all</button>
-            <span class="text-Cborder/60">·</span>
-            <button onclick="azureSelectAll(false)" class="text-[10px] text-Cmuted hover:text-white transition-colors">Clear</button>
+            <button onclick="azureSelectAll(true)"  class="text-[10px] font-mono font-semibold text-blue-400 hover:text-white transition-colors tracking-wide">Select all</button>
+            <span class="text-slate-700">·</span>
+            <button onclick="azureSelectAll(false)" class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Clear</button>
           </div>
         </div>
 
-        <!-- Filter bar — segmented controls + inline search -->
-        <div class="rounded-lg border border-Cborder/60 bg-Cbg/50 px-3 py-2.5 flex flex-col gap-2">
+        <!-- Filter panel — Industrial segmented controls -->
+        <div class="az-filter-panel">
 
-          <!-- Row 1: Type segmented group -->
-          <div class="flex items-center gap-3">
-            <span class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 w-7 shrink-0">Type</span>
-            <div class="inline-flex rounded border border-Cborder/60 overflow-hidden" role="group">
+          <!-- TYPE row -->
+          <div class="az-filter-row">
+            <span class="az-row-label">Type</span>
+            <div class="az-seg-group" role="group">
               <button onclick="azureFilterType('ALL')" data-type="ALL"
-                class="azure-type-filter az-seg-btn az-active px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
-                All
-              </button>
+                class="azure-type-filter az-seg-btn az-active">All</button>
               <button onclick="azureFilterType('APP')" data-type="APP"
-                class="azure-type-filter az-seg-btn az-type-app px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                class="azure-type-filter az-seg-btn az-type-app">
                 <span class="az-dot" style="background:#10b981"></span>APP<span class="az-chip" id="az-cnt-app"></span>
               </button>
               <button onclick="azureFilterType('DB')" data-type="DB"
-                class="azure-type-filter az-seg-btn az-type-db px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                class="azure-type-filter az-seg-btn az-type-db">
                 <span class="az-dot" style="background:#3b82f6"></span>DB<span class="az-chip" id="az-cnt-db"></span>
               </button>
               <button onclick="azureFilterType('SRE')" data-type="SRE"
-                class="azure-type-filter az-seg-btn az-type-sre px-3 py-1 text-[10px] font-bold transition-all">
+                class="azure-type-filter az-seg-btn az-type-sre">
                 <span class="az-dot" style="background:#f59e0b"></span>SRE<span class="az-chip" id="az-cnt-sre"></span>
               </button>
             </div>
           </div>
 
-          <!-- Row 2: Env segmented group -->
-          <div class="flex items-center gap-3">
-            <span class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 w-7 shrink-0">Env</span>
-            <div class="inline-flex rounded border border-Cborder/60 overflow-hidden" role="group">
+          <!-- ENV row -->
+          <div class="az-filter-row">
+            <span class="az-row-label">Env</span>
+            <div class="az-seg-group" role="group">
               <button onclick="azureFilterEnv('ALL')" data-env="ALL"
-                class="azure-env-filter az-seg-btn az-active px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
-                All
-              </button>
+                class="azure-env-filter az-seg-btn az-active">All</button>
               <button onclick="azureFilterEnv('PROD')" data-env="PROD"
-                class="azure-env-filter az-seg-btn az-env-prod px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
-                PROD<span class="az-chip" id="az-cnt-prod"></span>
-              </button>
+                class="azure-env-filter az-seg-btn az-env-prod">PROD<span class="az-chip" id="az-cnt-prod"></span></button>
               <button onclick="azureFilterEnv('TEST')" data-env="TEST"
-                class="azure-env-filter az-seg-btn az-env-test px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
-                TEST<span class="az-chip" id="az-cnt-test"></span>
-              </button>
+                class="azure-env-filter az-seg-btn az-env-test">TEST<span class="az-chip" id="az-cnt-test"></span></button>
               <button onclick="azureFilterEnv('UAT')" data-env="UAT"
-                class="azure-env-filter az-seg-btn az-env-uat px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
-                UAT<span class="az-chip" id="az-cnt-uat"></span>
-              </button>
+                class="azure-env-filter az-seg-btn az-env-uat">UAT<span class="az-chip" id="az-cnt-uat"></span></button>
               <button onclick="azureFilterEnv('STG')" data-env="STG"
-                class="azure-env-filter az-seg-btn az-env-stg px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
-                STG<span class="az-chip" id="az-cnt-stg"></span>
-              </button>
+                class="azure-env-filter az-seg-btn az-env-stg">STG<span class="az-chip" id="az-cnt-stg"></span></button>
               <button onclick="azureFilterEnv('DEV')" data-env="DEV"
-                class="azure-env-filter az-seg-btn az-env-dev px-3 py-1 text-[10px] font-bold transition-all">
-                DEV<span class="az-chip" id="az-cnt-dev"></span>
-              </button>
+                class="azure-env-filter az-seg-btn az-env-dev">DEV<span class="az-chip" id="az-cnt-dev"></span></button>
             </div>
           </div>
 
-          <!-- Search — own row so it never gets squeezed -->
-          <div class="flex items-center gap-2">
-            <span class="w-7 shrink-0"></span>
+          <!-- SEARCH row -->
+          <div class="az-filter-row">
+            <span class="az-row-label"></span>
             <input id="azure-vm-search" type="text" placeholder="Filter by VM name, app, or customer…"
-              oninput="_applyVmFilters()"
-              class="flex-1 bg-Cbg border border-Cborder/60 rounded px-2.5 py-1.5 text-[10px] text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cblue/60 font-mono" />
+              oninput="_applyVmFilters()" class="az-search" />
           </div>
+
         </div>
 
         <!-- VM table -->
