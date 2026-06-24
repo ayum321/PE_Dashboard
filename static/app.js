@@ -2045,7 +2045,10 @@ function renderBatchReview(data) {
 
   // 2. Charts — use filtered data for job-level views
   renderSlaBufferChart(_displayKpis);
-  renderWindowTrendChart(filtered.window || [], filtered.top_jobs || []);
+  // Pass full unfiltered top_jobs so the chart can build the correct excludedNameSet
+  // (filtered.top_jobs already has excluded jobs removed, so excludedNameSet would be
+  // empty if we pass filtered — the chart needs ALL jobs to know which ones are excluded)
+  renderWindowTrendChart(filtered.window || [], data.top_jobs || []);
   renderTopJobsChart(_filteredJobs, _displayKpis);
 
   // 3. Top 10 breaching jobs table
@@ -2802,18 +2805,26 @@ function renderWindowTrendChart(winData, topJobsData) {
 
   if (!winData || winData.length === 0) return;
 
+  // Build excluded set from ALL top_jobs (unfiltered) — caller must pass full list
   const excludedNameSet = new Set((topJobsData || []).filter(j => _isJobExcluded(j)).map(j => j.Job_Name));
   const labels   = winData.map((w) => w.run_date);
   const counts   = winData.map((w) => {
     const rawNames = Array.isArray(w.raw_job_names) ? w.raw_job_names : [];
     if (rawNames.length) return rawNames.filter(n => !excludedNameSet.has(n)).length;
+    // No per-day name list — fall back to server count (exclusions unknown per day)
     return w.job_count || 0;
   });
   const rawCounts = winData.map((w) => {
     const rawNames = Array.isArray(w.raw_job_names) ? w.raw_job_names : [];
+    // Prefer raw_job_names.length — server raw_job_count may include extras not in name list
     return rawNames.length || w.raw_job_count || w.job_count || 0;
   });
-  const excludedCounts = winData.map((w, i) => Math.max((rawCounts[i] || 0) - (counts[i] || 0), 0));
+  // Excluded count per day = actual intersection of raw_job_names with excludedNameSet
+  const excludedCounts = winData.map((w) => {
+    const rawNames = Array.isArray(w.raw_job_names) ? w.raw_job_names : [];
+    if (rawNames.length) return rawNames.filter(n => excludedNameSet.has(n)).length;
+    return 0; // can't tell without per-day names
+  });
   const topJobs  = winData.map((w) => w.top_job || "");
   const rawSums  = winData.map((w) => +(w.total_hrs  || 0));
   const rawElaps = winData.map((w) => +(w.elapsed_hrs || 0));
@@ -3031,9 +3042,11 @@ function renderWindowTrendChart(winData, topJobsData) {
               lines.push(`Unique jobs excluded from chart scope: ${excluded}`);
               if (excludedNames.length > 0) {
                 const preview = excludedNames.slice(0, 6).join(", ");
-                lines.push(`Excluded jobs: ${preview}${excludedNames.length > 6 ? `, … +${excludedNames.length - 6} more` : ""}`);
+                lines.push(`Excl. jobs: ${preview}${excludedNames.length > 6 ? `, … +${excludedNames.length - 6} more` : ""}`);
+              } else if (excludedNameSet.size > 0 && rawNames.length === 0) {
+                lines.push(`Excluded jobs: ${excludedNameSet.size} global exclusions (no per-day name data)`);
               } else {
-                lines.push("Excluded jobs: none");
+                lines.push("Excluded jobs: none in this day's data");
               }
               if (topJobs[i]) lines.push(`Longest job: ${topJobs[i]}`);
               if (winData[i]?.breach) lines.push(`⚠ SLA BREACH  +${(values[i] - SLA_DAILY_HRS).toFixed(1)}h over limit`);
