@@ -208,6 +208,18 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     cov.batch    = has_batch
     cov.resource = has_resource
 
+    # sla_loaded = True only when a CUSTOMER SLA file has been uploaded.
+    # Config-derived defaults (from _config_store early enrichment above) do NOT count
+    # as "customer SLA loaded" — those are system defaults, not approved contract values.
+    _bk_sla_type = (bk.get("sla_source") or {}).get("type", "default") if bk else "default"
+    sla_loaded = (
+        bool(req.sla_ceilings)                                  # explicit ceiling from upload
+        and _bk_sla_type in ("sla_matrix", "batch_sla_xlsx")   # batch was also re-solved against customer SLA
+    ) or (
+        # sla_matrix request field is populated (SLA Matrix tab was uploaded)
+        bool(req.sla_matrix)
+    )
+
     def add(level, icon, text, sub="", source="", confidence=100,
             impact="", evidence="", recommendation="", evidence_class="measured",
             root_cause=""):
@@ -242,12 +254,11 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             "confidence_label": "INFERRED",
             "date_span_days":   req.batch_kpis.get("date_span_days", 0),
             "has_end_time":     req.batch_kpis.get("has_end_time", False),
-            "sla_source":       "customer" if bool(sla_ceil) else "default",
+            "sla_source":       "customer" if sla_loaded else "default",
             "warnings":         [],
         }
-    sla_loaded  = bool(sla_ceil)
-    bench_loaded = bool(req.benchmark)
-    sow_loaded   = bool(req.sow_compare)
+    bench_loaded  = bool(req.benchmark)
+    sow_loaded    = bool(req.sow_compare)
     issues_loaded = bool(issues)
 
     # Data confidence warning (batch)
@@ -263,11 +274,20 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 impact="Compliance and SLA calculations may be inaccurate",
                 recommendation="Upload complete Ctrl-M export with Start_Time, End_Time, Status, and 30+ days of data")
 
-        # Warn about default SLA
+        # Warn about default SLA — only when no SLA file has been loaded in this session.
+        # Both "DEFAULT_SLA" (old code) and "NO_SLA_FILE" (batch_calculator) are handled.
+        # Warnings can live in batch_cov["warnings"] OR in batch_kpis.sla_source.warnings.
         sla_src = batch_cov.get("sla_source") if batch_cov else None
-        for w in (batch_cov.get("warnings") or []):
+        _sla_warnings = list(batch_cov.get("warnings") or [])
+        # Also pull from sla_source.warnings in the raw batch_kpis
+        _bk_sla_src = (req.batch_kpis or {}).get("sla_source") or {}
+        if isinstance(_bk_sla_src, dict):
+            for _w in (_bk_sla_src.get("warnings") or []):
+                if isinstance(_w, dict) and _w not in _sla_warnings:
+                    _sla_warnings.append(_w)
+        for w in _sla_warnings:
             code = w.get("code", "")
-            if code == "DEFAULT_SLA" and not sla_loaded:
+            if code in ("DEFAULT_SLA", "NO_SLA_FILE") and not sla_loaded:
                 add("warning", "📐",
                     "SLA Source: Assumed — no customer SLA matrix uploaded",
                     w.get("text", "") + " · Compliance results cannot be marked green for audit sign-off "
