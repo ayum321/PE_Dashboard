@@ -1382,12 +1382,20 @@
               </div>
             </div>
 
+            <!-- SCOPE RECONCILIATION — explains job-level vs window-level SLA -->
+            <div id="exec-scope-reconcile"
+                 class="hidden rounded-2xl border border-Cpurple/30 bg-Cpurple/[0.06] shadow-panel p-4"></div>
+
             <!-- ROW 2 — PRIMARY ABOVE-THE-FOLD: Batch SLA bars (wide) + Top 3 At-Risk -->
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
               <!-- Panel A: Batch Runtime vs SLA Ceiling — 2/3 width -->
               <div class="lg:col-span-2 rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-                <h3 class="text-sm font-bold text-Cwhite mb-1">Batch Runtime vs SLA Ceiling</h3>
-                <p class="text-[10px] text-Cmuted mb-1">Horizontal bars sorted by SRI (worst at top)</p>
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                  <h3 class="text-sm font-bold text-Cwhite">Batch Runtime vs SLA Ceiling</h3>
+                  <span class="text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded bg-Cteal/15 text-Cteal border border-Cteal/30"
+                        title="Scope: each job's peak runtime vs its own SLA ceiling. Green here ≠ the daily batch window passing — see the Breach Calendar for window-level results.">Job-level</span>
+                </div>
+                <p class="text-[10px] text-Cmuted mb-1">Each bar = one job's peak runtime vs its own ceiling · sorted by SRI (worst at top)</p>
                 <!-- SRI legend — Problem 6 -->
                 <div class="flex items-center gap-2 mb-3 flex-wrap">
                   <span class="text-[9px] text-Cmuted font-semibold">SRI = Schedule Risk Index:</span>
@@ -1446,8 +1454,12 @@
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
               <!-- Panel: Enhanced Breach Calendar — daily granularity cells -->
               <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-                <h3 class="text-sm font-bold text-Cwhite mb-1">Breach Calendar — Daily Granularity</h3>
-                <p class="text-[10px] text-Cmuted mb-3">Each cell = 1 day · 2px dashed red = SLA ceiling</p>
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                  <h3 class="text-sm font-bold text-Cwhite">Breach Calendar — Daily Granularity</h3>
+                  <span class="text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded bg-Camber/15 text-Camber border border-Camber/30"
+                        title="Scope: each day's total elapsed batch window vs the daily SLA ceiling. A day can be red here even when every individual job passed — see the Job-level chart above.">Window-level</span>
+                </div>
+                <p class="text-[10px] text-Cmuted mb-3">Each cell = total elapsed window for 1 day · 2px dashed red = SLA ceiling</p>
                 <div id="exec-chart-breach-cal" style="height:280px;"></div>
                 <div id="exec-breach-cal-summary" class="text-[11px] text-Cmuted mt-2">—</div>
               </div>

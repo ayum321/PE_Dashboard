@@ -9568,6 +9568,9 @@ async function renderOverview() {
         _renderExecConcurrency(data.concurrency);
         _renderExecForecast(window.appData?.batch?.window || [], data.kpis?.sla_daily_hrs || 6);
         _renderSignoffChecklistV2(data.decision);
+        _renderExecHotSpots(data);
+        _renderExecNarrative(data.narrative ?? window._lastFindings ?? []);
+        _renderExecScopeReconcile(data);
       });
       return;
     }
@@ -9606,6 +9609,9 @@ async function renderOverview() {
              window.appData?.batch?.window || [],
              data.kpis?.sla_daily_hrs || 6),
       () => _renderSignoffChecklistV2(data.decision),
+      () => _renderExecHotSpots(data),
+      () => _renderExecNarrative(data.narrative ?? window._lastFindings ?? []),
+      () => _renderExecScopeReconcile(data),
     ];
     // Render one chart per animation frame so KPIs paint immediately
     let ci = 0;
@@ -9624,6 +9630,14 @@ async function renderOverview() {
   } catch (err) {
     if (loading) loading.classList.add("hidden");
     if (content) content.classList.remove("hidden");
+    // Never leave the narrative panel stuck on its loading placeholder —
+    // surface an explicit unavailable state instead of an infinite spinner.
+    const _narrEl = document.getElementById("exec-narrative");
+    if (_narrEl) {
+      _narrEl.innerHTML = `<div class="rounded-lg border border-red-500/30 bg-red-900/20 p-3 text-[11px] text-Cred">
+        Executive narrative unavailable — the dashboard service did not respond. Retry the Executive tab or re-upload the batch data.
+      </div>`;
+    }
     _handleFetchError(err);
   }
 }
@@ -11185,11 +11199,44 @@ function _renderExecNarrative(findings) {
   const el = document.getElementById("exec-narrative");
   if (!el) return;
 
-  // Normalise input
+  // ── Case 1: backend deterministic narrative string → render as prose ──
+  // The /api/executive-dashboard "narrative" field is a sentence-level string
+  // (Scope · Compliance · Root cause · Impact). Render it as readable prose
+  // with per-sentence severity accent, NOT dumped into a single green bucket.
+  if (typeof findings === "string") {
+    const txt = findings.trim();
+    if (!txt) {
+      el.innerHTML = '<p class="text-Cmuted text-[12px] py-4 text-center">No narrative data — upload batch + resource files to generate insights.</p>';
+      return;
+    }
+    // Split into sentences/lines, keeping bullet evidence lines intact.
+    const parts = txt
+      .split(/\n+|(?<=[.!])\s+(?=[A-Z0-9])/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    const sevOf = (s) => {
+      const l = s.toLowerCase();
+      if (/breach|blocked|critical|exceed|fail|overrun|violat|miss/.test(l)) return { c: "#f43f5e", b: "rgba(244,63,94,0.5)" };
+      if (/risk|watch|near|approach|caution|degrad|elevated|warning/.test(l)) return { c: "#f59e0b", b: "rgba(245,158,11,0.5)" };
+      if (/within|compliant|approved|pass|healthy|ok\b|good|stable/.test(l)) return { c: "#10d96e", b: "rgba(16,217,110,0.5)" };
+      return { c: "#6b7db3", b: "rgba(107,125,179,0.35)" };
+    };
+    el.innerHTML = `<div class="space-y-1.5">
+      ${parts.map(p => {
+        const sv = sevOf(p);
+        return `<div class="flex gap-2 items-start text-[12px] leading-relaxed text-Cwhite/90 pl-2"
+                     style="border-left:2px solid ${sv.b}">
+          <span class="mt-1 w-1.5 h-1.5 rounded-full flex-shrink-0" style="background:${sv.c}"></span>
+          <span>${_esc(p)}</span>
+        </div>`;
+      }).join("")}
+    </div>`;
+    return;
+  }
+
+  // ── Case 2: findings array → 3-bucket BLOCKERS / WATCH / PASSING ──
   if (!findings) findings = [];
-  else if (typeof findings === "string") {
-    findings = findings.trim() ? [{ key: "coverage", icon: "🛡️", level: "info", text: findings }] : [];
-  } else if (!Array.isArray(findings)) {
+  else if (!Array.isArray(findings)) {
     findings = (typeof findings === "object") ? [findings] : [];
   }
   if (!findings.length) {
@@ -11236,6 +11283,81 @@ function _renderExecNarrative(findings) {
       </div>
     `).join('')}
   </div>`;
+}
+
+// ── Scope Reconciliation Banner ──────────────────────────────
+// Resolves the single biggest source of confusion on this page:
+// "job-level SLA = 100%" vs "window-level SLA = X%" look contradictory
+// but measure two different things. This banner states the relationship
+// explicitly so a PE reviewer never has to read backend code to know it.
+function _renderExecScopeReconcile(data) {
+  const el = document.getElementById("exec-scope-reconcile");
+  if (!el) return;
+
+  const kpis = data?.kpis || {};
+  const cal  = data?.breach_calendar || {};
+
+  // Job-level: every job vs its own SLA ceiling (peak runtime).
+  const jobRate = _n(kpis.batch_rate);
+  // Window-level: each day's total elapsed batch window vs the daily ceiling.
+  const winRate = _n(kpis.window_compliance ?? kpis.batch_rate);
+
+  // Authoritative single source for breach-day counts (same numbers the
+  // Breach Calendar bars are drawn from — guarantees the two never disagree).
+  const totalDays  = cal.total_days  ?? kpis.window_total_days ?? null;
+  let   breachDays = cal.breach_count ?? kpis.window_breach_days ?? null;
+  // Hard guard: a breach-day count can never exceed total days. If the data
+  // ever violates this, clamp and flag rather than render an impossible ratio.
+  let clampNote = "";
+  if (totalDays != null && breachDays != null && breachDays > totalDays) {
+    clampNote = " (count reconciled)";
+    breachDays = totalDays;
+  }
+
+  // Only render the banner when the two scopes actually diverge — when they
+  // agree there's nothing to reconcile and the banner would be noise.
+  const diverges = Math.abs(jobRate - winRate) >= 1.0 || (breachDays != null && breachDays > 0);
+  if (!diverges) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+
+  const jobCol = jobRate >= 95 ? "#10d96e" : jobRate >= 80 ? "#f59e0b" : "#f43f5e";
+  const winCol = winRate >= 95 ? "#10d96e" : winRate >= 80 ? "#f59e0b" : "#f43f5e";
+  const dayTxt = (totalDays != null && breachDays != null)
+    ? `${breachDays}/${totalDays} day${totalDays === 1 ? "" : "s"} breached${clampNote}`
+    : "—";
+
+  el.innerHTML = `
+    <div class="flex items-center gap-1.5 mb-2">
+      <span class="text-Cpurple text-sm">⇄</span>
+      <span class="text-[10px] font-bold uppercase tracking-widest text-Cwhite/80">Two SLA scopes — both true, measuring different things</span>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div class="rounded-lg border border-Cborder/60 bg-Ccard/40 p-3">
+        <div class="flex items-baseline justify-between">
+          <span class="text-[10px] uppercase tracking-wider text-Cmuted font-bold">Job-level SLA</span>
+          <span class="text-lg font-bold font-mono" style="color:${jobCol}">${_fmtPctCompact(jobRate)}</span>
+        </div>
+        <p class="text-[11px] text-Cwhite/70 leading-snug mt-1">
+          Each job's <strong>peak runtime</strong> vs its own SLA ceiling. Drives the
+          <strong>Batch&nbsp;Runtime&nbsp;vs&nbsp;SLA&nbsp;Ceiling</strong> bars above.
+        </p>
+      </div>
+      <div class="rounded-lg border border-Cborder/60 bg-Ccard/40 p-3">
+        <div class="flex items-baseline justify-between">
+          <span class="text-[10px] uppercase tracking-wider text-Cmuted font-bold">Window-level SLA</span>
+          <span class="text-lg font-bold font-mono" style="color:${winCol}">${_fmtPctCompact(winRate)}</span>
+        </div>
+        <p class="text-[11px] text-Cwhite/70 leading-snug mt-1">
+          Each day's <strong>total elapsed batch window</strong> vs the daily ceiling
+          (<span class="font-mono" style="color:${winCol}">${dayTxt}</span>). Drives the
+          <strong>Breach&nbsp;Calendar</strong> below.
+        </p>
+      </div>
+    </div>
+    <p class="text-[10px] text-Cmuted leading-snug mt-2">
+      A day can breach the <em>window</em> (batch finished late overall) even when <em>every individual job</em> stayed inside its own SLA —
+      caused by late starts, queue delays, or too many jobs running back-to-back without overlap. That is why these two numbers differ and both are correct.
+    </p>`;
 }
 
 // ── Hot Spots — crux strip above the narrative ───────────────

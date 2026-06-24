@@ -314,6 +314,12 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
             "worst_value": max(dd_vms[0].get("mem_used_max") or 0, dd_vms[0].get("cpu_max") or 0) if dd_vms else 0,
         }
 
+    # ── Breach calendar with SLA ceiling overlay ─────────────────
+    # Built BEFORE the decision gate so both consume one authoritative
+    # breach-day count — guarantees the blocker text and the calendar bars
+    # can never report different numbers (e.g. an impossible "76/27").
+    breach_calendar = _build_breach_calendar(window, sla_ceiling, top_jobs, _ceiling_map)  # Patch G
+
     # ── Decision Strip / Sign-off Gate (5-condition rule engine) ─
     decision = _compute_decision_gate(
         kpis=kpis,
@@ -325,10 +331,9 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         ceiling_map=_ceiling_map,          # Patch G
         findings=body.findings or [],
         customer=body.customer_name or "",
+        breach_days=breach_calendar.get("breach_count"),
+        total_days=breach_calendar.get("total_days"),
     )
-
-    # ── Breach calendar with SLA ceiling overlay ─────────────────
-    breach_calendar = _build_breach_calendar(window, sla_ceiling, top_jobs, _ceiling_map)  # Patch G
 
     # ── Job concurrency timeline (worst day Gantt) ───────────────
     concurrency = _build_concurrency_timeline(
@@ -404,6 +409,8 @@ def _compute_decision_gate(
     ceiling_map: Dict[str, float] | None = None,
     findings: List[Dict[str, Any]],
     customer: str,
+    breach_days: int | None = None,
+    total_days: int | None = None,
 ) -> Dict[str, Any]:
     """Produces the unified Decision Strip data.
 
@@ -419,9 +426,10 @@ def _compute_decision_gate(
     # ── 1. Job SLA rate
     job_sla = float(bk.get("compliance_pct") or 100.0)
 
-    # ── 2. Window compliance — re-derive from window list to be authoritative
-    #    Use per-row contracted ceiling via ceiling_map (Patch D key fix).
-    total_days = len(window or [])
+    # ── 2. Window compliance — prefer the authoritative breach-day counts
+    #    supplied by _build_breach_calendar (single source of truth so the
+    #    blocker text and the Breach Calendar bars always agree). Fall back to
+    #    a local re-derivation only when they were not passed in.
     def _win_hrs(w):
         e = _f(w.get("elapsed_hrs"))
         return e if e > 0 else _f(w.get("total_hrs"))
@@ -429,10 +437,16 @@ def _compute_decision_gate(
         _sa = str(w.get("sub_app") or w.get("Sub_Application") or "").upper()
         return ceiling_map.get(_sa, sla_ceiling)
 
-    breach_days = sum(
-        1 for w in (window or [])
-        if _win_hrs(w) > _win_ceiling(w) or w.get("breach") is True
-    )
+    if total_days is None:
+        total_days = len(window or [])
+    if breach_days is None:
+        breach_days = sum(
+            1 for w in (window or [])
+            if _win_hrs(w) > _win_ceiling(w)
+        )
+    # Invariant guard: a breach-day count can never exceed total days.
+    if total_days and breach_days > total_days:
+        breach_days = total_days
     compliant_days = total_days - breach_days
     if total_days > 0:
         window_compliance = round(compliant_days / total_days * 100.0, 1)
@@ -718,10 +732,13 @@ def _build_concurrency_timeline(
 
     available_dates = sorted(daily_jobs.keys())
     if worst_date not in daily_jobs:
-        worst_date = available_dates[-1] if available_dates else None
-
-    if not worst_date or worst_date not in daily_jobs:
-        return {"available": False, "reason": "No matching date with job-level timings."}
+        return {
+            "available": False,
+            "reason": (
+                "Worst-day date is outside the loaded job-level timing range. "
+                "Reload the batch file to clear stale summary state."
+            ),
+        }
 
     raw_jobs = daily_jobs[worst_date] or []
 
