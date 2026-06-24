@@ -832,11 +832,11 @@
                 <div id="upload-status" class="hidden" data-intake-progress data-color="blue"></div>
               </div>
 
-              <!-- Zone D — UI Benchmark Report (XLSX / CSV) -->
+              <!-- Zone D — Performance Benchmark (XLSX / CSV) -->
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <span id="bench-intake-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
-                  <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">UI Benchmark Report</span>
+                 <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Performance Benchmark</span>
                 </div>
                 <div id="bench-intake-drop-zone"
                      class="rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
@@ -3094,9 +3094,11 @@
             <div>
               <p class="text-sm font-semibold text-Cwhite">No benchmark file uploaded yet</p>
               <p class="text-xs text-Cmuted mt-1">
-                Upload your benchmark XLSX / CSV from the <strong class="text-Cwhite">Upload &amp; Intake</strong> page
-                (Zone D — UI Benchmark Report). Expected columns:
-                <span class="font-mono text-Cpurple">Transaction | Baseline (sec) | Current (sec)</span>
+                Upload from <strong class="text-Cwhite">Upload &amp; Intake</strong> → Zone D (Performance Benchmark).
+                Accepts two formats: <span class="font-mono text-Cpurple">Batch Runtime Performance XLSX</span>
+                (JOB / RUNTIME_&lt;new&gt; / RUNTIME_&lt;old&gt;) or
+                <span class="font-mono text-Cpurple">UI Benchmark XLSX/CSV</span>
+                (Transaction | Baseline (sec) | Current (sec)).
               </p>
             </div>
             <button onclick="setActiveView('upload')"
@@ -3105,29 +3107,33 @@
               ↑ Go to Upload
             </button>
           </div>
-          <!-- Loaded chip (hidden until benchmark data arrives) -->
+
+          <!-- Loaded chip -->
           <div id="bench-loaded-chip" class="hidden flex items-center gap-2 text-xs font-semibold text-Cpurple">
             <span class="w-2 h-2 rounded-full bg-Cpurple animate-pulse"></span>
             <span id="bench-loaded-label">Benchmark data loaded</span>
           </div>
 
-          <!-- KPI strip -->
+          <!-- KPI strip — IDs aligned with _renderBenchmark JS writes -->
           <div id="bench-kpi-row" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Transactions</div>
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Pass Rate</div>
+              <div id="bk-pass-rate" class="text-2xl font-bold text-Cgreen">—</div>
+              <div id="bk-pass-rate-sub" class="text-[10px] text-Cmuted mt-0.5"></div>
+            </div>
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Worst Regression</div>
+              <div id="bk-worst-reg" class="text-2xl font-bold text-Cred">—</div>
+              <div id="bk-worst-reg-name" class="text-[10px] text-Cmuted mt-0.5 truncate max-w-[120px] mx-auto"></div>
+            </div>
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
+              <div id="bk-total-label" class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Transactions</div>
               <div id="bk-total" class="text-2xl font-bold text-Cwhite">—</div>
             </div>
             <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Regressions</div>
-              <div id="bk-degraded" class="text-2xl font-bold text-Cred">—</div>
-            </div>
-            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">SLA Breaches</div>
-              <div id="bk-sla-breach" class="text-2xl font-bold text-Camber">—</div>
-            </div>
-            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Avg Delta</div>
-              <div id="bk-avg-delta" class="text-2xl font-bold text-Cwhite">—</div>
+              <div id="bk-fourth-label" class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Concurrent Users</div>
+              <div id="bk-max-concurrent" class="text-2xl font-bold text-Cblue">—</div>
+              <div id="bk-coverage-sub" class="text-[10px] text-Cmuted mt-0.5"></div>
             </div>
           </div>
 
@@ -3136,39 +3142,93 @@
             <p id="bench-summary-text" class="text-sm text-Cwhite font-semibold"></p>
           </div>
 
-          <!-- Category summary cards (multi-sheet files) -->
-          <div id="bench-category-cards" class="hidden flex flex-wrap gap-3"></div>
-
-          <!-- Fill Rate panel -->
-          <div id="bench-fill-rate" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
-
-          <!-- Batch Performance summary panel -->
-          <div id="bench-batch-perf" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
-
-          <!-- Comparison table -->
-          <div id="bench-table-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-            <h3 class="text-sm font-bold text-Cwhite mb-3">Transaction Comparison Matrix</h3>
-            <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
-              <table class="w-full text-xs">
-                <thead class="sticky top-0 bg-Ccard z-20">
-                  <tr class="border-b border-Cborder">
-                    <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Transaction</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">PROD (s)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">TEST (s)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Delta %</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">SLA (s)</th>
-                    <th class="text-center py-2 text-Cmuted font-semibold">Status</th>
-                  </tr>
-                </thead>
-                <tbody id="bench-tbody"></tbody>
-              </table>
+          <!-- Mode tab control — Industrial: 2px border-bottom active indicator, JetBrains Mono count badges -->
+          <div id="bench-mode-tabs" class="hidden border-b border-Cborder">
+            <div class="flex items-end gap-0">
+              <button id="bench-tab-batch"
+                      onclick="_benchSetMode('batch')"
+                      class="bench-mode-tab px-5 py-2.5 text-xs font-bold font-mono tracking-wider
+                             text-Cmuted border-b-2 border-transparent
+                             hover:text-Cwhite transition-colors duration-150 whitespace-nowrap">
+                BATCH RUNTIME
+                <span id="bench-tab-batch-badge"
+                      class="ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold
+                             bg-Cmuted/20 text-Cmuted transition-colors duration-150"></span>
+              </button>
+              <button id="bench-tab-ui"
+                      onclick="_benchSetMode('ui')"
+                      class="bench-mode-tab px-5 py-2.5 text-xs font-bold font-mono tracking-wider
+                             text-Cmuted border-b-2 border-transparent
+                             hover:text-Cwhite transition-colors duration-150 whitespace-nowrap">
+                UI BENCHMARK
+                <span id="bench-tab-ui-badge"
+                      class="ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold
+                             bg-Cmuted/20 text-Cmuted transition-colors duration-150"></span>
+              </button>
             </div>
           </div>
 
-          <!-- SIT Observations panel -->
-          <div id="bench-observations" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
+          <!-- BATCH RUNTIME PANEL -->
+          <div id="bench-batch-panel" class="hidden space-y-4">
+            <!-- Batch Performance summary: regressions, improvements, net delta, per-window tables -->
+            <div id="bench-batch-perf" class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
+          </div>
 
-          <!-- Empty state (hidden — bench-no-data-prompt covers this) -->
+          <!-- UI BENCHMARK PANEL -->
+          <div id="bench-ui-panel" class="hidden space-y-4">
+            <!-- Category summary cards (multi-sheet files) -->
+            <div id="bench-category-cards" class="hidden flex flex-wrap gap-3"></div>
+            <!-- Fill Rate panel -->
+            <div id="bench-fill-rate" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
+            <!-- Comparison table -->
+            <div id="bench-table-wrap" class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
+              <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                <h3 class="text-sm font-bold text-Cwhite">Transaction Comparison Matrix</h3>
+                <div class="flex items-center gap-2">
+                  <select id="bench-filter-action"
+                          onchange="_benchApplyFilter()"
+                          class="text-[10px] font-mono bg-Ccard2 border border-Cborder text-Cmuted rounded px-2 py-1 focus:outline-none focus:border-Cpurple/60">
+                    <option value="">All actions</option>
+                  </select>
+                  <select id="bench-filter-volume"
+                          onchange="_benchApplyFilter()"
+                          class="text-[10px] font-mono bg-Ccard2 border border-Cborder text-Cmuted rounded px-2 py-1 focus:outline-none focus:border-Cpurple/60">
+                    <option value="">All volumes</option>
+                    <option value="small">Small (&lt;1k rows)</option>
+                    <option value="medium">Medium (1k–10k)</option>
+                    <option value="large">Large (&gt;10k)</option>
+                  </select>
+                  <button id="bench-show-all-btn"
+                          onclick="_benchToggleShowAll()"
+                          class="text-[10px] font-mono border border-Cborder rounded px-3 py-1 text-Cmuted
+                                 hover:text-Cwhite hover:border-Cpurple/60 transition-colors">
+                    Show All
+                  </button>
+                </div>
+              </div>
+              <!-- Mini bar chart -->
+              <div id="bench-mini-chart" class="mb-4"></div>
+              <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
+                <table class="w-full text-xs">
+                  <thead class="sticky top-0 bg-Ccard z-20">
+                    <tr class="border-b border-Cborder">
+                      <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Transaction</th>
+                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Baseline (s)</th>
+                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Current (s)</th>
+                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Delta %</th>
+                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">SLA (s)</th>
+                      <th class="text-center py-2 text-Cmuted font-semibold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="bench-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+            <!-- SIT Observations panel -->
+            <div id="bench-observations" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5"></div>
+          </div>
+
+          <!-- Empty state -->
           <div id="bench-empty" class="hidden"></div>
 
         </section>

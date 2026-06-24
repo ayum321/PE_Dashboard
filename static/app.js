@@ -15273,6 +15273,36 @@ function _benchToggleShowAll() {
   _benchApplyFilter();
 }
 
+// ── Mode toggle: "batch" | "ui" ───────────────────────────────────────────────
+// Industrial active state: 2px border-bottom on active tab, signal color badge.
+// Switches between batch runtime panel and UI benchmark panel.
+function _benchSetMode(mode) {
+  const batchPanel = document.getElementById("bench-batch-panel");
+  const uiPanel    = document.getElementById("bench-ui-panel");
+  const batchTab   = document.getElementById("bench-tab-batch");
+  const uiTab      = document.getElementById("bench-tab-ui");
+
+  const activeTabCls   = ["text-Cwhite", "border-Cpurple"];
+  const inactiveTabCls = ["text-Cmuted",  "border-transparent"];
+
+  if (mode === "batch") {
+    batchPanel?.classList.remove("hidden");
+    uiPanel?.classList.add("hidden");
+    // Active indicator
+    batchTab?.classList.remove(...inactiveTabCls);
+    batchTab?.classList.add(...activeTabCls);
+    uiTab?.classList.remove(...activeTabCls);
+    uiTab?.classList.add(...inactiveTabCls);
+  } else {
+    uiPanel?.classList.remove("hidden");
+    batchPanel?.classList.add("hidden");
+    uiTab?.classList.remove(...inactiveTabCls);
+    uiTab?.classList.add(...activeTabCls);
+    batchTab?.classList.remove(...activeTabCls);
+    batchTab?.classList.add(...inactiveTabCls);
+  }
+}
+
 function _benchUpdateShowAllBtn() {
   const btn = document.getElementById("bench-show-all-btn");
   if (!btn) return;
@@ -15311,7 +15341,6 @@ function _renderBenchmark(data) {
   document.getElementById("bench-no-data-prompt")?.classList.add("hidden");
   document.getElementById("bench-loaded-chip")?.classList.remove("hidden");
   document.getElementById("bench-kpi-row")?.classList.remove("hidden");
-  document.getElementById("bench-table-wrap")?.classList.remove("hidden");
 
   const isBatchPerf = !!(data.batch_perf_summary);
   const rows = data.rows || [];
@@ -15321,6 +15350,12 @@ function _renderBenchmark(data) {
   const catLabel = isBatchPerf ? " · batch runtime" : (cats.length > 0 ? ` · ${cats.length} categories` : "");
   const lbl = document.getElementById("bench-loaded-label");
   if (lbl) lbl.textContent = `${data.filename || "Benchmark"} · ${data.total_transactions} ${isBatchPerf ? "jobs" : "transactions"}${catLabel}`;
+
+  // Adapt KPI strip labels by mode
+  const totalLbl = document.getElementById("bk-total-label");
+  const fourthLbl = document.getElementById("bk-fourth-label");
+  if (totalLbl) totalLbl.textContent = isBatchPerf ? "Total Jobs" : "Transactions";
+  if (fourthLbl) fourthLbl.textContent = isBatchPerf ? "Net Runtime Δ" : "Concurrent Users";
 
   // ── BAND A: KPI strip ────────────────────────────────────────
   const withBase = rows.filter(r => r.baseline_sec > 0);
@@ -15360,31 +15395,27 @@ function _renderBenchmark(data) {
     }
   }
 
-  // Transactions
+  // Total jobs / transactions
   setText("bk-total", String(total));
 
-  // Max concurrent users
-  const concurs = rows.map(r => r.concurrent_users || 0).filter(v => v > 0);
-  const maxConcur = concurs.length > 0 ? Math.max(...concurs) : null;
+  // 4th KPI: Net Runtime for batch mode, Max Concurrent for UI mode
   const concurEl = document.getElementById("bk-max-concurrent");
-  if (concurEl) {
-    concurEl.textContent = maxConcur != null ? String(maxConcur) : "—";
-    concurEl.className   = "text-2xl font-bold text-Cblue";
-  }
-
-  // Coverage tag
-  const covEl  = document.getElementById("bk-coverage");
-  const covSub = document.getElementById("bk-coverage-sub");
-  const cov    = data.coverage_summary;
-  if (covEl) {
-    if (cov && cov.flows && cov.flows.length > 0) {
-      const n = cov.flows.length;
-      covEl.textContent = n <= 5 ? "Core flows" : n <= 15 ? "Partial coverage" : "Full stack";
-      covEl.className   = "text-sm font-bold text-Cpurple leading-tight";
-      if (covSub) covSub.textContent = `${n} flows · ${(cov.actions || []).length} action types`;
-    } else {
-      covEl.textContent = String(total) + " txns";
-      if (covSub) covSub.textContent = "";
+  if (isBatchPerf && data.batch_perf_summary) {
+    const bps = data.batch_perf_summary;
+    const netSecs = _n(bps.net_delta_secs);
+    const netMin  = Math.abs(netSecs / 60).toFixed(1);
+    if (concurEl) {
+      concurEl.textContent = (netSecs >= 0 ? "−" : "+") + netMin + " min";
+      concurEl.className   = `text-2xl font-bold ${netSecs >= 0 ? "text-Cgreen" : "text-Cred"}`;
+    }
+    const covSub = document.getElementById("bk-coverage-sub");
+    if (covSub) covSub.textContent = netSecs >= 0 ? "saved per run" : "added per run";
+  } else {
+    const concurs = rows.map(r => r.concurrent_users || 0).filter(v => v > 0);
+    const maxConcur = concurs.length > 0 ? Math.max(...concurs) : null;
+    if (concurEl) {
+      concurEl.textContent = maxConcur != null ? String(maxConcur) : "—";
+      concurEl.className   = "text-2xl font-bold text-Cblue";
     }
   }
 
@@ -15397,18 +15428,51 @@ function _renderBenchmark(data) {
     bannerEl.className = `rounded-xl border px-5 py-3 ${breachCount > 0 ? "border-Cred/40 bg-Cred/10" : watchCount > 0 ? "border-Camber/40 bg-Camber/10" : "border-Cgreen/40 bg-Cgreen/10"}`;
   }
 
-  // ── BAND B: Table + mini chart ───────────────────────────────
+  // ── Mode tabs — show both, set badge counts, auto-activate correct mode ──
+  const tabWrap = document.getElementById("bench-mode-tabs");
+  if (tabWrap) tabWrap.classList.remove("hidden");
+
+  // Batch tab badge
+  const batchBadge = document.getElementById("bench-tab-batch-badge");
+  if (batchBadge) {
+    if (isBatchPerf) {
+      batchBadge.textContent = `${total} jobs`;
+      const hasReg = (data.batch_perf_summary?.regressions || 0) > 0;
+      batchBadge.className = `ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors duration-150 ${hasReg ? "bg-Cred/20 text-Cred" : "bg-Cgreen/20 text-Cgreen"}`;
+    } else {
+      batchBadge.textContent = "no data";
+      batchBadge.className = "ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-Cmuted/20 text-Cmuted transition-colors duration-150";
+    }
+  }
+  // UI tab badge
+  const uiBadge = document.getElementById("bench-tab-ui-badge");
+  if (uiBadge) {
+    if (!isBatchPerf && total > 0) {
+      uiBadge.textContent = `${total} txns`;
+      const hasBreaches = breachCount > 0;
+      uiBadge.className = `ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors duration-150 ${hasBreaches ? "bg-Cred/20 text-Cred" : "bg-Cpurple/20 text-Cpurple"}`;
+    } else {
+      uiBadge.textContent = "no data";
+      uiBadge.className = "ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-Cmuted/20 text-Cmuted transition-colors duration-150";
+    }
+  }
+
+  // ── BAND B: render sub-panels then set mode ──────────────────
   _benchUpdateShowAllBtn();
-  _benchApplyFilter();   // renders table with default filter (BREACH+WATCH only)
+  _benchApplyFilter();
 
   // ── BAND C: Coverage + Evidence ──────────────────────────────
   _benchRenderCoverage(data);
   _benchRenderEvidence(data.evidence_sentences || []);
 
-  // Existing sub-panels
+  // Sub-panels
+  _renderBatchPerfSummary(data);   // was dead code — now wired
   _renderBenchCategories(data);
   _renderBenchFillRate(data);
   _renderBenchObservations(data);
+
+  // Auto-activate the mode that has data
+  _benchSetMode(isBatchPerf ? "batch" : "ui");
 }
 
 function _benchRenderTable(rows, threshold, batchPerfSummary) {
@@ -15681,7 +15745,6 @@ function _renderBatchPerfSummary(data) {
   if (!wrap) return;
   const bps = data.batch_perf_summary;
   if (!bps) { wrap.classList.add("hidden"); return; }
-  wrap.classList.remove("hidden");
 
   const netSecs = _n(bps.net_delta_secs);
   const netMin  = Math.abs(netSecs / 60).toFixed(1);
@@ -15700,25 +15763,16 @@ function _renderBatchPerfSummary(data) {
     const pctCol = isReg ? "text-Cred" : "text-Cgreen";
     const sav = _n(e.delta_secs);
     return `<tr class="border-b border-Cborder/30 hover:bg-Ccard/40">
-      <td class="py-1.5 pr-3 text-Cwhite text-xs font-semibold">${_esc(e.job)}</td>
-      <td class="py-1.5 pr-3 text-right text-Cmuted font-mono text-xs">${_n(e.old_secs).toFixed(0)}s</td>
-      <td class="py-1.5 pr-3 text-right font-mono text-xs ${isReg ? "text-Camber" : "text-Cgreen"}">${_n(e.new_secs).toFixed(0)}s</td>
-      <td class="py-1.5 text-right font-mono text-xs font-bold ${pctCol}">${pct > 0 ? "+" : ""}${pct.toFixed(0)}%</td>
-      <td class="py-1.5 text-right font-mono text-xs ${sav >= 0 ? "text-Cgreen" : "text-Cred"}">${sav >= 0 ? "+" : ""}${sav.toFixed(0)}s</td>
+      <td class="py-1.5 pr-3 text-Cwhite text-xs font-semibold truncate max-w-[200px]" title="${_esc(e.job)}">${_esc(e.job)}</td>
+      <td class="py-1.5 pr-3 text-right text-Cmuted font-mono text-xs tabular-nums">${_n(e.old_secs).toFixed(0)}s</td>
+      <td class="py-1.5 pr-3 text-right font-mono text-xs tabular-nums ${isReg ? "text-Camber" : "text-Cgreen"}">${_n(e.new_secs).toFixed(0)}s</td>
+      <td class="py-1.5 text-right font-mono text-xs font-bold tabular-nums ${pctCol}">${pct > 0 ? "+" : ""}${pct.toFixed(0)}%</td>
+      <td class="py-1.5 text-right font-mono text-xs tabular-nums ${sav >= 0 ? "text-Cgreen" : "text-Cred"}">${sav >= 0 ? "+" : ""}${sav.toFixed(0)}s</td>
     </tr>`;
   };
 
   const reg  = bps.top_regressions  || [];
   const impr = bps.top_improvements || [];
-
-  let html = `<h3 class="text-sm font-bold text-Cwhite mb-3">Batch Runtime Comparison</h3>
-    <div class="flex flex-wrap gap-3 mb-5">
-      ${statCard("Total Jobs",    bps.total_jobs,    "text-Cwhite",  `${bps.comparable} with baseline`)}
-      ${statCard("Regressions",   bps.regressions,   bps.regressions > 0 ? "text-Cred" : "text-Cgreen", "worse than before")}
-      ${statCard("Improvements",  bps.improvements,  bps.improvements > 0 ? "text-Cgreen" : "text-Cmuted", "faster than before")}
-      ${statCard("No Change",     bps.no_change,     "text-Cmuted",  "within ±threshold")}
-      ${statCard("Net Runtime",   `${netSecs >= 0 ? "−" : "+"}${netMin} min`, netCol, `${netDir} per run`)}
-    </div>`;
 
   const colHead = `<thead><tr class="border-b border-Cborder">
     <th class="text-left py-1.5 pr-3 text-Cmuted text-[10px] font-semibold">Job</th>
@@ -15728,8 +15782,17 @@ function _renderBatchPerfSummary(data) {
     <th class="text-right py-1.5 text-Cmuted text-[10px] font-semibold">Δ sec</th>
   </tr></thead>`;
 
-  html += `<div class="grid grid-cols-1 xl:grid-cols-2 gap-4">`;
+  let html = `<h3 class="text-sm font-bold text-Cwhite mb-4">Batch Runtime Comparison</h3>
+    <div class="flex flex-wrap gap-3 mb-5">
+      ${statCard("Total Jobs",   bps.total_jobs,    "text-Cwhite",  `${bps.comparable} comparable`)}
+      ${statCard("Regressions",  bps.regressions,   bps.regressions > 0 ? "text-Cred"   : "text-Cgreen", "worse than before")}
+      ${statCard("Improvements", bps.improvements,  bps.improvements > 0 ? "text-Cgreen" : "text-Cmuted", "faster than before")}
+      ${statCard("No Change",    bps.no_change,     "text-Cmuted",  "within ±threshold")}
+      ${statCard("Net Runtime",  `${netSecs >= 0 ? "−" : "+"}${netMin} min`, netCol, `${netDir} per run`)}
+    </div>`;
 
+  // Top regressions / improvements side-by-side
+  html += `<div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-5">`;
   if (reg.length) {
     html += `<div>
       <div class="text-xs font-bold text-Cred uppercase tracking-wider mb-2">Top Regressions <span class="font-normal text-Cmuted normal-case">(${bps.regressions} total)</span></div>
@@ -15738,7 +15801,6 @@ function _renderBatchPerfSummary(data) {
       </tbody></table></div>
     </div>`;
   }
-
   if (impr.length) {
     html += `<div>
       <div class="text-xs font-bold text-Cgreen uppercase tracking-wider mb-2">Top Improvements <span class="font-normal text-Cmuted normal-case">(${bps.improvements} total)</span></div>
@@ -15747,14 +15809,50 @@ function _renderBatchPerfSummary(data) {
       </tbody></table></div>
     </div>`;
   }
-
   if (!reg.length && !impr.length) {
     html += `<div class="col-span-2 py-6 text-center text-Cmuted text-xs">
       All ${bps.total_jobs} jobs ran within tolerance — no significant regressions or improvements.
     </div>`;
   }
-
   html += `</div>`;
+
+  // Per-batch-window category breakdown (e.g. Monthly / Daily / SEQ Daily / Weekly Run 1 / Weekly Run 2)
+  const cats = (data.categories || []).filter(c => c.total > 0);
+  if (cats.length > 1) {
+    html += `<div class="border-t border-Cborder pt-5">
+      <div class="text-xs font-bold text-Cwhite uppercase tracking-wider mb-3">By Batch Window</div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead><tr class="border-b border-Cborder">
+            <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Window</th>
+            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Jobs</th>
+            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Regressions</th>
+            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Improvements</th>
+            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Pass Rate</th>
+            <th class="text-right py-2 text-Cmuted font-semibold">Avg Δ</th>
+          </tr></thead>
+          <tbody>
+            ${cats.map(c => {
+              const pct = c.total > 0 ? Math.round(c.passed / c.total * 100) : 0;
+              const pctCol = c.degraded > 0 ? "text-Cred" : c.failed > 0 ? "text-Camber" : "text-Cgreen";
+              const regCol = (c.degraded || 0) > 0 ? "text-Cred font-bold" : "text-Cmuted";
+              const imprCol = (c.passed || 0) > 0 && (c.avg_delta || 0) < 0 ? "text-Cgreen" : "text-Cmuted";
+              const deltaCol = (c.avg_delta || 0) > 0 ? "text-Camber" : "text-Cgreen";
+              return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
+                <td class="py-2 pr-4 text-Cwhite font-semibold">${_esc(c.name)}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums text-Cmuted">${c.total}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${regCol}">${c.degraded || 0}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${imprCol}">${c.passed || 0}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${pctCol}">${pct}%</td>
+                <td class="py-2 text-right font-mono tabular-nums ${deltaCol}">${(_n(c.avg_delta) > 0 ? "+" : "") + _n(c.avg_delta).toFixed(1)}%</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  }
+
   wrap.innerHTML = html;
 }
 
