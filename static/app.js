@@ -2034,10 +2034,12 @@ function renderBatchReview(data) {
   renderBatchLayerCards(data);
   renderBatchCoverageStrip(data.data_coverage || null);
   // FIX 6.2: merge data quality warnings from both coverage and kpis.dq_warnings
-  renderBatchDataWarnings([
+  const _batchWarnings = [
     ...(data.data_coverage?.warnings || []),
     ...(data.kpis?.dq_warnings      || []),
-  ]);
+  ];
+  window._lastBatchWarnings = _batchWarnings;
+  renderBatchDataWarnings(_batchWarnings);
   renderExcludedJobsPanel(data.data_coverage || null);
   renderBatchSlaSourceTags(data.sla_source || null, _displayKpis);
 
@@ -2513,6 +2515,9 @@ function renderBatchCoverageStrip(dc) {
 
 
 // ── Data Warnings ─────────────────────────────────────────────
+// Warnings with identical `code` (e.g. UTILITY_PATTERN_NOT_EXCLUDED) are
+// collapsed into a single summary row with expand/collapse — prevents 40+
+// near-identical info rows from flooding the Batch Review panel.
 function renderBatchDataWarnings(warnings) {
   const wrap = document.getElementById("batch-data-warnings");
   if (!wrap) return;
@@ -2520,29 +2525,92 @@ function renderBatchDataWarnings(warnings) {
 
   wrap.classList.remove("hidden");
 
-  // Sort: critical first, then warning, then info
   const sevOrder = { critical: 0, warning: 1, info: 2 };
   const sorted = [...warnings].sort((a, b) =>
     (sevOrder[a.severity] ?? 3) - (sevOrder[b.severity] ?? 3)
   );
 
-  wrap.innerHTML = sorted.map(w => {
-    const isCritical = w.severity === "critical";
-    const isWarning  = w.severity === "warning";
-    const sev = isCritical ? THEME.red : isWarning ? THEME.amber : THEME.cyan;
+  // Group by code — critical/warning codes always render individually;
+  // info codes with >3 members collapse into a summary row.
+  const GROUP_THRESHOLD = 3;
+  const groups = new Map(); // code → [warnings]
+  sorted.forEach(w => {
+    const key = w.code || w.severity || "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(w);
+  });
+
+  // Expand state — persists across re-renders
+  if (!window._batchWarnExpanded) window._batchWarnExpanded = {};
+
+  const rows = [];
+  groups.forEach((members, code) => {
+    const first = members[0];
+    const isCritical = first.severity === "critical";
+    const isWarning  = first.severity === "warning";
+    const sev  = isCritical ? THEME.red : isWarning ? THEME.amber : THEME.cyan;
     const icon = isCritical ? "🚨" : isWarning ? "⚠️" : "ℹ️";
-    const borderW = isCritical ? "3" : "2";
-    const bgOpacity = isCritical ? 0.10 : 0.06;
-    const extraClass = isCritical
-      ? "animate-pulse font-semibold text-[12px]"
-      : "text-[11px]";
-    return `<div class="rounded-lg border-l-${borderW} px-3 py-2 ${extraClass}"
-                 style="border-left-color:${sev};border-left-width:${borderW}px;background:${hexA(sev, bgOpacity)}">
-      <span style="color:${sev}" class="font-bold">${icon}</span>
-      <span class="${isCritical ? 'text-red-300' : 'text-Cmuted'} ml-1">${escapeHtml(w.text)}</span>
-    </div>`;
-  }).join("");
+    const bgOp = isCritical ? 0.10 : 0.06;
+
+    // Always render individually for critical/warning, or small groups
+    if (isCritical || isWarning || members.length <= GROUP_THRESHOLD) {
+      members.forEach(w => {
+        rows.push(`<div class="rounded-lg px-3 py-2 text-[11px]${isCritical ? " animate-pulse font-semibold" : ""}"
+          style="border-left:${isCritical ? 3 : 2}px solid ${sev};background:${hexA(sev, bgOp)}">
+          <span style="color:${sev}" class="font-bold">${icon}</span>
+          <span class="${isCritical ? "text-red-300" : "text-Cmuted"} ml-1">${escapeHtml(w.text)}</span>
+        </div>`);
+      });
+      return;
+    }
+
+    // Collapsed group for repetitive info codes (UTILITY_PATTERN_NOT_EXCLUDED etc.)
+    const expanded = !!window._batchWarnExpanded[code];
+    // Derive a clean group label: strip job-specific parts, keep the pattern
+    const groupLabel = (() => {
+      // Most utility warnings say "Job 'X' matches utility pattern '_export'..."
+      // Extract the common part after "matches utility pattern"
+      const m = first.text.match(/matches utility pattern '([^']+)'/);
+      if (m) return `${members.length} jobs match utility pattern '${m[1]}' — runtime exceeds threshold, treated as real batch`;
+      // Fallback: common prefix
+      let prefix = first.text;
+      for (const w of members) {
+        while (prefix && !w.text.startsWith(prefix)) prefix = prefix.slice(0, -1);
+      }
+      return (prefix.trim().replace(/[:·,\-]+$/, "") || code) + ` (${members.length} jobs)`;
+    })();
+
+    rows.push(`<div class="rounded-lg text-[11px]"
+        style="border-left:2px solid ${sev};background:${hexA(sev, bgOp)}">
+      <div class="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer hover:opacity-90 transition"
+           onclick="window._toggleBatchWarnGroup('${escapeHtml(code)}')">
+        <div class="flex items-center gap-2 min-w-0">
+          <span style="color:${sev}" class="font-bold shrink-0">${icon}</span>
+          <span class="text-Cmuted truncate">${escapeHtml(groupLabel)}</span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                style="color:${sev};background:${hexA(sev,0.15)};border:1px solid ${hexA(sev,0.3)}">${members.length} jobs</span>
+          <span class="text-[10px] text-Cmuted">${expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+      ${expanded ? `<div class="px-3 pb-2 space-y-1 border-t" style="border-color:${hexA(sev,0.15)}">
+        ${members.map(w => `<div class="text-[10px] text-Cmuted py-0.5 font-mono">${escapeHtml(w.text)}</div>`).join("")}
+      </div>` : ""}
+    </div>`);
+  });
+
+  wrap.innerHTML = `<div class="space-y-1">${rows.join("")}</div>`;
 }
+
+/** Toggle expand/collapse of a batch warning group. */
+window._toggleBatchWarnGroup = function(code) {
+  if (!window._batchWarnExpanded) window._batchWarnExpanded = {};
+  window._batchWarnExpanded[code] = !window._batchWarnExpanded[code];
+  // Re-render using the cached warnings
+  const cached = window._lastBatchWarnings;
+  if (cached) renderBatchDataWarnings(cached);
+};
 
 
 // ── Excluded Jobs Panel (SHORT_JOB / INSUFFICIENT / manual excludes) ──────
@@ -16573,6 +16641,9 @@ async function clearSessionData() {
     applyCustomerName("");
     _batchManualExclude.clear();
     _batchManualInclude.clear();
+    window._lastBatchWarnings = null;
+    window._batchWarnExpanded = {};
+    window._findingsGroupExpanded = {};
 
     // Hide the whole review body, show the no-data state
     document.getElementById("batch-review-body")?.classList.add("hidden");
