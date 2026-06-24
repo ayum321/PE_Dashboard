@@ -264,6 +264,13 @@ def classify_schedule(text: str) -> str:
                 continue
             return stype
 
+    # SEQUENCING: "Daily Sequencing", "PROD_SEQUENCING" — a distinct contractual
+    # window, NOT the main daily batch. Check BEFORE _COMPILED_SCHED loop because
+    # "Daily Sequencing" contains the word DAILY and would otherwise match the
+    # DAILY pattern, collapsing two separate SLA commitments into one ceiling.
+    if re.search(r"SEQUENC", t):
+        return "SEQUENCING"
+
     # Stage 3 Tier 4: Standard keyword patterns
     # Compound WEEKLY+MONTHLY in same name → defer to data inference (Addition 3)
     _has_weekly  = bool(re.search(r"(?:^|[^A-Za-z])WEEKLY(?:$|[^A-Za-z])", t))
@@ -1848,37 +1855,13 @@ def ingest_sla_file(raw_bytes: bytes, filename: str) -> SlaIngestResult:
     # Use MAX because the global ceiling represents the overall batch window,
     # not individual workflow SLAs.  Per-workflow compliance is reported
     # separately via workflow_sla_summary.
-    #
-    # Canonical type map — schedules that aren't DAILY/WEEKLY/MONTHLY are folded
-    # into their closest standard type so they contribute to the ceiling.
-    # WEEKLY_SPECIFIC_DAY is resolved via batch_name when canonical is None.
-    _CANONICAL_MAP = {
-        "DAILY":                "DAILY",
-        "TWICE_DAILY":          "DAILY",
-        "DAILY_EXCEPT":         "DAILY",
-        "DAILY_EXCEPT_WEEKEND": "DAILY",
-        "MIDWEEK":              "DAILY",
-        "WEEKLY":               "WEEKLY",
-        "WEEKLY_SPECIFIC_DAY":  None,   # resolved by batch_name below
-        "FORTNIGHTLY":          "WEEKLY",
-        "BIWEEKLY":             "WEEKLY",
-        "PARALLEL_WEEKLY":      "WEEKLY",
-        "PARALLEL_WORKFLOW":    "WEEKLY",
-        "MONTHLY":              "MONTHLY",
-        "BIMONTHLY":            "MONTHLY",
-    }
     for contract in result.contracts:
         if contract.sla_window_hrs and contract.sla_window_hrs > 0:
             sched = contract.schedule_type
-            canonical = _CANONICAL_MAP.get(sched)
-            if canonical is None and sched == "WEEKLY_SPECIFIC_DAY":
-                # Use batch_name keyword (DAILY/WEEKLY suffix) to pick ceiling bucket
-                _name_type = classify_schedule(contract.batch_name or "")
-                canonical = _CANONICAL_MAP.get(_name_type)
-            if canonical in ("DAILY", "WEEKLY", "MONTHLY"):
-                existing = result.ceilings.get(canonical)
+            if sched in ("DAILY", "WEEKLY", "MONTHLY"):
+                existing = result.ceilings.get(sched)
                 if existing is None or contract.sla_window_hrs > existing:
-                    result.ceilings[canonical] = contract.sla_window_hrs
+                    result.ceilings[sched] = contract.sla_window_hrs
 
     # Generate warnings
     if result.partial_rows > 0:

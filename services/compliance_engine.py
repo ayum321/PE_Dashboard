@@ -7,10 +7,13 @@ numbers on the Batch Review tab and SLA Matrix tab are always identical for
 the same data.
 
 Formula (canonical):
-    denominator = unique (sub_app, run_date) pairs where schedule_type is NOT
-                  in pe_config.COMPLIANCE_EXCLUDED_TYPES
-    numerator   = denominator rows where actual_window_hrs <= sla_ceiling_hrs
+    denominator = unique run_date values in scope
+    numerator   = denominator days where actual_window_hrs <= sla_ceiling_hrs
     compliance% = numerator / denominator × 100
+
+Canonical window rule:
+    elapsed window for a day = max(end_time) - min(start_time) grouped by date
+    compared against the resolved SLA ceiling for that day.
 
 Ceiling map resolution (canonical, highest → lowest priority):
     1. XLSX workflow SLA  — fuzzy substring match against _batch_sla_xlsx workflows
@@ -27,14 +30,15 @@ def compute_window_compliance(
     ceiling_map: Dict[str, Any],
     excluded_types: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """Compute batch window compliance from sentinel-measured window records.
+    """Compute canonical daily batch-window compliance.
 
     Parameters
     ----------
     window_records:
-        List of dicts, each representing one (sub_app, run_date) observation.
-        Required keys: ``sub_app``, ``run_date``, ``elapsed_hrs``.
-        Optional keys: ``schedule_type``, ``sla_ceil``, ``sentinel_source``.
+        List of dicts, each representing one day in the file.
+        Required keys: ``run_date`` plus either ``elapsed_hrs`` or
+        ``total_hrs``. Optional keys: ``schedule_type``, ``sla_ceil``,
+        ``breach`` and ``sentinel_source``.
     ceiling_map:
         Dict mapping sub_app name → SLA ceiling in hours (or None = excluded).
         Produced by batch_calculator._build_sla_ceiling_map().
@@ -51,6 +55,7 @@ def compute_window_compliance(
         at_risk_count    int   — elapsed within 15% of ceiling
         total_windows    int   — denominator
         excluded_windows int   — rows skipped (CYCLIC, ADHOC, etc.)
+        warnings         list[str] — data-shape guardrails
     """
     try:
         from services import pe_config as _pc
@@ -64,47 +69,87 @@ def compute_window_compliance(
         _atrisk_pct = 15.0
         _daily_default = 6.0
 
-    total_windows = 0
+    daily: Dict[str, Dict[str, Any]] = {}
+    warnings: List[str] = []
     excluded_windows = 0
-    breach_count = 0
-    ok_count = 0
-    at_risk_count = 0
 
     for rec in window_records:
-        sub_app  = str(rec.get("sub_app") or rec.get("Sub_Application") or "")
-        sched    = str(rec.get("schedule_type") or "").upper()
-        elapsed  = float(rec.get("elapsed_hrs") or 0.0)
+        date_str = str(rec.get("run_date") or rec.get("date") or "").strip()
+        if not date_str:
+            warnings.append("Skipped a window record without run_date.")
+            continue
 
-        # Skip CYCLIC/ADHOC/excluded schedule types
+        sched = str(rec.get("schedule_type") or "").upper()
+
+        # Skip CYCLIC/ADHOC/excluded schedule types.
         if sched in _excluded:
             excluded_windows += 1
             continue
 
-        # Determine ceiling: from record → ceiling_map → default
+        elapsed = float(rec.get("elapsed_hrs") or rec.get("total_hrs") or 0.0)
         ceil = rec.get("sla_ceil")
         if ceil is None:
+            sub_app = str(rec.get("sub_app") or rec.get("Sub_Application") or "").upper()
             ceil = ceiling_map.get(sub_app)
         if ceil is None:
-            # Unknown sub_app — check if it appears cyclic via ceiling_map None sentinel
             ceil = _daily_default
-        if ceil is None or ceil <= 0:
+        try:
+            ceil_f = float(ceil)
+        except (TypeError, ValueError):
+            ceil_f = 0.0
+
+        if ceil_f <= 0:
             excluded_windows += 1
+            warnings.append(f"Skipped {date_str}: no usable SLA ceiling.")
             continue
 
-        total_windows += 1
-        if elapsed > ceil:
-            breach_count += 1
-        else:
-            buffer_pct = (ceil - elapsed) / ceil * 100
-            if buffer_pct <= _atrisk_pct:
-                at_risk_count += 1
-            else:
-                ok_count += 1
+        breach = rec.get("breach")
+        if breach is None:
+            breach = elapsed > ceil_f
+        breach = bool(breach)
 
-    compliance_pct = (
-        round((ok_count + at_risk_count) / total_windows * 100, 1)
-        if total_windows > 0 else 0.0
-    )
+        current = daily.get(date_str)
+        if current is None:
+            daily[date_str] = {
+                "run_date": date_str,
+                "elapsed_hrs": elapsed,
+                "sla_ceil": ceil_f,
+                "breach": breach,
+                "schedule_type": sched,
+                "source_count": 1,
+            }
+        else:
+            current["source_count"] += 1
+            if elapsed >= float(current.get("elapsed_hrs") or 0.0):
+                current["elapsed_hrs"] = elapsed
+                current["sla_ceil"] = ceil_f
+                current["breach"] = breach
+                current["schedule_type"] = sched or str(current.get("schedule_type") or "")
+            else:
+                current["breach"] = bool(current.get("breach")) or breach
+
+    duplicate_days = [day for day, row in daily.items() if int(row.get("source_count", 0)) > 1]
+    if duplicate_days:
+        warnings.append(
+            "Duplicate run_date records were collapsed into one daily window: "
+            + ", ".join(sorted(duplicate_days)[:8])
+        )
+
+    total_windows = len(daily)
+    breach_count = sum(1 for row in daily.values() if bool(row.get("breach")))
+    ok_count = 0
+    at_risk_count = 0
+    for row in daily.values():
+        if row.get("breach"):
+            continue
+        ceil_f = float(row.get("sla_ceil") or 0.0)
+        elapsed = float(row.get("elapsed_hrs") or 0.0)
+        if ceil_f > 0 and ((ceil_f - elapsed) / ceil_f * 100) <= _atrisk_pct:
+            at_risk_count += 1
+        else:
+            ok_count += 1
+
+    compliance_pct = round((ok_count + at_risk_count) / total_windows * 100, 1) if total_windows > 0 else 0.0
     return {
         "compliance_pct":   compliance_pct,
         "breach_count":     breach_count,
@@ -112,6 +157,7 @@ def compute_window_compliance(
         "at_risk_count":    at_risk_count,
         "total_windows":    total_windows,
         "excluded_windows": excluded_windows,
+        "warnings":         warnings,
     }
 
 
@@ -164,6 +210,7 @@ def build_ceiling_map(
             "TWICE_DAILY":   getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
             "BIWEEKLY":      getattr(pe_config_ref, "SLA_BIWEEKLY_HRS", 8.0),
             "MONTHLY":       getattr(pe_config_ref, "SLA_MONTHLY_HRS", 24.0),
+            "SEQUENCING":    getattr(pe_config_ref, "SLA_DAILY_HRS",   3.0),  # shorter window
         }
         return defaults.get(stype, getattr(pe_config_ref, "SLA_DAILY_HRS", 6.0))
 
