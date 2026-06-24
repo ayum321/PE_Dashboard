@@ -11,7 +11,7 @@ REM ================================================================
 setlocal ENABLEEXTENSIONS ENABLEDELAYEDEXPANSION
 
 set "HOST=127.0.0.1"
-set "PORT=8765"
+set "PORT=8000"
 
 REM ── Find Python ──
 set "PY="
@@ -40,9 +40,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ── Kill any existing server on this port ──
-for /f "tokens=5" %%K in ('netstat -ano 2^>nul ^| findstr "LISTENING" ^| findstr ":%PORT% "') do (
-    echo   Killing PID %%K on port %PORT%
+REM ── Kill any existing server on common PE Dashboard ports (8000, 8765) ──
+for /f "tokens=5" %%K in ('netstat -ano 2^>nul ^| findstr "LISTENING" ^| findstr ":8000 "') do (
+    echo   Killing PID %%K on port 8000
+    taskkill /F /PID %%K >nul 2>&1
+)
+for /f "tokens=5" %%K in ('netstat -ano 2^>nul ^| findstr "LISTENING" ^| findstr ":8765 "') do (
+    echo   Killing PID %%K on port 8765
     taskkill /F /PID %%K >nul 2>&1
 )
 timeout /t 2 /nobreak >nul
