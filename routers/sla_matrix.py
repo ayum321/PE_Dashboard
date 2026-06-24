@@ -85,6 +85,7 @@ class SlaMatrixResponse(BaseModel):
     window_total_days:     Optional[int]   = None
     window_breach_days:    Optional[int]   = None
     window_detail:         Optional[List[Dict[str, Any]]] = None
+    window_warnings:       Optional[List[str]] = None
     gate_audit:        Optional[Dict[str, Any]] = None
     explicit_sla_matrix: bool = False
     # "per_job" when job names present, "aggregated" when only sub-app-level data
@@ -250,6 +251,26 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
             anchor = _norm(row.get(fld) or "")
             if anchor and anchor not in ("UNKNOWN", ""):
                 _bsla_by_job[anchor] = (sla_f, "batch_sla_xlsx")
+
+    # ── Also index first_job / last_job from _sla_intelligence contracts ──────
+    # Dawn Foods-style SLA matrices (window model, no WESCO-style workflow rows)
+    # store anchor jobs in the ingest result contracts but not in _batch_sla_rows.
+    # Index those contracts into the same lookup structures so Pass C matching works.
+    for contract in contracts:
+        _c_sla = getattr(contract, "sla_window_hrs", None) or getattr(contract, "sla_duration_hrs", None)
+        if not _c_sla or _c_sla <= 0:
+            continue
+        _c_sla_f = float(_c_sla)
+        _c_name  = _norm(getattr(contract, "batch_name", "") or "")
+        if _c_name:
+            _bsla_exact.setdefault(_c_name, (_c_sla_f, getattr(contract, "batch_name", _c_name)))
+            _tok = frozenset(t for t in re.split(r"[_\s]+", _c_name) if len(t) >= 2)
+            if _tok:
+                _bsla_tokens.append((_tok, _c_sla_f, getattr(contract, "batch_name", _c_name)))
+        for _anchor_attr in ("first_job", "last_job"):
+            _anchor_val = _norm(getattr(contract, _anchor_attr, "") or "")
+            if _anchor_val and _anchor_val not in ("UNKNOWN", ""):
+                _bsla_by_job.setdefault(_anchor_val, (_c_sla_f, "sla_intelligence_anchor"))
 
     # Full-row lookup: normalized workflow key → complete BSLA row dict.
     # Used in workflow_summary to retrieve first_job / last_job anchors and
@@ -1002,6 +1023,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
     w_total_days = None
     w_breach_days = None
     w_detail_list = None
+    window_warnings: list[str] = []
     try:
         has_end = "End_Time" in df.columns and df["End_Time"].notna().sum() > 0
         if has_end:
@@ -1029,60 +1051,21 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 # Safe fallback — use global SLA for all sub_apps
                 _sub_sla_lookup = {str(_sa): global_sla_hrs for _sa in _sub_apps_all}
 
-            # Per-Sub_Application window: group by (Sub_Application, run_date), then
-            # compare elapsed to the sub_app-specific SLA. Roll up to per-run_date
-            # compliance: a run_date is breached if ANY sub_app breached on that day.
-            wgrp_sub = pd.DataFrame()
-            if "Sub_Application" in wdf.columns and _sub_sla_lookup:
-                wgrp_sub = (wdf.groupby(["Sub_Application", "run_date"])
-                               .agg(first_start=("Start_Time", "min"),
-                                    last_end=("End_Time", "max"),
-                                    job_count=("Job_Name", "nunique"))
-                               .dropna().reset_index())
-                if not wgrp_sub.empty:
-                    wgrp_sub["elapsed_hrs"] = (
-                        (wgrp_sub["last_end"] - wgrp_sub["first_start"]).dt.total_seconds() / 3600.0
-                    ).clip(lower=0).round(3)
-                    wgrp_sub["resolved_sla"] = wgrp_sub["Sub_Application"].map(
-                        lambda sa: _sub_sla_lookup.get(str(sa), global_sla_hrs)
-                    )
-                    wgrp_sub["breach"] = wgrp_sub["elapsed_hrs"] > wgrp_sub["resolved_sla"]
-                    # Roll up to run_date level (breach on day = any sub_app breached)
-                    wgrp = (wgrp_sub.groupby("run_date")
-                                    .agg(elapsed_hrs=("elapsed_hrs", "max"),
-                                         job_count=("job_count", "sum"),
-                                         breach=("breach", "any"))
-                                    .dropna())
-                    wgrp["sla_hrs"] = wgrp_sub.groupby("run_date")["resolved_sla"].min().values if len(wgrp) > 0 else global_sla_hrs
-                else:
-                    wgrp = pd.DataFrame()
-            else:
-                # No Sub_Application info: fall back to global_sla_hrs
-                wgrp = (wdf.groupby("run_date")
-                           .agg(first_start=("Start_Time", "min"),
-                                last_end=("End_Time", "max"),
-                                job_count=("Job_Name", "nunique"))
-                           .dropna())
-                if not wgrp.empty:
-                    wgrp["elapsed_hrs"] = (
-                        (wgrp["last_end"] - wgrp["first_start"]).dt.total_seconds() / 3600.0
-                    ).clip(lower=0).round(3)
-                    # Use build_ceiling_map fallback (schedule-type default) not global_sla_hrs
-                    # so WEEKLY jobs don't get flagged as breached against a daily ceiling.
-                    try:
-                        from services import compliance_engine as _ce_fb
-                        from services import config_store as _cs_fb
-                        from services import pe_config as _pc_fb
-                        _fallback_ceil_map = _ce_fb.build_ceiling_map(
-                            sub_applications=["BATCH"],
-                            xlsx_config=_cs_fb.get("_batch_sla_xlsx") or None,
-                            pe_config_ref=_pc_fb,
-                        )
-                        _fallback_ceil = _fallback_ceil_map.get("BATCH", global_sla_hrs)
-                    except Exception:
-                        _fallback_ceil = global_sla_hrs
-                    wgrp["breach"] = wgrp["elapsed_hrs"] > _fallback_ceil
-                    wgrp["sla_hrs"] = _fallback_ceil
+            # Canonical daily window: first job start → last job end for the
+            # whole file on each day. This is the metric shared with Batch Review.
+            wgrp = (
+                wdf.groupby("run_date")
+                .agg(first_start=("Start_Time", "min"),
+                     last_end=("End_Time", "max"),
+                     job_count=("Job_Name", "nunique"))
+                .dropna()
+            )
+            if not wgrp.empty:
+                wgrp["elapsed_hrs"] = (
+                    (wgrp["last_end"] - wgrp["first_start"]).dt.total_seconds() / 3600.0
+                ).clip(lower=0).round(3)
+                wgrp["breach"] = wgrp["elapsed_hrs"] > global_sla_hrs
+                wgrp["sla_hrs"] = global_sla_hrs
 
             if not wgrp.empty:
                 w_total_days = len(wgrp)
@@ -1101,25 +1084,20 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
 
                 # ── Canonical window compliance via SHARED engine (sole path) ─
                 # If compliance_engine raises, window_comp_pct stays None.
-                if not wgrp_sub.empty:
-                    try:
-                        from services import compliance_engine as _ce
-                        _win_recs = [
-                            {"sub_app":     str(r["Sub_Application"]),
-                             "run_date":    str(r["run_date"]),
-                             "elapsed_hrs": float(r["elapsed_hrs"]),
-                             "sla_ceil":    float(r["resolved_sla"])}
-                            for _, r in wgrp_sub.iterrows()
-                        ]
-                        # Use the SAME ceiling map built by build_ceiling_map() above
-                        # — keys are already UPPER, but compliance_engine looks up by
-                        # the exact sub_app string in the record, so pass as-is.
-                        _wc = _ce.compute_window_compliance(_win_recs, _sub_sla_lookup)
-                        window_comp_pct = _wc["compliance_pct"]
-                        w_total_days    = _wc["total_windows"]
-                        w_breach_days   = _wc["breach_count"]
-                    except Exception:
-                        pass
+                try:
+                    from services import compliance_engine as _ce
+                    _wc = _ce.compute_window_compliance(w_detail_list, {})
+                    window_comp_pct = _wc["compliance_pct"]
+                    w_total_days    = _wc["total_windows"]
+                    w_breach_days   = _wc["breach_count"]
+                    window_warnings = _wc.get("warnings") or []
+                except Exception:
+                    pass
+                file_days = int(wdf["run_date"].nunique()) if "run_date" in wdf.columns else len(w_detail_list)
+                if w_total_days is not None and file_days and w_total_days != file_days:
+                    window_warnings.append(
+                        f"Window denominator mismatch: {file_days} unique date(s) loaded but {w_total_days} day(s) were analyzed."
+                    )
     except Exception:
         pass
 
@@ -1149,6 +1127,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         window_total_days=w_total_days,
         window_breach_days=w_breach_days,
         window_detail=w_detail_list,
+        window_warnings=window_warnings or None,
         explicit_sla_matrix=explicit_sla_matrix,
         data_format=data_format,
         workflow_summary=workflow_summary or None,

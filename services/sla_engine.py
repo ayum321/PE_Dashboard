@@ -862,8 +862,15 @@ def classify_schedule_with_data(
 # Maps messy customer column names → canonical field names
 _COLUMN_MAP: Dict[str, str] = {}
 _COL_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    # ── First / Last job anchors — MUST come before generic job_name patterns ─
+    # "First Job_name" / "Last Job_name" would otherwise be swallowed by the
+    # generic job[\s_-]?name → batch_name rule and silently lost.
+    (re.compile(r"first[\s_-]?job[\s_-]?name?|first[\s_-]?jobname?", re.I), "first_job"),
+    (re.compile(r"last[\s_-]?job[\s_-]?name?|last[\s_-]?jobname?", re.I), "last_job"),
     # ── Batch / Job name ─────────────────────────────────────────────────────
-    (re.compile(r"batch[\s_-]?name|batch[\s_-]?type|window[\s_-]?name|module", re.I), "batch_name"),
+    # Note: "module" intentionally excluded — customer Module columns contain
+    # sub-system names (e.g. "DEMAND/FULFILLMENT") not batch schedule names.
+    (re.compile(r"batch[\s_-]?name|batch[\s_-]?type|window[\s_-]?name", re.I), "batch_name"),
     (re.compile(r"^batch$|^job$|^task$|^process$|^workflow$|^stream$", re.I), "batch_name"),
     (re.compile(r"job[\s_-]?type|job[\s_-]?name|task[\s_-]?name|process[\s_-]?name", re.I), "batch_name"),
     # When a customer's SLA XLSX uses "Sub Application" / "Sub_Application" as the
@@ -873,9 +880,6 @@ _COL_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"schedule[\s_-]?(type|name)?$", re.I), "schedule_text"),
     (re.compile(r"^day$|^days$|^frequency$|^run[\s_-]?days?$", re.I), "schedule_text"),
     (re.compile(r"cadence|run[\s_-]?type|run[\s_-]?period|^type$|^period$", re.I), "schedule_text"),
-    # ── First / Last job ─────────────────────────────────────────────────────
-    (re.compile(r"first[\s_-]?job[\s_-]?name?|first[\s_-]?jobname?", re.I), "first_job"),
-    (re.compile(r"last[\s_-]?job[\s_-]?name?|last[\s_-]?jobname?", re.I), "last_job"),
     # ── Hard SLA deadline (most-specific first) ───────────────────────────────
     (re.compile(r"sla[\s_-]?cutoff|cutoff|sla[\s_-]?deadline", re.I), "sla_end_time"),
     (re.compile(r"expected[\s_-]?end[\s_-]?time[\s_-]?/?sla|expected[\s_-]?end[\s_-]?time"
@@ -1365,6 +1369,7 @@ class SlaIngestResult:
     contract_type: str = "MIXED"              # JOB_MATRIX | SOW_SCHEDULE | MIXED
     contracts: List[SlaContract] = field(default_factory=list)
     ceilings: Dict[str, float] = field(default_factory=dict)    # DAILY/WEEKLY/MONTHLY → hours (file-sourced only)
+    named_ceilings: Dict[str, float] = field(default_factory=dict)  # batch_name.upper() → hours (per-contract)
     missing_ceilings: List[str] = field(default_factory=list)   # schedule types absent from the file
     schedule_map: Dict[str, str] = field(default_factory=dict)  # batch_name → schedule_type
     warnings: List[Dict[str, str]] = field(default_factory=list)
@@ -1382,6 +1387,7 @@ class SlaIngestResult:
             "detected_model": self.detected_model,
             "contracts": [c.to_dict() for c in self.contracts],
             "ceilings": self.ceilings,
+            "named_ceilings": self.named_ceilings,
             "missing_ceilings": self.missing_ceilings,
             "schedule_map": self.schedule_map,
             "warnings": self.warnings,
@@ -1851,17 +1857,23 @@ def ingest_sla_file(raw_bytes: bytes, filename: str) -> SlaIngestResult:
         result.schema_type = "mixed"
         result.detected_model = "Mixed/incomplete SLA structure"
 
-    # Build ceilings (widest SLA per schedule type, across all sheets)
-    # Use MAX because the global ceiling represents the overall batch window,
-    # not individual workflow SLAs.  Per-workflow compliance is reported
-    # separately via workflow_sla_summary.
+    # Build ceilings (most restrictive SLA per schedule type).
+    # Use MIN — the tightest contract window is the binding compliance target.
+    # Using MAX would inflate the ceiling (e.g. a 14h cyclic outbound window
+    # drowning out a 6h nightly batch) and cause everything to appear compliant.
+    # Also store per-batch-name ceilings in named_ceilings so job-level lookup
+    # can resolve individual contracts beyond the coarse DAILY/WEEKLY/MONTHLY keys.
     for contract in result.contracts:
         if contract.sla_window_hrs and contract.sla_window_hrs > 0:
             sched = contract.schedule_type
             if sched in ("DAILY", "WEEKLY", "MONTHLY"):
                 existing = result.ceilings.get(sched)
-                if existing is None or contract.sla_window_hrs > existing:
+                if existing is None or contract.sla_window_hrs < existing:
                     result.ceilings[sched] = contract.sla_window_hrs
+            # Named ceiling: keyed by normalised batch_name for precise per-job lookup
+            if contract.batch_name:
+                _named = contract.batch_name.upper().strip()
+                result.named_ceilings[_named] = contract.sla_window_hrs
 
     # Generate warnings
     if result.partial_rows > 0:
