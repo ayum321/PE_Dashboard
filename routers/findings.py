@@ -1655,10 +1655,22 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         worst_job   = sla.get("worst_job") or ""
         worst_hrs   = _f(sla.get("worst_hrs"))
         worst_marg  = _f(sla.get("worst_margin_hrs"))
-        # Window compliance (new fields from updated SLA Matrix engine)
-        win_comp_pct   = sla.get("window_compliance_pct")   # None means not computed
-        win_total_days = _i(sla.get("window_total_days") or 0)
-        win_breach_days = _i(sla.get("window_breach_days") or 0)
+        # Window compliance (canonical daily-window signal)
+        win_comp_pct = sla.get("window_compliance_pct")
+        if win_comp_pct is None:
+            win_comp_pct = bk.get("window_compliance_pct")
+        if win_comp_pct is None:
+            win_comp_pct = bk.get("batch_window_compliance")
+        win_total_days = _i(
+            sla.get("window_total_days")
+            or bk.get("window_total_days")
+            or 0
+        )
+        win_breach_days = _i(
+            sla.get("window_breach_days")
+            or bk.get("window_breach_days")
+            or 0
+        )
 
         # Distinct breaching jobs
         breach_names: list[str] = []
@@ -1770,6 +1782,28 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         if isinstance(sla_triage, dict):
             low_buf_jobs = sla_triage.get("low_buffer_jobs") or []
             unexplained  = sla_triage.get("unexplained_breaches") or []
+
+            # Priority application jobs — the smallest buffers are the first
+            # jobs to watch in the heat map and in the PE narrative.
+            if low_buf_jobs:
+                sorted_low = sorted(
+                    low_buf_jobs,
+                    key=lambda j: (_f(j.get("buffer_pct", 999)), -_f(j.get("breach_rate", 0))),
+                )
+                top_low = sorted_low[:5]
+                names = "; ".join(
+                    f"{j.get('job_name', '?')} ({_f(j.get('buffer_pct', 0)):.1f}% buffer)"
+                    for j in top_low
+                )
+                sev = "critical"
+                add(sev, "⭐",
+                    f"Priority application jobs need attention: {len(low_buf_jobs)} job(s) below 20% buffer",
+                    f"These are the jobs to watch first in the heat map and PE review: {names}"
+                    f"{'…' if len(sorted_low) > 5 else ''}.",
+                    source="sla", evidence_class="measured",
+                    impact="Low-buffer jobs are the first to fail when data volume or runtime shifts upward",
+                    recommendation="Prioritise these jobs for optimisation, then re-run the review to confirm buffer recovery.",
+                    root_cause="PRIORITY_APPLICATION_JOBS")
 
             # Low-buffer jobs (< 20% headroom) — per-job findings
             for j in low_buf_jobs[:5]:
@@ -2878,6 +2912,10 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
     elif penalty_score >= 60: _grade, _glabel = "C", "CONDITIONAL HOLD"
     elif penalty_score >= 45: _grade, _glabel = "D", "BLOCKED — MINOR"
     else:                      _grade, _glabel = "F", "BLOCKED — MAJOR"
+    # Hard floor: any critical finding caps the grade at C regardless of ok count.
+    # Prevents "3 breaches + 20 passing checks = Grade A" dilution.
+    if _n_crit > 0 and _grade in ("A", "B"):
+        _grade, _glabel = "C", "CONDITIONAL HOLD"
     # Persist so executive.py can blend it into OSHS (Patch F)
     try:
         from services import session_cache as _sc_f
