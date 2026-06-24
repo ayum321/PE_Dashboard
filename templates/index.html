@@ -3704,6 +3704,12 @@
 
         <!-- Summary strip -->
         <div class="flex items-center gap-3 flex-wrap px-1">
+          <button onclick="document.getElementById('azure-step1').classList.remove('hidden');document.getElementById('azure-step2').classList.add('hidden')"
+            class="text-[10px] text-Cmuted hover:text-Cwhite transition-colors flex items-center gap-1">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+            Search
+          </button>
+          <span class="text-Cborder/40">·</span>
           <span id="azure-vm-total" class="text-[11px] font-bold tracking-wide text-Cwhite"></span>
           <div class="flex items-center gap-1.5">
             <span id="azure-vm-app-badge" class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 tabular-nums"></span>

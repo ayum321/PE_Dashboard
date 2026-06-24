@@ -13138,6 +13138,8 @@ function _showDiscoveredVMs(data, statusEl, statusMsg) {
     if (statusEl) { statusEl.textContent = "No VMs found."; statusEl.className = "text-xs text-amber-400"; }
     return;
   }
+  const step1 = document.getElementById("azure-step1");
+  if (step1) step1.classList.add("hidden");
   const step2 = document.getElementById("azure-step2");
   if (step2) step2.classList.remove("hidden");
 
