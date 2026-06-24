@@ -3519,14 +3519,178 @@
             </button>
           </div>
 
-          <!-- Empty state (hidden when contract loaded) -->
-          <div id="sow-empty" class="rounded-2xl border border-dashed border-Cborder bg-Ccard/30 p-10 text-center space-y-3">
+          <!-- Empty state (hidden when contract or manual panel loaded) -->
+          <div id="sow-empty" class="rounded-2xl border border-dashed border-Cborder bg-Ccard/30 p-10 text-center space-y-4">
             <div class="w-12 h-12 rounded-xl bg-Ccyan/10 border border-Ccyan/30 flex items-center justify-center mx-auto">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-Ccyan"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
             </div>
             <p class="text-sm text-Cwhite font-semibold">No SOW contract loaded</p>
-            <p class="text-[11px] text-Cmuted max-w-md mx-auto">Upload the SOW PDF via the <strong class="text-Ccyan">SOW Contract</strong> tile on the Upload panel to auto-extract all contract intelligence.</p>
-            <button onclick="setActiveView('upload')" class="mt-2 px-4 py-2 rounded-lg text-xs font-semibold bg-Ccyan/15 border border-Ccyan/30 text-Ccyan hover:bg-Ccyan/25 transition">Go to Upload →</button>
+            <p class="text-[11px] text-Cmuted max-w-md mx-auto">Upload the SOW PDF to auto-extract all contract intelligence, or enter the key targets manually below.</p>
+            <div class="flex items-center justify-center gap-3 flex-wrap pt-1">
+              <button onclick="setActiveView('upload')" class="px-4 py-2 rounded-lg text-xs font-semibold bg-Ccyan/15 border border-Ccyan/30 text-Ccyan hover:bg-Ccyan/25 transition">
+                Upload SOW PDF →
+              </button>
+              <button onclick="openSowManualEntry()" class="px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-Camber/20 to-Corange/10 border border-Camber/40 text-Camber hover:from-Camber/30 hover:to-Corange/20 transition">
+                ✏️ Enter Manually
+              </button>
+            </div>
+          </div>
+
+          <!-- ── MANUAL SOW ENTRY PANEL (always-available, no PDF needed) ──── -->
+          <div id="sow-manual-panel" class="hidden rounded-2xl border border-Camber/30 bg-gradient-to-br from-Camber/5 via-Ccard to-Ccard2 shadow-panel">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-5 py-4 border-b border-Camber/15">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-Camber/25 to-Corange/15 border border-Camber/40 flex items-center justify-center shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-4 h-4 text-Camber">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z" />
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-sm font-bold text-Cwhite">Manual SOW Entry</p>
+                  <p class="text-[10px] text-Camber/70 mt-0.5">Enter contract targets and actuals directly — auto-saved and wired to PE Findings + Executive Dashboard</p>
+                </div>
+              </div>
+              <button onclick="clearSowManual()" class="text-[10px] font-semibold text-Cmuted hover:text-Cred/80 border border-Cborder/40 rounded-lg px-3 py-1.5 hover:border-Cred/40 transition">Clear All</button>
+            </div>
+
+            <div class="px-5 pb-5 pt-4 space-y-6">
+              <!-- Contract identity -->
+              <div class="space-y-3">
+                <p class="text-[10px] font-bold text-Camber/80 uppercase tracking-widest">Contract Identity</p>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-[10px] font-semibold text-Cmuted uppercase mb-1.5">Customer Name</label>
+                    <input id="sow-m-customer" type="text" placeholder="e.g. ACME Corp"
+                           class="w-full bg-Cbg border border-Cborder/60 rounded-lg px-3 py-2 text-sm text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Camber/60 transition" />
+                  </div>
+                  <div>
+                    <label class="block text-[10px] font-semibold text-Cmuted uppercase mb-1.5">Contract Years</label>
+                    <input id="sow-m-contract-years" type="text" placeholder="e.g. 3"
+                           class="w-full bg-Cbg border border-Cborder/60 rounded-lg px-3 py-2 text-sm text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Camber/60 transition" />
+                  </div>
+                  <div>
+                    <label class="block text-[10px] font-semibold text-Cmuted uppercase mb-1.5">Annual Fee</label>
+                    <input id="sow-m-annual-fee" type="text" placeholder="e.g. 250000"
+                           class="w-full bg-Cbg border border-Cborder/60 rounded-lg px-3 py-2 text-sm text-Cwhite placeholder-Cmuted/40 focus:outline-none focus:border-Camber/60 transition" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Volume targets -->
+              <div class="space-y-3">
+                <p class="text-[10px] font-bold text-Cblue/80 uppercase tracking-widest">Volume Targets</p>
+                <div class="rounded-xl border border-Cborder/50 overflow-hidden">
+                  <div class="grid grid-cols-3 gap-0 px-4 py-2 bg-Cbg/60 border-b border-Cborder/40">
+                    <span class="text-[10px] font-bold text-Cmuted uppercase">Metric</span>
+                    <span class="text-[10px] font-bold text-Cmuted uppercase text-right">SOW Target</span>
+                    <span class="text-[10px] font-bold text-Cmuted uppercase text-right">Actual</span>
+                  </div>
+                  <div class="divide-y divide-Cborder/30">
+                    <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                      <span class="text-xs font-semibold text-Cwhite">Daily DFU</span>
+                      <input id="sow-dfu-baseline" type="number" min="0" placeholder="e.g. 500000" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cblue/60 transition" />
+                      <input id="sow-dfu-actual"    type="number" min="0" placeholder="actual"      class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                    </div>
+                    <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                      <span class="text-xs font-semibold text-Cwhite">Daily SKU Count</span>
+                      <input id="sow-sku-baseline" type="number" min="0" placeholder="e.g. 80000" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cblue/60 transition" />
+                      <input id="sow-sku-actual"   type="number" min="0" placeholder="actual"     class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                    </div>
+                    <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                      <span class="text-xs font-semibold text-Cwhite">Daily Orders</span>
+                      <input id="sow-orders-baseline" type="number" min="0" placeholder="e.g. 200000" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cblue/60 transition" />
+                      <input id="sow-orders-actual"   type="number" min="0" placeholder="actual"      class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                    </div>
+                    <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                      <span class="text-xs font-semibold text-Cwhite">Batch Jobs / Day</span>
+                      <input id="sow-batchjobs-baseline" type="number" min="0" placeholder="e.g. 450" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cblue/60 transition" />
+                      <input id="sow-batchjobs-actual"   type="number" min="0" placeholder="actual"  class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                    </div>
+                    <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                      <span class="text-xs font-semibold text-Cwhite">Peak Concurrent Users</span>
+                      <input id="sow-users-baseline" type="number" min="0" placeholder="e.g. 500" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cblue/60 transition" />
+                      <input id="sow-users-actual"   type="number" min="0" placeholder="actual"  class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Resource baselines + SLA side by side -->
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <!-- Resource -->
+                <div class="space-y-3">
+                  <p class="text-[10px] font-bold text-Cpurple/80 uppercase tracking-widest">Infrastructure Baselines</p>
+                  <div class="rounded-xl border border-Cborder/50 overflow-hidden">
+                    <div class="grid grid-cols-3 gap-0 px-4 py-2 bg-Cbg/60 border-b border-Cborder/40">
+                      <span class="text-[10px] font-bold text-Cmuted uppercase">Metric</span>
+                      <span class="text-[10px] font-bold text-Cmuted uppercase text-right">Baseline %</span>
+                      <span class="text-[10px] font-bold text-Cmuted uppercase text-right">Actual %</span>
+                    </div>
+                    <div class="divide-y divide-Cborder/30">
+                      <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                        <span class="text-xs font-semibold text-Cwhite">CPU</span>
+                        <input id="sow-cpu-baseline" type="number" min="0" max="100" step="0.1" placeholder="e.g. 70" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple/60 transition" />
+                        <input id="sow-cpu-actual"   type="number" min="0" max="100" step="0.1" placeholder="actual" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                      </div>
+                      <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                        <span class="text-xs font-semibold text-Cwhite">Memory</span>
+                        <input id="sow-mem-baseline" type="number" min="0" max="100" step="0.1" placeholder="e.g. 70" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple/60 transition" />
+                        <input id="sow-mem-actual"   type="number" min="0" max="100" step="0.1" placeholder="actual" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                      </div>
+                      <div class="grid grid-cols-3 gap-3 items-center px-4 py-2.5">
+                        <span class="text-xs font-semibold text-Cwhite">Disk</span>
+                        <input id="sow-disk-baseline" type="number" min="0" max="100" step="0.1" placeholder="e.g. 65" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple/60 transition" />
+                        <input id="sow-disk-actual"   type="number" min="0" max="100" step="0.1" placeholder="actual" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cgreen/60 transition" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- SLA Windows -->
+                <div class="space-y-3">
+                  <p class="text-[10px] font-bold text-Ccyan/80 uppercase tracking-widest">Batch SLA Windows</p>
+                  <div class="rounded-xl border border-Cborder/50 overflow-hidden">
+                    <div class="grid grid-cols-2 gap-0 px-4 py-2 bg-Cbg/60 border-b border-Cborder/40">
+                      <span class="text-[10px] font-bold text-Cmuted uppercase">Type</span>
+                      <span class="text-[10px] font-bold text-Cmuted uppercase text-right">Ceiling (hrs)</span>
+                    </div>
+                    <div class="divide-y divide-Cborder/30">
+                      <div class="grid grid-cols-2 gap-3 items-center px-4 py-2.5">
+                        <span class="text-xs font-semibold text-Ccyan">Daily</span>
+                        <input id="sow-sla-daily" type="number" min="0.5" max="48" step="0.5" placeholder="e.g. 6" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Ccyan/60 transition" />
+                      </div>
+                      <div class="grid grid-cols-2 gap-3 items-center px-4 py-2.5">
+                        <span class="text-xs font-semibold text-Cblue">Weekly</span>
+                        <input id="sow-sla-weekly" type="number" min="0.5" max="72" step="0.5" placeholder="e.g. 8" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cblue/60 transition" />
+                      </div>
+                      <div class="grid grid-cols-2 gap-3 items-center px-4 py-2.5">
+                        <span class="text-xs font-semibold text-Cpurple">Monthly</span>
+                        <input id="sow-sla-monthly" type="number" min="0.5" max="120" step="0.5" placeholder="e.g. 17" class="bg-Cbg/80 border border-Cborder/50 rounded-lg px-2.5 py-1.5 text-sm font-bold text-Cwhite text-right placeholder-Cmuted/40 focus:outline-none focus:border-Cpurple/60 transition" />
+                      </div>
+                    </div>
+                  </div>
+                  <p class="text-[10px] text-Cmuted">These SLA ceilings are saved as Tier 2 windows and used in the SLA Matrix compliance calculations.</p>
+                </div>
+              </div>
+
+              <!-- Save feedback + comparison trigger -->
+              <div class="flex flex-wrap items-center gap-3 pt-1 border-t border-Camber/15">
+                <button onclick="saveSowBaseline()"
+                        class="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-gradient-to-r from-Ccyan/20 to-Cblue/15 border border-Ccyan/40 text-Ccyan hover:from-Ccyan/30 hover:to-Cblue/25 active:scale-[0.98] transition-all">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  </svg>
+                  Save &amp; Compare vs Actuals
+                </button>
+                <p id="sow-save-msg" class="hidden text-sm font-semibold text-Cgreen flex items-center gap-1.5"></p>
+              </div>
+
+              <!-- Volume achievement bars (populated on save) -->
+              <div id="sow-volume-comparison" class="hidden space-y-2 pt-2 border-t border-Cborder/30">
+                <p class="text-[10px] font-bold text-Cmuted uppercase tracking-wider">Volume Achievement vs SOW Commitment</p>
+              </div>
+            </div>
           </div>
 
           <!-- ── CONTRACT INTELLIGENCE GRID (shown when loaded) ─────── -->
@@ -3647,39 +3811,7 @@
               </div>
             </div>
 
-            <!-- Manual entry (collapsed by default) -->
-            <details class="rounded-2xl border border-Cborder bg-Ccard/40">
-              <summary class="px-5 py-3 text-xs font-bold text-Cmuted uppercase tracking-wider cursor-pointer hover:text-Cwhite transition select-none">
-                Manual Override — Enter SOW Targets &amp; Actuals
-              </summary>
-              <div class="px-5 pb-5 pt-2 space-y-3">
-                <div class="grid grid-cols-3 gap-2 text-xs pb-1 border-b border-Cborder">
-                  <div class="text-[10px] font-bold text-Cmuted uppercase">Metric</div>
-                  <div class="text-[10px] font-bold text-Cmuted uppercase text-right">SOW Target</div>
-                  <div class="text-[10px] font-bold text-Cmuted uppercase text-right">Actual</div>
-                </div>
-                <div class="grid grid-cols-3 gap-2 items-center">
-                  <div class="text-xs font-semibold text-Cwhite">Daily DFU</div>
-                  <input id="sow-dfu-baseline" type="number" min="0" placeholder="e.g. 500000"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                  <input id="sow-dfu-actual" type="number" min="0" placeholder="actual"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                </div>
-                <div class="grid grid-cols-3 gap-2 items-center">
-                  <div class="text-xs font-semibold text-Cwhite">Daily SKU Count</div>
-                  <input id="sow-sku-baseline" type="number" min="0" placeholder="e.g. 80000"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                  <input id="sow-sku-actual" type="number" min="0" placeholder="actual"
-                         class="bg-Cbg border border-Cborder rounded px-2 py-1.5 text-right text-Cwhite text-xs focus:outline-none focus:border-Ccyan" />
-                </div>
-                <p id="sow-save-msg" class="hidden text-[11px]"></p>
-              </div>
-
-              <!-- SOW vs Actual comparison bars (shown when actuals are entered) -->
-              <div id="sow-volume-comparison" class="hidden mt-2 pt-3 border-t border-Cborder/30 space-y-1">
-                <div class="text-[10px] font-bold text-Cmuted uppercase tracking-wider mb-2">Volume Achievement vs SOW Commitment</div>
-              </div>
-            </details>
+            <!-- Manual entry now in standalone sow-manual-panel above -->
 
           </div><!-- /sow-contract-grid -->
 
