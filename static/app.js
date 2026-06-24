@@ -8683,7 +8683,104 @@ function _applyFindingsSort() {
       : `<span title="${_esc(s)}">${_esc(s)}</span>`;
   };
 
-  tbody.innerHTML = sorted.map((f, idx) => {
+  // ── Smart grouping: collapse repetitive same-pattern findings ──────────────
+  // Findings with identical (root_cause + level + source) and >3 members get
+  // collapsed into a single summary row with expand/collapse. Critical findings
+  // are never grouped — they always render individually for full visibility.
+  const _groupKey = (f) => {
+    if (f.level === "critical") return null; // never group criticals
+    return `${f.root_cause || ""}|${f.level}|${f.source || ""}`;
+  };
+  const _groupMap = new Map();
+  sorted.forEach((f, origIdx) => {
+    const key = _groupKey(f);
+    if (!key) return;
+    if (!_groupMap.has(key)) _groupMap.set(key, []);
+    _groupMap.get(key).push({ f, origIdx });
+  });
+  // Build display list: replace groups of >3 with a summary entry
+  const GROUP_THRESHOLD = 3;
+  const _groupedIds = new Set();
+  _groupMap.forEach((members, key) => {
+    if (members.length > GROUP_THRESHOLD) members.forEach(m => _groupedIds.add(m.origIdx));
+  });
+  // Build render list: individual rows + group header rows
+  const _renderList = []; // { type: "row"|"group", f?, members?, key? }
+  const _seenGroupKeys = new Set();
+  sorted.forEach((f, idx) => {
+    const key = _groupKey(f);
+    if (key && _groupedIds.has(idx)) {
+      if (!_seenGroupKeys.has(key)) {
+        _seenGroupKeys.add(key);
+        const members = _groupMap.get(key);
+        _renderList.push({ type: "group", key, members, f: members[0].f });
+      }
+    } else {
+      _renderList.push({ type: "row", f, origIdx: idx });
+    }
+  });
+
+  // Track expand state per group key
+  if (!window._findingsGroupExpanded) window._findingsGroupExpanded = {};
+
+  const _renderGroupHeader = (entry, gidx) => {
+    const { members, f, key } = entry;
+    const sv      = SV_ST[f.level] || SV_ST.info;
+    const srcLbl  = SRC_LBL[f.source] || (f.source || "").toUpperCase() || "—";
+    const srcClr  = SRC_CLR[f.source] || THEME.muted;
+    const bdrClr  = SEV_BDR[f.level] || THEME.muted;
+    const rc      = (f.root_cause || "").replace(/_/g, " ").trim() || "—";
+    // Derive group label: strip job-specific suffix, keep the pattern description
+    const groupLabel = (() => {
+      const texts = members.map(m => m.f.text || "");
+      // Find longest common prefix
+      let prefix = texts[0] || "";
+      for (const t of texts) {
+        while (prefix && !t.startsWith(prefix)) prefix = prefix.slice(0, -1);
+      }
+      prefix = prefix.trim().replace(/[:·—\-,]+$/, "").trim();
+      return prefix || rc;
+    })();
+    const expanded = !!window._findingsGroupExpanded[key];
+    const expandId = `fg-${gidx}`;
+    return `<tr data-group-header="${_esc(key)}" data-expand-id="${expandId}"
+      class="cursor-pointer border-b border-white/5 hover:bg-white/[0.04] transition-colors group"
+      style="border-left:3px solid ${hexA(bdrClr, 0.35)}"
+      onclick="window._toggleFindingGroup(this, '${_esc(key)}')">
+      <td class="pl-3 pr-2 py-2 w-8">
+        <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+              style="background:${sv.dot};box-shadow:0 0 8px ${hexA(sv.dot,.4)}"></span>
+      </td>
+      <td class="px-2 py-2" style="min-width:220px;max-width:320px">
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] text-Cmuted/70 transition-transform inline-block ${expanded ? "rotate-90" : ""}" style="font-size:9px">▶</span>
+          <div>
+            <div class="text-[11px] font-semibold text-Cwhite/90 leading-snug">${_esc(_short(groupLabel, 72))}</div>
+            <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
+              <span class="text-[8px] font-bold px-1.5 py-0.5 rounded"
+                    style="background:${hexA(srcClr,.15)};color:${srcClr};border:1px solid ${hexA(srcClr,.3)}">${srcLbl}</span>
+              <span class="text-[8px] px-1.5 py-0.5 rounded font-mono"
+                    style="background:${hexA(sv.dot,.12)};color:${sv.dot};border:1px solid ${hexA(sv.dot,.25)}">${members.length} findings</span>
+              <span class="text-[8px] text-Cmuted/60">${expanded ? "click to collapse" : "click to expand"}</span>
+            </div>
+          </div>
+        </div>
+      </td>
+      ${visSet.has("severity") ? `<td class="px-3 py-2 w-24">
+        <span class="inline-flex items-center text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ${sv.bg} ${sv.tx} ${sv.bd} border">${f.level}</span>
+      </td>` : ""}
+      ${visSet.has("root_cause") ? `<td class="px-3 py-2 text-[10px] font-medium w-36" style="color:${THEME.amber}">${_col(rc, 30)}</td>` : ""}
+      ${visSet.has("impact")     ? `<td class="px-3 py-2 text-[10px] text-Cwhite/50 w-44">—</td>` : ""}
+      ${visSet.has("action")     ? `<td class="px-3 py-2 text-[10px] text-Cwhite/50 w-44">—</td>` : ""}
+      ${visSet.has("evidence")   ? `<td class="px-3 py-2 w-20 text-center text-[10px] text-Cmuted">—</td>` : ""}
+      <td class="px-2 py-2 w-8 text-center">
+        <span class="text-[11px] text-Cmuted/50 group-hover:text-Cmuted transition-colors">${expanded ? "▲" : "▼"}</span>
+      </td>
+    </tr>
+    ${expanded ? members.map((m, mi) => _renderSingleRow(m.f, m.origIdx, true)).join("") : ""}`;
+  };
+
+  const _renderSingleRow = (f, idx, isChild = false) => {
     const sv      = SV_ST[f.level] || SV_ST.info;
     const rc      = (f.root_cause || "").replace(/_/g, " ").trim() || "—";
     const impact  = _findingImpactText(f) || "—";
@@ -8692,7 +8789,6 @@ function _applyFindingsSort() {
     const ecLbl   = EC_LBL[f.evidence_class] || "—";
     const srcLbl  = SRC_LBL[f.source] || (f.source || "").toUpperCase() || "—";
     const srcClr  = SRC_CLR[f.source] || THEME.muted;
-    const detId   = `finding-det-${idx}`;
     const bdrClr  = SEV_BDR[f.level] || THEME.muted;
     const bdrAlpha = f.level === "critical" ? 0.7 : f.level === "warning" ? 0.45 : 0.2;
     const rcColor = f.level === "critical" ? THEME.amber
@@ -8700,16 +8796,15 @@ function _applyFindingsSort() {
                   : "rgba(240,244,255,.75)";
     const showEcBadge = !visSet.has("evidence");
     const isCrit = f.level === "critical";
-    // Hover tooltip: sub + impact (hidden from row, shown on hover)
     const hoverTip = [f.sub, _findingImpactText(f)].filter(Boolean).join(" · ");
-    // Global idx for drawer
     const gIdx = (window._lastRealFindings || []).indexOf(f);
+    const childIndent = isChild ? "pl-8" : "pl-3";
 
     return `<tr data-idx="${idx}"
-  class="hover:bg-white/[0.04] transition-colors cursor-pointer border-b border-white/5 group${isCrit ? " findings-crit-row" : ""}"
-  style="border-left:3px solid ${hexA(bdrClr, bdrAlpha)};${isCrit ? `background:rgba(244,63,94,.025)` : ""}"
+  class="hover:bg-white/[0.04] transition-colors cursor-pointer border-b border-white/5 group${isCrit ? " findings-crit-row" : ""}${isChild ? " findings-child-row" : ""}"
+  style="border-left:3px solid ${hexA(bdrClr, bdrAlpha)};${isCrit ? "background:rgba(244,63,94,.025)" : ""}${isChild ? ";background:rgba(255,255,255,.012)" : ""}"
   onclick="window.peOpenFinding(${gIdx >= 0 ? gIdx : idx})">
-  <td class="pl-3 pr-2 py-2.5 w-8">
+  <td class="${childIndent} pr-2 py-2.5 w-8">
     <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0${isCrit ? " findings-crit-blink" : ""}"
           style="background:${sv.dot};box-shadow:0 0 ${isCrit ? "12" : "8"}px ${hexA(sv.dot, isCrit ? .75 : .45)}"></span>
   </td>
@@ -8739,8 +8834,35 @@ function _applyFindingsSort() {
     <span class="text-[11px] text-Cmuted/50 group-hover:text-Cmuted transition-colors">→</span>
   </td>
 </tr>`;
+  };
+
+  tbody.innerHTML = _renderList.map((entry, gidx) => {
+    if (entry.type === "group") return _renderGroupHeader(entry, gidx);
+    return _renderSingleRow(entry.f, entry.origIdx);
   }).join("");
+
+  // Show count of grouped vs total
+  const groupedCount = [..._seenGroupKeys].reduce((n, k) => n + (_groupMap.get(k)?.length || 0), 0);
+  const singleCount  = _renderList.filter(e => e.type === "row").length;
+  const groupCount   = _renderList.filter(e => e.type === "group").length;
+  const countBadge2  = document.getElementById("findings-count-badge");
+  if (countBadge2 && groupCount > 0) {
+    countBadge2.textContent = `${sorted.length} (${groupCount} group${groupCount > 1 ? "s" : ""} + ${singleCount} single)`;
+  }
+
+  // Unused legacy path kept for non-grouped path below — groups already rendered above
+  if (false) sorted.map((f, idx) => {
+    void f; void idx; // no-op — entire block dead
+  });
 }
+
+/** Toggle expand/collapse of a grouped findings row. */
+window._toggleFindingGroup = function(headerRow, key) {
+  if (!window._findingsGroupExpanded) window._findingsGroupExpanded = {};
+  window._findingsGroupExpanded[key] = !window._findingsGroupExpanded[key];
+  _applyFindingsSort(); // re-render with updated expand state
+};
+
 
 // ── Audit Context Health Bar ──────────────────────────────────
 // Polls /api/audit-context and renders the pillar status pills.
