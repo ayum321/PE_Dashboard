@@ -517,7 +517,7 @@ echo   [7/7] Starting server  (Ctrl+C to stop)...
 echo.
 
 start "PE Browser" /B !PY! _open_browser.py %HOST% !PORT!
-!PY! -m uvicorn %APP% --host %HOST% --port !PORT!
+!PY! -m uvicorn %APP% --host %HOST% --port !PORT! --reload --reload-dir routers --reload-dir services --reload-dir templates --reload-dir static
 
 REM ── If uvicorn exits, check if it was a port-bind failure ──
 set "EXIT_CODE=!ERRORLEVEL!"
