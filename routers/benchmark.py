@@ -39,7 +39,7 @@ class BenchmarkRow(BaseModel):
     delta_pct:      float     # positive = regression, negative = improvement
     sla_sec:        Optional[float] = None
     sla_breach:     bool = False
-    status:         str   # OK | WATCH | BREACH | N/A   (replaces GREEN/AMBER/RED)
+    status:         str   # OK | WATCH | BREACH | REFERENCE   (replaces GREEN/AMBER/RED)
     category:       str = ""
     pass_fail:      Optional[str] = None
     # Template-aligned extra fields
@@ -80,6 +80,7 @@ class BenchmarkResponse(BaseModel):
     fill_rate:          Optional[List[Dict[str, Any]]] = None
     observations:       Optional[List[Dict[str, Any]]] = None
     batch_perf_summary: Optional[Dict[str, Any]] = None
+    reference_only:     Optional[bool] = False
     evidence_sentences: List[str] = []
     coverage_summary:   Optional[Dict[str, Any]] = None
     ai_narrative:       Optional[str] = None
@@ -124,6 +125,10 @@ def _find_col(headers: list[str], candidates: list[str]) -> str | None:
 def _safe_float(v, default=0.0):
     if v is None:
         return default
+    # openpyxl returns duration-formatted cells as datetime.timedelta
+    import datetime
+    if isinstance(v, datetime.timedelta):
+        return v.total_seconds()
     try:
         f = float(v)
         return f if f == f else default  # NaN guard
@@ -147,7 +152,7 @@ def _compute_benchmark(rows: list[dict], threshold_pct: float) -> tuple[list[Ben
     - OK (GREEN):    Delta ≤ +threshold_pct% AND current ≤ SLA
     - WATCH (AMBER): threshold_pct < Delta ≤ threshold_pct*2 OR within 10% of SLA
     - BREACH (RED):  Delta > threshold_pct*2 OR current > SLA
-    - N/A:           No baseline (baseline_sec = 0)
+        - REFERENCE:     No baseline (baseline_sec = 0)
     """
     try:
         from services import pe_config
@@ -184,12 +189,7 @@ def _compute_benchmark(rows: list[dict], threshold_pct: float) -> tuple[list[Ben
 
         if base == 0:
             delta = 0.0
-            if sla and cur > sla:
-                status = "BREACH"
-            elif cur > 0:
-                status = "N/A"
-            else:
-                status = "N/A"
+            status = "REFERENCE"
         else:
             delta = round((cur - base) / base * 100, 2)
             sla_near = sla and cur > sla * 0.9     # within 10% of SLA
@@ -203,10 +203,10 @@ def _compute_benchmark(rows: list[dict], threshold_pct: float) -> tuple[list[Ben
                 status = "OK"
 
         # Override from original Pass/Fail column
-        if pf and str(pf).strip().lower() == "fail" and status not in ("BREACH",):
+        if base > 0 and pf and str(pf).strip().lower() == "fail" and status not in ("BREACH",):
             status = "BREACH"
 
-        sla_breach = bool(sla and cur > sla)
+        sla_breach = bool(sla and cur > sla) if base > 0 else False
 
         results.append(BenchmarkRow(
             transaction=txn, baseline_sec=base, current_sec=cur,
@@ -1299,6 +1299,93 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
     }
 
 
+def _parse_multigroup_runtime_sheet(ws, sheet_name: str) -> list[dict] | None:
+    """Parse horizontal multi-group runtime comparison sheets.
+
+    Layout (Dawn Foods / similar):
+        Row 1: group labels  "Run 1: Monthly Batch" | None | None | None | "Run 1: Daily Batch" ...
+        Row 2: col headers   "JOB" | "RUNTIME_<new>" | "RUNTIME_<old>" | None | "JOB" | ...
+        Row 3+: data rows    job_name | timedelta/secs | timedelta/secs | None | ...
+
+    Groups are separated by None/empty columns. Each group is a distinct batch window.
+    Returns list of row dicts tagged with the group name as 'category', or None if
+    the layout is not recognised.
+    """
+    max_r = ws.max_row or 0
+    max_c = ws.max_column or 0
+    if max_r < 3 or max_c < 3:
+        return None
+
+    # Detect: Row 1 must have at least 2 non-empty cells that look like group labels
+    row1 = [ws.cell(1, c).value for c in range(1, max_c + 1)]
+    row2 = [str(ws.cell(2, c).value or "").strip() for c in range(1, max_c + 1)]
+
+    # Row 2 must have at least 2 "JOB" anchors to be a multi-group layout
+    job_anchor_cols = [i + 1 for i, v in enumerate(row2) if v.upper() == "JOB"]
+    if len(job_anchor_cols) < 2:
+        return None
+
+    # Build group definitions from the JOB anchor columns
+    groups: list[dict] = []
+    for job_col in job_anchor_cols:
+        # Group label from row 1 (same column as JOB anchor, or nearest non-empty to the left)
+        group_label = None
+        for back in range(job_col, max(0, job_col - 4), -1):
+            v = row1[back - 1] if back - 1 < len(row1) else None
+            if v and str(v).strip():
+                group_label = str(v).strip()
+                break
+        if not group_label:
+            group_label = sheet_name
+
+        # Find RUNTIME_<new> and RUNTIME_<old> (or equivalent) in row 2 after job_col
+        new_col = old_col = None
+        for c in range(job_col + 1, min(job_col + 5, max_c + 1)):
+            hdr = row2[c - 1].lower().replace(" ", "_").replace("-", "_") if c - 1 < len(row2) else ""
+            if not hdr:
+                break  # hit separator
+            if "runtime" in hdr or "new" in hdr:
+                if new_col is None:
+                    new_col = c
+            if ("old" in hdr or ("runtime" in hdr and new_col and new_col != c)):
+                if old_col is None:
+                    old_col = c
+
+        if new_col is None or old_col is None:
+            # Fallback: first two non-empty cols after JOB
+            non_empty = [c for c in range(job_col + 1, min(job_col + 5, max_c + 1))
+                         if (c - 1 < len(row2) and row2[c - 1])]
+            if len(non_empty) >= 2:
+                new_col, old_col = non_empty[0], non_empty[1]
+            else:
+                continue
+
+        groups.append({"label": group_label, "job_col": job_col,
+                       "new_col": new_col, "old_col": old_col})
+
+    if not groups:
+        return None
+
+    rows_out: list[dict] = []
+    for r in range(3, max_r + 1):
+        for g in groups:
+            job = str(ws.cell(r, g["job_col"]).value or "").strip()
+            if not job:
+                continue
+            new_secs = _safe_float(ws.cell(r, g["new_col"]).value)
+            old_secs = _safe_float(ws.cell(r, g["old_col"]).value)
+            if new_secs == 0.0 and old_secs == 0.0:
+                continue
+            rows_out.append({
+                "transaction":  job,
+                "baseline_sec": old_secs,
+                "current_sec":  new_secs,
+                "category":     g["label"],
+            })
+
+    return rows_out if rows_out else None
+
+
 # ── Master multi-sheet parser ────────────────────────────────────────────────
 
 def _parse_benchmark_file(raw_bytes: bytes, filename: str) -> dict:
@@ -1323,7 +1410,16 @@ def _parse_benchmark_file(raw_bytes: bytes, filename: str) -> dict:
     sheet_names = wb.sheetnames
     result["debug_info"] = f"Sheets found: {list(sheet_names)}."
 
-    # ── 1. Batch performance format detection (RUNTIME_<new>/RUNTIME_<old>) ────
+    # ── 1a. Multi-group horizontal runtime format (JOB/RUNTIME_<new>/RUNTIME_<old> groups side-by-side) ──
+    for sn in sheet_names:
+        mg_rows = _parse_multigroup_runtime_sheet(wb[sn], sn)
+        if mg_rows:
+            result["batch_perf_all_rows"] = mg_rows
+            result["rows"] = mg_rows
+            wb.close()
+            return result
+
+    # ── 1b. Batch performance format detection (RUNTIME_<new>/RUNTIME_<old>) ────
     for sn in sheet_names:
         bp_rows = _parse_batch_perf_sheet(wb[sn], sn)
         if bp_rows is not None:
@@ -1702,6 +1798,7 @@ async def benchmark_upload(
         fill_rate=fill_rate,
         observations=observations,
         batch_perf_summary=batch_perf_summary,
+        reference_only=bool(is_single_time),
         evidence_sentences=evidence_sentences,
         coverage_summary=coverage_summary,
     )
@@ -1741,6 +1838,14 @@ def benchmark_json(body: JsonBenchmarkRequest) -> BenchmarkResponse:
     unchanged = sum(1 for r in result_rows if abs(r.delta_pct) <= 1.0)
     sla_brs   = sum(1 for r in result_rows if r.sla_breach)
     avg_delta = round(sum(r.delta_pct for r in result_rows) / len(result_rows), 2) if result_rows else 0.0
+    is_single_time = result_rows and all(r.baseline_sec == 0.0 for r in result_rows)
+    if is_single_time:
+        total = len(result_rows)
+        summary = (
+            f"📋 UAT performance capture — {total} transaction(s) recorded. "
+            f"No PROD baseline loaded; times shown as-is for review. "
+            f"Upload a file with PROD + TEST/UAT columns to enable regression comparison."
+        )
 
     resp = BenchmarkResponse(
         filename=body.filename or "",
@@ -1749,6 +1854,7 @@ def benchmark_json(body: JsonBenchmarkRequest) -> BenchmarkResponse:
         sla_breaches=sla_brs, avg_delta_pct=avg_delta,
         threshold_pct=thresh, rows=result_rows, summary=summary,
         categories=categories,
+        reference_only=bool(is_single_time),
         evidence_sentences=_build_evidence_sentences(result_rows),
         coverage_summary=_build_coverage_summary(result_rows),
     )
