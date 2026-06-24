@@ -2009,7 +2009,7 @@ function renderBatchReview(data) {
 
   // 2. Charts — use filtered data for job-level views
   renderSlaBufferChart(_displayKpis);
-  renderWindowTrendChart(filtered.window || []);
+  renderWindowTrendChart(filtered.window || [], filtered.top_jobs || []);
   renderTopJobsChart(_filteredJobs, _displayKpis);
 
   // 3. Top 10 breaching jobs table
@@ -2693,15 +2693,25 @@ function centerTextPlugin(big, sub) {
 // ─────────────────────────────────────────────────────────────
 // Chart 2 — Daily Batch Window (premium bar chart)
 // ─────────────────────────────────────────────────────────────
-function renderWindowTrendChart(winData) {
+function renderWindowTrendChart(winData, topJobsData) {
   const canvas = document.getElementById("chart-window-trend");
   if (!canvas) return;
   destroyChart("windowTrend");
 
   if (!winData || winData.length === 0) return;
 
+  const excludedNameSet = new Set((topJobsData || []).filter(j => _isJobExcluded(j)).map(j => j.Job_Name));
   const labels   = winData.map((w) => w.run_date);
-  const counts   = winData.map((w) => w.job_count || 0);
+  const counts   = winData.map((w) => {
+    const rawNames = Array.isArray(w.raw_job_names) ? w.raw_job_names : [];
+    if (rawNames.length) return rawNames.filter(n => !excludedNameSet.has(n)).length;
+    return w.job_count || 0;
+  });
+  const rawCounts = winData.map((w) => {
+    const rawNames = Array.isArray(w.raw_job_names) ? w.raw_job_names : [];
+    return rawNames.length || w.raw_job_count || w.job_count || 0;
+  });
+  const excludedCounts = winData.map((w, i) => Math.max((rawCounts[i] || 0) - (counts[i] || 0), 0));
   const topJobs  = winData.map((w) => w.top_job || "");
   const rawSums  = winData.map((w) => +(w.total_hrs  || 0));
   const rawElaps = winData.map((w) => +(w.elapsed_hrs || 0));
@@ -2750,6 +2760,10 @@ function renderWindowTrendChart(winData) {
     metricTypeEl.className = hasElapsed
       ? "text-[9px] text-Cteal font-semibold mt-0.5"
       : "text-[9px] text-Camber font-semibold mt-0.5";
+  }
+  const countNoteEl = document.getElementById("chart-window-count-note");
+  if (countNoteEl) {
+    countNoteEl.textContent = "Bar labels show unique jobs in scope after exclusions. Hover a day to see excluded job names.";
   }
 
   // Peak bar index
@@ -2891,16 +2905,33 @@ function renderWindowTrendChart(winData) {
               if (i == null) return "";
               const isSpike = spikeIdxs.has(i);
               const spike = isSpike ? "  ⚡ SPIKE" : "";
-              return `${labels[i]}  ·  ${counts[i]} job${counts[i] !== 1 ? "s" : ""}${spike}`;
+              const shown = counts[i] || 0;
+              const raw = rawCounts[i] || shown;
+              const excluded = excludedCounts[i] || Math.max(raw - shown, 0);
+              return `${labels[i]}  ·  ${shown} shown / ${raw} raw / ${excluded} excluded${spike}`;
             },
             label: (ctx) => {
               const i = ctx.dataIndex;
               const lines = [];
+              const shown = counts[i] || 0;
+              const raw = rawCounts[i] || shown;
+              const excluded = excludedCounts[i] || Math.max(raw - shown, 0);
+              const rawNames = Array.isArray(winData[i]?.raw_job_names) ? winData[i].raw_job_names : [];
+              const excludedNames = rawNames.filter(n => excludedNameSet.has(n));
               if (hasElapsed) {
                 lines.push(`Elapsed window: ${rawElaps[i].toFixed(2)}h`);
                 if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h`);
               } else {
                 lines.push(`Total (summed): ${rawSums[i].toFixed(2)}h`);
+              }
+              lines.push(`Unique jobs shown here: ${shown}`);
+              lines.push(`Raw unique jobs in file: ${raw}`);
+              lines.push(`Unique jobs excluded from chart scope: ${excluded}`);
+              if (excludedNames.length > 0) {
+                const preview = excludedNames.slice(0, 6).join(", ");
+                lines.push(`Excluded jobs: ${preview}${excludedNames.length > 6 ? `, … +${excludedNames.length - 6} more` : ""}`);
+              } else {
+                lines.push("Excluded jobs: none");
               }
               if (topJobs[i]) lines.push(`Longest job: ${topJobs[i]}`);
               if (winData[i]?.breach) lines.push(`⚠ SLA BREACH  +${(values[i] - SLA_DAILY_HRS).toFixed(1)}h over limit`);
@@ -8894,6 +8925,7 @@ async function _triggerPeNarrativeImpl() {
     resource:      ad.resource     || null,
     sla_matrix:    ad.slaMatrix    || null,
     sla_intel:     ad.slaIntelligence || null,
+    sla_triage:    _buildSlaTriage(),
     sow_compare,
     benchmark:     ad.benchmark    || null,
     red_flags:     ad.redFlags     || null,
@@ -10239,17 +10271,23 @@ function _renderExecBenchmarkSummary(bench) {
   const obs = bench.observations || [];
   const totalTx = bench.total_transactions || 0;
   const degraded = bench.degraded || 0;
+  const referenceOnly = bench.reference_only === true;
   const passRate = totalTx > 0 ? Math.round((totalTx - degraded) / totalTx * 100) : 0;
-  const color = degraded > 0 ? "border-Camber/40 bg-Camber/5" : "border-Cgreen/40 bg-Cgreen/5";
+  const color = referenceOnly
+    ? "border-Ccyan/40 bg-Ccyan/5"
+    : degraded > 0 ? "border-Camber/40 bg-Camber/5" : "border-Cgreen/40 bg-Cgreen/5";
 
   let catCards = "";
   cats.forEach(c => {
     const pct = c.total > 0 ? Math.round(c.passed / c.total * 100) : 0;
-    const badge = c.degraded > 0 ? "text-Cred" : "text-Cgreen";
+    const badge = referenceOnly ? "text-Ccyan" : (c.degraded > 0 ? "text-Cred" : "text-Cgreen");
+    const meta = referenceOnly
+      ? `${c.total} raw capture row${c.total !== 1 ? "s" : ""}`
+      : `${c.passed}/${c.total} pass${c.degraded > 0 ? ` · ${c.degraded} red` : ""}`;
     catCards += `<div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-Ccard/50 border border-Cborder/30">
-      <span class="text-lg font-bold ${badge}">${pct}%</span>
+      <span class="text-lg font-bold ${badge}">${referenceOnly ? "REF" : `${pct}%`}</span>
       <div class="text-[10px]"><div class="text-Cwhite font-semibold">${_esc(c.name)}</div>
-        <div class="text-Cmuted">${c.passed}/${c.total} pass${c.degraded > 0 ? ` · ${c.degraded} red` : ""}</div>
+        <div class="text-Cmuted">${meta}</div>
       </div></div>`;
   });
 
@@ -10258,7 +10296,7 @@ function _renderExecBenchmarkSummary(bench) {
       <span class="text-lg">⚡</span>
       <div>
         <div class="text-sm font-bold text-Cwhite">UI Performance Benchmark</div>
-        <div class="text-[10px] text-Cmuted">${totalTx} transactions · ${passRate}% pass rate${fr.length ? ` · ${fr.length} fill rate entries` : ""}${obs.length ? ` · ${obs.length} SIT obs` : ""}</div>
+        <div class="text-[10px] text-Cmuted">${totalTx} transactions${referenceOnly ? " · reference only" : ` · ${passRate}% pass rate`}${fr.length ? ` · ${fr.length} fill rate entries` : ""}${obs.length ? ` · ${obs.length} SIT obs` : ""}</div>
       </div>
     </div>
     ${catCards ? `<div class="flex flex-wrap gap-2 mt-2">${catCards}</div>` : ""}
@@ -11685,6 +11723,24 @@ function renderSlaHeatmap(data) {
     return;
   }
 
+  const jobPriority = data.job_priority || {};
+  const priorityRank = (p) => p === "critical" ? 2 : p === "warning" ? 1 : 0;
+  const orderedJobs = [...jobs].sort((a, b) => {
+    const ma = jobPriority[a] || {};
+    const mb = jobPriority[b] || {};
+    const pa = priorityRank(ma.priority || "normal");
+    const pb = priorityRank(mb.priority || "normal");
+    if (pa !== pb) return pb - pa;
+    const sa = typeof ma.score === "number" ? ma.score : 0;
+    const sb = typeof mb.score === "number" ? mb.score : 0;
+    if (sb !== sa) return sb - sa;
+    return String(a).localeCompare(String(b));
+  });
+  const priorityCount = Object.values(jobPriority).filter((meta) => {
+    const pr = meta?.priority || "normal";
+    return pr !== "normal";
+  }).length;
+
   // Build O(1) lookup: "job||date" → cell object
   const lookup = {};
   for (const c of cells) {
@@ -11736,10 +11792,24 @@ function renderSlaHeatmap(data) {
       </thead>
       <tbody>`;
 
-  for (const job of jobs) {
-    html += `<tr class="hover:brightness-125 transition-[filter]">
+  for (const job of orderedJobs) {
+    const meta = jobPriority[job] || {};
+    const pr   = meta.priority || "normal";
+    const prCol = pr === "critical" ? THEME.red : pr === "warning" ? THEME.amber : THEME.green;
+    const prLabel = pr === "critical" ? "PRIORITY" : pr === "warning" ? "WATCH" : "";
+    const rowStyle = pr !== "normal"
+      ? `background:${hexA(prCol,0.06)};box-shadow:inset 2px 0 0 ${prCol};`
+      : "";
+    const jobTitle = `${job}${meta.reason ? ` · ${meta.reason}` : ""}`;
+    html += `<tr class="hover:brightness-125 transition-[filter]" style="${rowStyle}">
       <td class="sticky left-0 z-10 bg-Ccard pr-3 py-0.5 text-Cwhite font-mono
-                 whitespace-nowrap max-w-[200px] truncate" title="${_esc(job)}">${_esc(job)}</td>
+                 whitespace-nowrap max-w-[200px] truncate" title="${_esc(jobTitle)}">
+        <div class="flex items-center gap-1.5">
+          <span class="truncate">${_esc(job)}</span>
+          ${prLabel ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider"
+                style="color:${prCol};background:${hexA(prCol,0.14)};border:1px solid ${hexA(prCol,0.35)}">${prLabel}</span>` : ""}
+        </div>
+      </td>
       ${dates.map((date) => {
         const c  = lookup[`${job}||${date}`];
         const bg = cellColor(c);
@@ -11754,7 +11824,12 @@ function renderSlaHeatmap(data) {
   }
 
   html += `</tbody></table>`;
-  container.innerHTML = html;
+  const priorityNote = priorityCount
+    ? `<div class="mb-2 text-[10px] text-Cmuted">
+        ★ Priority rows are sorted first and flagged when the job has breach or near-SLA days.
+      </div>`
+    : "";
+  container.innerHTML = priorityNote + html;
   if (section) section.classList.remove("hidden");
 }
 
@@ -12819,6 +12894,12 @@ function openAzureModal() {
   if (step1) step1.classList.remove("hidden");
   if (step2) step2.classList.add("hidden");
   if (statusDiv) { statusDiv.textContent = ""; statusDiv.classList.add("hidden"); }
+  // Reset both filters to ALL
+  _activeVmFilters = { type: "ALL", env: "ALL" };
+  document.querySelectorAll('.azure-type-filter').forEach(b => b.classList.remove("bg-Cblue/20"));
+  document.querySelector('.azure-type-filter[data-type="ALL"]')?.classList.add("bg-Cblue/20");
+  document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("bg-Cblue/20"));
+  document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("bg-Cblue/20");
   // Refresh auth bar and load subscriptions
   _refreshModalAuthBar();
 }
@@ -13030,6 +13111,23 @@ async function azureLoadRGs() {
 /* ── Cached discovered VMs ── */
 let _discoveredVMs = [];
 let _selectedVmIds = new Set();   // Persistent selection — survives filter switches
+let _activeVmFilters = { type: "ALL", env: "ALL" };
+
+/* ── Detect VM environment from Azure tags or name prefix ── */
+function _getVmEnv(vm) {
+  const tags = vm.tags || {};
+  const tagEnv = (tags.Environment || tags.environment || tags.Env || tags.env || tags.Tier || "").toUpperCase();
+  for (const [env, rx] of [["PROD",/PROD/],["TEST",/TEST|QA/],["UAT",/UAT/],["STG",/STG|STAGE/],["DEV",/DEV/]]) {
+    if (rx.test(tagEnv)) return env;
+  }
+  const n = (vm.name || "").toUpperCase();
+  if (/^PR[A-Z]{2}\d|PROD[_\-]/.test(n))         return "PROD";
+  if (/^TS[A-Z]{2}\d|^TST|TEST[_\-]/.test(n))    return "TEST";
+  if (/^UA[A-Z]{2}\d|UAT[_\-]/.test(n))           return "UAT";
+  if (/^ST[A-Z]{2}\d|STG[_\-]|STAGE[_\-]/.test(n)) return "STG";
+  if (/^DV[A-Z]{2}\d|DEV[_\-]/.test(n))           return "DEV";
+  return "PROD"; // default — assume production
+}
 
 /* ── Helper: show discovered VMs in step 2 ── */
 function _showDiscoveredVMs(data, statusEl, statusMsg) {
@@ -13047,6 +13145,26 @@ function _showDiscoveredVMs(data, statusEl, statusMsg) {
   document.getElementById("azure-vm-app-badge").textContent = `APP ${counts.APP || 0}`;
   document.getElementById("azure-vm-db-badge").textContent  = `DB ${counts.DB || 0}`;
   document.getElementById("azure-vm-sre-badge").textContent = `SRE ${counts.SRE || 0}`;
+
+  // Env counts
+  const envCounts = {};
+  _discoveredVMs.forEach(v => { const e = _getVmEnv(v); envCounts[e] = (envCounts[e]||0)+1; });
+  const envBadgeContainer = document.getElementById("azure-vm-env-badges");
+  if (envBadgeContainer) {
+    const envStyles = {
+      PROD: "bg-red-500/15 text-red-400 border-red-500/40",
+      TEST: "bg-sky-500/15 text-sky-400 border-sky-500/40",
+      UAT:  "bg-violet-500/15 text-violet-400 border-violet-500/40",
+      STG:  "bg-orange-500/15 text-orange-400 border-orange-500/40",
+      DEV:  "bg-teal-500/15 text-teal-400 border-teal-500/40",
+    };
+    envBadgeContainer.innerHTML = Object.entries(envCounts)
+      .sort(([a],[b]) => a.localeCompare(b))
+      .map(([e,c]) => {
+        const cls = envStyles[e] || "bg-Cborder/20 text-Cmuted border-Cborder/40";
+        return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls} border">${e} ${c}</span>`;
+      }).join("");
+  }
   _renderVMTable(_discoveredVMs);
   _updateSelectedCount();
   if (statusEl) { statusEl.textContent = statusMsg; statusEl.className = "text-xs text-emerald-400"; }
@@ -13170,11 +13288,12 @@ function _renderVMTable(vms) {
     for (const { vm, idx } of grouped[cust]) {
       const colors = typeColors[vm.type] || typeColors.APP;
       const app = vm.application || (vm.tags||{}).Application || (vm.tags||{}).application || "";
-      const sub = vm.subscription_id ? vm.subscription_id.slice(0,8) + "…" : "";
       const isChecked = _selectedVmIds.has(vm.resource_id);
-      html += `<tr class="hover:bg-Cbg/40 azure-vm-row" data-type="${vm.type}" data-customer="${_escHtml(cust)}" data-idx="${idx}">
+      const env = _getVmEnv(vm);
+      const envClr = {PROD:"text-red-400",TEST:"text-sky-400",UAT:"text-violet-400",STG:"text-orange-400",DEV:"text-teal-400"}[env] || "text-Cmuted";
+      html += `<tr class="hover:bg-Cbg/40 azure-vm-row" data-type="${vm.type}" data-env="${env}" data-customer="${_escHtml(cust)}" data-idx="${idx}">
         <td class="px-2 py-1.5"><input type="checkbox" ${isChecked ? 'checked' : ''} class="azure-vm-check rounded border-Cborder" data-rid="${_escHtml(vm.resource_id)}" data-customer="${_escHtml(cust)}" onchange="_onVmCheckChange(this)" /></td>
-        <td class="px-2 py-1.5 text-Cwhite font-mono text-[11px]">${_escHtml(vm.name)}</td>
+        <td class="px-2 py-1.5 text-Cwhite font-mono text-[11px] font-medium">${_escHtml(vm.name)}</td>
         <td class="px-2 py-1.5">
           <select class="azure-type-select bg-transparent border rounded px-1 py-0.5 text-[10px] font-bold ${colors}" data-idx="${idx}"
                   onchange="azureChangeVMType(${idx}, this.value)">
@@ -13183,10 +13302,10 @@ function _renderVMTable(vms) {
             <option value="SRE" ${vm.type==='SRE'?'selected':''} class="bg-Cbg text-Cwhite">SRE</option>
           </select>
         </td>
+        <td class="px-2 py-1.5 text-[10px] font-bold ${envClr}">${env}</td>
         <td class="px-2 py-1.5 text-Cmuted text-[10px]">${_escHtml(app)}</td>
         <td class="px-2 py-1.5 text-Cmuted text-[10px] max-w-[140px] truncate" title="${_escHtml(cust)}">${_escHtml(cust)}</td>
-        <td class="px-2 py-1.5 text-Cmuted text-[10px]" title="${_escHtml(vm.subscription_id||'')}">${sub}</td>
-        <td class="px-2 py-1.5 text-Cmuted text-[10px]">${_escHtml(vm.location)}</td>
+        <td class="px-2 py-1.5 text-Cmuted text-[10px] hidden sm:table-cell">${_escHtml(vm.location)}</td>
       </tr>`;
     }
   }
@@ -13219,17 +13338,13 @@ function _syncVmSelection(cb) {
 /* ── Type override by user ── */
 function azureChangeVMType(idx, newType) {
   if (_discoveredVMs[idx]) _discoveredVMs[idx].type = newType;
-  // Update the select styling
-  _renderVMTable(_discoveredVMs.filter(vm => {
-    const activeFilter = document.querySelector(".azure-type-filter.bg-Cblue\\/20")?.dataset?.type || "ALL";
-    return activeFilter === "ALL" || vm.type === activeFilter;
-  }));
-  // Update badges
+  // Update type badges
   const counts = {APP:0,DB:0,SRE:0};
   _discoveredVMs.forEach(v => counts[v.type] = (counts[v.type]||0) + 1);
   document.getElementById("azure-vm-app-badge").textContent = `APP ${counts.APP}`;
   document.getElementById("azure-vm-db-badge").textContent  = `DB ${counts.DB}`;
   document.getElementById("azure-vm-sre-badge").textContent = `SRE ${counts.SRE}`;
+  _applyVmFilters();
 }
 
 /* ── Select / deselect all (works across ALL VMs, not just visible) ── */
@@ -13259,32 +13374,50 @@ function _updateSelectedCount() {
   if (el) el.textContent = `${_selectedVmIds.size} of ${_discoveredVMs.length} selected`;
 }
 
-/* ── Type filter — multi-select: click ALL resets, click DB/APP/SRE toggles ── */
+/* ── Combined filter: respects both type + env selections ── */
+function _applyVmFilters() {
+  const activeTypes = [...document.querySelectorAll('.azure-type-filter.bg-Cblue\\/20')].map(b => b.dataset.type);
+  const showAllTypes = activeTypes.includes("ALL") || activeTypes.length === 0;
+  let filtered = showAllTypes ? _discoveredVMs : _discoveredVMs.filter(v => activeTypes.includes(v.type));
+  if (_activeVmFilters.env !== "ALL") {
+    filtered = filtered.filter(v => _getVmEnv(v) === _activeVmFilters.env);
+  }
+  _renderVMTable(filtered);
+  _updateSelectedCount();
+}
+
+/* ── Env filter — single-select radio style ── */
+function azureFilterEnv(env) {
+  const allBtn  = document.querySelector('.azure-env-filter[data-env="ALL"]');
+  const clicked = document.querySelector(`.azure-env-filter[data-env="${env}"]`);
+  const wasActive = clicked?.classList.contains("bg-Cblue/20") && env !== "ALL";
+  document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("bg-Cblue/20"));
+  if (env === "ALL" || wasActive) {
+    allBtn?.classList.add("bg-Cblue/20");
+    _activeVmFilters.env = "ALL";
+  } else {
+    clicked?.classList.add("bg-Cblue/20");
+    _activeVmFilters.env = env;
+  }
+  _applyVmFilters();
+}
+
+/* ── Type filter — multi-select ── */
 function azureFilterType(type) {
   const allBtn = document.querySelector('.azure-type-filter[data-type="ALL"]');
   const typeBtns = document.querySelectorAll('.azure-type-filter:not([data-type="ALL"])');
 
   if (type === "ALL") {
-    // ALL resets — deactivate specific types, activate ALL
     typeBtns.forEach(b => b.classList.remove("bg-Cblue/20"));
     allBtn?.classList.add("bg-Cblue/20");
   } else {
-    // Toggle the clicked type
     const btn = document.querySelector(`.azure-type-filter[data-type="${type}"]`);
     btn?.classList.toggle("bg-Cblue/20");
-    // Deactivate ALL
     allBtn?.classList.remove("bg-Cblue/20");
-    // If nothing active, re-activate ALL
     const anyActive = document.querySelector('.azure-type-filter:not([data-type="ALL"]).bg-Cblue\\/20');
     if (!anyActive) allBtn?.classList.add("bg-Cblue/20");
   }
-
-  // Collect active type filters
-  const activeTypes = [...document.querySelectorAll('.azure-type-filter.bg-Cblue\\/20')].map(b => b.dataset.type);
-  const showAll = activeTypes.includes("ALL") || activeTypes.length === 0;
-  const filtered = showAll ? _discoveredVMs : _discoveredVMs.filter(v => activeTypes.includes(v.type));
-  _renderVMTable(filtered);
-  _updateSelectedCount();
+  _applyVmFilters();
 }
 
 /* ── Step 2: Fetch metrics for selected VMs ── */
@@ -14016,6 +14149,9 @@ function _renderSlaMatrix(data) {
       + (data.window_total_days != null
            ? ` · window: ${(data.window_total_days||0)-(data.window_breach_days||0)}/${data.window_total_days} days OK`
            : ``);
+    if (data.window_warnings?.length) {
+      compEl.title += ` · ${data.window_warnings[0]}`;
+    }
   }
   // Show window context if available (X of Y days breached)
   const compSubEl = document.getElementById("slak-compliance-sub");
@@ -14030,15 +14166,21 @@ function _renderSlaMatrix(data) {
   if (compNote) {
     const breachCount = data.breaching_runs || 0;
     const wbDays      = data.window_breach_days || 0;
+    const windowWarnings = data.window_warnings || [];
+    let noteText = "";
     if (wbDays > 0 && breachCount === 0) {
       // Classic "window failed but no single job breached" — explain why
-      compNote.classList.remove("hidden");
-      compNote.textContent = `ℹ Window = total elapsed time (first job start → last job end). `
+      noteText = `ℹ Window = total elapsed time (first job start → last job end). `
         + `${wbDays} day(s) where the batch collectively ran late, even though no individual job `
         + `exceeded its own SLA ceiling. Possible causes: late job start, queue delays, or too many `
         + `jobs running sequentially without overlap.`;
-    } else if (wbDays === 0 && breachCount === 0) {
-      compNote.classList.add("hidden");
+    }
+    if (windowWarnings.length) {
+      noteText = noteText ? `${noteText} · ${windowWarnings[0]}` : windowWarnings[0];
+    }
+    if (noteText) {
+      compNote.classList.remove("hidden");
+      compNote.textContent = noteText;
     } else {
       compNote.classList.add("hidden");
     }
@@ -14133,6 +14275,7 @@ function _renderSlaMatrix(data) {
   // Update it with the SLA Matrix's authoritative window compliance so
   // Executive Dashboard gauges reflect the correct values.
   if (window.appData.batch?.kpis && data.window_compliance_pct != null) {
+    window.appData.batch.kpis.window_compliance_pct = data.window_compliance_pct;
     window.appData.batch.kpis.batch_window_compliance = data.window_compliance_pct;
     window.appData.batch.kpis.window_breach_days = data.window_breach_days || 0;
     window.appData.batch.kpis.window_total_days  = data.window_total_days || 0;
@@ -14763,9 +14906,9 @@ function _renderSlaTriage(data) {
       const bufCol = buf < 5  ? "text-Cred font-bold" :
                      buf < 10 ? "text-Cred font-semibold" :
                      buf < 20 ? "text-Camber font-semibold" : "text-Cgreen";
-      const risk   = buf < 5  ? "CRITICAL — immediate optimisation needed" :
-                     buf < 10 ? "HIGH — any production data spike will breach" :
-                     "MODERATE — monitor closely under load";
+      const risk   = buf < 5  ? "PRIORITY — immediate optimisation needed" :
+                     buf < 10 ? "PRIORITY — any production data spike will breach" :
+                     "WATCH — prioritise in heat map and PE review";
       const riskCol = buf < 10 ? "text-Cred" : "text-Camber";
       return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/30">
         <td class="py-1.5 px-3 font-mono text-Cwhite text-[10px]">${_esc(j.job_name || j.Job_Name || "?")}</td>
@@ -15237,6 +15380,7 @@ function _benchRenderTable(rows, threshold, batchPerfSummary) {
     BREACH: { bg: "bg-Cred/15",   bd: "border-l-2 border-Cred",   badge: "bg-Cred/20 text-Cred",   dot: "🔴" },
     WATCH:  { bg: "bg-Camber/10", bd: "border-l-2 border-Camber", badge: "bg-Camber/20 text-Camber",dot: "🟡" },
     OK:     { bg: "",              bd: "",                          badge: "bg-Cgreen/20 text-Cgreen",dot: "🟢" },
+    REFERENCE: { bg: "",           bd: "",                          badge: "bg-Ccyan/20 text-Ccyan",   dot: "🧭" },
     "N/A":  { bg: "",              bd: "",                          badge: "bg-Cmuted/20 text-Cmuted", dot: "⚪" },
   };
   const dCol = (d) => d > (threshold * 2) ? "text-Cred font-bold" : d > threshold ? "text-Camber font-bold" : d < -5 ? "text-Cgreen" : "text-Cmuted";
