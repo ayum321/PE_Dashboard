@@ -289,7 +289,7 @@ REM Core framework
 call :pkg "fastapi>=0.111.0" "uvicorn[standard]>=0.29.0" "pydantic>=2.7.0" "jinja2>=3.1.3" "python-multipart>=0.0.9"
 
 REM Document parsing
-call :pkg "pypdf>=4.2.0" "python-docx>=1.1.0" "lxml>=5.2.0" "beautifulsoup4>=4.12.3"
+call :pkg "pypdf>=4.2.0" "python-docx>=1.1.0" "lxml>=5.2.0" "beautifulsoup4>=4.12.3" "pdfplumber>=0.11.0"
 
 REM Batch analytics
 call :pkg "pandas>=2.2.0" "numpy>=1.26.0" "openpyxl>=3.1.2" "xlrd>=2.0.1"
@@ -304,7 +304,7 @@ REM HTTP client
 call :pkg "requests>=2.32.0"
 
 REM Azure Monitor live-connect (optional but preinstalled)
-call :pkg "azure-identity>=1.16.0" "azure-monitor-query>=1.3.0,<2.0.0" "azure-mgmt-compute>=30.0.0" "azure-mgmt-resource>=23.0.0" "azure-mgmt-subscription>=3.0.0" "azure-mgmt-resourcegraph>=8.0.0"
+call :pkg "azure-identity>=1.16.0" "azure-monitor-query>=1.4.0,<2.0.0" "azure-mgmt-compute>=30.0.0" "azure-mgmt-resource>=23.0.0" "azure-mgmt-subscription>=3.0.0" "azure-mgmt-resourcegraph>=8.0.0" "msal_extensions>=1.2.0"
 
 REM Write stamp (Python writes the file cleanly, avoids CMD redirect quirks)
 !PY! -c "open(r'!STAMP!','w').write('ok')" >nul 2>&1
@@ -314,19 +314,25 @@ goto :step4
 
 REM -- Package install subroutine with 3-tier fallback --
 :pkg
-REM Attempt 1: standard global
+REM Attempt 1: standard (works in venv, admin install, or writable site-packages)
 !PY! -m pip install --quiet --no-warn-script-location %* >nul 2>&1
 if not errorlevel 1 goto :eof
 
-REM Attempt 2: --user (no admin / restricted corporate machine)
+REM Attempt 2: --user (no admin / restricted corporate machine — skipped inside venv)
+!PY! -c "import sys; exit(0 if hasattr(sys, 'real_prefix') or (hasattr(sys,'base_prefix') and sys.base_prefix!=sys.prefix) else 1)" >nul 2>&1
+if not errorlevel 1 (
+    REM Inside a virtualenv — --user is not valid; fall straight through to trusted-host attempt
+    goto :pkg_proxy
+)
 !PY! -m pip install --quiet --no-warn-script-location --user %* >nul 2>&1
 if not errorlevel 1 (
     echo        [user-mode] %*
     goto :eof
 )
 
-REM Attempt 3: --user + --trusted-host (corporate TLS inspection proxy)
-!PY! -m pip install --quiet --no-warn-script-location --user --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org %* >nul 2>&1
+:pkg_proxy
+REM Attempt 3: trusted-host (corporate TLS inspection proxy)
+!PY! -m pip install --quiet --no-warn-script-location --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org %* >nul 2>&1
 if not errorlevel 1 (
     echo        [proxy-mode] %*
     goto :eof
@@ -362,10 +368,75 @@ if "!FILES_OK!"=="0" (
 !PY! -c "import uvicorn" >nul 2>&1
 if errorlevel 1 (
     echo        uvicorn not importable -- forcing reinstall...
-    !PY! -m pip install --quiet --user "uvicorn[standard]>=0.29.0" "fastapi>=0.111.0"
+    call :pkg "uvicorn[standard]>=0.29.0" "fastapi>=0.111.0"
     !PY! -c "import uvicorn" >nul 2>&1
     if errorlevel 1 (
         echo   [ERROR] uvicorn still unavailable after reinstall.
+        echo          Check internet/proxy and re-run start.bat.
+        pause
+        exit /b 1
+    )
+)
+
+!PY! -c "from fastapi.templating import Jinja2Templates" >nul 2>&1
+if errorlevel 1 (
+    echo        Jinja2 templating support missing -- forcing reinstall...
+    call :pkg "jinja2>=3.1.3" "fastapi>=0.111.0"
+    !PY! -c "from fastapi.templating import Jinja2Templates" >nul 2>&1
+    if errorlevel 1 (
+        echo   [ERROR] Jinja2 templating is still unavailable after reinstall.
+        echo          Check internet/proxy and re-run start.bat.
+        pause
+        exit /b 1
+    )
+)
+
+!PY! -c "import pandas" >nul 2>&1
+if errorlevel 1 (
+    echo        pandas missing -- forcing reinstall...
+    call :pkg "pandas>=2.2.0" "numpy>=1.26.0" "openpyxl>=3.1.2"
+    !PY! -c "import pandas" >nul 2>&1
+    if errorlevel 1 (
+        echo   [ERROR] pandas is still unavailable after reinstall.
+        echo          Check internet/proxy and re-run start.bat.
+        pause
+        exit /b 1
+    )
+)
+
+!PY! -c "from azure.monitor.query import MetricsQueryClient" >nul 2>&1
+if errorlevel 1 (
+    echo        Azure Monitor SDK incomplete -- forcing reinstall...
+    call :pkg "azure-identity>=1.16.0" "azure-monitor-query>=1.4.0,<2.0.0" "azure-mgmt-compute>=30.0.0" "azure-mgmt-resource>=23.0.0" "azure-mgmt-subscription>=3.0.0" "azure-mgmt-resourcegraph>=8.0.0" "msal_extensions>=1.2.0"
+    !PY! -c "from azure.monitor.query import MetricsQueryClient" >nul 2>&1
+    if errorlevel 1 (
+        echo   [ERROR] Azure Monitor SDK is still incomplete after reinstall.
+        echo          Check internet/proxy and re-run start.bat.
+        pause
+        exit /b 1
+    )
+)
+
+!PY! -c "import pdfplumber" >nul 2>&1
+if errorlevel 1 (
+    echo        pdfplumber missing -- forcing reinstall...
+    call :pkg "pdfplumber>=0.11.0"
+    !PY! -c "import pdfplumber" >nul 2>&1
+    if errorlevel 1 (
+        echo   [ERROR] pdfplumber is still unavailable after reinstall.
+        echo          Check internet/proxy and re-run start.bat.
+        pause
+        exit /b 1
+    )
+)
+
+!PY! -c "import msal_extensions" >nul 2>&1
+if errorlevel 1 (
+    echo        msal_extensions missing -- forcing reinstall...
+    call :pkg "msal_extensions>=1.2.0"
+    !PY! -c "import msal_extensions" >nul 2>&1
+    if errorlevel 1 (
+        echo   [ERROR] msal_extensions is still unavailable after reinstall.
         echo          Check internet/proxy and re-run start.bat.
         pause
         exit /b 1
