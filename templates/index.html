@@ -3569,6 +3569,56 @@
   </div>
 
   <!-- Azure Monitor live-fetch modal — 2-step: Discover VMs → Select & Fetch -->
+  <!-- Azure modal segmented control styles -->
+  <style>
+    /* Base segment button */
+    .az-seg-btn {
+      background: transparent;
+      color: rgba(148,163,184,0.7);
+      cursor: pointer;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      user-select: none;
+    }
+    .az-seg-btn:hover { color: #f1f5f9; background: rgba(255,255,255,0.06); }
+
+    /* Dot indicator inside button */
+    .az-dot { width:6px; height:6px; border-radius:50%; display:inline-block; opacity:0.7; flex-shrink:0; }
+
+    /* Count chip inside button */
+    .az-chip { font-size:9px; padding:0 4px; background:rgba(255,255,255,0.08); border-radius:3px; margin-left:3px; min-width:16px; text-align:center; color:inherit; font-variant-numeric: tabular-nums; display:inline-block; }
+    .az-chip:empty { display:none; }
+
+    /* Active — All (neutral) */
+    .az-seg-btn.az-active { color:#f1f5f9; background:rgba(255,255,255,0.1); }
+
+    /* Active — Type colors */
+    .az-type-app.az-active { color:#6ee7b7; background:rgba(16,185,129,0.18); }
+    .az-type-db.az-active  { color:#93c5fd; background:rgba(59,130,246,0.18); }
+    .az-type-sre.az-active { color:#fcd34d; background:rgba(245,158,11,0.18); }
+
+    /* Active — Env colors */
+    .az-env-prod.az-active { color:#fca5a5; background:rgba(239,68,68,0.18); }
+    .az-env-test.az-active { color:#7dd3fc; background:rgba(14,165,233,0.18); }
+    .az-env-uat.az-active  { color:#c4b5fd; background:rgba(139,92,246,0.18); }
+    .az-env-stg.az-active  { color:#fdba74; background:rgba(249,115,22,0.18); }
+    .az-env-dev.az-active  { color:#5eead4; background:rgba(20,184,166,0.18); }
+
+    /* Table row zebra */
+    #azure-vm-table-body tr:nth-child(even) { background: rgba(255,255,255,0.018); }
+    #azure-vm-table-body tr:hover { background: rgba(59,130,246,0.06) !important; }
+
+    /* ENV badge in table cell */
+    .az-env-badge { display:inline-block; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:700; letter-spacing:0.04em; }
+    .az-env-badge.env-PROD { color:#fca5a5; background:rgba(239,68,68,0.15); }
+    .az-env-badge.env-TEST { color:#7dd3fc; background:rgba(14,165,233,0.15); }
+    .az-env-badge.env-UAT  { color:#c4b5fd; background:rgba(139,92,246,0.15); }
+    .az-env-badge.env-STG  { color:#fdba74; background:rgba(249,115,22,0.15); }
+    .az-env-badge.env-DEV  { color:#5eead4; background:rgba(20,184,166,0.15); }
+  </style>
+
   <div id="azure-fetch-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
     <div class="bg-Ccard border border-Cborder rounded-2xl shadow-panel p-4 sm:p-6 w-[960px] max-w-[95vw] max-h-[88vh] flex flex-col space-y-3 overflow-hidden">
       <div class="flex items-center justify-between">
@@ -3650,73 +3700,112 @@
       </div>
 
       <!-- STEP 2: VM list with classification (hidden until discovery) -->
-      <div id="azure-step2" class="hidden flex-1 min-h-0 space-y-2.5 overflow-y-auto">
-        <!-- Summary badges — type counts -->
-        <div class="flex items-center gap-2 flex-wrap border-b border-Cborder/50 pb-2">
-          <span id="azure-vm-total" class="text-sm font-extrabold tracking-tight text-Cwhite mr-1"></span>
-          <span id="azure-vm-app-badge" class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/40">
-            <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
-          </span>
-          <span id="azure-vm-db-badge" class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/40">
-            <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
-          </span>
-          <span id="azure-vm-sre-badge" class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/40">
-            <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
-          </span>
-          <!-- Env counts injected by JS -->
-          <div id="azure-vm-env-badges" class="flex items-center gap-1.5 flex-wrap ml-2 pl-2 border-l border-Cborder/50"></div>
-          <div class="ml-auto flex items-center gap-2">
-            <button onclick="azureSelectAll(true)" class="text-[10px] text-Cblue hover:underline font-semibold">Select All</button>
-            <button onclick="azureSelectAll(false)" class="text-[10px] text-Cmuted hover:underline">Deselect All</button>
+      <div id="azure-step2" class="hidden flex-1 min-h-0 flex flex-col gap-2 overflow-hidden">
+
+        <!-- Summary strip -->
+        <div class="flex items-center gap-3 flex-wrap px-1">
+          <span id="azure-vm-total" class="text-[11px] font-bold tracking-wide text-Cwhite"></span>
+          <div class="flex items-center gap-1.5">
+            <span id="azure-vm-app-badge" class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 tabular-nums"></span>
+            <span id="azure-vm-db-badge"  class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30 tabular-nums"></span>
+            <span id="azure-vm-sre-badge" class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 tabular-nums"></span>
+          </div>
+          <div id="azure-vm-env-badges" class="flex items-center gap-1 flex-wrap pl-2 border-l border-Cborder/50"></div>
+          <div class="ml-auto flex items-center gap-3">
+            <button onclick="azureSelectAll(true)"  class="text-[10px] font-semibold text-Cblue hover:text-white transition-colors">Select all</button>
+            <span class="text-Cborder/60">·</span>
+            <button onclick="azureSelectAll(false)" class="text-[10px] text-Cmuted hover:text-white transition-colors">Clear</button>
           </div>
         </div>
 
-        <!-- Filter rows: Type + Env -->
-        <div class="space-y-1.5 bg-Cbg/40 rounded-lg px-3 py-2 border border-Cborder/50">
-          <!-- Type filter -->
-          <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-[10px] font-bold uppercase tracking-widest text-Cmuted w-8">Type</span>
-            <button onclick="azureFilterType('ALL')" class="azure-type-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-Cborder text-Cwhite bg-Cblue/20" data-type="ALL">All</button>
-            <button onclick="azureFilterType('APP')" class="azure-type-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/15" data-type="APP">● APP</button>
-            <button onclick="azureFilterType('DB')" class="azure-type-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-blue-500/40 text-blue-400 hover:bg-blue-500/15" data-type="DB">● DB</button>
-            <button onclick="azureFilterType('SRE')" class="azure-type-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-amber-500/40 text-amber-400 hover:bg-amber-500/15" data-type="SRE">● SRE</button>
+        <!-- Filter bar — segmented controls + inline search -->
+        <div class="rounded-lg border border-Cborder/60 bg-Cbg/50 px-3 py-2.5 flex flex-col gap-2">
+
+          <!-- Row 1: Type segmented group -->
+          <div class="flex items-center gap-3">
+            <span class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 w-7 shrink-0">Type</span>
+            <div class="inline-flex rounded border border-Cborder/60 overflow-hidden" role="group">
+              <button onclick="azureFilterType('ALL')" data-type="ALL"
+                class="azure-type-filter az-seg-btn az-active px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                All
+              </button>
+              <button onclick="azureFilterType('APP')" data-type="APP"
+                class="azure-type-filter az-seg-btn az-type-app px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                <span class="az-dot" style="background:#10b981"></span>APP<span class="az-chip" id="az-cnt-app"></span>
+              </button>
+              <button onclick="azureFilterType('DB')" data-type="DB"
+                class="azure-type-filter az-seg-btn az-type-db px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                <span class="az-dot" style="background:#3b82f6"></span>DB<span class="az-chip" id="az-cnt-db"></span>
+              </button>
+              <button onclick="azureFilterType('SRE')" data-type="SRE"
+                class="azure-type-filter az-seg-btn az-type-sre px-3 py-1 text-[10px] font-bold transition-all">
+                <span class="az-dot" style="background:#f59e0b"></span>SRE<span class="az-chip" id="az-cnt-sre"></span>
+              </button>
+            </div>
           </div>
-          <!-- Env filter -->
-          <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-[10px] font-bold uppercase tracking-widest text-Cmuted w-8">Env</span>
-            <button onclick="azureFilterEnv('ALL')" class="azure-env-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-Cborder text-Cwhite bg-Cblue/20" data-env="ALL">All</button>
-            <button onclick="azureFilterEnv('PROD')" class="azure-env-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-red-500/40 text-red-400 hover:bg-red-500/15" data-env="PROD">PROD</button>
-            <button onclick="azureFilterEnv('TEST')" class="azure-env-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-sky-500/40 text-sky-400 hover:bg-sky-500/15" data-env="TEST">TEST</button>
-            <button onclick="azureFilterEnv('UAT')" class="azure-env-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-violet-500/40 text-violet-400 hover:bg-violet-500/15" data-env="UAT">UAT</button>
-            <button onclick="azureFilterEnv('STG')" class="azure-env-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-orange-500/40 text-orange-400 hover:bg-orange-500/15" data-env="STG">STG</button>
-            <button onclick="azureFilterEnv('DEV')" class="azure-env-filter px-2.5 py-0.5 rounded text-[11px] font-bold border border-teal-500/40 text-teal-400 hover:bg-teal-500/15" data-env="DEV">DEV</button>
+
+          <!-- Row 2: Env segmented group -->
+          <div class="flex items-center gap-3">
+            <span class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 w-7 shrink-0">Env</span>
+            <div class="inline-flex rounded border border-Cborder/60 overflow-hidden" role="group">
+              <button onclick="azureFilterEnv('ALL')" data-env="ALL"
+                class="azure-env-filter az-seg-btn az-active px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                All
+              </button>
+              <button onclick="azureFilterEnv('PROD')" data-env="PROD"
+                class="azure-env-filter az-seg-btn az-env-prod px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                PROD<span class="az-chip" id="az-cnt-prod"></span>
+              </button>
+              <button onclick="azureFilterEnv('TEST')" data-env="TEST"
+                class="azure-env-filter az-seg-btn az-env-test px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                TEST<span class="az-chip" id="az-cnt-test"></span>
+              </button>
+              <button onclick="azureFilterEnv('UAT')" data-env="UAT"
+                class="azure-env-filter az-seg-btn az-env-uat px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                UAT<span class="az-chip" id="az-cnt-uat"></span>
+              </button>
+              <button onclick="azureFilterEnv('STG')" data-env="STG"
+                class="azure-env-filter az-seg-btn az-env-stg px-3 py-1 text-[10px] font-bold border-r border-Cborder/40 transition-all">
+                STG<span class="az-chip" id="az-cnt-stg"></span>
+              </button>
+              <button onclick="azureFilterEnv('DEV')" data-env="DEV"
+                class="azure-env-filter az-seg-btn az-env-dev px-3 py-1 text-[10px] font-bold transition-all">
+                DEV<span class="az-chip" id="az-cnt-dev"></span>
+              </button>
+            </div>
+            <!-- Inline VM name search -->
+            <input id="azure-vm-search" type="text" placeholder="Filter by name…"
+              oninput="_applyVmFilters()"
+              class="ml-auto w-44 bg-Cbg border border-Cborder/60 rounded px-2.5 py-1 text-[10px] text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cblue/60 font-mono" />
           </div>
         </div>
 
-        <!-- Scrollable VM table -->
-        <div class="overflow-auto flex-1 max-h-[280px] rounded-lg border border-Cborder">
+        <!-- VM table -->
+        <div class="overflow-auto flex-1 min-h-0 rounded-lg border border-Cborder/60">
           <table class="w-full text-xs min-w-[560px]">
-            <thead class="bg-Cbg/80 sticky top-0 z-10">
+            <thead class="sticky top-0 z-10" style="background:#0f1117">
               <tr>
-                <th class="px-2 py-1.5 text-left w-8"><input type="checkbox" id="azure-vm-checkall" checked onchange="azureToggleAll(this.checked)" class="rounded border-Cborder" /></th>
-                <th class="px-2 py-1.5 text-left text-Cmuted font-bold uppercase tracking-widest text-[10px]">VM Name</th>
-                <th class="px-2 py-1.5 text-left text-Cmuted font-bold uppercase tracking-widest text-[10px] w-16">Type</th>
-                <th class="px-2 py-1.5 text-left text-Cmuted font-bold uppercase tracking-widest text-[10px] w-14">Env</th>
-                <th class="px-2 py-1.5 text-left text-Cmuted font-bold uppercase tracking-widest text-[10px]">App</th>
-                <th class="px-2 py-1.5 text-left text-Cmuted font-bold uppercase tracking-widest text-[10px]">Customer</th>
-                <th class="px-2 py-1.5 text-left text-Cmuted font-bold uppercase tracking-widest text-[10px] hidden sm:table-cell">Region</th>
+                <th class="px-2 py-2 text-left w-8">
+                  <input type="checkbox" id="azure-vm-checkall" checked onchange="azureToggleAll(this.checked)" class="rounded border-Cborder" />
+                </th>
+                <th class="px-3 py-2 text-left text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70">VM Name</th>
+                <th class="px-2 py-2 text-left text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 w-16">Type</th>
+                <th class="px-2 py-2 text-left text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 w-14">Env</th>
+                <th class="px-2 py-2 text-left text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70">App</th>
+                <th class="px-2 py-2 text-left text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70">Customer</th>
+                <th class="px-2 py-2 text-left text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70 hidden sm:table-cell">Region</th>
               </tr>
             </thead>
-            <tbody id="azure-vm-table-body" class="divide-y divide-Cborder/50">
+            <tbody id="azure-vm-table-body" class="divide-y divide-Cborder/30">
             </tbody>
           </table>
         </div>
 
-        <!-- Fetch options + button -->
-        <div class="flex flex-wrap items-center gap-3 pt-1">
-          <div>
-            <label class="block text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">History</label>
-            <select id="azure-modal-hours" class="bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite focus:outline-none focus:border-Cblue">
+        <!-- Fetch footer -->
+        <div class="flex flex-wrap items-center gap-3 pt-0.5 border-t border-Cborder/40">
+          <div class="flex items-center gap-2">
+            <label class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted/70">History</label>
+            <select id="azure-modal-hours" class="bg-Cbg border border-Cborder/60 rounded px-2.5 py-1.5 text-[10px] text-Cwhite focus:outline-none focus:border-Cblue/60">
               <option value="1">1h</option>
               <option value="6">6h</option>
               <option value="24" selected>24h</option>
@@ -3726,7 +3815,7 @@
               <option value="720">30d</option>
             </select>
           </div>
-          <span id="azure-selected-count" class="text-[10px] text-Cmuted"></span>
+          <span id="azure-selected-count" class="text-[10px] text-Cmuted tabular-nums"></span>
           <div class="flex items-center gap-2 ml-auto">
             <button onclick="runAzureFetch()"
                     id="azure-fetch-btn"

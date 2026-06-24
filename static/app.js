@@ -12894,12 +12894,13 @@ function openAzureModal() {
   if (step1) step1.classList.remove("hidden");
   if (step2) step2.classList.add("hidden");
   if (statusDiv) { statusDiv.textContent = ""; statusDiv.classList.add("hidden"); }
-  // Reset both filters to ALL
+  // Reset both filters to ALL and clear search
   _activeVmFilters = { type: "ALL", env: "ALL" };
-  document.querySelectorAll('.azure-type-filter').forEach(b => b.classList.remove("bg-Cblue/20"));
-  document.querySelector('.azure-type-filter[data-type="ALL"]')?.classList.add("bg-Cblue/20");
-  document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("bg-Cblue/20"));
-  document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("bg-Cblue/20");
+  document.querySelectorAll('.azure-type-filter').forEach(b => b.classList.remove("az-active"));
+  document.querySelector('.azure-type-filter[data-type="ALL"]')?.classList.add("az-active");
+  document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("az-active"));
+  document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("az-active");
+  const srch = document.getElementById("azure-vm-search"); if (srch) srch.value = "";
   // Refresh auth bar and load subscriptions
   _refreshModalAuthBar();
 }
@@ -13132,7 +13133,6 @@ function _getVmEnv(vm) {
 /* ── Helper: show discovered VMs in step 2 ── */
 function _showDiscoveredVMs(data, statusEl, statusMsg) {
   _discoveredVMs = data.vms || [];
-  // Fresh discovery → select none by default so user picks what they need
   _selectedVmIds = new Set();
   if (!_discoveredVMs.length) {
     if (statusEl) { statusEl.textContent = "No VMs found."; statusEl.className = "text-xs text-amber-400"; }
@@ -13140,34 +13140,42 @@ function _showDiscoveredVMs(data, statusEl, statusMsg) {
   }
   const step2 = document.getElementById("azure-step2");
   if (step2) step2.classList.remove("hidden");
+
   const counts = data.counts || {};
-  document.getElementById("azure-vm-total").textContent = `${data.total} VMs discovered`;
+  document.getElementById("azure-vm-total").textContent = `${data.total} VMs`;
   document.getElementById("azure-vm-app-badge").textContent = `APP ${counts.APP || 0}`;
   document.getElementById("azure-vm-db-badge").textContent  = `DB ${counts.DB || 0}`;
   document.getElementById("azure-vm-sre-badge").textContent = `SRE ${counts.SRE || 0}`;
 
-  // Env counts
-  const envCounts = {};
-  _discoveredVMs.forEach(v => { const e = _getVmEnv(v); envCounts[e] = (envCounts[e]||0)+1; });
-  const envBadgeContainer = document.getElementById("azure-vm-env-badges");
-  if (envBadgeContainer) {
-    const envStyles = {
-      PROD: "bg-red-500/15 text-red-400 border-red-500/40",
-      TEST: "bg-sky-500/15 text-sky-400 border-sky-500/40",
-      UAT:  "bg-violet-500/15 text-violet-400 border-violet-500/40",
-      STG:  "bg-orange-500/15 text-orange-400 border-orange-500/40",
-      DEV:  "bg-teal-500/15 text-teal-400 border-teal-500/40",
-    };
-    envBadgeContainer.innerHTML = Object.entries(envCounts)
-      .sort(([a],[b]) => a.localeCompare(b))
-      .map(([e,c]) => {
-        const cls = envStyles[e] || "bg-Cborder/20 text-Cmuted border-Cborder/40";
-        return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls} border">${e} ${c}</span>`;
-      }).join("");
-  }
+  _updateFilterCounts();
   _renderVMTable(_discoveredVMs);
   _updateSelectedCount();
   if (statusEl) { statusEl.textContent = statusMsg; statusEl.className = "text-xs text-emerald-400"; }
+}
+
+/* ── Inject live counts into filter buttons + env summary badges ── */
+function _updateFilterCounts() {
+  const typeCounts = {APP:0, DB:0, SRE:0};
+  const envCounts  = {};
+  _discoveredVMs.forEach(v => {
+    typeCounts[v.type] = (typeCounts[v.type]||0) + 1;
+    const e = _getVmEnv(v); envCounts[e] = (envCounts[e]||0) + 1;
+  });
+  // Type chips
+  const tc = {"APP":"az-cnt-app","DB":"az-cnt-db","SRE":"az-cnt-sre"};
+  Object.entries(tc).forEach(([t,id]) => { const el = document.getElementById(id); if (el) el.textContent = typeCounts[t] || ""; });
+  // Env chips
+  const ec = {"PROD":"az-cnt-prod","TEST":"az-cnt-test","UAT":"az-cnt-uat","STG":"az-cnt-stg","DEV":"az-cnt-dev"};
+  Object.entries(ec).forEach(([e,id]) => { const el = document.getElementById(id); if (el) el.textContent = envCounts[e] || ""; });
+  // Env summary badges
+  const envBadgeContainer = document.getElementById("azure-vm-env-badges");
+  if (envBadgeContainer) {
+    const envStyles = {PROD:"env-PROD",TEST:"env-TEST",UAT:"env-UAT",STG:"env-STG",DEV:"env-DEV"};
+    envBadgeContainer.innerHTML = Object.entries(envCounts)
+      .sort(([a],[b]) => a.localeCompare(b))
+      .map(([e,c]) => `<span class="az-env-badge ${envStyles[e]||''}">${e} ${c}</span>`)
+      .join("");
+  }
 }
 
 /* ── Search VMs across all subscriptions (Resource Graph) ── */
@@ -13302,7 +13310,7 @@ function _renderVMTable(vms) {
             <option value="SRE" ${vm.type==='SRE'?'selected':''} class="bg-Cbg text-Cwhite">SRE</option>
           </select>
         </td>
-        <td class="px-2 py-1.5 text-[10px] font-bold ${envClr}">${env}</td>
+        <td class="px-2 py-1.5 text-[10px] font-bold"><span class="az-env-badge env-${env}">${env}</span></td>
         <td class="px-2 py-1.5 text-Cmuted text-[10px]">${_escHtml(app)}</td>
         <td class="px-2 py-1.5 text-Cmuted text-[10px] max-w-[140px] truncate" title="${_escHtml(cust)}">${_escHtml(cust)}</td>
         <td class="px-2 py-1.5 text-Cmuted text-[10px] hidden sm:table-cell">${_escHtml(vm.location)}</td>
@@ -13338,12 +13346,12 @@ function _syncVmSelection(cb) {
 /* ── Type override by user ── */
 function azureChangeVMType(idx, newType) {
   if (_discoveredVMs[idx]) _discoveredVMs[idx].type = newType;
-  // Update type badges
   const counts = {APP:0,DB:0,SRE:0};
   _discoveredVMs.forEach(v => counts[v.type] = (counts[v.type]||0) + 1);
   document.getElementById("azure-vm-app-badge").textContent = `APP ${counts.APP}`;
   document.getElementById("azure-vm-db-badge").textContent  = `DB ${counts.DB}`;
   document.getElementById("azure-vm-sre-badge").textContent = `SRE ${counts.SRE}`;
+  _updateFilterCounts();
   _applyVmFilters();
 }
 
@@ -13374,13 +13382,21 @@ function _updateSelectedCount() {
   if (el) el.textContent = `${_selectedVmIds.size} of ${_discoveredVMs.length} selected`;
 }
 
-/* ── Combined filter: respects both type + env selections ── */
+/* ── Combined filter: respects type + env + name search ── */
 function _applyVmFilters() {
-  const activeTypes = [...document.querySelectorAll('.azure-type-filter.bg-Cblue\\/20')].map(b => b.dataset.type);
+  const activeTypes = [...document.querySelectorAll('.azure-type-filter.az-active')].map(b => b.dataset.type);
   const showAllTypes = activeTypes.includes("ALL") || activeTypes.length === 0;
+  const searchQ = (document.getElementById("azure-vm-search")?.value || "").toLowerCase().trim();
   let filtered = showAllTypes ? _discoveredVMs : _discoveredVMs.filter(v => activeTypes.includes(v.type));
   if (_activeVmFilters.env !== "ALL") {
     filtered = filtered.filter(v => _getVmEnv(v) === _activeVmFilters.env);
+  }
+  if (searchQ) {
+    filtered = filtered.filter(v =>
+      (v.name || "").toLowerCase().includes(searchQ) ||
+      (v.application || "").toLowerCase().includes(searchQ) ||
+      (v.customer || "").toLowerCase().includes(searchQ)
+    );
   }
   _renderVMTable(filtered);
   _updateSelectedCount();
@@ -13390,13 +13406,13 @@ function _applyVmFilters() {
 function azureFilterEnv(env) {
   const allBtn  = document.querySelector('.azure-env-filter[data-env="ALL"]');
   const clicked = document.querySelector(`.azure-env-filter[data-env="${env}"]`);
-  const wasActive = clicked?.classList.contains("bg-Cblue/20") && env !== "ALL";
-  document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("bg-Cblue/20"));
+  const wasActive = clicked?.classList.contains("az-active") && env !== "ALL";
+  document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("az-active"));
   if (env === "ALL" || wasActive) {
-    allBtn?.classList.add("bg-Cblue/20");
+    allBtn?.classList.add("az-active");
     _activeVmFilters.env = "ALL";
   } else {
-    clicked?.classList.add("bg-Cblue/20");
+    clicked?.classList.add("az-active");
     _activeVmFilters.env = env;
   }
   _applyVmFilters();
@@ -13408,14 +13424,14 @@ function azureFilterType(type) {
   const typeBtns = document.querySelectorAll('.azure-type-filter:not([data-type="ALL"])');
 
   if (type === "ALL") {
-    typeBtns.forEach(b => b.classList.remove("bg-Cblue/20"));
-    allBtn?.classList.add("bg-Cblue/20");
+    typeBtns.forEach(b => b.classList.remove("az-active"));
+    allBtn?.classList.add("az-active");
   } else {
     const btn = document.querySelector(`.azure-type-filter[data-type="${type}"]`);
-    btn?.classList.toggle("bg-Cblue/20");
-    allBtn?.classList.remove("bg-Cblue/20");
-    const anyActive = document.querySelector('.azure-type-filter:not([data-type="ALL"]).bg-Cblue\\/20');
-    if (!anyActive) allBtn?.classList.add("bg-Cblue/20");
+    btn?.classList.toggle("az-active");
+    allBtn?.classList.remove("az-active");
+    const anyActive = document.querySelector('.azure-type-filter:not([data-type="ALL"]).az-active');
+    if (!anyActive) allBtn?.classList.add("az-active");
   }
   _applyVmFilters();
 }
