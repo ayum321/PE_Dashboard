@@ -816,6 +816,66 @@ def _compute_adaptive_sla(df: pd.DataFrame, global_ceil: float) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Utility job exclusion helper — generic, signal-based
+# ─────────────────────────────────────────────────────────────────
+_UTILITY_RUNTIME_MAX_BASIS: frozenset[str] = frozenset({
+    "_fw", "fw_",
+    "batch_start", "batch_end", "batchstart", "batchend",
+    "pre_batch_node", "post_batch_node", "qwbatchstart", "qwbatchend",
+    "seq_disable_login", "seq_enable_users",
+    "disable_users", "enable_users",
+    "disable_login", "enable_login",
+    "zabbix_monitors",
+})
+
+
+def _normalize_job_name(job_name: str) -> str:
+    return re.sub(r"[\s\-]+", "_", str(job_name)).lower().strip()
+
+
+def is_utility_job(
+    job_name: str,
+    avg_runtime_hrs: float,
+    max_runtime_hrs: float,
+) -> tuple[bool, str]:
+    """
+    Return (is_utility, reason_string) for a single job name.
+
+    Strong utility tokens are name-only exclusions. Runtime-gated patterns require
+    both a name match and a runtime threshold check.
+    """
+    n = _normalize_job_name(job_name)
+
+    _strong_tokens = sorted(
+        {str(t).strip().lower() for t in getattr(pe_config, "STRONG_UTILITY_TOKENS", set()) if str(t).strip()},
+        key=lambda s: (-len(s), s),
+    )
+    for token in _strong_tokens:
+        if token and token in n:
+            return True, f"strong_utility:{token}"
+
+    matched_fail_reason = ""
+    for pattern, threshold in getattr(pe_config, "RUNTIME_GATED_UTILITY", {}).items():
+        if not pattern or pattern not in n:
+            continue
+
+        check_val = max_runtime_hrs if pattern in _UTILITY_RUNTIME_MAX_BASIS else avg_runtime_hrs
+        try:
+            check_val_f = float(check_val)
+        except (TypeError, ValueError):
+            check_val_f = float("nan")
+
+        if pd.notna(check_val_f) and check_val_f < float(threshold):
+            return True, f"runtime_gated:{pattern}({check_val_f:.4f}h<{float(threshold):.4f}h)"
+
+        matched_fail_reason = (
+            f"pattern_matched_not_excluded:{pattern}({check_val_f:.4f}h>={float(threshold):.4f}h)"
+        )
+
+    return False, matched_fail_reason
+
+
+# ─────────────────────────────────────────────────────────────────
 # build_top_jobs_df — name per Phase 3 brief
 # ─────────────────────────────────────────────────────────────────
 def build_top_jobs_df(df: pd.DataFrame,
@@ -1021,70 +1081,20 @@ def build_top_jobs_df(df: pd.DataFrame,
     for col in ("peak_hrs", "avg_hrs", "total_hrs", "sla_hrs"):
         top_jobs[col] = top_jobs[col].round(3)
 
-    # ── Tag utility jobs (FileWatcher, DB backup, export, health-check) ──────
-    # is_utility=True → frontend can filter these out of the SLA buffer table.
-    # Backend keeps them in the dataset so run/fail counts are still tracked.
-    #
-    # Sub_Application confirmation guard (Area 1 tightening):
-    # Patterns fall into two tiers:
-    #   STRONG — unambiguous utility regardless of context (file_watcher, ping_job)
-    #   WEAK   — everything else; only auto-excluded when the job's sub_app is NOT
-    #            batch-productive (i.e. the sub_app has < 2 non-utility jobs).
-    # This prevents false-positive exclusion of legitimate batch jobs that happen
-    # to contain a matching substring in a productive batch sub_app.
-    _STRONG_UTIL: frozenset = frozenset({
-        # FileWatcher — strong regardless of sub_app (marks data arrival, not batch)
-        "file_watcher", "filewatcher", "ctrl_m_file_watcher", "_fw", "fw_", "ping_job",
-        # Outbound file delivery — always file push, never batch computation
-        "export_outbound", "move_file_to_outbox", "outbound_file",
-        # DB maintenance utilities — stats/cleanup, never batch SLA jobs
-        "gather_db_stats", "delete_type4_fcst", "delete_type",
-    })
-    _util_patterns = [str(p).lower() for p in getattr(pe_config, "UTILITY_JOB_PATTERNS", [])]
-    if _util_patterns and "Job_Name" in top_jobs.columns:
-        import re as _re_util
-
-        def _norm_name(n: str) -> str:
-            return _re_util.sub(r"[\s\-]+", "_", str(n)).lower()
-
-        def _util_hit(name: str) -> tuple:
-            norm = _norm_name(name)
-            for pat in _util_patterns:
-                if pat in norm:
-                    return True, pat
-            return False, ""
-
-        # First pass: find all pattern-based candidates
-        _util_results = top_jobs["Job_Name"].apply(_util_hit)
-        top_jobs["_is_cand"]  = _util_results.apply(lambda t: t[0])
-        top_jobs["_cand_pat"] = _util_results.apply(lambda t: t[1])
-
-        # Build batch-productive sub_apps: sub_apps where ≥ 2 jobs are NOT
-        # pattern-candidates (they do real batch work). Only meaningful when
-        # Sub_Application is present in the frame (composite-key grouping).
-        _batch_subs: set = set()
-        if "Sub_Application" in top_jobs.columns:
-            _non_cand = top_jobs[~top_jobs["_is_cand"]]
-            if not _non_cand.empty:
-                _sub_cnts = _non_cand.groupby("Sub_Application").size()
-                _batch_subs = set(_sub_cnts[_sub_cnts >= 2].index)
-
-        def _is_util(row) -> bool:
-            if not row["_is_cand"]:
-                return False
-            if row["_cand_pat"] in _STRONG_UTIL:
-                return True   # strong match — utility regardless of sub_app context
-            # Weak match: only utility when the sub_app is NOT batch-productive
-            sub = str(row.get("Sub_Application", "")) if "Sub_Application" in row.index else ""
-            return sub not in _batch_subs
-
-        top_jobs["is_utility"]     = top_jobs.apply(_is_util, axis=1)
-        top_jobs["utility_reason"] = top_jobs.apply(
-            lambda r: r["_cand_pat"] if r["is_utility"] else "", axis=1
+    # ── Tag utility jobs using the two-step generic exclusion algorithm ──────
+    if "Job_Name" in top_jobs.columns:
+        _util_results = top_jobs.apply(
+            lambda r: is_utility_job(
+                str(r.get("Job_Name", "")),
+                float(r.get("avg_hrs", 0.0) or 0.0),
+                float(r.get("peak_hrs", 0.0) or 0.0),
+            ),
+            axis=1,
         )
-        top_jobs.drop(columns=["_is_cand", "_cand_pat"], inplace=True)
+        top_jobs["is_utility"] = _util_results.apply(lambda t: bool(t[0]))
+        top_jobs["utility_reason"] = _util_results.apply(lambda t: str(t[1]) if t[1] else "")
     else:
-        top_jobs["is_utility"]     = False
+        top_jobs["is_utility"] = False
         top_jobs["utility_reason"] = ""
 
     return top_jobs
@@ -1824,30 +1834,9 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 "suspect_flag":  str(_r.get("suspect_flag", "OK")),
             })
 
-        # ── PROMPT 2: Worst window using per-sub_app SLA as denominator ──────
-        # Compute buffer_pct using each row's own sla_hrs (not global_ceil).
-        # Store worst-window info in a dict so _build_window_sla_buffer
-        # can use the correct denominator for the gauge.
+        # Legacy compatibility payload only. The daily buffer now uses the
+        # canonical daily worst day, so this stays empty on purpose.
         _worst_window_info: dict = {}
-        try:
-            if not window_agg.empty and "elapsed_hrs" in window_agg.columns:
-                _wab = window_agg.copy()
-                _wab["_buf_pct"] = (
-                    (_wab["sla_hrs"] - _wab["elapsed_hrs"])
-                    / _wab["sla_hrs"].clip(lower=0.001)
-                    * 100
-                )
-                _widx = int(_wab["_buf_pct"].idxmin())
-                _wr = _wab.loc[_widx]
-                _worst_window_info = {
-                    "sla_hrs":     float(_wr["sla_hrs"]),
-                    "elapsed_hrs": float(_wr["elapsed_hrs"]),
-                    "sub_app":     str(_wr["Sub_Application"]),
-                    "run_date":    str(_wr["run_date"]),
-                    "buffer_pct":  float(_wr["_buf_pct"]),
-                }
-        except Exception:
-            pass
 
         # Merge back to daily (Job_Name level) for compatibility with heatmap
         daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
@@ -1893,10 +1882,36 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     job_sla_comp = 0.0
 
     # ── Daily batch window time-series ───────────────────────────
+    _raw_window_counts = (
+        df.groupby("run_date", as_index=False)
+          .agg(raw_job_count=("Job_Name", "nunique"))
+        if "Job_Name" in df.columns and "run_date" in df.columns
+        else pd.DataFrame(columns=["run_date", "raw_job_count"])
+    )
+    _raw_window_names = (
+        df.groupby("run_date")["Job_Name"]
+          .apply(lambda s: [str(v) for v in pd.unique(s.dropna().astype(str))])
+          .reset_index(name="raw_job_names")
+        if "Job_Name" in df.columns and "run_date" in df.columns
+        else pd.DataFrame(columns=["run_date", "raw_job_names"])
+    )
     window = (df_analysis.groupby("run_date", as_index=False)
                 .agg(total_hrs=("run_time_hrs", "sum"),
                      job_count=("Job_Name", "nunique"))
                 .sort_values("run_date"))
+    if not _raw_window_counts.empty:
+        window = window.merge(_raw_window_counts, on="run_date", how="left")
+    else:
+        window["raw_job_count"] = window["job_count"]
+    if not _raw_window_names.empty:
+        window = window.merge(_raw_window_names, on="run_date", how="left")
+    else:
+        window["raw_job_names"] = [[] for _ in range(len(window))]
+    window["raw_job_count"] = window["raw_job_count"].fillna(window["job_count"]).astype(int)
+    window["excluded_job_count"] = (window["raw_job_count"] - window["job_count"]).clip(lower=0).astype(int)
+    window["raw_job_names"] = window["raw_job_names"].apply(
+        lambda v: [str(x) for x in v] if isinstance(v, list) else []
+    )
 
     elapsed_available  = False
     window_breach_days = 0
@@ -1906,154 +1921,85 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
     if has_end_time:
         try:
-            # Elapsed window per (Sub_Application, run_date). Grouping by run_date
-            # ALONE collapses every sub_app into one window (earliest start of ANY
-            # sub_app → latest end of ANY sub_app), which massively inflates the
-            # window for multi-sub_app customers. Group per sub_app first, then
-            # take the worst sub_app window per date.
-            if "window_agg" in dir() and not window_agg.empty:
-                # Reuse per-sub_app window already computed (out-of-scope filtered)
-                elap_sub = window_agg[["Sub_Application", "run_date", "elapsed_hrs"]].copy()
-            elif "Sub_Application" in df_window.columns:
-                elap_sub = (df_window.groupby(["Sub_Application", "run_date"], as_index=False)
-                              .agg(first_start=("Start_Time", "min"),
-                                   last_end=("End_Time", "max")))
-                elap_sub["elapsed_hrs"] = (
-                    (elap_sub["last_end"] - elap_sub["first_start"]).dt.total_seconds() / 3600.0
+            # Canonical daily elapsed window: first job start → last job end for
+            # the whole batch on each day. This is the number used everywhere.
+            _daily_elapsed = (
+                _df_win_for_agg.groupby("run_date", as_index=False)
+                .agg(first_start=("Start_Time", "min"),
+                     last_end=("End_Time", "max"),
+                     job_count=("Job_Name", "nunique"))
+                .dropna(subset=["run_date"])
+            )
+            if not _daily_elapsed.empty:
+                _daily_elapsed["elapsed_hrs"] = (
+                    (_daily_elapsed["last_end"] - _daily_elapsed["first_start"])
+                    .dt.total_seconds() / 3600.0
                 ).clip(lower=0).fillna(0.0)
-                if _out_of_scope_subs:
-                    elap_sub = elap_sub[
-                        ~elap_sub["Sub_Application"].astype(str).isin(_out_of_scope_subs)
-                    ]
-            else:
-                # No sub_app dimension — single window per date
-                elap_sub = (df_window.groupby("run_date", as_index=False)
-                              .agg(first_start=("Start_Time", "min"),
-                                   last_end=("End_Time", "max")))
-                elap_sub["Sub_Application"] = "ALL"
-                elap_sub["elapsed_hrs"] = (
-                    (elap_sub["last_end"] - elap_sub["first_start"]).dt.total_seconds() / 3600.0
-                ).clip(lower=0).fillna(0.0)
-
-            elap_sub = elap_sub.dropna(subset=["run_date"])
-            if not elap_sub.empty:
-                # Bar chart: worst sub_app window per date (max across in-scope sub_apps)
-                elap_daily = (elap_sub.groupby("run_date")["elapsed_hrs"]
-                                .max().reset_index())
-                window = window.merge(elap_daily, on="run_date", how="left")
+                window = window.merge(
+                    _daily_elapsed[["run_date", "elapsed_hrs"]],
+                    on="run_date",
+                    how="left",
+                )
                 window["elapsed_hrs"] = window["elapsed_hrs"].fillna(0.0).round(3)
                 elapsed_available = True
-
-                # Headline KPI: DAILY/UNKNOWN sub_apps only — WEEKLY sub_apps would
-                # inflate the "daily elapsed window" headline tile.
-                try:
-                    from services.sla_engine import classify_schedule as _cs_kpi
-                    _daily_sas = {
-                        sa for sa in elap_sub["Sub_Application"].dropna().unique()
-                        if str(sa) == "ALL" or _cs_kpi(str(sa)) in {"DAILY", "UNKNOWN"}
-                    }
-                except Exception:
-                    _daily_sas = set(elap_sub["Sub_Application"].dropna().unique())
-                _kpi_src = (elap_sub[elap_sub["Sub_Application"].isin(_daily_sas)]
-                            if _daily_sas else elap_sub)
-                _kpi_daily = _kpi_src.groupby("run_date")["elapsed_hrs"].max()
-                if not _kpi_daily.empty:
-                    worst_elapsed_kpi  = float(_kpi_daily.max())
-                    avg_elapsed_kpi    = float(_kpi_daily.mean())
-                    worst_elapsed_date = str(_kpi_daily.idxmax())
+                worst_elapsed_kpi  = float(_daily_elapsed["elapsed_hrs"].max())
+                avg_elapsed_kpi    = float(_daily_elapsed["elapsed_hrs"].mean())
+                worst_elapsed_date = str(
+                    _daily_elapsed.loc[_daily_elapsed["elapsed_hrs"].idxmax(), "run_date"]
+                )
         except Exception:
             pass
     if not elapsed_available:
         window["elapsed_hrs"] = 0.0
 
-    # ── Identify primary (DAILY/UNKNOWN) sub-apps for headline compliance ────
-    # WEEKLY/MONTHLY sub-apps run on a different cadence; combining them with
-    # DAILY in the denominator dilutes the compliance % (e.g. 4 passing weekly
-    # windows lift a 43.5% DAILY result to 58.1% combined — wrong headline).
-    # Primary sub-apps are DAILY/UNKNOWN schedule types only.
-    _primary_comp_sas: set = set()
-    try:
-        if "window_agg" in dir() and not window_agg.empty:
-            _primary_comp_sas = {
-                sa for sa in window_agg["Sub_Application"].dropna().unique()
-                if _cs_win(str(sa)) in {"DAILY", "UNKNOWN"}
-            }
-    except Exception:
-        pass
-
-    # ── Batch Window Compliance (wall-clock daily window vs per-sub-app SLA) ──
-    # Fix #14: window_agg["breach"] already uses per-Sub_Application resolved SLA
-    # (via _sub_sla()). Use that aggregated breach count instead of re-computing
-    # with global_ceil, which caused false BREACHes for WEEKLY jobs when DAILY
-    # dominated the global ceiling (e.g. global_ceil=8.833h, WEEKLY runs 9h → false BREACH).
-    n_window_days = len(window)
-    if n_window_days > 0:
-        if has_end_time and "window_agg" in dir() and not window_agg.empty:
-            # Per-sub-app breach already computed; aggregate to run_date level
-            _sub_breach_daily = window_agg.groupby("run_date")["breach"].any()
-            # Align to window's run_date index
-            window_breach_days = int(_sub_breach_daily.reindex(window["run_date"]).fillna(False).sum())
-            # Refine denominator to DAILY-only so WEEKLY passing windows don't
-            # inflate the headline compliance % beyond the DAILY batch result.
-            if _primary_comp_sas:
-                _pwagg = window_agg[window_agg["Sub_Application"].isin(_primary_comp_sas)]
-                _p_dates = int(_pwagg["run_date"].nunique())
-                _p_breach = int(_pwagg.groupby("run_date")["breach"].any().sum())
-                if _p_dates > 0:
-                    n_window_days = _p_dates
-                    window_breach_days = _p_breach
-        elif elapsed_available:
-            window_breach_days = int((window["elapsed_hrs"] > global_ceil).sum())
+    # ── Batch Window Compliance (canonical daily window vs resolved SLA) ──
+    # The daily window records already carry the authoritative per-day breach
+    # flag. Feed those directly into the shared compliance engine so Batch and
+    # SLA Matrix always agree on the same denominator.
+    if "breach" not in window.columns:
+        if elapsed_available:
+            window["breach"] = window["elapsed_hrs"] > global_ceil
         else:
-            window_breach_days = int((window["total_hrs"] > global_ceil).sum())
-        batch_window_comp = round((1 - window_breach_days / n_window_days) * 100, 1)
-        # G14: carry the per-sub_app breach flag into the window series
-        # so build_batch_payload uses the correct per-SLA breach, not global ceil.
-        if has_end_time and "window_agg" in dir() and not window_agg.empty:
-            _breach_by_date = (window_agg.groupby("run_date")["breach"]
-                               .any().reset_index()
-                               .rename(columns={"breach": "_sub_breach"}))
-            window = window.merge(_breach_by_date, on="run_date", how="left")
-            window["breach"] = window["_sub_breach"].fillna(False)
-            window.drop(columns=["_sub_breach"], inplace=True, errors="ignore")
-        elif "breach" not in window.columns:
-            if elapsed_available:
-                window["breach"] = window["elapsed_hrs"] > global_ceil
-            else:
-                window["breach"] = window["total_hrs"] > global_ceil
-    else:
-        batch_window_comp = 0.0
+            window["breach"] = window["total_hrs"] > global_ceil
 
-    # ── Canonical window compliance via SHARED engine (Areas 4 + 5) ──────────
-    # The (sub_app, date)-granular compliance that BOTH the Batch Review and the
-    # SLA Matrix tabs report. compliance_engine is the single definition so the
-    # two screens can never diverge for the same data.
-    # Use DAILY/primary sub-apps only so the headline matches batch_window_comp.
+    if "sla_hrs" not in window.columns:
+        window["sla_hrs"] = global_ceil
+
+    window_records_daily = window.to_dict(orient="records")
+    n_window_days = len(window_records_daily)
+    batch_window_comp = 0.0
+    window_breach_days = 0
     window_compliance = {
-        "compliance_pct": float(round(batch_window_comp, 1)),
-        "breach_count": int(window_breach_days),
-        "ok_count": 0, "at_risk_count": 0,
-        "total_windows": int(n_window_days), "excluded_windows": 0,
+        "compliance_pct": 0.0,
+        "breach_count": 0,
+        "ok_count": 0,
+        "at_risk_count": 0,
+        "total_windows": 0,
+        "excluded_windows": 0,
+        "warnings": [],
         "granularity": "day",
     }
-    if _win_records:
+    if window_records_daily:
         try:
             from services import compliance_engine as _ce
-            # Filter to primary (DAILY/UNKNOWN) sub-apps only — WEEKLY records
-            # must not inflate total_windows and lift the headline compliance.
-            _primary_records = (
-                [r for r in _win_records if r["sub_app"] in _primary_comp_sas]
-                if _primary_comp_sas else _win_records
-            ) or _win_records
-            _primary_ceiling = (
-                {k: v for k, v in _win_ceiling_map.items() if k in _primary_comp_sas}
-                if _primary_comp_sas else _win_ceiling_map
-            ) or _win_ceiling_map
-            _wc = _ce.compute_window_compliance(_primary_records, _primary_ceiling)
-            _wc["granularity"] = "sub_app_date"
+            # Prefer _win_records (per-sub-app, sla_ceil from XLSX) over window_records_daily
+            # (per-day totals, breach precomputed against global_ceil).  _win_records is
+            # populated whenever wall-clock windows + Sub_Application are both available.
+            _ce_records = _win_records if _win_records else window_records_daily
+            _ce_cmap    = _win_ceiling_map if _win_records else {}
+            _wc = _ce.compute_window_compliance(_ce_records, _ce_cmap)
+            _wc["granularity"] = "day"
             window_compliance = _wc
+            batch_window_comp = float(_wc.get("compliance_pct", 0.0))
+            window_breach_days = int(_wc.get("breach_count", 0))
+            n_window_days = int(_wc.get("total_windows", n_window_days))
         except Exception:
-            pass
+            batch_window_comp = round(
+                ((n_window_days - int(window["breach"].sum())) / n_window_days * 100)
+                if n_window_days else 0.0,
+                1,
+            )
+            window_breach_days = int(window["breach"].sum()) if n_window_days else 0
 
     # Sub-application rollup
     sub = (df_analysis.groupby("Sub_Application", as_index=False)
@@ -2062,6 +2008,32 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
     # ── Per-job frame + compliance scope ─────────────────────────
     top_jobs = build_top_jobs_df(df_analysis, sla_index=sla_index)
+
+    # Pattern-matched jobs that were NOT excluded because runtime exceeded the threshold.
+    # These stay in scope, but we surface them as data-quality warnings so the user can
+    # see that the rule was evaluated and intentionally not applied.
+    _utility_warnings: list = []
+    if "utility_reason" in top_jobs.columns and "Job_Name" in top_jobs.columns:
+        _warn_mask = top_jobs["utility_reason"].astype(str).str.startswith("pattern_matched_not_excluded:")
+        _warn_rows = top_jobs[_warn_mask]
+        for _, _row in _warn_rows.iterrows():
+            _reason = str(_row.get("utility_reason", ""))
+            _m = re.match(
+                r"^pattern_matched_not_excluded:(?P<pat>[^()]+)\((?P<val>[-0-9.]+)h>=(?P<thr>[-0-9.]+)h\)$",
+                _reason,
+            )
+            if _m:
+                _utility_warnings.append({
+                    "code": "UTILITY_PATTERN_NOT_EXCLUDED",
+                    "text": (
+                        f"Job '{_row['Job_Name']}' matches utility pattern '{_m.group('pat')}' "
+                        f"but runtime {_m.group('val')}h exceeds {_m.group('thr')}h — "
+                        "treated as a real batch job."
+                    ),
+                    "severity": "info",
+                    "job_name": str(_row["Job_Name"]),
+                    "pattern": _m.group("pat"),
+                })
 
     # Compliance scope: drop utility jobs and out-of-scope schedule sub_apps
     # (MONTHLY / CYCLIC / OUTBOUND / etc already collected in _out_of_scope_subs).
@@ -2145,6 +2117,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "batch_window_compliance": float(round(batch_window_comp, 1)),
         "window_breach_days":      window_breach_days,
         "window_total_days":       n_window_days,
+        "window_date_count":       len(unique_dates),
         # Canonical (sub_app, date)-granular window compliance from the shared engine
         "window_compliance":       window_compliance,
         "total_jobs":       t_jobs,
@@ -2173,6 +2146,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             "avg_hrs":    round(avg_elapsed_kpi, 3),
             "worst_date": worst_elapsed_date,
         },
+        "_worst_day_warning": (
+            f"Worst-day date '{worst_elapsed_date}' was not found in the uploaded file date range."
+            if worst_elapsed_date and worst_elapsed_date not in {str(d) for d in unique_dates}
+            else ""
+        ),
         "date_span_days":   date_span,
         "date_range":       [str(unique_dates[0]), str(unique_dates[-1])] if unique_dates else [],
         "ok_runs":          ok_count,
@@ -2187,6 +2165,8 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "_sla_index":       sla_index,
         # ── Retry storm warnings (job failure→cascade retries, NOT cyclic) ──
         "_retry_storms":    _retry_storms,
+        # ── Utility pattern warnings (matched but not excluded due to runtime)
+        "_utility_warnings": _utility_warnings,
         # Sub_Apps excluded from compliance scope (CYCLIC/OUTBOUND/CALENDAR_BASED/etc.)
         "excluded_sub_apps": [
             {"sub_app": sa, "reason": info.get("reason","?"),
@@ -2212,22 +2192,72 @@ def _build_sla_heatmap(daily_df: pd.DataFrame, ceiling: float | None = None) -> 
         return {"jobs": [], "dates": [], "cells": []}
 
     lim = ceiling if ceiling and ceiling > 0 else pe_config.SLA_DAILY_HRS
-    dates = sorted(daily_df["run_date"].unique())[-21:]   # last 21 days
-    all_jobs = sorted(daily_df["Job_Name"].unique())
-    if len(all_jobs) > 40:
-        all_jobs = (
-            daily_df.groupby("Job_Name")["total_hrs"].sum()
-            .nlargest(40).index.tolist()
-        )
+    if "Job_Name" not in daily_df.columns or "run_date" not in daily_df.columns:
+        return {"jobs": [], "dates": [], "cells": [], "limit": lim}
+
+    work = daily_df.copy()
+    hrs_col = "total_hrs" if "total_hrs" in work.columns else (
+        "run_time_hrs" if "run_time_hrs" in work.columns else None
+    )
+    if hrs_col is None:
+        return {"jobs": [], "dates": [], "cells": [], "limit": lim}
+
+    work[hrs_col] = pd.to_numeric(work[hrs_col], errors="coerce").fillna(0.0)
+    work = work.dropna(subset=["Job_Name", "run_date"])
+    if work.empty:
+        return {"jobs": [], "dates": [], "cells": [], "limit": lim}
+
+    dates = sorted(work["run_date"].unique())[-21:]   # last 21 days
+
+    # Rank jobs by operational attention first:
+    # breaches > near-SLA days > peak runtime > total runtime.
+    job_priority: Dict[str, Dict[str, Any]] = {}
+    ranked_jobs: list[tuple[float, str]] = []
+    for job_name, grp in work.groupby("Job_Name", dropna=True):
+        job = str(job_name)
+        vals = pd.to_numeric(grp[hrs_col], errors="coerce").fillna(0.0)
+        breach_days = int((vals > lim).sum())
+        near_days   = int(((vals > lim * 0.85) & (vals <= lim)).sum())
+        peak_hrs    = float(vals.max()) if not vals.empty else 0.0
+        total_hrs    = float(vals.sum()) if not vals.empty else 0.0
+        avg_hrs      = float(vals.mean()) if not vals.empty else 0.0
+        priority     = "critical" if breach_days > 0 else "warning" if near_days > 0 else "normal"
+        reasons: list[str] = []
+        if breach_days:
+            reasons.append(f"{breach_days} breach day(s)")
+        if near_days:
+            reasons.append(f"{near_days} near-SLA day(s)")
+        if peak_hrs > 0:
+            reasons.append(f"peak {peak_hrs:.2f}h")
+        score = (breach_days * 100000.0) + (near_days * 1000.0) + (peak_hrs * 100.0) + total_hrs
+        job_priority[job] = {
+            "priority": priority,
+            "score": round(score, 2),
+            "breach_days": breach_days,
+            "near_days": near_days,
+            "peak_hrs": round(peak_hrs, 2),
+            "avg_hrs": round(avg_hrs, 2),
+            "total_hrs": round(total_hrs, 2),
+            "reason": "; ".join(reasons) if reasons else "Total runtime only",
+        }
+        ranked_jobs.append((score, job))
+
+    ranked_jobs.sort(key=lambda x: (-x[0], x[1]))
+    all_jobs = [job for _, job in ranked_jobs[:40]]
+    priority_jobs = [
+        {"job": job, **job_priority.get(job, {})}
+        for _, job in ranked_jobs
+        if job_priority.get(job, {}).get("priority") in ("critical", "warning")
+    ][:15]
 
     cells = []
     for job in all_jobs:
         for d in dates:
-            sub = daily_df[(daily_df["Job_Name"] == job) & (daily_df["run_date"] == d)]
+            sub = work[(work["Job_Name"] == job) & (work["run_date"] == d)]
             if sub.empty:
                 cells.append({"job": job, "date": str(d), "hrs": None, "breach": False})
             else:
-                h = float(sub.iloc[0]["total_hrs"])
+                h = float(pd.to_numeric(sub[hrs_col], errors="coerce").fillna(0.0).sum())
                 cells.append({"job": job, "date": str(d), "hrs": round(h, 2),
                                "breach": h > lim})
 
@@ -2236,6 +2266,8 @@ def _build_sla_heatmap(daily_df: pd.DataFrame, ceiling: float | None = None) -> 
         "dates": [str(d) for d in dates],
         "cells": cells,
         "limit": lim,
+        "job_priority": job_priority,
+        "priority_jobs": priority_jobs,
     }
 
 
@@ -2465,6 +2497,9 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "total_hrs":    total_hrs,
             "elapsed_hrs":  elapsed_hrs,
             "job_count":    int(r["job_count"]),
+            "raw_job_count": int(r.get("raw_job_count", r["job_count"])),
+            "excluded_job_count": int(r.get("excluded_job_count", max(int(r.get("raw_job_count", r["job_count"])) - int(r["job_count"]), 0))),
+            "raw_job_names": list(r.get("raw_job_names", [])) if isinstance(r.get("raw_job_names", []), list) else [],
             "breach":       bool(is_breach),
             "top_job":      top_job_per_day.get(date_str, ""),
             "has_failures": fail_by_date.get(date_str, 0) > 0,
@@ -2540,7 +2575,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                 {"run_date": (m.get("elapsed_window_kpi") or {}).get("worst_date", ""),
                  "elapsed_hrs": (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0.0)}
                 if m["elapsed_available"] and (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0) > 0
-                else _worst_elapsed(window_records)
+                else _worst_elapsed(window_records, valid_dates=set(unique_dates))
             ),
             "avg_elapsed_hrs": (
                 round((m.get("elapsed_window_kpi") or {}).get("avg_hrs", 0.0), 3)
@@ -2551,8 +2586,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             ),
             "note": (
                 "Elapsed window = wall-clock from first Start_Time to last End_Time "
-                "per (Sub_Application, day). Headline shows DAILY sub_apps; the chart "
-                "shows the worst sub_app window per day."
+                "per day across the whole batch."
                 if m["elapsed_available"]
                 else "End_Time column missing — elapsed window cannot be computed. "
                      "Showing summed runtime only."
@@ -2680,42 +2714,31 @@ def _build_daily_jobs(df: pd.DataFrame) -> Dict[str, list]:
     return out
 
 
-def _worst_elapsed(window_records: list) -> dict | None:
-    """Find the day with the highest elapsed window."""
+def _worst_elapsed(window_records: list, valid_dates: set[str] | None = None) -> dict | None:
+    """Find the day with the highest elapsed window.
+
+    When valid_dates is provided, the chosen date must exist in that set.
+    """
     elapsed_days = [w for w in window_records if w.get("elapsed_hrs", 0) > 0]
     if not elapsed_days:
         return None
     worst = max(elapsed_days, key=lambda w: w["elapsed_hrs"])
-    return {"run_date": worst["run_date"], "elapsed_hrs": worst["elapsed_hrs"]}
+    worst_date = str(worst.get("run_date") or "")
+    if valid_dates and worst_date not in valid_dates:
+        return None
+    return {"run_date": worst_date, "elapsed_hrs": worst["elapsed_hrs"]}
 
 
 def _build_window_sla_buffer(m: dict) -> dict | None:
-    """Compute the batch-WINDOW SLA buffer from the sentinel-measured elapsed
-    window (not the worst single job).
-
-    PROMPT 2: The denominator is the worst window's own per-sub_app SLA
-    (from _win_ceiling_map/_xlsx_sla_map), NOT global_ceil.  This means
-    PO_RANGES (8.83h SLA) and AM_DAILY (6.0h SLA) are measured against
-    their own contracted ceiling — not the majority-vote global.
-
-        buffer_pct = (sub_app_SLA − worst_day_elapsed) / sub_app_SLA × 100
-    """
+    """Compute the batch-WINDOW SLA buffer from the daily elapsed window."""
     if not m.get("elapsed_available"):
         return None
 
-    # PROMPT 2: prefer worst-window's own resolved SLA as denominator
-    _wwi  = m.get("_worst_window_info") or {}
-    if _wwi.get("elapsed_hrs") and _wwi.get("sla_hrs"):
-        worst = float(_wwi["elapsed_hrs"])
-        ceil  = float(_wwi["sla_hrs"])
-        worst_date  = _wwi.get("run_date", "")
-        worst_sub   = _wwi.get("sub_app", "")
-    else:
-        ewk   = m.get("elapsed_window_kpi") or {}
-        worst = float(ewk.get("worst_hrs", 0.0) or 0.0)
-        ceil  = float(m.get("sla_ceiling") or pe_config.SLA_DAILY_HRS)
-        worst_date  = ewk.get("worst_date", "")
-        worst_sub   = ""
+    ewk = m.get("elapsed_window_kpi") or {}
+    worst = float(ewk.get("worst_hrs", 0.0) or 0.0)
+    ceil  = float(m.get("sla_ceiling") or pe_config.SLA_DAILY_HRS)
+    worst_date = ewk.get("worst_date", "")
+    worst_sub  = ""
 
     if worst <= 0 or ceil <= 0:
         return None
@@ -2751,6 +2774,25 @@ def _build_window_sla_buffer(m: dict) -> dict | None:
 def _build_data_warnings(m: dict) -> list:
     """Generate human-readable warnings about data quality issues."""
     warnings = []
+    window_days = int(m.get("window_total_days") or 0)
+    file_days = int(m.get("window_date_count") or 0)
+    if window_days and file_days and window_days != file_days:
+        warnings.append({
+            "code": "WINDOW_DENOMINATOR_MISMATCH",
+            "text": (
+                f"Window denominator mismatch: {file_days} unique date(s) in the file "
+                f"but {window_days} day(s) are being shown in the compliance rollup."
+            ),
+            "severity": "warning",
+            "expected_days": file_days,
+            "used_days": window_days,
+        })
+    if m.get("_worst_day_warning"):
+        warnings.append({
+            "code": "WORST_DAY_OUT_OF_RANGE",
+            "text": m["_worst_day_warning"],
+            "severity": "warning",
+        })
     if not m["elapsed_available"]:
         warnings.append({
             "code": "NO_END_TIME",
@@ -2786,6 +2828,8 @@ def _build_data_warnings(m: dict) -> list:
                     "Upload customer SLA matrix for accurate compliance measurement.",
             "severity": "info",
         })
+    for uw in m.get("_utility_warnings", []):
+        warnings.append(uw)
     # Retry storm warnings — distinct from cyclic jobs
     for rs in m.get("_retry_storms", []):
         warnings.append({
@@ -2811,6 +2855,12 @@ def _build_data_warnings(m: dict) -> list:
             "folder":     maf["folder"],
             "app_count":  maf["app_count"],
         })
+    for ww in (m.get("window_compliance") or {}).get("warnings", []):
+        warnings.append({
+            "code": "WINDOW_COMPLIANCE_WARNING",
+            "text": ww,
+            "severity": "warning",
+        })
     return warnings
 
 
@@ -2830,6 +2880,17 @@ def _build_excluded_jobs_list(top_jobs_df) -> list:
         if not name_col:
             return result
         for _, row in top_jobs_df.iterrows():
+            if bool(row.get("is_utility", False)):
+                reason = str(row.get("utility_reason", "")).strip()
+                if reason.startswith("strong_utility:"):
+                    reason = reason.replace("strong_utility:", "", 1)
+                elif reason.startswith("runtime_gated:"):
+                    reason = reason.replace("runtime_gated:", "", 1)
+                result.append({
+                    "job_name": str(row[name_col]),
+                    "reason": reason or "UTILITY",
+                })
+                continue
             quality = str(row.get("baseline_quality", "")).upper()
             is_short = bool(row.get("is_short_job", False))
             if quality in ("SHORT_JOB", "INSUFFICIENT") or is_short:
