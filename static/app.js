@@ -13305,8 +13305,8 @@ function _renderVMTable(vms) {
         <td class="px-2 py-1.5"><input type="checkbox" ${isChecked ? 'checked' : ''} class="azure-vm-check rounded border-Cborder" data-rid="${_escHtml(vm.resource_id)}" data-customer="${_escHtml(cust)}" onchange="_onVmCheckChange(this)" /></td>
         <td class="px-2 py-1.5 text-Cwhite font-mono text-[11px] font-medium">${_escHtml(vm.name)}</td>
         <td class="px-2 py-1.5">
-          <select class="azure-type-select bg-transparent border rounded px-1 py-0.5 text-[10px] font-bold ${colors}" data-idx="${idx}"
-                  onchange="azureChangeVMType(${idx}, this.value)">
+          <select class="azure-type-select bg-transparent border rounded px-1 py-0.5 text-[10px] font-bold ${colors}" data-rid="${_escHtml(vm.resource_id)}"
+                  onchange="azureChangeVMType('${_escHtml(vm.resource_id)}', this.value)">
             <option value="APP" ${vm.type==='APP'?'selected':''} class="bg-Cbg text-Cwhite">APP</option>
             <option value="DB" ${vm.type==='DB'?'selected':''} class="bg-Cbg text-Cwhite">DB</option>
             <option value="SRE" ${vm.type==='SRE'?'selected':''} class="bg-Cbg text-Cwhite">SRE</option>
@@ -13320,6 +13320,22 @@ function _renderVMTable(vms) {
     }
   }
   tbody.innerHTML = html;
+
+  // Set indeterminate state on customer group checkboxes (must be done via JS, not HTML attribute)
+  document.querySelectorAll('.azure-cust-check').forEach(cb => {
+    const custRow = cb.closest('tr');
+    if (!custRow) return;
+    // Find customer name from sibling cell
+    const custName = custRow.querySelector('td[colspan] .text-\\[10px\\]')?.textContent?.trim() ||
+                     custRow.querySelectorAll('td')[1]?.querySelector('span')?.textContent?.trim() || "";
+    if (!custName) return;
+    const custVms = _discoveredVMs.filter(v =>
+      (v.customer || (v.tags||{}).CustomerName || (v.tags||{}).customerName || "Untagged") === custName);
+    const allSel = custVms.every(v => _selectedVmIds.has(v.resource_id));
+    const anySel = custVms.some(v => _selectedVmIds.has(v.resource_id));
+    cb.checked       = allSel;
+    cb.indeterminate = !allSel && anySel;
+  });
 }
 
 /* Toggle all VMs for a specific customer */
@@ -13345,9 +13361,10 @@ function _syncVmSelection(cb) {
   else _selectedVmIds.delete(rid);
 }
 
-/* ── Type override by user ── */
-function azureChangeVMType(idx, newType) {
-  if (_discoveredVMs[idx]) _discoveredVMs[idx].type = newType;
+/* ── Type override by user — uses resource_id, not filter-array index ── */
+function azureChangeVMType(resourceId, newType) {
+  const vm = _discoveredVMs.find(v => v.resource_id === resourceId);
+  if (vm) vm.type = newType;
   const counts = {APP:0,DB:0,SRE:0};
   _discoveredVMs.forEach(v => counts[v.type] = (counts[v.type]||0) + 1);
   document.getElementById("azure-vm-app-badge").textContent = `APP ${counts.APP}`;
@@ -13402,6 +13419,14 @@ function _applyVmFilters() {
   }
   _renderVMTable(filtered);
   _updateSelectedCount();
+  // Sync header checkbox state to visible rows
+  const allCb = document.getElementById("azure-vm-checkall");
+  if (allCb && filtered.length > 0) {
+    const allVisible = filtered.every(v => _selectedVmIds.has(v.resource_id));
+    const anyVisible = filtered.some(v => _selectedVmIds.has(v.resource_id));
+    allCb.checked       = allVisible;
+    allCb.indeterminate = !allVisible && anyVisible;
+  }
 }
 
 /* ── Env filter — single-select radio style ── */
