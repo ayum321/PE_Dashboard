@@ -1877,7 +1877,7 @@ function renderBatchReview(data) {
   // Dataset chip
   const chip = document.getElementById("batch-dataset-chip");
   if (chip) {
-    chip.textContent = `${data.filename} · ${data.kpis.total_runs.toLocaleString()} runs`;
+    chip.textContent = `${data.filename} · ${(data.kpis?.total_runs ?? 0).toLocaleString()} runs`;
     chip.classList.remove("hidden");
   }
 

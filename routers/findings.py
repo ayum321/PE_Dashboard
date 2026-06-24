@@ -26,6 +26,15 @@ from pydantic import BaseModel, ConfigDict
 
 log = logging.getLogger("pe_dashboard.findings")
 
+# Top-level imports — avoids import-inside-function anti-pattern
+try:
+    from services import config_store as _config_store
+    from services import session_cache as _session_cache
+except ImportError as _ie:
+    log.warning("findings: service import failed at load: %s", _ie)
+    _config_store = None  # type: ignore[assignment]
+    _session_cache = None  # type: ignore[assignment]
+
 from services.pe_utils import (
     STATUS_COLOR,
     buffer_pct,
@@ -39,6 +48,20 @@ from services.pe_utils import (
 )
 
 router = APIRouter()
+
+
+def _get_data_coverage(batch_kpis: dict | None) -> dict | None:
+    """Single source of truth for fetching data_coverage — request payload first, session cache fallback."""
+    cov = (batch_kpis or {}).get("data_coverage") or None
+    if cov:
+        return cov
+    try:
+        if _session_cache:
+            lb = _session_cache.get("last_batch") or {}
+            return lb.get("data_coverage") or (lb.get("kpis") or {}).get("data_coverage")
+    except Exception as _e:
+        log.debug("data_coverage session cache fallback failed: %s", _e)
+    return None
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
@@ -165,22 +188,20 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     sub_stats   = req.sub_stats     or []
     sla_ceil    = req.sla_ceilings  or {}
 
-    # Early SLA ceiling enrichment — ensure uploaded SLA XLSX ceilings are
-    # available BEFORE batch rules fire (the full enrichment block runs later).
-    if not sla_ceil:
+    # Early SLA ceiling enrichment — use top-level _config_store (no import-inside-function).
+    if not sla_ceil and _config_store:
         try:
-            from services import config_store as _early_cs
             _early_ceil: dict[str, float] = {}
             for _ek, _et in (("daily_sla_hrs", "DAILY"), ("weekly_sla_hrs", "WEEKLY"),
                              ("monthly_sla_hrs", "MONTHLY"), ("custom_sla_hrs", "CUSTOM")):
-                _ev = _early_cs.get(_ek)
+                _ev = _config_store.get(_ek)
                 if _ev is not None and _f(_ev) > 0:
                     _early_ceil[_et] = _f(_ev)
             if _early_ceil:
                 sla_ceil = _early_ceil
                 req.sla_ceilings = _early_ceil
-        except Exception:
-            pass
+        except Exception as _e:
+            log.warning("findings: SLA ceiling enrichment failed: %s", _e)
 
     has_batch    = bool(bk) or bool(top_jobs)
     has_resource = bool(rk) or bool(servers)
@@ -213,20 +234,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     # data_coverage lives as a top-level key in the batch response, but
     # the frontend sends batch_kpis as just the flat KPIs dict.  Try both
     # locations so confidence/date_span are not lost.
-    batch_cov   = (req.batch_kpis or {}).get("data_coverage") or None
-    if not batch_cov:
-        # Frontend sends data_coverage at appData.batch.data_coverage which
-        # is NOT inside batch_kpis. PATCH 1 now enriches batch_kpis with it,
-        # but fall back to session cache for older/stale sessions.
-        try:
-            from services import session_cache as _sc_cov
-            _lb = _sc_cov.get("last_batch") or {}
-            batch_cov = (
-                _lb.get("data_coverage")
-                or (_lb.get("kpis") or {}).get("data_coverage")
-            )
-        except Exception:
-            pass
+    batch_cov = _get_data_coverage(req.batch_kpis)
     if not batch_cov and req.batch_kpis:
         # Final fallback: synthesise minimal coverage from available kpis
         batch_cov = {
@@ -2832,16 +2840,8 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
     # blocks the rule-engine response.
 
     # ── Build PE Audit Coverage Strip ──────────────────────────────────────────
-    # data_coverage is a top-level key in the batch response, but the frontend
-    # sends batch_kpis as just the flat KPIs dict.  Try session cache fallback.
-    batch_cov_data = (body.batch_kpis or {}).get("data_coverage") or {}
-    if not batch_cov_data:
-        try:
-            from services import session_cache as _sc2
-            _lb2 = _sc2.get("last_batch") or {}
-            batch_cov_data = _lb2.get("data_coverage") or {}
-        except Exception:
-            pass
+    # Uses shared _get_data_coverage() helper — no import-inside-function.
+    batch_cov_data = _get_data_coverage(body.batch_kpis) or {}
     sla_ceil = body.sla_ceilings or {}
 
     date_span = _i(batch_cov_data.get("date_span_days"))
@@ -2918,10 +2918,10 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
         _grade, _glabel = "C", "CONDITIONAL HOLD"
     # Persist so executive.py can blend it into OSHS (Patch F)
     try:
-        from services import session_cache as _sc_f
-        _sc_f.ac_set("findings_penalty_score", round(penalty_score, 1))
-    except Exception:
-        pass
+        if _session_cache:
+            _session_cache.ac_set("findings_penalty_score", round(penalty_score, 1))
+    except Exception as _e:
+        log.debug("findings: penalty score cache failed: %s", _e)
     # ── end grade ─────────────────────────────────────────────────────────────
 
     # Patch J: include penalty_score fields in response
@@ -2936,10 +2936,10 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
     )
     # Cache so agent tools can list/read findings without recomputing.
     try:
-        from services import session_cache
-        session_cache.set("last_findings", resp.model_dump())
-    except Exception:
-        pass
+        if _session_cache:
+            _session_cache.set("last_findings", resp.model_dump())
+    except Exception as _e:
+        log.debug("findings: cache write failed: %s", _e)
     return resp
 
 
