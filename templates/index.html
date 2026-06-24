@@ -3773,10 +3773,14 @@
                 DEV<span class="az-chip" id="az-cnt-dev"></span>
               </button>
             </div>
-            <!-- Inline VM name search -->
-            <input id="azure-vm-search" type="text" placeholder="Filter by name…"
+          </div>
+
+          <!-- Search — own row so it never gets squeezed -->
+          <div class="flex items-center gap-2">
+            <span class="w-7 shrink-0"></span>
+            <input id="azure-vm-search" type="text" placeholder="Filter by VM name, app, or customer…"
               oninput="_applyVmFilters()"
-              class="ml-auto w-44 bg-Cbg border border-Cborder/60 rounded px-2.5 py-1 text-[10px] text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cblue/60 font-mono" />
+              class="flex-1 bg-Cbg border border-Cborder/60 rounded px-2.5 py-1.5 text-[10px] text-Cwhite placeholder-Cmuted/50 focus:outline-none focus:border-Cblue/60 font-mono" />
           </div>
         </div>
 
