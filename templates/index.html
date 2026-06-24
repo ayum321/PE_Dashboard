@@ -832,30 +832,59 @@
                 <div id="upload-status" class="hidden" data-intake-progress data-color="blue"></div>
               </div>
 
-              <!-- Zone D — Performance Benchmark (XLSX / CSV) -->
+              <!-- Zone D — Performance Benchmark (two sources) -->
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <span id="bench-intake-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
-                 <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Performance Benchmark</span>
+                  <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Performance Benchmark</span>
+                  <span class="text-[9px] font-mono text-Cmuted ml-auto">2 sources</span>
                 </div>
-                <div id="bench-intake-drop-zone"
-                     class="rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
-                            p-6 text-center cursor-pointer select-none
+
+                <!-- D-1: Batch Runtime Performance (new vs old release runtimes) -->
+                <div id="bench-batch-drop-zone"
+                     class="rounded-lg border-2 border-dashed border-Cborder bg-Cbg/40
+                            px-3 py-4 text-center cursor-pointer select-none
+                            transition-all duration-150 hover:border-Camber hover:bg-Camber/5"
+                     style="min-height:96px">
+                  <div class="flex items-center gap-3 pointer-events-none text-left">
+                    <div class="w-9 h-9 shrink-0 rounded-lg bg-Camber/10 border border-Camber/30 flex items-center justify-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-Camber">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                      </svg>
+                    </div>
+                    <div class="min-w-0">
+                      <div class="text-[11px] font-bold text-Cwhite leading-tight">Batch Runtime Performance</div>
+                      <div class="text-[9px] text-Cmuted leading-tight mt-0.5">Job runtimes — new vs old release</div>
+                      <div class="text-[9px] text-Cmuted font-mono mt-1">drop .xlsx · .csv or <span class="text-Camber font-semibold">browse</span></div>
+                    </div>
+                    <span id="bench-batch-badge" class="ml-auto hidden text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-Camber/15 text-Camber border border-Camber/30"></span>
+                  </div>
+                </div>
+                <input id="bench-batch-file-input" type="file" accept=".xlsx,.xls,.csv" class="hidden" />
+                <div id="bench-batch-status" class="hidden" data-intake-progress data-color="amber"></div>
+
+                <!-- D-2: UI Benchmark (transaction load / response times) -->
+                <div id="bench-ui-drop-zone"
+                     class="rounded-lg border-2 border-dashed border-Cborder bg-Cbg/40
+                            px-3 py-4 text-center cursor-pointer select-none
                             transition-all duration-150 hover:border-Cpurple hover:bg-Cpurple/5"
-                     style="min-height:130px">
-                  <div class="flex flex-col items-center gap-2 pointer-events-none">
-                    <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-Cpurple/20 to-Cindigo/20 border border-Cpurple/30 flex items-center justify-center">
+                     style="min-height:96px">
+                  <div class="flex items-center gap-3 pointer-events-none text-left">
+                    <div class="w-9 h-9 shrink-0 rounded-lg bg-Cpurple/10 border border-Cpurple/30 flex items-center justify-center">
                       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-Cpurple">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0 0 20.25 18V6A2.25 2.25 0 0 0 18 3.75H6A2.25 2.25 0 0 0 3.75 6v12A2.25 2.25 0 0 0 6 20.25Z" />
                       </svg>
                     </div>
-                    <div class="text-xs font-semibold text-Cwhite">Perf Test / Benchmark</div>
-                    <div class="text-[10px] text-Cmuted font-mono">.xlsx · .csv</div>
-                    <div class="text-[10px] text-Cmuted">or <span class="text-Cpurple font-semibold">browse</span></div>
+                    <div class="min-w-0">
+                      <div class="text-[11px] font-bold text-Cwhite leading-tight">UI Benchmark</div>
+                      <div class="text-[9px] text-Cmuted leading-tight mt-0.5">Transaction load / response times</div>
+                      <div class="text-[9px] text-Cmuted font-mono mt-1">drop .xlsx · .csv or <span class="text-Cpurple font-semibold">browse</span></div>
+                    </div>
+                    <span id="bench-ui-badge" class="ml-auto hidden text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-Cpurple/15 text-Cpurple border border-Cpurple/30"></span>
                   </div>
                 </div>
-                <input id="bench-intake-file-input" type="file" accept=".xlsx,.xls,.csv" class="hidden" />
-                <div id="bench-intake-status" class="hidden" data-intake-progress data-color="purple"></div>
+                <input id="bench-ui-file-input" type="file" accept=".xlsx,.xls,.csv" class="hidden" />
+                <div id="bench-ui-status" class="hidden" data-intake-progress data-color="purple"></div>
               </div>
 
               <!-- Zone E — Workflow SLA Info (BatchSLA_info.xlsx) — Tier 1 SLA source -->
@@ -3141,6 +3170,9 @@
           <div id="bench-summary-banner" class="hidden rounded-xl border border-Cborder bg-Ccard2/60 px-5 py-3">
             <p id="bench-summary-text" class="text-sm text-Cwhite font-semibold"></p>
           </div>
+
+          <!-- Cross-layer correlation verdict (batch ↔ UI release readiness) -->
+          <div id="bench-correlation-panel" class="hidden"></div>
 
           <!-- Mode tab control — Industrial: 2px border-bottom active indicator, JetBrains Mono count badges -->
           <div id="bench-mode-tabs" class="hidden border-b border-Cborder">

@@ -2125,6 +2125,100 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 "; ".join(str(o.get("problem", ""))[:60] for o in open_obs[:3]),
                 source="benchmark")
 
+        # ───────────────────────────────────────────────────────────
+        # BATCH RUNTIME PERFORMANCE (new-release vs old-release runtime
+        # comparison file — distinct from UI transaction benchmark above).
+        # Without this branch, batch runtime regressions are invisible to
+        # PE Findings even when a batch-perf file is uploaded.
+        # ───────────────────────────────────────────────────────────
+        bp = bench.get("batch_perf_summary") or {}
+        if bp:
+            bp_total   = _i(bp.get("total_jobs", 0))
+            bp_comp    = _i(bp.get("comparable", 0))
+            bp_regr    = _i(bp.get("regressions", 0))
+            bp_impr    = _i(bp.get("improvements", 0))
+            bp_net     = _f(bp.get("net_delta_secs", 0))
+            top_regr   = bp.get("top_regressions") or []
+            regr_pct   = (bp_regr / bp_comp * 100) if bp_comp > 0 else 0.0
+            # net_delta_secs: positive = time saved, negative = time added (per build convention)
+            net_dir    = "saved" if bp_net >= 0 else "added"
+
+            def _bp_offenders(n=3):
+                return "; ".join(
+                    f"{(r.get('job') or '?')} "
+                    f"{_f(r.get('old_secs')):.0f}s→{_f(r.get('new_secs')):.0f}s "
+                    f"({_f(r.get('delta_pct')):+.0f}%)"
+                    for r in top_regr[:n]
+                )
+
+            if regr_pct >= 30 or (bp_net < 0 and abs(bp_net) > 1800):
+                add("critical", "⏱️",
+                    f"Batch runtime: {bp_regr}/{bp_comp} jobs regressed "
+                    f"({regr_pct:.0f}%) · net {abs(bp_net):.0f}s {net_dir}/run",
+                    f"Top regressions — {_bp_offenders()}",
+                    source="benchmark", evidence_class="measured",
+                    impact="New release lengthens batch runtimes — risks SLA breach and "
+                           "downstream batch-window overrun in production.",
+                    recommendation="Profile the regressed jobs against the new build. Compare "
+                                   "execution plans / data volumes between releases before go-live.",
+                    root_cause="BATCH_RUNTIME_REGRESSION")
+            elif bp_regr > 0:
+                add("warning", "⏱️",
+                    f"Batch runtime: {bp_regr}/{bp_comp} job(s) regressed "
+                    f"· {bp_impr} improved · net {abs(bp_net):.0f}s {net_dir}/run",
+                    (f"Top regressions — {_bp_offenders()}" if top_regr
+                     else "Some jobs run slower on the new release — review before sign-off."),
+                    source="benchmark", evidence_class="measured",
+                    root_cause="BATCH_RUNTIME_REGRESSION")
+            elif bp_comp > 0:
+                add("ok", "⏱️",
+                    f"Batch runtime: all {bp_comp} comparable job(s) within tolerance "
+                    f"· {bp_impr} improved · net {abs(bp_net):.0f}s {net_dir}/run",
+                    "New release shows no batch runtime regressions vs prior baseline.",
+                    source="benchmark", evidence_class="measured",
+                    root_cause="BATCH_RUNTIME_CLEAN")
+
+            # ── Cross-layer correlation: systemic vs isolated ──
+            # If the same subsystem token regresses in BOTH a batch job and a
+            # UI transaction, the root cause is shared infra/DB, not isolated.
+            _STOP = {"the","and","for","run","job","load","time","test","prod",
+                     "uat","new","old","sec","secs","daily","weekly","monthly",
+                     "batch","data","report","process","step","main","seq"}
+
+            def _tokset(name):
+                import re as _re
+                toks = _re.split(r"[^A-Za-z0-9]+", str(name).upper())
+                return {t for t in toks if len(t) >= 3 and t.lower() not in _STOP and not t.isdigit()}
+
+            batch_regr_tokens = {}
+            for r in top_regr:
+                for t in _tokset(r.get("job")):
+                    batch_regr_tokens.setdefault(t, r.get("job"))
+            ui_regr_tokens = {}
+            for r in red_rows:
+                for t in _tokset(r.get("transaction")):
+                    ui_regr_tokens.setdefault(t, r.get("transaction"))
+
+            shared = set(batch_regr_tokens) & set(ui_regr_tokens)
+            if shared and (bp_regr > 0) and red_rows:
+                examples = "; ".join(
+                    f"'{tok}' (batch: {batch_regr_tokens[tok]} · UI: {ui_regr_tokens[tok]})"
+                    for tok in list(shared)[:3]
+                )
+                add("critical", "🔗",
+                    f"Systemic regression: {len(shared)} subsystem(s) slow in BOTH "
+                    f"batch and UI layers",
+                    f"Shared subsystem(s) — {examples}. Regression spans batch and UI "
+                    f"simultaneously, pointing to shared DB/infrastructure root cause "
+                    f"rather than isolated job tuning.",
+                    source="benchmark", evidence_class="derived",
+                    impact="A single infra/DB regression is degrading multiple layers — "
+                           "fixing one layer alone will not resolve it.",
+                    recommendation="Investigate the shared subsystem at the DB/infra tier "
+                                   "(shared tables, connection pool, storage). Validate the fix "
+                                   "improves both batch runtime and UI response together.",
+                    root_cause="SYSTEMIC_PERFORMANCE_REGRESSION")
+
     # ═══════════════════════════════════════════════════════════════
     # SOW COMPARE RULES
     # ═══════════════════════════════════════════════════════════════

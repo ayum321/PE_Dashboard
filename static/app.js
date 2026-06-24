@@ -26,7 +26,9 @@ window.appData = {
   customerName:  "",     // extracted from uploaded resource document heading
   slaMatrix:     null,   // from /api/sla-matrix (Phase 7)
   slaCeilings:   null,   // from /api/sla-ceilings — customer SLA window dict
-  benchmark:     null,   // from /api/benchmark  (Phase 7)
+  benchmark:     null,   // merged benchmark (from /api/benchmark) (Phase 7)
+  benchmarkBatch: null,  // batch-runtime-performance source slot
+  benchmarkUI:    null,  // UI-benchmark source slot
   sowCompare:    null,   // from /api/sow/compare (Phase 8)
   config:        null,   // loaded from /api/config on startup
   approvals: {           // Governance sign-off state (Phase 6)
@@ -8828,9 +8830,18 @@ async function refreshAuditContext() {
         };
       }
       // Restore benchmark (UAT evidence) from server cache after reload
-      if (!ad.benchmark && data.extra?.last_benchmark?.rows?.length) {
-        ad.benchmark = data.extra.last_benchmark;
-        try { _renderBenchmark(ad.benchmark); } catch (e) { console.warn("[pe-dashboard] restore benchmark:", e); }
+      if (!ad.benchmark && data.extra?.last_benchmark) {
+        const lb = data.extra.last_benchmark;
+        if (lb.rows?.length || lb.batch_perf_summary) {
+          const slot = (lb.kind === "batch" || lb.batch_perf_summary) ? "batch" : "ui";
+          if (slot === "batch") ad.benchmarkBatch = lb;
+          else                  ad.benchmarkUI    = lb;
+          try {
+            _mergeBenchmarkSources();
+            _benchUpdateZoneBadges();
+            _renderBenchmark(ad.benchmark);
+          } catch (e) { console.warn("[pe-dashboard] restore benchmark:", e); }
+        }
       }
       if (!ad.slaCeilings && slots.batch_kpis) {
         // Reconstruct SLA ceilings from config (already set by upload)
@@ -10287,16 +10298,22 @@ function _renderExecBenchmarkSummary(bench) {
   if (!el) return;
   if (!bench) { el.classList.add("hidden"); return; }
   el.classList.remove("hidden");
-  const cats = bench.categories || [];
+
+  // Slot-aware: a UI section only renders when a UI benchmark source exists.
+  const hasUI    = !!window.appData.benchmarkUI;
+  const hasBatch = !!(bench.batch_perf_summary);
+  const cats = hasUI ? (bench.categories || []) : [];
   const fr = bench.fill_rate || [];
   const obs = bench.observations || [];
-  const totalTx = bench.total_transactions || 0;
-  const degraded = bench.degraded || 0;
-  const referenceOnly = bench.reference_only === true;
+  const totalTx = hasUI ? (window.appData.benchmarkUI.total_transactions || 0) : 0;
+  const degraded = hasUI ? (window.appData.benchmarkUI.degraded || 0) : 0;
+  const referenceOnly = hasUI && window.appData.benchmarkUI.reference_only === true;
   const passRate = totalTx > 0 ? Math.round((totalTx - degraded) / totalTx * 100) : 0;
-  const color = referenceOnly
-    ? "border-Ccyan/40 bg-Ccyan/5"
-    : degraded > 0 ? "border-Camber/40 bg-Camber/5" : "border-Cgreen/40 bg-Cgreen/5";
+  const corr = bench.correlation;
+  const color = (corr && corr.verdict === "NO-GO") ? "border-Cred/40 bg-Cred/5"
+    : referenceOnly ? "border-Ccyan/40 bg-Ccyan/5"
+    : (degraded > 0 || (hasBatch && bench.batch_perf_summary.regressions > 0))
+      ? "border-Camber/40 bg-Camber/5" : "border-Cgreen/40 bg-Cgreen/5";
 
   let catCards = "";
   cats.forEach(c => {
@@ -10312,7 +10329,7 @@ function _renderExecBenchmarkSummary(bench) {
       </div></div>`;
   });
 
-  el.innerHTML = `<div class="rounded-xl border ${color} p-4">
+  const uiBlock = hasUI ? `
     <div class="flex items-center gap-3 mb-3">
       <span class="text-lg">⚡</span>
       <div>
@@ -10320,7 +10337,65 @@ function _renderExecBenchmarkSummary(bench) {
         <div class="text-[10px] text-Cmuted">${totalTx} transactions${referenceOnly ? " · reference only" : ` · ${passRate}% pass rate`}${fr.length ? ` · ${fr.length} fill rate entries` : ""}${obs.length ? ` · ${obs.length} SIT obs` : ""}</div>
       </div>
     </div>
-    ${catCards ? `<div class="flex flex-wrap gap-2 mt-2">${catCards}</div>` : ""}
+    ${catCards ? `<div class="flex flex-wrap gap-2 mt-2">${catCards}</div>` : ""}` : "";
+
+  el.innerHTML = `<div class="rounded-xl border ${color} p-4">
+    ${uiBlock}
+    ${hasUI && hasBatch ? "" : ""}
+    ${_execBatchPerfBlock(hasBatch ? bench.batch_perf_summary : null, !hasUI)}
+    ${_execCorrelationBlock(corr)}
+  </div>`;
+}
+
+/** Compact batch-runtime block for the executive benchmark summary card. */
+function _execBatchPerfBlock(bp, isFirst) {
+  if (!bp) return "";
+  const net = _n(bp.net_delta_secs);
+  const netMin = Math.abs(net / 60).toFixed(1);
+  const dir = net >= 0 ? "saved" : "added";
+  const dirCol = net >= 0 ? "text-Cgreen" : "text-Cred";
+  const regrCol = _n(bp.regressions) > 0 ? "text-Cred" : "text-Cgreen";
+  const sep = isFirst ? "" : "mt-3 pt-3 border-t border-Cborder/40";
+  return `<div class="${sep}">
+    <div class="flex items-center gap-3 mb-1">
+      <span class="text-lg">⏱️</span>
+      <div class="text-sm font-bold text-Cwhite">Batch Runtime Performance</div>
+    </div>
+    <div class="flex flex-wrap gap-2 mt-1">
+      <div class="px-3 py-1.5 rounded-lg bg-Ccard/50 border border-Cborder/30 text-[10px]">
+        <span class="text-lg font-bold ${regrCol}">${_n(bp.regressions)}</span>
+        <span class="text-Cmuted"> regressions / ${_n(bp.comparable)} comparable</span>
+      </div>
+      <div class="px-3 py-1.5 rounded-lg bg-Ccard/50 border border-Cborder/30 text-[10px]">
+        <span class="text-lg font-bold text-Cgreen">${_n(bp.improvements)}</span>
+        <span class="text-Cmuted"> improved</span>
+      </div>
+      <div class="px-3 py-1.5 rounded-lg bg-Ccard/50 border border-Cborder/30 text-[10px]">
+        <span class="text-lg font-bold ${dirCol}">${net >= 0 ? "−" : "+"}${netMin}m</span>
+        <span class="text-Cmuted"> net ${dir}/run</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Release-readiness verdict block for the executive benchmark summary card. */
+function _execCorrelationBlock(corr) {
+  if (!corr) return "";
+  const V = {
+    "GO":          { col: "Cgreen", tag: "RELEASE READY" },
+    "CONDITIONAL": { col: "Camber", tag: "CONDITIONAL" },
+    "NO-GO":       { col: "Cred",   tag: "NOT READY" },
+  }[corr.verdict] || { col: "Cmuted", tag: "" };
+  const sys = corr.systemic
+    ? `<span class="text-[10px] text-Cred font-mono ml-2">⚠ ${corr.shared_subsystems.length} systemic subsystem(s)</span>`
+    : (corr.layers.length === 2 ? `<span class="text-[10px] text-Cgreen font-mono ml-2">✓ isolated</span>` : "");
+  return `<div class="mt-3 pt-3 border-t border-Cborder/40 flex items-center gap-3">
+    <div class="text-2xl font-mono font-extrabold text-${V.col} tabular-nums">${corr.score}<span class="text-[10px] text-Cmuted">/100</span></div>
+    <div>
+      <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-${V.col}/15 text-${V.col} border border-${V.col}/30">${V.tag}</span>
+      <span class="text-[11px] text-Cwhite font-semibold ml-1">Release Readiness</span>
+      ${sys}
+    </div>
   </div>`;
 }
 
@@ -15224,10 +15299,14 @@ async function uploadBenchmarkFile(file) {
       return;
     }
     const data = await res.json();
-    window.appData.benchmark = data;
+    const slot = (data.kind === "batch" || data.batch_perf_summary) ? "batch" : "ui";
+    if (slot === "batch") window.appData.benchmarkBatch = data;
+    else                  window.appData.benchmarkUI    = data;
     _markSessionActive();  // track session boundary
+    _mergeBenchmarkSources();
+    _benchUpdateZoneBadges();
     refreshDataStatus();
-    _renderBenchmark(data);
+    _renderBenchmark(window.appData.benchmark);
     triggerGenerateFindings().catch(() => {});
     toast("success", "Benchmark loaded", `${data.total_transactions} transactions compared`);
   } catch (err) {
@@ -15470,9 +15549,81 @@ function _renderBenchmark(data) {
   _renderBenchCategories(data);
   _renderBenchFillRate(data);
   _renderBenchObservations(data);
+  _renderBenchCorrelation(data.correlation);
 
   // Auto-activate the mode that has data
   _benchSetMode(isBatchPerf ? "batch" : "ui");
+}
+
+/**
+ * Render the cross-layer correlation verdict in the benchmark view.
+ * Industrial: 2px border, mono score, signal colors. Shows release-readiness
+ * score, GO/CONDITIONAL/NO-GO verdict, and systemic-regression callout.
+ */
+function _renderBenchCorrelation(corr) {
+  const host = document.getElementById("bench-correlation-panel");
+  if (!host) return;
+  if (!corr) { host.classList.add("hidden"); host.innerHTML = ""; return; }
+
+  const V = {
+    "GO":          { col: "Cgreen", bd: "border-Cgreen/40", bg: "bg-Cgreen/5",  tag: "RELEASE READY" },
+    "CONDITIONAL": { col: "Camber", bd: "border-Camber/40", bg: "bg-Camber/5",  tag: "CONDITIONAL" },
+    "NO-GO":       { col: "Cred",   bd: "border-Cred/40",   bg: "bg-Cred/5",    tag: "NOT READY" },
+  }[corr.verdict] || { col: "Cmuted", bd: "border-Cborder", bg: "", tag: "" };
+
+  const layerTxt = corr.layers.length === 2
+    ? "batch runtime + UI benchmark"
+    : corr.layers[0] === "batch" ? "batch runtime only" : "UI benchmark only";
+
+  let systemicHtml = "";
+  if (corr.systemic && corr.shared_subsystems.length) {
+    const items = corr.shared_subsystems.map(s =>
+      `<li class="flex items-start gap-2">
+        <span class="text-Cred font-mono text-[10px] mt-0.5">▣</span>
+        <span class="text-[11px] text-Cwhite">
+          <span class="font-mono font-bold text-Cred">${_esc(s.token)}</span>
+          <span class="text-Cmuted"> — batch:</span> ${_esc(s.batch)}
+          <span class="text-Cmuted"> · UI:</span> ${_esc(s.ui)}
+        </span>
+      </li>`).join("");
+    systemicHtml = `
+      <div class="mt-3 pt-3 border-t border-Cred/30">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="text-[10px] font-mono font-bold text-Cred uppercase tracking-wider">⚠ Systemic regression</span>
+          <span class="text-[10px] text-Cmuted">same subsystem slow in both layers → shared DB/infra root cause</span>
+        </div>
+        <ul class="space-y-1">${items}</ul>
+      </div>`;
+  } else if (corr.layers.length === 2) {
+    systemicHtml = `
+      <div class="mt-3 pt-3 border-t border-Cborder">
+        <span class="text-[11px] text-Cgreen font-mono">✓ No systemic overlap</span>
+        <span class="text-[11px] text-Cmuted"> — batch and UI regressions are isolated, not a shared root cause.</span>
+      </div>`;
+  }
+
+  host.classList.remove("hidden");
+  host.innerHTML = `
+    <div class="rounded-xl border-2 ${V.bd} ${V.bg} px-5 py-4">
+      <div class="flex items-center gap-4">
+        <div class="shrink-0 text-center">
+          <div class="text-3xl font-mono font-extrabold text-${V.col} tabular-nums">${corr.score}</div>
+          <div class="text-[9px] font-mono text-Cmuted uppercase tracking-wider">/100</div>
+        </div>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-${V.col}/15 text-${V.col} border border-${V.col}/30">${V.tag}</span>
+            <span class="text-xs font-bold text-Cwhite">Performance Release Readiness</span>
+          </div>
+          <div class="text-[11px] text-Cmuted font-mono mt-1">
+            ${_esc(layerTxt)}
+            ${corr.layers.includes("batch") ? ` · batch regr ${corr.batch_regression_rate}%` : ""}
+            ${corr.layers.includes("ui") ? ` · UI breach ${corr.ui_breach_rate}%` : ""}
+          </div>
+        </div>
+      </div>
+      ${systemicHtml}
+    </div>`;
 }
 
 function _benchRenderTable(rows, threshold, batchPerfSummary) {
@@ -16396,39 +16547,52 @@ async function clearSessionData() {
 }
 
 
-/** Zone D — Benchmark file upload on the Intake page */
+/** Zone D — Performance Benchmark: two source sub-zones (batch runtime + UI). */
 function initBenchIntakeUploader() {
-  const dz    = document.getElementById("bench-intake-drop-zone");
-  const input = document.getElementById("bench-intake-file-input");
+  _initBenchZone("batch", "amber");
+  _initBenchZone("ui", "purple");
+}
+
+function _initBenchZone(kind, color) {
+  const dz    = document.getElementById(`bench-${kind}-drop-zone`);
+  const input = document.getElementById(`bench-${kind}-file-input`);
   if (!dz || !input) return;
+  const onCls = [`border-C${color}`, `bg-C${color}/5`];
 
   dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
-    if (f) _uploadBenchIntakeFile(f);
+    if (f) _uploadBenchFile(f, kind);
     input.value = "";
   });
   ["dragenter", "dragover"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("border-Cpurple","bg-Cpurple/5"); })
+    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add(...onCls); })
   );
   ["dragleave", "dragend"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("border-Cpurple","bg-Cpurple/5"); })
+    dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove(...onCls); })
   );
   dz.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
-    dz.classList.remove("border-Cpurple", "bg-Cpurple/5");
+    dz.classList.remove(...onCls);
     const f = e.dataTransfer?.files?.[0];
-    if (f) _uploadBenchIntakeFile(f);
+    if (f) _uploadBenchFile(f, kind);
   });
 }
 
-async function _uploadBenchIntakeFile(file) {
-  const dot = document.getElementById("bench-intake-dot");
-  _renderIntakeProgress("bench-intake-status", {
+/**
+ * Upload one benchmark source into its slot, then merge both slots into the
+ * unified window.appData.benchmark consumed by findings / exec / benchmark view.
+ * kind: "batch" (runtime comparison) | "ui" (transaction benchmark).
+ */
+async function _uploadBenchFile(file, kind) {
+  const color  = kind === "batch" ? "amber" : "purple";
+  const dot    = document.getElementById("bench-intake-dot");
+  const statId = `bench-${kind}-status`;
+  _renderIntakeProgress(statId, {
     filename: file.name,
     message:  formatBytes(file.size),
     percent:  0,
-    color:    "purple",
+    color,
     phase:    "uploading",
   });
 
@@ -16443,12 +16607,12 @@ async function _uploadBenchIntakeFile(file) {
 
   try {
     const { ok, status, body } = await _uploadWithProgress("/api/benchmark", fd, (pct, loaded, total, finished) => {
-      _renderIntakeProgress("bench-intake-status", {
+      _renderIntakeProgress(statId, {
         filename: file.name,
-        message:  finished ? `${formatBytes(file.size)} \u2014 comparing PROD vs TEST\u2026`
+        message:  finished ? `${formatBytes(file.size)} \u2014 analysing\u2026`
                            : `${formatBytes(loaded)} / ${formatBytes(total)}`,
         percent:  finished ? null : pct,
-        color:    "purple",
+        color,
         phase:    finished ? "analysing" : "uploading",
       });
     });
@@ -16457,32 +16621,166 @@ async function _uploadBenchIntakeFile(file) {
       return;
     }
     const data = body;
-    window.appData.benchmark = data;
-    _markSessionActive();  // track session boundary
 
-    // Update dot
-    if (dot) { dot.className = "w-2 h-2 rounded-full bg-Cpurple animate-pulse shrink-0"; }
+    // Auto-route: trust backend's `kind`, but warn on slot mismatch.
+    const detected = data.kind || (data.batch_perf_summary ? "batch" : "ui");
+    if (detected !== kind) {
+      toast("info", "Re-routed by content",
+        `File looks like a ${detected === "batch" ? "Batch Runtime" : "UI Benchmark"} source — stored there.`);
+    }
+    const slot = detected;  // store where the data actually belongs
 
-    // Show result card
-    _renderBenchIntakeCard(data, file.name);
+    if (slot === "batch") window.appData.benchmarkBatch = data;
+    else                  window.appData.benchmarkUI    = data;
 
-    // Auto-populate the Benchmark tab
-    _renderBenchmark(data);
+    _markSessionActive();
+    _mergeBenchmarkSources();
+
+    // Slot badges + dot
+    _benchUpdateZoneBadges();
+    if (dot) dot.className = "w-2 h-2 rounded-full bg-Cpurple animate-pulse shrink-0";
+
+    _renderBenchIntakeCard(window.appData.benchmark, file.name);
+    _renderBenchmark(window.appData.benchmark);
     refreshDataStatus();
-    // Re-run findings with benchmark data included
     triggerGenerateFindings().catch(() => {});
 
-    // Show intake status row + next prompt
     document.getElementById("intake-status-row")?.classList.remove("hidden");
     document.getElementById("upload-next-prompt")?.classList.remove("hidden");
 
-    toast("success", "Benchmark loaded",
-      `${data.total_transactions} transactions · ${data.degraded} regression(s)`);
+    const bp = data.batch_perf_summary;
+    toast("success",
+      slot === "batch" ? "Batch runtime loaded" : "UI benchmark loaded",
+      bp ? `${bp.total_jobs} jobs · ${bp.regressions} regression(s)`
+         : `${data.total_transactions} transactions · ${data.degraded} regression(s)`);
   } catch (err) {
     _handleFetchError(err);
   } finally {
-    document.getElementById("bench-intake-status")?.classList.add("hidden");
+    document.getElementById(statId)?.classList.add("hidden");
   }
+}
+
+/** Update the per-zone count badges from the two slots. */
+function _benchUpdateZoneBadges() {
+  const b  = window.appData.benchmarkBatch;
+  const u  = window.appData.benchmarkUI;
+  const bb = document.getElementById("bench-batch-badge");
+  const ub = document.getElementById("bench-ui-badge");
+  if (bb) {
+    if (b?.batch_perf_summary) {
+      bb.textContent = `${b.batch_perf_summary.regressions}▲ ${b.batch_perf_summary.total_jobs} jobs`;
+      bb.classList.remove("hidden");
+    } else bb.classList.add("hidden");
+  }
+  if (ub) {
+    if (u) {
+      ub.textContent = `${_n(u.degraded)}▲ ${_n(u.total_transactions)} tx`;
+      ub.classList.remove("hidden");
+    } else ub.classList.add("hidden");
+  }
+}
+
+/**
+ * Compose the unified window.appData.benchmark from the two source slots.
+ * UI source supplies rows / categories / fill_rate / observations; batch source
+ * supplies batch_perf_summary. Both compose into one object for downstream
+ * findings + exec consumers. Also computes the cross-layer correlation verdict.
+ */
+function _mergeBenchmarkSources() {
+  const b = window.appData.benchmarkBatch;
+  const u = window.appData.benchmarkUI;
+
+  if (!b && !u) { window.appData.benchmark = null; return; }
+
+  let merged;
+  if (u && b) {
+    // UI as base; graft batch runtime summary on top. Combine source filenames.
+    merged = { ...u };
+    merged.batch_perf_summary = b.batch_perf_summary || null;
+    merged.batch_filename     = b.filename || "";
+    merged.ui_filename        = u.filename || "";
+    merged.filename           = `${u.filename || "UI"} + ${b.filename || "Batch"}`;
+  } else {
+    merged = { ...(u || b) };
+  }
+
+  merged.correlation = _computeBenchCorrelation(b, u);
+  window.appData.benchmark = merged;
+  if (window._execCache !== undefined) window._execCache = null;  // invalidate exec cache
+}
+
+/**
+ * Smart correlation bridge between batch-runtime and UI-benchmark sources.
+ * Produces a release-readiness score + verdict and detects SYSTEMIC regressions:
+ * subsystem name-tokens that regress in BOTH layers (shared DB/infra root cause)
+ * rather than isolated tuning. O(n+m) via hash sets.
+ * Returns null when fewer than the inputs needed are present.
+ */
+function _computeBenchCorrelation(batchObj, uiObj) {
+  const bp = batchObj?.batch_perf_summary || null;
+
+  // ── Component rates ──
+  const bComp = bp ? _n(bp.comparable) : 0;
+  const bRegr = bp ? _n(bp.regressions) : 0;
+  const batchRegrRate = bComp > 0 ? bRegr / bComp : 0;
+
+  const uRows   = (uiObj?.rows || []).filter(r => _n(r.baseline_sec) > 0);
+  const uBreach = uRows.filter(r => r.status === "BREACH").length;
+  const uiBreachRate = uRows.length > 0 ? uBreach / uRows.length : 0;
+
+  // Release-readiness score: weight each present layer.
+  let score, parts = [];
+  if (bp && uRows.length) {
+    score = 100 - batchRegrRate * 50 - uiBreachRate * 50;
+    parts = ["batch", "ui"];
+  } else if (bp) {
+    score = 100 - batchRegrRate * 100;
+    parts = ["batch"];
+  } else if (uRows.length) {
+    score = 100 - uiBreachRate * 100;
+    parts = ["ui"];
+  } else {
+    return null;
+  }
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const verdict = score >= 85 ? "GO" : score >= 65 ? "CONDITIONAL" : "NO-GO";
+
+  // ── Systemic detection: token-set intersection across both layers ──
+  const STOP = new Set(["the","and","for","run","job","load","time","test","prod",
+    "uat","new","old","sec","secs","daily","weekly","monthly","batch","data",
+    "report","process","step","main","seq"]);
+  const tokset = (name) => {
+    const out = new Set();
+    String(name || "").toUpperCase().split(/[^A-Z0-9]+/).forEach(t => {
+      if (t.length >= 3 && !STOP.has(t.toLowerCase()) && !/^\d+$/.test(t)) out.add(t);
+    });
+    return out;
+  };
+
+  const shared = [];
+  if (bp && uBreach > 0) {
+    const batchTok = new Map();
+    (bp.top_regressions || []).forEach(r => tokset(r.job).forEach(t => {
+      if (!batchTok.has(t)) batchTok.set(t, r.job);
+    }));
+    const uiTok = new Map();
+    uRows.filter(r => r.status === "BREACH").forEach(r => tokset(r.transaction).forEach(t => {
+      if (!uiTok.has(t)) uiTok.set(t, r.transaction);
+    }));
+    batchTok.forEach((batchName, t) => {
+      if (uiTok.has(t)) shared.push({ token: t, batch: batchName, ui: uiTok.get(t) });
+    });
+  }
+
+  return {
+    score,
+    verdict,
+    layers: parts,
+    batch_regression_rate: Math.round(batchRegrRate * 100),
+    ui_breach_rate: Math.round(uiBreachRate * 100),
+    systemic: shared.length > 0,
+    shared_subsystems: shared.slice(0, 5),
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════

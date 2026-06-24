@@ -67,6 +67,7 @@ class BenchmarkCategory(BaseModel):
 
 class BenchmarkResponse(BaseModel):
     filename:           str
+    kind:               str = "ui"   # "batch" (runtime comparison) | "ui" (transaction benchmark)
     total_transactions: int
     degraded:           int      # > threshold %
     improved:           int
@@ -1790,6 +1791,7 @@ async def benchmark_upload(
 
     resp = BenchmarkResponse(
         filename=file.filename or "",
+        kind="batch" if batch_perf_summary is not None else "ui",
         total_transactions=len(result_rows),
         degraded=breaches, improved=oks, unchanged=unchanged,
         sla_breaches=sla_brs, avg_delta_pct=avg_delta,
