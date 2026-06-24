@@ -46,22 +46,22 @@ from typing import Any, Dict, List, Optional
 
 # Fallback static patterns used only when pe_config is unavailable
 _STATIC_TYPE_PATTERNS: list[tuple[str, list[str]]] = [
-    ("BIWEEKLY",   ["BIWEEKLY", "BI_WEEKLY", "BI-WEEKLY"]),
-    ("QUARTERLY",  ["QUARTERLY", "QUATERLY", "QTR"]),
-    ("MONTHLY",    ["MONTHLY", "MLY"]),
-    ("WEEKLY",     ["WEEKLY", "WLY", "_WF", "-WF"]),
-    ("OUTBOUND",   ["OUTBOUND"]),
-    ("CYCLIC",     ["CYCLIC", "_CYC"]),
-    ("DAILY",      ["DAILY", "DLY", "EVERY DAY", "EVERYDAY", "NIGHTLY", "OVERNIGHT"]),
+    ("BIWEEKLY",    ["BIWEEKLY", "BI_WEEKLY", "BI-WEEKLY"]),
+    ("QUARTERLY",   ["QUARTERLY", "QUATERLY", "QTR"]),
+    ("MONTHLY",     ["MONTHLY", "MLY"]),
+    ("WEEKLY",      ["WEEKLY", "WLY", "_WF", "-WF"]),
+    ("SEQUENCING",  ["SEQUENCING", "SEQUENC", "SEQ_BATCH", "SEQ_RUN"]),
+    ("OUTBOUND",    ["OUTBOUND"]),
+    ("CYCLIC",      ["CYCLIC", "_CYC"]),
+    ("DAILY",       ["DAILY", "DLY", "EVERY DAY", "EVERYDAY", "NIGHTLY", "OVERNIGHT"]),
 ]
 
 # Resolution priority order for detect_batch_type()
-_DETECT_PRIORITY = ["ADHOC", "BIWEEKLY", "QUARTERLY", "MONTHLY", "WEEKLY", "OUTBOUND", "CYCLIC", "DAILY"]
+_DETECT_PRIORITY = ["ADHOC", "BIWEEKLY", "QUARTERLY", "MONTHLY", "WEEKLY", "SEQUENCING", "OUTBOUND", "CYCLIC", "DAILY"]
 
 
 def _strip_env_prefix(name: str) -> str:
-    """Strip known environment prefixes (PROD_, TEST_, UAT_, etc.) and
-    leading year-number tokens (e.g. 2025_) from a job name."""
+    """Strip known environment prefixes (PROD_, TEST_, UAT_, etc.) from a job name."""
     try:
         from services import pe_config
         prefixes = pe_config.ENV_PREFIXES_TO_STRIP
@@ -70,11 +70,7 @@ def _strip_env_prefix(name: str) -> str:
     upper = name.upper()
     for pfx in prefixes:
         if upper.startswith(pfx.upper()):
-            name = name[len(pfx):]
-            upper = name.upper()
-            break
-    # Strip leading 4-digit year token (e.g. "2025_DAILY_DMD" → "DAILY_DMD")
-    name = re.sub(r'^\d{4}[_\-]', '', name)
+            return name[len(pfx):]
     return name
 
 
@@ -172,6 +168,11 @@ def detect_batch_type(batch_name: str, schedule: str = "") -> str:
     # PERIODIC: "periodically", "runs periodically"
     if re.search(r'\bperiodic(?:ally)?\b', _all_text, re.IGNORECASE):
         return "PERIODIC"
+    # SEQUENCING: "Daily Sequencing", "PROD_SEQUENCING", "SEQ_RUN"
+    # Must be checked BEFORE generic DAILY so distinct sequencing windows keep
+    # their own SLA ceiling and are not merged into the main daily batch window.
+    if re.search(r'SEQUENC', _all_text, re.IGNORECASE):
+        return "SEQUENCING"
 
     # Fast path: batch_name or schedule IS an exact schedule word (e.g. "Weekly",
     # "Bi-Weekly", "DAILY").  The pe_config patterns use underscore-prefix/suffix
@@ -947,30 +948,6 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
             _sheets_used.append(_sheet_name)
 
     _explicit = sum(1 for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX")
-    # ── Engine-based SLA enrichment ────────────────────────────────────────────
-    # When no explicit SLA column was found (time-window XLSX format), use the
-    # SLA intelligence engine to extract per-workflow SLA hours from Start/End
-    # time columns.  This handles customers like Harry's USA who express SLA as
-    # a batch window (e.g. 00:00–08:00 = 8h) rather than a numeric "Expected SLA" column.
-    if _explicit == 0 and workflows:
-        try:
-            from services.sla_engine import ingest_sla_file as _ise_enrich
-            _intel = _ise_enrich(raw_bytes, filename)
-            if _intel.valid_rows > 0 and _intel.contracts:
-                _eng_map = {
-                    c.batch_name.upper(): c.sla_window_hrs
-                    for c in _intel.contracts
-                    if c.batch_name and c.sla_window_hrs and c.sla_window_hrs > 0
-                }
-                if _eng_map:
-                    for w in workflows:
-                        wf_key = _strip_env_prefix(w.get("workflow") or "").upper()
-                        if wf_key in _eng_map:
-                            w["sla_hours"] = _eng_map[wf_key]
-                            w["sla_source"] = "BATCH_SLA_XLSX"
-                    _explicit = sum(1 for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX")
-        except Exception:
-            pass
     _fallback = sum(1 for w in workflows if w.get("sla_source") in ("SOW_EXTRACTED", "GLOBAL_DEFAULT"))
     if _fallback > 0 and _explicit == 0:
         warnings.append(
@@ -1018,8 +995,28 @@ def build_workflow_job_map(ctrlm_df, batch_sla_rows: list[dict]) -> dict:
             continue
 
         ctrlm_upper = ctrlm_df[job_col].str.upper()
-        first_runs  = ctrlm_df[ctrlm_upper.str.contains(first_job, na=False, regex=False)]
-        last_runs   = ctrlm_df[ctrlm_upper.str.contains(last_job,  na=False, regex=False)]
+
+        # Try all sentinels in the list — use first match found.
+        # Handles Haleon-style multi-value cells: "JOB_A  JOB_B  JOB_C"
+        first_runs = pd.DataFrame()
+        for _fj in (row.get("first_jobs_list") or [first_job]):
+            _fj_u = str(_fj).strip().upper()
+            if not _fj_u:
+                continue
+            _cand = ctrlm_df[ctrlm_upper.str.contains(_fj_u, na=False, regex=False)]
+            if not _cand.empty:
+                first_runs = _cand
+                break
+
+        last_runs = pd.DataFrame()
+        for _lj in (row.get("last_jobs_list") or [last_job]):
+            _lj_u = str(_lj).strip().upper()
+            if not _lj_u:
+                continue
+            _cand = ctrlm_df[ctrlm_upper.str.contains(_lj_u, na=False, regex=False)]
+            if not _cand.empty:
+                last_runs = _cand
+                break
 
         if first_runs.empty or last_runs.empty:
             result[batch_name] = {
@@ -1088,12 +1085,13 @@ def build_workflow_job_map(ctrlm_df, batch_sla_rows: list[dict]) -> dict:
 #  pe_config reads from config_store at runtime; these are compile-time fallbacks
 #  used only when pe_config import fails.
 GLOBAL_DEFAULTS: dict[str, float] = {
-    "DAILY":     6.0,
-    "WEEKLY":    17.0,
-    "BIWEEKLY":  17.0,
-    "MONTHLY":   17.0,
-    "QUARTERLY": 12.0,
-    "OUTBOUND":  1.0,
+    "DAILY":       6.0,
+    "WEEKLY":      17.0,
+    "BIWEEKLY":    17.0,
+    "MONTHLY":     17.0,
+    "QUARTERLY":   12.0,
+    "OUTBOUND":    1.0,
+    "SEQUENCING":  3.0,   # Sequencing windows are typically shorter than main daily batch
 }
 
 

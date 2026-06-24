@@ -221,8 +221,12 @@ def _extract_sla_legacy(file_bytes: bytes) -> dict[str, float]:
 
 
 def _classify_batch_name(name: str) -> str | None:
-    """Map a raw batch name/type string to DAILY | WEEKLY | MONTHLY | CUSTOM."""
+    """Map a raw batch name/type string to DAILY | WEEKLY | MONTHLY | SEQUENCING | CUSTOM."""
     name = name.upper().strip()
+    # SEQUENCING checked before DAILY — "Daily Sequencing" contains "DAILY"
+    # but is a distinct contractual window, not the main daily batch.
+    if "SEQUENC" in name:
+        return "SEQUENCING"
     if any(w in name for w in ("DAILY", "DAY", " D ", "NIGHTLY", "OVERNIGHT")):
         return "DAILY"
     if any(w in name for w in ("WEEKLY", "WEEK", " W ", "WK")):
