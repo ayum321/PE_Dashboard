@@ -1286,16 +1286,18 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
 
     comparable = [r for r in rows if r["baseline_sec"] > 0]
     net_delta  = sum(r["baseline_sec"] - r["current_sec"] for r in comparable)
+    regression_rate = round(len(regressions) / len(comparable) * 100, 1) if comparable else 0.0
 
     return {
-        "total_jobs":      len(rows),
-        "comparable":      len(comparable),
-        "regressions":     len(regressions),
-        "improvements":    len(improvements),
-        "new_only":        new_only,
-        "no_change":       no_change,
-        "net_delta_secs":  round(net_delta, 1),
-        "top_regressions": regressions[:10],
+        "total_jobs":       len(rows),
+        "comparable":       len(comparable),
+        "regressions":      len(regressions),
+        "improvements":     len(improvements),
+        "new_only":         new_only,
+        "no_change":        no_change,
+        "net_delta_secs":   round(net_delta, 1),
+        "regression_rate":  regression_rate,
+        "top_regressions":  regressions[:10],
         "top_improvements": improvements[:10],
     }
 
