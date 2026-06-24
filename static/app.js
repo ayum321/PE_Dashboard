@@ -16737,6 +16737,16 @@ async function clearSessionData() {
     window._execCacheHash = null;
     window._slaData       = null;
     window._deepDiveData  = null;
+    // Clear findings state — stale filter/sort survives a page-session and causes
+    // wrong rendering when new findings come in after a hard reset
+    window._lastRealFindings = [];
+    window._findingsFilter   = null;
+    window._findingsSort     = null;
+    window._findingsCols     = null;
+    // Abort any in-flight findings request — prevents a race where the response
+    // arrives AFTER the DOM is cleared and re-populates findings with stale data
+    _findingsInFlight = false;
+    if (_findingsDebounceTimer) { clearTimeout(_findingsDebounceTimer); _findingsDebounceTimer = null; }
     _clearSessionMarker();
 
     // ── 3. Upload / Intake tab ────────────────────────────────────────────
@@ -16821,7 +16831,7 @@ async function clearSessionData() {
     if (manMsg) manMsg.classList.add("hidden");
 
     // ── 7. Findings tab ───────────────────────────────────────────────────
-    window._lastRealFindings = [];
+    // (window._lastRealFindings and _findingsFilter already cleared in step 2)
     document.getElementById("findings-empty")?.classList.remove("hidden");
     document.getElementById("findings-loading")?.classList.add("hidden");
     ["findings-list","findings-summary-strip","findings-filter-bar"
@@ -16832,6 +16842,28 @@ async function clearSessionData() {
     // Clear verdict hero and audit coverage panels (dynamically injected)
     document.getElementById("findings-verdict-hero")?.remove();
     document.getElementById("findings-audit-coverage")?.remove();
+    // Hide + wipe PE narrative card — it stays visible otherwise because it's
+    // unhidden by renderPeReviewSections() and never re-hidden on reset
+    const peNarrCard = document.getElementById("pe-narrative-card");
+    if (peNarrCard) {
+      peNarrCard.classList.add("hidden");
+      const peNarrSections = document.getElementById("pe-narr-sections");
+      if (peNarrSections) peNarrSections.innerHTML = "";
+      const peNarrSummary = document.getElementById("pe-narr-summary");
+      if (peNarrSummary) peNarrSummary.textContent = "—";
+      const peNarrVerdict = document.getElementById("pe-narr-verdict");
+      if (peNarrVerdict) peNarrVerdict.textContent = "—";
+    }
+    // Reset filter buttons back to default state
+    document.querySelectorAll(".findings-filter-btn").forEach(btn => btn.classList.remove("active-filter"));
+    const ffilAll = document.getElementById("ffil-all");
+    if (ffilAll) ffilAll.classList.add("active-filter");
+    // Reset hero pill + counts
+    const decisionPill = document.getElementById("findings-decision-pill");
+    if (decisionPill) { decisionPill.textContent = "—"; decisionPill.removeAttribute("style"); }
+    ["hero-crit","hero-warn","hero-ok","hero-info"].forEach(id => {
+      const el = document.getElementById(id); if (el) el.textContent = "0";
+    });
 
     // ── 8. Executive Dashboard tab ────────────────────────────────────────
     // exec-content holds all rendered panels; exec-no-data is the empty state
