@@ -179,14 +179,20 @@ class ManualSlaWindowsRequest(BaseModel):
 
 @router.post("/sow/sla-windows/manual")
 def set_manual_sla_windows(body: ManualSlaWindowsRequest) -> dict:
-    """Accept manually entered SLA ceiling values and store them as SOW windows (Tier 2)."""
+    """Accept manually entered SLA ceiling values and store them as SOW windows (Tier 2).
+
+    Setting a field to null removes any existing MANUAL entry for that type so
+    'Clear All' (sends all-nulls) fully wipes manual overrides without touching
+    values that came from a SOW PDF upload.
+    """
     existing = config_store.get("_sow_sla_windows") or {}
-    if body.daily_hrs   and body.daily_hrs   > 0:
-        existing["DAILY"]   = {"limit_hours": body.daily_hrs,   "source": "MANUAL"}
-    if body.weekly_hrs  and body.weekly_hrs  > 0:
-        existing["WEEKLY"]  = {"limit_hours": body.weekly_hrs,  "source": "MANUAL"}
-    if body.monthly_hrs and body.monthly_hrs > 0:
-        existing["MONTHLY"] = {"limit_hours": body.monthly_hrs, "source": "MANUAL"}
+    for field, key in [("daily_hrs", "DAILY"), ("weekly_hrs", "WEEKLY"), ("monthly_hrs", "MONTHLY")]:
+        val = getattr(body, field)
+        if val is not None and val > 0:
+            existing[key] = {"limit_hours": val, "source": "MANUAL"}
+        elif val is None and existing.get(key, {}).get("source") == "MANUAL":
+            # Null explicitly clears a MANUAL entry — leaves SOW-sourced entries intact
+            del existing[key]
     config_store.set("_sow_sla_windows", existing)
     return {"ok": True, "windows": existing}
 
