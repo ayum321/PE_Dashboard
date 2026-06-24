@@ -3744,22 +3744,26 @@
       </div>
 
       <!-- STEP 1: Search / Discover VMs -->
-      <div id="azure-step1" class="space-y-3 overflow-y-auto flex-1 min-h-0">
-        <!-- Search bar (cross-subscription) -->
-        <div>
-          <label class="block text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">
+      <div id="azure-step1" class="space-y-4 overflow-y-auto flex-1 min-h-0">
+        <!-- Primary search — dominant CTA -->
+        <div class="az-filter-panel" style="padding: 16px 20px;">
+          <label style="font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:8px; font-weight:700; letter-spacing:0.14em; text-transform:uppercase; color:rgba(71,85,105,0.9); display:block; margin-bottom:10px;">
             Search by customer, server name, or tag
-            <span class="font-normal text-Cmuted">(all subscriptions)</span>
+            <span style="font-weight:400; margin-left:6px; color:rgba(71,85,105,0.6)">(all subscriptions)</span>
           </label>
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div class="flex gap-3 items-stretch">
             <input id="azure-search-input" type="text"
                    placeholder="e.g. ShopRite, tsbh731403001, Oracle DB…"
-                   class="w-full sm:flex-1 bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-xs text-Cwhite placeholder-Cmuted focus:outline-none focus:border-Cblue"
+                   style="font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:13px; color:#e2e8f0; background:rgba(0,0,0,0.4); border:1px solid rgba(51,65,85,0.7); border-radius:5px; padding:12px 16px; flex:1; outline:none; transition:border-color 0.15s, box-shadow 0.15s;"
+                   onfocus="this.style.borderColor='rgba(59,130,246,0.6)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,0.12)'"
+                   onblur="this.style.borderColor='rgba(51,65,85,0.7)';this.style.boxShadow='none'"
                    onkeydown="if(event.key==='Enter') azureSearchVMs()" />
             <button onclick="azureSearchVMs()"
                     id="azure-search-btn"
-                    class="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-Cblue/20 to-Cpurple/20 border border-Cblue/40 text-Cwhite hover:opacity-90 transition whitespace-nowrap inline-flex items-center justify-center gap-1.5">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    style="font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:12px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#fff; background:linear-gradient(135deg,rgba(37,99,235,0.9),rgba(59,130,246,0.75)); border:1px solid rgba(59,130,246,0.6); border-radius:5px; padding:0 28px; white-space:nowrap; display:inline-flex; align-items:center; gap:8px; cursor:pointer; transition:background 0.15s, box-shadow 0.15s; box-shadow:0 0 0 0 rgba(59,130,246,0);"
+                    onmouseover="this.style.boxShadow='0 0 16px rgba(59,130,246,0.35)'; this.style.background='linear-gradient(135deg,rgba(37,99,235,1),rgba(96,165,250,0.9))'"
+                    onmouseout="this.style.boxShadow='0 0 0 0 rgba(59,130,246,0)'; this.style.background='linear-gradient(135deg,rgba(37,99,235,0.9),rgba(59,130,246,0.75))'">
+              <svg style="width:15px;height:15px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
               Search
             </button>
           </div>
