@@ -58,6 +58,38 @@ const THEME = {
   muted:  "#6b7db3",
   white:  "#f0f4ff",
 };
+
+// ── Centralised level → visual token map ─────────────────────
+// Single source of truth — no more hardcoded #f43f5e scattered across 3+ places.
+const LEVEL_COLOR = {
+  critical: THEME.red,
+  warning:  THEME.amber,
+  ok:       THEME.green,
+  info:     THEME.muted,
+};
+const LEVEL_BG = {
+  critical: "rgba(244,63,94,0.08)",
+  warning:  "rgba(245,158,11,0.08)",
+  ok:       "rgba(16,217,110,0.08)",
+  info:     "rgba(107,125,179,0.06)",
+};
+/** Return signal color for a finding level string. */
+function _levelColor(level) { return LEVEL_COLOR[level] || THEME.muted; }
+/** Return background tint for a finding level string. */
+function _levelBg(level)    { return LEVEL_BG[level]    || "rgba(107,125,179,0.06)"; }
+
+// ── Grade helpers — canonical boundaries matching findings.py ─
+// A≥90, B≥75, C≥60, D≥45, F<45. Hard floor: any critical → max C.
+const GRADE_LABELS = { A: "APPROVED", B: "APPROVED WITH NOTES", C: "CONDITIONAL HOLD", D: "BLOCKED — MINOR", F: "BLOCKED — MAJOR" };
+const GRADE_COLORS_FINDINGS = { A: THEME.green, B: THEME.green, C: THEME.amber, D: THEME.red, F: THEME.red };
+function _computeGrade(nCrit, nWarn, nOk) {
+  const score = Math.max(0, Math.min(100, 100 - nCrit * 15 - nWarn * 5 + nOk * 2));
+  let g = score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 45 ? "D" : "F";
+  // Hard floor: any critical caps at C (mirrors findings.py hard floor fix)
+  if (nCrit > 0 && (g === "A" || g === "B")) g = "C";
+  return { score, grade: g, label: GRADE_LABELS[g], color: GRADE_COLORS_FINDINGS[g] };
+}
+
 // SLA daily limit — kept in sync with the backend config loaded in loadConfig().
 // Use `let` so loadConfig() can update it when the user changes settings.
 let SLA_DAILY_HRS = 6.0;
@@ -8046,18 +8078,9 @@ function renderFindings(findings) {
     decision = "APPROVED"; glowColor = THEME.green;
   }
 
-  // Grade — canonical boundaries matching pe_config.GRADE_TABLE:
-  // ≥90=A, ≥80=B, ≥70=C, ≥60=D, <60=F
-  // For finding-count-based grade: map counts to a synthetic score
-  const penaltyScore = Math.max(0, 100 - hardBlockers.length * 20 - softCriticals.length * 10 - warnCount * 5);
-  const grade = penaltyScore >= 90 ? "A"
-    : penaltyScore >= 80 ? "B"
-    : penaltyScore >= 70 ? "C"
-    : penaltyScore >= 60 ? "D"
-    : "F";
-  const _GRADE_LABELS = { A: "APPROVED", B: "APPROVED WITH NOTES", C: "CONDITIONAL HOLD", D: "BLOCKED — MINOR", F: "BLOCKED — MAJOR" };
-  const gradeColors = { F: THEME.red, D: THEME.red, C: THEME.amber, B: THEME.amber, A: THEME.green };
-  const gc = gradeColors[grade] || THEME.muted;
+  // Grade — use shared helper matching Python thresholds + hard floor
+  const { grade, label: gradeLabel, color: gc } = _computeGrade(critCount, warnCount, okCount);
+  const _GRADE_LABELS = GRADE_LABELS;
 
   // Animate verdict hero
   const pill = document.getElementById("findings-decision-pill");
@@ -8067,7 +8090,7 @@ function renderFindings(findings) {
   }
   const gradePill = document.getElementById("findings-grade-pill");
   if (gradePill) {
-    gradePill.textContent = `Grade ${grade} — ${_GRADE_LABELS[grade] || ""}`;
+    gradePill.textContent = `Grade ${grade} — ${gradeLabel || ""}`;
     gradePill.style.cssText = `color:${gc};border-color:${hexA(gc,.5)};background:${hexA(gc,.12)}`;
   }
 
@@ -8114,9 +8137,15 @@ function renderFindings(findings) {
   if (countBadge) countBadge.textContent = realFindings.length;
 
   // ── Findings table ──────────────────────────────────────────
-  if (!window._findingsSort)   window._findingsSort   = { col: "severity", dir: 1 };
-  if (!window._findingsCols)   window._findingsCols   = {};
-  if (!window._findingsFilter) window._findingsFilter = "critical"; // default: show only critical
+  if (!window._findingsSort) window._findingsSort = { col: "severity", dir: 1 };
+  if (!window._findingsCols) window._findingsCols = {};
+  // Smart default: show the highest severity present; fall back to "all"
+  // so the table is never empty when the user first opens findings.
+  if (!window._findingsFilter) {
+    const _hasCrit = realFindings.some(f => f.level === "critical");
+    const _hasWarn = realFindings.some(f => f.level === "warning");
+    window._findingsFilter = _hasCrit ? "critical" : _hasWarn ? "lp" : "all";
+  }
   _renderFindingsColPicker();
   _updateFindingsFilterCounts();
   _applyFindingsSort();
@@ -8142,13 +8171,8 @@ function renderPeReviewSections(findingsResp, smartVerdictData) {
   const _cards = (source) => findings
     .filter(f => f.source === source)
     .map(f => {
-      const col = f.level === "critical" ? "#f43f5e"
-                : f.level === "warning"  ? "#f59e0b"
-                : f.level === "ok"       ? "#10d96e" : "#6b7db3";
-      const bg  = f.level === "critical" ? "rgba(244,63,94,0.08)"
-                : f.level === "warning"  ? "rgba(245,158,11,0.08)"
-                : f.level === "ok"       ? "rgba(16,217,110,0.08)"
-                : "rgba(107,125,179,0.08)";
+      const col = _levelColor(f.level);
+      const bg  = _levelBg(f.level);
       const rec  = f.recommendation
         ? `<div class="mt-1 text-xs" style="color:#6b7db3">→ ${_esc(f.recommendation)}</div>` : "";
       const evid = f.evidence
@@ -9379,6 +9403,28 @@ async function renderOverview() {
 }
 
 // ── KPI Strip ────────────────────────────────────────────────
+// ── Grade advisory — cross-references deep-dive DB server memory with fleet grade ──
+function _buildGradeAdvisory(kpis) {
+  const dd = window.appData?.deepDive;
+  if (!dd || !kpis) return null;
+  const servers = window.appData?.resource?.servers || [];
+  const dbServers = servers.filter(s => (s.type || "").toUpperCase().includes("DB"));
+  if (!dbServers.length) return null;
+  let chronicDb = 0;
+  for (const srv of dbServers) {
+    const vmKey = Object.keys(dd).find(k => k.toLowerCase() === (srv.server || srv.host || "").toLowerCase());
+    if (!vmKey) continue;
+    const memWf = dd[vmKey]?.waveforms?.["Available Memory Percentage"];
+    if (memWf && (memWf.label === "flat_high" || memWf.label === "plateau" || memWf.risk === "critical" || memWf.risk === "high")) {
+      chronicDb++;
+    }
+  }
+  if (chronicDb > 0) {
+    return `${kpis.total_servers || 0} servers · DB expected allocation (${chronicDb} within SGA/PGA band)`;
+  }
+  return null;
+}
+
 function _renderExecKPIs(kpis) {
   if (!kpis) return;
 
@@ -9436,31 +9482,7 @@ function _renderExecKPIs(kpis) {
       return hrs > 0 ? Math.max(0, 100 - ((hrs - sla) / sla) * 100) : 100;
     }), wrCol);
 
-  // ── Grade advisory — cross-references deep-dive data with fleet grade ──
-  function _buildGradeAdvisory(kpis) {
-    const dd = window.appData?.deepDive;
-    if (!dd || !kpis) return null;
-    const servers = window.appData?.resource?.servers || [];
-    const dbServers = servers.filter(s => (s.type || "").toUpperCase().includes("DB"));
-    if (!dbServers.length) return null;
-
-    // Check if any DB server has chronic memory in deep-dive
-    let chronicDb = 0;
-    for (const srv of dbServers) {
-      const vmKey = Object.keys(dd).find(k => k.toLowerCase() === (srv.server || srv.host || "").toLowerCase());
-      if (!vmKey) continue;
-      const vmData = dd[vmKey];
-      const memWf = vmData?.waveforms?.["Available Memory Percentage"];
-      if (memWf && (memWf.label === "flat_high" || memWf.label === "plateau" || memWf.risk === "critical" || memWf.risk === "high")) {
-        chronicDb++;
-      }
-    }
-    if (chronicDb > 0) {
-      return `${kpis.total_servers || 0} servers · DB expected allocation (${chronicDb} within SGA/PGA band)`;
-    }
-    return null;
-  }
-
+  // ── Grade advisory — uses top-level _buildGradeAdvisory() ──
   // ── Fleet Grade — letter + gradient bullet bar ──
   const flEl = document.getElementById("exec-fleet");
   const gradePct = { "A": 95, "B": 80, "C": 65, "D": 50, "F": 25, "N/A": 0 };
@@ -9469,7 +9491,6 @@ function _renderExecKPIs(kpis) {
     flEl.textContent = kpis.fleet_grade || "—";
     flEl.style.color = gc[kpis.fleet_grade] || "#f0f4ff";
   }
-  // Grade advisory — check if deep-dive found chronic memory pressure on DB servers
   const gradeAdvisory = _buildGradeAdvisory(kpis);
   setText("exec-fleet-sub", gradeAdvisory || `${kpis.total_servers || 0} servers`);
   const flBar = document.getElementById("exec-fleet-bar");
@@ -9480,7 +9501,7 @@ function _renderExecKPIs(kpis) {
   const rfcs = _n(kpis.rfcs);
   if (rfEl) {
     rfEl.textContent = rfcs.toFixed(0);
-    rfEl.style.color = rfcs >= 60 ? "#f43f5e" : (rfcs >= 30 ? "#f59e0b" : "#10d96e");
+    rfEl.style.color = rfcs >= 60 ? THEME.red : (rfcs >= 30 ? THEME.amber : THEME.green);
   }
   const rfMarker = document.getElementById("exec-rfcs-marker");
   if (rfMarker) {

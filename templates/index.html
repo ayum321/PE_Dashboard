@@ -227,6 +227,7 @@
       font-size: .8rem;
       border-bottom: 1px solid rgba(33,48,96,.4);
       transition: background .1s;
+      font-variant-numeric: tabular-nums;
     }
     .pe-table tr:hover td { background: rgba(59,130,246,.04); }
 
@@ -271,32 +272,33 @@
       color: rgba(107,125,179,.85);
       border-color: rgba(107,125,179,.25);
       background: rgba(255,255,255,.025);
-      font-family: 'Inter', 'Segoe UI', sans-serif;
-      letter-spacing: .02em;
+      font-family: 'JetBrains Mono', 'Menlo', monospace;
+      font-size: 10px;
+      letter-spacing: .04em;
     }
     .findings-sort-btn:hover,
     .findings-filter-btn:hover {
       color: #f0f4ff;
-      border-color: rgba(168,85,247,.45);
-      background: rgba(168,85,247,.08);
+      border-color: rgba(59,130,246,.45);
+      background: rgba(59,130,246,.08);
     }
     .findings-sort-btn.active-sort {
-      color: #a855f7;
-      border-color: rgba(168,85,247,.55);
-      background: rgba(168,85,247,.12);
-      box-shadow: 0 0 10px rgba(168,85,247,.2);
+      color: #f0f4ff;
+      border-color: rgba(59,130,246,.6);
+      background: rgba(59,130,246,.12);
+      border-bottom: 2px solid #3b82f6;
     }
     .findings-filter-btn.active-filter {
       color: #f0f4ff;
-      border-color: rgba(168,85,247,.6);
-      background: rgba(168,85,247,.15);
-      box-shadow: 0 0 12px rgba(168,85,247,.22);
+      border-color: rgba(59,130,246,.5);
+      background: rgba(59,130,246,.1);
+      border-bottom: 2px solid #3b82f6;
     }
     .findings-filter-btn.active-filter[data-fid="critical"] {
       color: #fda4af;
-      border-color: rgba(244,63,94,.6);
-      background: rgba(244,63,94,.12);
-      box-shadow: 0 0 14px rgba(244,63,94,.25);
+      border-color: rgba(244,63,94,.5);
+      background: rgba(244,63,94,.1);
+      border-bottom: 2px solid #f43f5e;
     }
     /* ── Ambient card glow when criticals are shown ── */
     @keyframes card-glow-red {
