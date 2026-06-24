@@ -14179,14 +14179,17 @@ function _renderSlaCommitmentsPanel() {
                 // global*/assumed = no contract found, system default → DEFAULT (amber warning)
                 const _slaBadge = (() => {
                   const s = (_slaSrc || "").toLowerCase();
-                  if (s.startsWith("batch_sla_xlsx") || s === "xlsx")
-                    return `<span class="ml-1 text-[7px] font-bold text-Cteal bg-Cteal/10 px-0.5 rounded" title="Source: BatchSLA_info.xlsx workflow SLA">BATCH</span>`;
+                  // batch_sla_xlsx* and sla_intelligence_anchor = SLA came from the customer file
+                  if (s.startsWith("batch_sla_xlsx") || s === "xlsx" || s === "sla_intelligence_anchor")
+                    return `<span class="ml-1 text-[7px] font-bold text-Cgreen bg-Cgreen/10 px-0.5 rounded" title="Source: Customer SLA Matrix file — per-contract window">CONTRACT</span>`;
                   if (s === "sow_extracted")
                     return `<span class="ml-1 text-[7px] font-bold text-Cpurple bg-Cpurple/10 px-0.5 rounded" title="Source: SOW contract batch-type ceiling (no per-workflow SLA in XLSX)">SOW</span>`;
                   if (s === "sla_matrix" || s === "contract")
                     return `<span class="ml-1 text-[7px] font-bold text-Cgreen bg-Cgreen/10 px-0.5 rounded" title="Source: Uploaded customer SLA matrix file">CONTRACT</span>`;
                   if (s === "global_default" || s.startsWith("global") || s === "assumed")
-                    return `<span class="ml-1 text-[7px] font-bold text-Camber bg-Camber/10 px-0.5 rounded" title="No contract SLA found — system default used. Upload BatchSLA_info.xlsx with SLA column or SOW to override.">DEFAULT</span>`;
+                    return `<span class="ml-1 text-[7px] font-bold text-Camber bg-Camber/10 px-0.5 rounded" title="No contract SLA found — system default used. Upload SLA Matrix to override.">DEFAULT</span>`;
+                  if (s && s !== "none")
+                    return `<span class="ml-1 text-[7px] font-bold text-Cmuted bg-Cmuted/10 px-0.5 rounded" title="SLA source: ${_esc(_slaSrc)}">${s.replace(/_/g," ").toUpperCase().slice(0,8)}</span>`;
                   return "";
                 })();
                 const sla       = _slaVal != null

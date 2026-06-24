@@ -490,23 +490,32 @@ _COL_ALIASES = {
     # Batch / workflow name — accept any reasonable naming customers use
     "Batch_Name":       ["batch_name", "workflow", "workflow_name", "batch name",
                          "batch", "batch type", "sub_application", "sub application",
-                         "sub_app", "sub app", "process", "task", "module",
+                         "sub_app", "sub app", "process", "task",
                          "job", "job name", "batch_type"],
     "Schedule":         ["schedule", "cadence", "frequency"],
     "TimeZone":         ["timezone", "time_zone", "tz"],
-    # Expected_SLA: duration/SLA value column — accepts many customer naming styles.
-    # "Expected Run time" (Dole) is a DURATION, same semantic as SLA duration.
-    # Variants with "(2019)" or "(PHT)" suffixes are stripped before matching.
-    "Expected_SLA":     ["expected end time/sla", "expected end timesla",
-                         "expected end time sla", "sla", "expected sla",
+    # Expected_SLA: numeric duration/SLA column — e.g. "1.5", "4h", "90 min"
+    # NOTE: "expected end time/sla" is intentionally NOT here — when a column
+    # holds a CLOCK TIME ("6 am EST", "8:30 pm EST") it belongs in Expected_End_Time,
+    # not Expected_SLA. Including it here caused parse_sla_hours() to get a time
+    # string → return None → fall back to GLOBAL_DEFAULT.
+    "Expected_SLA":     ["expected sla",
                          "sla_hours", "sla hrs", "expected_sla", "sla_limit",
                          "expected run time", "expected runtime",
                          "expected run time (hrs)", "expected run time(hrs)",
-                         "sla (hrs)", "sla(hrs)", "run time sla"],
+                         "sla (hrs)", "sla(hrs)", "run time sla",
+                         "sla duration", "batch sla"],
     # Expected_End_Time: time-of-day DEADLINE — sla_h computed as (deadline - start_time)
-    "Expected_End_Time": ["expected end time", "expected_end_time", "sla deadline",
-                          "batch end time", "target end time", "end time target"],
+    # Accepts "Expected End Time/SLA" — when this column has clock times (not durations),
+    # sla_merger will compute sla_h = _overnight_delta_hours(start, end).
+    "Expected_End_Time": ["expected end time/sla", "expected end timesla",
+                          "expected end time sla", "expected end time",
+                          "expected_end_time", "sla deadline",
+                          "batch end time", "target end time", "end time target",
+                          "sla", "sla time"],
     # First_Job / Last_Job: sentinel job names — handle underscore vs space variants
+    # MUST appear before any generic job_name alias so "First Job_name" maps here,
+    # not to Batch_Name via "job name".
     "First_Job":        ["first job_name", "first job name", "first_job_name",
                          "first_job", "first jobname", "start job", "start_job",
                          "start job name", "first job"],
@@ -553,13 +562,20 @@ def _map_columns(df_columns: list[str]) -> dict[str, str]:
     Uses normalized column names (parenthetical suffixes stripped, lowercased)
     before matching against _COL_ALIASES, enabling Haleon-style columns like
     'Expected End Time/SLA (2019)' and 'Current run time(PHT)' to match correctly.
+
+    Collision guard: once a raw column is claimed by a canonical key, it cannot
+    be claimed again. This prevents "First Job_name" from being swallowed by
+    Batch_Name's "job name" alias after it was already matched by First_Job.
+    Process order respects _COL_ALIASES insertion order (Python 3.7+).
     """
     lower = {_normalize_col_header(c): c for c in df_columns}
     mapping: dict[str, str] = {}
+    claimed: set[str] = set()  # raw column names already assigned to a canonical key
     for canon, aliases in _COL_ALIASES.items():
         for alias in aliases:
-            if alias in lower:
+            if alias in lower and lower[alias] not in claimed:
                 mapping[canon] = lower[alias]
+                claimed.add(lower[alias])
                 break
     return mapping
 
@@ -570,16 +586,37 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
     e.g. start=21:00, end=01:00 → 4.0h  (not -20h)
          start=21:00, end=03:00 → 6.0h
          start=08:30, end=11:50 → 3.33h
-    Accepts pandas Timestamp, datetime.time, or string like '21:00:00' / '01:00'.
+    Accepts pandas Timestamp, datetime.time, or string like '21:00:00' / '01:00' /
+    '6:30 am EST' / '8.30 pm EST' (timezone suffix stripped before parsing).
     Returns None if either value is null or unparseable.
     Sanity cap: delta > 18h is almost certainly a data error, return None.
     """
     import pandas as _pd
+
+    def _clean(v: Any) -> str:
+        """Strip timezone suffix, normalise dot-as-colon, return clean time string."""
+        s = str(v).strip() if v is not None else ""
+        if not s or s.lower() in ("nan", "none", "nat"):
+            return ""
+        # Strip trailing timezone qualifiers: "EST", "CST", "IST", "UTC+5:30", etc.
+        import re as _re
+        s = _re.sub(
+            r'\s+(?:CST|CDT|EST|EDT|PST|PDT|MST|MDT|IST|GMT|UTC[+-]?\d*)\s*$',
+            '', s, flags=_re.IGNORECASE,
+        ).strip()
+        # Strip parenthetical notes like "(next day)"
+        s = _re.sub(r'\s*\([^)]*\)', '', s).strip()
+        # Normalise "8.30 pm" → "8:30 pm" (dot used as colon separator)
+        s = _re.sub(r'^(\d{1,2})\.(\d{2})\s*([AaPp][Mm])', r'\1:\2 \3', s)
+        return s
+
     try:
-        if start_val is None or end_val is None:
+        sc = _clean(start_val)
+        ec = _clean(end_val)
+        if not sc or not ec:
             return None
-        st = _pd.to_datetime(str(start_val), errors="coerce")
-        et = _pd.to_datetime(str(end_val), errors="coerce")
+        st = _pd.to_datetime(sc, errors="coerce")
+        et = _pd.to_datetime(ec, errors="coerce")
         if _pd.isna(st) or _pd.isna(et):
             return None
         st_h = st.hour + st.minute / 60 + st.second / 3600
@@ -587,9 +624,9 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
         delta = et_h - st_h
         if delta < 0:
             delta += 24.0  # overnight crossing
-        # Sanity: >18h delta almost certainly means a data error (e.g. wrong
+        # Sanity: >23h delta almost certainly means a data error (e.g. wrong
         # date paired with wrong time).  Return None so fallback SLA kicks in.
-        if delta > 18.0:
+        if delta > 23.0:
             return None
         return round(delta, 3)
     except Exception:
