@@ -2171,6 +2171,17 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     for r in top_regr[:n]
                 )
 
+            _STOP = {"the","and","for","run","job","load","time","test","prod",
+                     "uat","new","old","sec","secs","daily","weekly","monthly",
+                     "batch","data","report","process","step","main","seq"}
+
+            def _tokset(name):
+                import re as _re
+                base = _re.sub(r"^(?:PROD|TEST|UAT|DEV|STG)_+", "", str(name or "").upper())
+                norm = _re.sub(r"[^A-Z0-9_]+", "_", base)
+                toks = [t for t in norm.split("_") if t]
+                return {t for t in toks if len(t) >= 3 and t.lower() not in _STOP and not t.isdigit()}
+
             if regr_pct >= 30 or (bp_net < 0 and abs(bp_net) > 1800):
                 add("critical", "⏱️",
                     f"Batch runtime: {bp_regr}/{bp_comp} jobs regressed "
@@ -2201,15 +2212,6 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             # ── Cross-layer correlation: systemic vs isolated ──
             # If the same subsystem token regresses in BOTH a batch job and a
             # UI transaction, the root cause is shared infra/DB, not isolated.
-            _STOP = {"the","and","for","run","job","load","time","test","prod",
-                     "uat","new","old","sec","secs","daily","weekly","monthly",
-                     "batch","data","report","process","step","main","seq"}
-
-            def _tokset(name):
-                import re as _re
-                toks = _re.split(r"[^A-Za-z0-9]+", str(name).upper())
-                return {t for t in toks if len(t) >= 3 and t.lower() not in _STOP and not t.isdigit()}
-
             batch_regr_tokens = {}
             for r in top_regr:
                 for t in _tokset(r.get("job")):
@@ -2238,6 +2240,129 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                                    "(shared tables, connection pool, storage). Validate the fix "
                                    "improves both batch runtime and UI response together.",
                     root_cause="SYSTEMIC_PERFORMANCE_REGRESSION")
+
+            # ── Ctrl-M production bridge: project release regressions onto prod SLA ──
+            ctrlm_jobs = []
+            for j in top_jobs:
+                j_name = j.get("Job_Name") or j.get("job_name") or ""
+                tokens = _tokset(j_name)
+                if not j_name or not tokens:
+                    continue
+                ctrlm_jobs.append({
+                    "job": j,
+                    "job_name": str(j_name),
+                    "tokens": tokens,
+                    "peak_hrs": _f(j.get("peak_hrs")),
+                })
+
+            regr_jobs = []
+            for r in top_regr:
+                r_name = r.get("job") or r.get("transaction") or ""
+                tokens = _tokset(r_name)
+                if not r_name or not tokens:
+                    continue
+                regr_jobs.append({
+                    "reg": r,
+                    "job_name": str(r_name),
+                    "tokens": tokens,
+                    "delta_pct": _f(r.get("delta_pct")),
+                })
+
+            matched_impacts = []
+            for reg_job in regr_jobs:
+                best = None
+                best_overlap = 0.0
+                best_shared = 0
+                for prod_job in ctrlm_jobs:
+                    shared = reg_job["tokens"] & prod_job["tokens"]
+                    overlap = (len(shared) / max(1, len(reg_job["tokens"]))) if shared else 0.0
+                    if overlap < 0.5:
+                        continue
+                    if overlap > best_overlap or (overlap == best_overlap and len(shared) > best_shared):
+                        best = prod_job
+                        best_overlap = overlap
+                        best_shared = len(shared)
+                if not best:
+                    continue
+
+                j_name = best["job_name"]
+                prod_peak_hrs = _f(best["peak_hrs"])
+                release_delta_pct = _f(reg_job["delta_pct"])
+                prod_sla_hrs = _f(get_sla_hrs(detect_batch_type(j_name), sla_ceil))
+                if prod_sla_hrs <= 0:
+                    continue
+                prod_buffer_pct = ((prod_sla_hrs - prod_peak_hrs) / prod_sla_hrs) * 100
+                projected_hrs_after_release = prod_peak_hrs * (1 + release_delta_pct / 100)
+                projected_buffer_pct = ((prod_sla_hrs - projected_hrs_after_release) / prod_sla_hrs) * 100
+                matched_impacts.append({
+                    "job_name": j_name,
+                    "shared_tokens": best_shared,
+                    "overlap": best_overlap,
+                    "release_delta_pct": release_delta_pct,
+                    "prod_peak_hrs": prod_peak_hrs,
+                    "prod_sla_hrs": prod_sla_hrs,
+                    "prod_buffer_pct": prod_buffer_pct,
+                    "projected_hrs_after_release": projected_hrs_after_release,
+                    "projected_buffer_pct": projected_buffer_pct,
+                })
+
+            if matched_impacts:
+                matched_impacts.sort(key=lambda m: (m["projected_buffer_pct"], -m["projected_hrs_after_release"]))
+                worst_impact = matched_impacts[0]
+                match_count = _i(len(matched_impacts))
+                matched_jobs = ", ".join(m["job_name"] for m in matched_impacts[:3])
+                common_kwargs = dict(
+                    source="benchmark",
+                    evidence_class="derived",
+                    impact="New-release runtime regression will directly impact production SLA compliance if deployed as-is",
+                    root_cause="RELEASE_SLA_IMPACT",
+                )
+                if worst_impact["projected_buffer_pct"] < 0:
+                    add(
+                        "critical",
+                        "🚨",
+                        f"Release regression will breach production SLA: {worst_impact['job_name']} "
+                        f"projects {worst_impact['projected_hrs_after_release']:.2f}h vs "
+                        f"{worst_impact['prod_sla_hrs']:.1f}h SLA (current prod: "
+                        f"{worst_impact['prod_peak_hrs']:.2f}h, new release: "
+                        f"{worst_impact['projected_hrs_after_release']:.2f}h, regression: "
+                        f"+{worst_impact['release_delta_pct']:.0f}%)",
+                        f"Matched {_i(match_count)}/{_i(len(regr_jobs))} regressed job(s) to Ctrl-M "
+                        f"production jobs. Worst-case projected buffer {worst_impact['projected_buffer_pct']:.0f}% "
+                        f"across {matched_jobs}.",
+                        recommendation="Block deployment until the regressed batch job is tuned back under the "
+                                       "production SLA ceiling or the release is rolled back.",
+                        **common_kwargs,
+                    )
+                elif worst_impact["projected_buffer_pct"] < 15:
+                    add(
+                        "warning",
+                        "⚠️",
+                        f"Release regression shrinks production SLA buffer: {worst_impact['job_name']} "
+                        f"buffer drops from {worst_impact['prod_buffer_pct']:.0f}% → "
+                        f"{worst_impact['projected_buffer_pct']:.0f}% after new release",
+                        f"Matched {_i(match_count)}/{_i(len(regr_jobs))} regressed job(s) to Ctrl-M "
+                        f"production jobs. Projected runtime {_fmt_hrs(worst_impact['projected_hrs_after_release'])}h "
+                        f"vs {_fmt_hrs(worst_impact['prod_sla_hrs'])}h SLA; current prod peak "
+                        f"{worst_impact['prod_peak_hrs']:.2f}h; regression +{worst_impact['release_delta_pct']:.0f}%.",
+                        recommendation="Treat the release as conditional. Re-test the regressed production-mapped "
+                                       "job and recover SLA buffer above the 15% at-risk threshold before go-live.",
+                        **common_kwargs,
+                    )
+                else:
+                    add(
+                        "ok",
+                        "✅",
+                        "Regressed jobs have adequate production SLA buffer",
+                        f"Matched {_i(match_count)}/{_i(len(regr_jobs))} regressed job(s) to Ctrl-M "
+                        f"production jobs. Tightest case: {worst_impact['job_name']} projects "
+                        f"{_fmt_hrs(worst_impact['projected_hrs_after_release'])}h vs "
+                        f"{_fmt_hrs(worst_impact['prod_sla_hrs'])}h SLA; buffer stays "
+                        f"{worst_impact['projected_buffer_pct']:.0f}% after release.",
+                        recommendation="Proceed with release monitoring focused on the matched jobs, but no "
+                                       "production SLA breach is projected from current runtime regressions.",
+                        **common_kwargs,
+                    )
 
     # ═══════════════════════════════════════════════════════════════
     # SOW COMPARE RULES

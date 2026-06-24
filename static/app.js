@@ -7951,13 +7951,14 @@ window.peOpenFinding = function(idx) {
     pill.innerHTML = `<span style="color:${sevCol}">${sev}</span>${f.source ? ` · ${SRC_LBL[f.source] || f.source.toUpperCase()}` : ""}`;
   }
   title.textContent = f.text || "Finding detail";
+  const impactText = _findingImpactText(f) || "—";
   const _row = (label, val, col) => val ? `<div class="rounded-lg p-3" style="background:#0d1526;border:1px solid #213060">
     <div class="text-[8px] uppercase tracking-widest font-bold mb-1" style="color:${col || "#6b7db3"}">${label}</div>
     <div class="text-[11px] leading-relaxed" style="color:#e2e8f0">${_esc(val)}</div>
   </div>` : "";
   body.innerHTML = [
     _row("⚡ Root Cause",         (f.root_cause || "").replace(/_/g, " ") || "—",  "#f59e0b"),
-    _row("📋 Business Impact",    f.impact || "—",                                  "#3b82f6"),
+    _row("📋 Business Impact",    impactText,                                       "#3b82f6"),
     _row("→ Recommended Action",  f.recommendation || "—",                          "#10d96e"),
     f.sub    ? _row("Context",  f.sub,    "#8899bb") : "",
     f.evidence ? _row("Evidence", f.evidence, "#6b7db3") : "",
@@ -7975,6 +7976,17 @@ window.peCloseDrawer = function() {
   const bd = document.getElementById("pe-finding-backdrop");
   if (bd) bd.classList.add("hidden");
 };
+
+function _findingImpactText(f) {
+  const impact = (f?.impact || "").trim();
+  if (impact) return impact;
+  switch ((f?.root_cause || "").trim().toUpperCase()) {
+    case "RELEASE_SLA_IMPACT":
+      return "New-release runtime regression will directly impact production SLA compliance if deployed as-is";
+    default:
+      return "";
+  }
+}
 
 function renderFindingsAsRootCause(findings) {
   const tbody = document.getElementById("findings-tbody");
@@ -7994,7 +8006,7 @@ function renderFindingsAsRootCause(findings) {
     const sev = g.crit > 0 ? "CRITICAL" : g.warn > 0 ? "WARNING" : g.ok > 0 ? "OK" : "INFO";
     const col = sev === "CRITICAL" ? "#f43f5e" : sev === "WARNING" ? "#f59e0b" : sev === "OK" ? "#10d96e" : "#6b7db3";
     const sample = g.examples[0] || {};
-    const action = _short(sample.recommendation || sample.impact || "—", 70);
+    const action = _short(sample.recommendation || _findingImpactText(sample) || "—", 70);
     const pills  = [...g.sources].map(s =>
       `<span class="text-[8px] px-1.5 py-0.5 rounded" style="background:${hexA(THEME.muted,.1)};color:${THEME.muted}">${s}</span>`
     ).join(" ");
@@ -8674,7 +8686,7 @@ function _applyFindingsSort() {
   tbody.innerHTML = sorted.map((f, idx) => {
     const sv      = SV_ST[f.level] || SV_ST.info;
     const rc      = (f.root_cause || "").replace(/_/g, " ").trim() || "—";
-    const impact  = (f.impact || "").trim() || "—";
+    const impact  = _findingImpactText(f) || "—";
     const action  = _short((f.recommendation || "").trim() || "—", 50);
     const ecColor = EC_CLR[f.evidence_class] || THEME.muted;
     const ecLbl   = EC_LBL[f.evidence_class] || "—";
@@ -8689,7 +8701,7 @@ function _applyFindingsSort() {
     const showEcBadge = !visSet.has("evidence");
     const isCrit = f.level === "critical";
     // Hover tooltip: sub + impact (hidden from row, shown on hover)
-    const hoverTip = [f.sub, f.impact].filter(Boolean).join(" · ");
+    const hoverTip = [f.sub, _findingImpactText(f)].filter(Boolean).join(" · ");
     // Global idx for drawer
     const gIdx = (window._lastRealFindings || []).indexOf(f);
 
@@ -16413,6 +16425,10 @@ async function clearSessionData() {
     });
 
     // ── 2. Wipe browser-side app state ───────────────────────────────────
+    if (window.appData && typeof window.appData === "object") {
+      window.appData.benchmarkBatch = null;
+      window.appData.benchmarkUI = null;
+    }
     window.appData        = {};
     window._lastFindings  = [];
     window._execCache     = null;
@@ -16510,6 +16526,16 @@ async function clearSessionData() {
     document.getElementById("bench-empty")?.classList.remove("hidden");
     ["bench-result-section","bench-loaded"
     ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
+    ["bench-batch-badge","bench-ui-badge","bench-batch-status","bench-ui-status"
+    ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
+    const benchDot = document.getElementById("bench-intake-dot");
+    if (benchDot) benchDot.className = "w-2 h-2 rounded-full bg-Cmuted/40 shrink-0";
+    const benchCorr = document.getElementById("bench-correlation-panel");
+    if (benchCorr) benchCorr.innerHTML = "";
+    const benchBanner = document.getElementById("bench-summary-banner");
+    if (benchBanner) benchBanner.className = "hidden rounded-xl border border-Cborder bg-Ccard2/60 px-5 py-3";
+    const benchSummary = document.getElementById("bench-summary-text");
+    if (benchSummary) benchSummary.textContent = "";
 
     // ── 10. SOW tab ───────────────────────────────────────────────────────
     ["sow-dfu-baseline","sow-dfu-actual","sow-sku-baseline","sow-sku-actual",
