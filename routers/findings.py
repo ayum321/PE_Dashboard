@@ -1998,7 +1998,12 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         # Batch files (kind="batch") have rows=[] by design — skip entirely.
         rows = bench.get("rows") or []
         ui_rows = [r for r in rows if bench_kind != "batch"]   # empty for batch files
-        bench_summ = bench.get("summary") or {}
+        # NOTE: BenchmarkResponse.summary is a free-text string, NOT a dict.
+        # Only treat it as a counts dict if a caller actually passed one (defensive:
+        # a bare string here previously crashed the whole engine with
+        # "'str' object has no attribute 'get'").
+        _bs = bench.get("summary")
+        bench_summ = _bs if isinstance(_bs, dict) else {}
         total_tx   = _i(bench_summ.get("total", bench.get("total_transactions", len(ui_rows))))
         threshold  = _f(bench.get("threshold_pct", 10.0))
         sla_breaches_b = _i(bench.get("sla_breaches", 0))

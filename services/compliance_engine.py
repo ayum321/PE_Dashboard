@@ -26,7 +26,85 @@ Ceiling map resolution (canonical, highest → lowest priority):
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# ── Generic name-matching primitives ─────────────────────────────────────────
+# Customer SLA workbooks name workflows differently from the Ctrl-M
+# Sub_Application that actually runs them.  e.g. the contract row "BY WEEKLY"
+# governs the Ctrl-M sub-app "TEST_2025_WEEKLY".  Neither string is a substring
+# of the other, but they share the cadence token WEEKLY.  Pure substring
+# matching silently misses every such pair and the job is judged against a
+# wrong default ceiling — manufacturing false breaches.  We resolve the pairing
+# on shared *signal tokens* instead, which is naming-convention agnostic and
+# therefore works across the whole customer base.
+
+# Environment / connector tokens that carry no cadence identity.
+_NOISE_TOKENS: Set[str] = {
+    "TEST", "PROD", "PRD", "UAT", "DEV", "STG", "STAGE", "STAGING", "QA",
+    "SIT", "PERF", "PRE", "PREPROD", "NONPROD", "TRAIN", "DR",
+    "BY", "THE", "OF", "AND", "FOR", "TO", "ON", "AT", "A", "AN",
+}
+
+# Day-of-week variants → canonical 3-letter token so "TUESDAY" matches "TUE".
+_DAY_CANON: Dict[str, str] = {
+    "MONDAY": "MON", "MON": "MON",
+    "TUESDAY": "TUE", "TUES": "TUE", "TUE": "TUE", "TUS": "TUE",
+    "WEDNESDAY": "WED", "WED": "WED", "WEDS": "WED",
+    "THURSDAY": "THU", "THURS": "THU", "THUR": "THU", "THU": "THU", "THURSDY": "THU",
+    "FRIDAY": "FRI", "FRI": "FRI",
+    "SATURDAY": "SAT", "SAT": "SAT",
+    "SUNDAY": "SUN", "SUN": "SUN",
+}
+
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")  # 1900-2099 — calendar years, not identity
+
+
+def _signal_tokens(name: str) -> Set[str]:
+    """Tokenise a workflow / sub-application name into cadence-identity tokens.
+
+    Splits on every non-alphanumeric boundary, upper-cases, then drops
+    environment prefixes, connector words and calendar years, and canonicalises
+    day-of-week names.  What remains is the set of tokens that actually identify
+    *which* batch this is (DAILY, WEEKLY, MONTHLY, SEQ, OUTBOUND, TUE, …).
+    """
+    out: Set[str] = set()
+    for tok in re.split(r"[^A-Za-z0-9]+", str(name).upper()):
+        if not tok or len(tok) <= 1:
+            continue
+        if _YEAR_RE.match(tok):
+            continue
+        if tok in _NOISE_TOKENS:
+            continue
+        out.add(_DAY_CANON.get(tok, tok))
+    return out
+
+
+def _token_match_score(sa_tok: Set[str], pat_tok: Set[str]) -> float:
+    """Score how well an XLSX workflow pattern governs a sub-application.
+
+    Dual-containment: sub-app coverage (how much of the sub-app's identity the
+    pattern explains) plus pattern coverage (how fully the pattern is itself
+    matched).  Summing both rewards the *most specific* governing contract:
+    "BY SEQ WEEKLY" beats "BY WEEKLY" for the sub-app "…_SEQ_WEEKLY" because it
+    covers more of the sub-app, while "BY WEEKLY" beats "BY SEQ WEEKLY" for a
+    plain "…_WEEKLY" sub-app because the pattern itself is fully matched.
+    Day-list noise in the pattern ("BY SEQ DAILY (MON,TUE,…)") cannot drown the
+    cadence tokens, unlike a raw Jaccard.  Range 0.0 – 2.0.
+    """
+    inter = sa_tok & pat_tok
+    if not inter:
+        return 0.0
+    sa_cov  = len(inter) / len(sa_tok)  if sa_tok  else 0.0
+    pat_cov = len(inter) / len(pat_tok) if pat_tok else 0.0
+    return sa_cov + pat_cov
+
+
+# Minimum dual-containment score to accept a token match. 0.5 demands at least
+# one side meaningfully covered (e.g. one shared token that is the sub-app's
+# whole identity, or a strong partial overlap) before overriding the
+# schedule-type default — weak incidental overlaps fall through safely.
+_TOKEN_MATCH_THRESHOLD = 0.5
 
 
 def compute_window_compliance(
@@ -240,8 +318,8 @@ def build_ceiling_map(
         }
         return defaults.get(stype, getattr(pe_config_ref, "SLA_DAILY_HRS", 6.0))
 
-    # Step 1 — build XLSX pattern → sla_hrs lookup
-    _xlsx_pairs: List[tuple] = []   # [(pattern_upper, sla_hrs)]
+    # Step 1 — build XLSX pattern → sla_hrs lookup (with precomputed signal tokens)
+    _xlsx_pairs: List[Tuple[str, float, Set[str]]] = []   # [(pattern_upper, sla_hrs, tokens)]
     if xlsx_config:
         for wf in xlsx_config.get("workflows") or []:
             # Accept all known field-name variants from parse_batch_sla_xlsx()
@@ -252,14 +330,37 @@ def build_ceiling_map(
                 wf.get("sla_hours") or wf.get("window_sla_hrs") or wf.get("sla_hrs") or 0
             )
             if pat and sla_h > 0:
-                _xlsx_pairs.append((pat, sla_h))
+                _xlsx_pairs.append((pat, sla_h, _signal_tokens(pat)))
 
     ceiling_map: Dict[str, float] = {}
     for sa in sub_applications:
         sa_upper = str(sa).upper()
-        # Priority 1: fuzzy substring match against XLSX workflow patterns
+        sa_tok   = _signal_tokens(sa_upper)
+
+        # Priority 1: token-overlap match against XLSX workflow patterns.
+        # Picks the most specific governing contract via dual-containment score,
+        # so cadence names ("BY WEEKLY") resolve to their Ctrl-M sub-app
+        # ("TEST_2025_WEEKLY") even when neither is a substring of the other.
+        best_score = 0.0
+        best_sla: Optional[float] = None
+        for pat, sla_h, pat_tok in _xlsx_pairs:
+            score = _token_match_score(sa_tok, pat_tok)
+            if score < _TOKEN_MATCH_THRESHOLD:
+                continue
+            # Higher score wins; tie-break on the tighter (smaller) contract
+            # window — the binding SLA when two contracts match equally well.
+            if best_sla is None or score > best_score or (score == best_score and sla_h < best_sla):
+                best_score = score
+                best_sla   = sla_h
+
+        if best_sla is not None:
+            ceiling_map[sa_upper] = best_sla
+            continue
+
+        # Priority 1b: legacy substring match — covers opaque codes with no
+        # clean alpha tokens (e.g. "EDI852") where tokenisation can't help.
         matched: Optional[float] = None
-        for pat, sla_h in _xlsx_pairs:
+        for pat, sla_h, _pt in _xlsx_pairs:
             if pat in sa_upper or sa_upper in pat:
                 matched = sla_h
                 break
