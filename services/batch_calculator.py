@@ -2682,9 +2682,12 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # RULE 6 — include Sub_Application so findings engine can use composite key
     # sla_hrs / sla_source must be included so the frontend can show per-job ceiling
     # is_utility must be included so the frontend utility-exclusion toggle works
+    # baseline_quality + sla_path needed so frontend can show STRONG/MODERATE/WEAK
+    # confidence tier and correctly label the "BASELINE" column in adaptive mode
     _job_cols = [c for c in ["Sub_Application", "Job_Name", "peak_hrs", "avg_hrs",
-                              "total_hrs", "sla_hrs", "sla_source",
+                              "total_hrs", "sla_hrs", "sla_source", "sla_path",
                               "buffer_pct", "sla_used_pct", "buffer_status",
+                              "baseline_quality", "is_high_variance",
                               "fail_count", "is_utility", "utility_reason"]
                  if c in top_jobs_df.columns]
 
@@ -2738,6 +2741,11 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "gauge_buffer_source": "window_elapsed" if m.get("elapsed_available") else "fleet_peak_fallback",
             # Auto-detected schedule mode — lets sla_matrix default to same mode
             "sla_detected_mode":  m.get("sla_detected_mode", "DAILY"),
+            # SLA resolution path: "A" = contracted XLSX, "C" = adaptive per-job baseline
+            # Frontend uses this to correctly label the compliance view
+            "sla_path": (top_jobs_df["sla_path"].iloc[0]
+                         if "sla_path" in top_jobs_df.columns and not top_jobs_df.empty
+                         else "C"),
         },
         # ── Separated analysis layers ────────────────────────────
         "elapsed_window": {

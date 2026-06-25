@@ -3433,22 +3433,30 @@ function renderTopBreachesTable(rows, kpis) {
   const hasSlaMatrix = (window.appData?.batch?.sla_source?.type === "sla_matrix")
     || rows.some(r => r.sla_source === "sla_matrix" || r.sla_contract_type === "JOB_SPECIFIC");
 
-  // Dynamically add/remove SLA column header
+  // Dynamically add/remove SLA / BASELINE column header
+  // — In adaptive mode: show "BASELINE" column with per-job adaptive ceiling
+  // — In SLA matrix mode: show "SLA" column with contracted ceiling
   const slaColTh = document.getElementById("top-jobs-th-sla");
+  const showBaselineCol = isAdaptiveMode;  // always show in adaptive mode so the comparison is visible
+  const showSlaCol      = hasSlaMatrix && !isAdaptiveMode;
   const tableHead = tbody?.closest("table")?.querySelector("thead tr");
   if (tableHead) {
-    if (hasSlaMatrix && !slaColTh) {
-      // Insert after Avg col (3rd th, index 2)
+    if ((showSlaCol || showBaselineCol) && !slaColTh) {
       const avgTh = tableHead.querySelectorAll("th")[2];
       if (avgTh) {
         const th = document.createElement("th");
         th.id = "top-jobs-th-sla";
         th.className = "px-2 py-2 font-semibold uppercase tracking-wider text-[10px] text-center";
-        th.title = "SLA ceiling per job — 📋 = from SLA matrix contract · ⚙ = schedule default";
-        th.textContent = "SLA";
+        if (showBaselineCol) {
+          th.title = "Adaptive baseline — computed from this job's own 28-day run history (p95/p90/peak·0.9 by sample count)";
+          th.textContent = "BASELINE";
+        } else {
+          th.title = "SLA ceiling per job — 📋 = from SLA matrix contract · ⚙ = schedule default";
+          th.textContent = "SLA";
+        }
         avgTh.insertAdjacentElement("afterend", th);
       }
-    } else if (!hasSlaMatrix && slaColTh) {
+    } else if (!showSlaCol && !showBaselineCol && slaColTh) {
       slaColTh.remove();
     }
   }
@@ -3486,8 +3494,11 @@ function renderTopBreachesTable(rows, kpis) {
       bufPct < 30       ? "text-Camber" : "text-Cgreen";
 
     const jobSla = row.sla_hrs ?? slaCeiling;
-    const slaBarPct   = Math.min(100, slaUsed ?? (peak / jobSla * 100));
-    const slaBarColor = slaBarPct >= 100 ? "#f43f5e" : slaBarPct >= 80 ? "#f59e0b" : "#3b82f6";
+    // In adaptive mode: show actual overflow % (e.g., "112%") not capped 100%
+    // so severity is visible (a job at 130% of baseline is worse than one at 101%)
+    const rawSlaBarPct = slaUsed ?? (peak / jobSla * 100);
+    const slaBarPct    = isAdaptiveMode ? rawSlaBarPct : Math.min(100, rawSlaBarPct);
+    const slaBarColor  = rawSlaBarPct >= 100 ? "#f43f5e" : rawSlaBarPct >= 80 ? "#f59e0b" : "#3b82f6";
 
     // Buffer display: show buffer% when available, else compute from peak/SLA
     let bufferDisplay = "—";
@@ -3498,26 +3509,50 @@ function renderTopBreachesTable(rows, kpis) {
       bufferDisplay = (computedBuf >= 0 ? "+" : "") + computedBuf.toFixed(1) + "%";
     }
 
-    // SLA ceiling column — shows per-job contract source when matrix loaded
+    // BASELINE column (adaptive mode) — shows per-job adaptive ceiling with quality badge
+    // SLA column (matrix mode) — shows contracted ceiling with source icon
     const rowSlaSource = row.sla_source || (hasSlaMatrix ? "default" : null);
     const isJobMatrix  = rowSlaSource === "sla_matrix" || row.sla_contract_type === "JOB_SPECIFIC";
-    const slaSourceIcon = isJobMatrix ? "📋" : "⚙";
-    const slaSourceTitle = isJobMatrix
-      ? `Contract SLA: ${jobSla.toFixed(1)}h (from SLA matrix — job-specific)`
-      : `Default SLA: ${jobSla.toFixed(1)}h (schedule default)`;
-    const slaCtx = `title="${slaSourceTitle}"`;
-    const slaCeilCell = hasSlaMatrix
-      ? `<td class="px-2 py-2 text-center text-[10px]" title="${slaSourceTitle}">
+    const slaCtx = `title="Adaptive baseline: ${jobSla.toFixed(2)}h — peak compared against this"`;
+
+    // Baseline quality badge (STRONG/MODERATE/WEAK) from PATH C computation
+    const bq = (row.baseline_quality || "").toUpperCase();
+    const bqColor = bq === "STRONG" ? "text-Cgreen" : bq === "MODERATE" ? "text-Cblue" : bq === "WEAK" ? "text-Camber" : "text-Cmuted";
+    const bqTitle = {
+      STRONG: "STRONG — ≥14 historical runs, p95 baseline",
+      MODERATE: "MODERATE — 7–13 runs, p90 baseline",
+      WEAK: "WEAK — 3–6 runs, conservative estimate",
+      CONTRACTED: "CONTRACTED — from SLA matrix",
+      INSUFFICIENT: "INSUFFICIENT — <3 runs, excluded from compliance"
+    }[bq] || bq;
+
+    let slaCeilCell = "";
+    if (showBaselineCol) {
+      // Adaptive baseline column: show per-job ceiling and quality confidence
+      slaCeilCell = `<td class="px-2 py-2 text-center text-[10px]" title="${bqTitle}">
+           <span class="font-mono text-Cwhite">${jobSla.toFixed(2)}h</span>
+           ${bq && bq !== "CONTRACTED" ? `<span class="ml-1 ${bqColor} opacity-70">${bq.slice(0,3)}</span>` : ""}
+         </td>`;
+    } else if (showSlaCol) {
+      const slaSourceIcon = isJobMatrix ? "📋" : "⚙";
+      const slaSourceTitle = isJobMatrix
+        ? `Contract SLA: ${jobSla.toFixed(1)}h (from SLA matrix — job-specific)`
+        : `Default SLA: ${jobSla.toFixed(1)}h (schedule default)`;
+      slaCeilCell = `<td class="px-2 py-2 text-center text-[10px]" title="${slaSourceTitle}">
            <span class="${isJobMatrix ? "text-Cgreen" : "text-Camber opacity-60"}">${slaSourceIcon}</span>
            <span class="ml-1 font-mono text-Cmuted">${jobSla.toFixed(1)}h</span>
-         </td>`
-      : "";
+         </td>`;
+    }
+
+    // SLA USED bar: in adaptive mode cap bar display at 200% max width for very large overflows
+    const barWidth = isAdaptiveMode ? Math.min(100, (rawSlaBarPct / 2)).toFixed(0) : Math.min(100, rawSlaBarPct).toFixed(0);
+    const barTitle = isAdaptiveMode ? `${rawSlaBarPct.toFixed(0)}% of adaptive baseline` : `${Math.min(100, rawSlaBarPct).toFixed(0)}% of SLA`;
 
     tr.innerHTML = `
       <td class="px-3 py-2 font-mono text-Cwhite text-[11px]">
         <div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}">${escapeHtml(jobName)}</div>
       </td>
-      <td class="px-3 py-2 text-right font-mono font-bold text-Cwhite text-[11px]" ${slaCtx}>
+      <td class="px-3 py-2 text-right font-mono font-bold text-Cwhite text-[11px]" ${isAdaptiveMode ? slaCtx : ""}>
         ${peak.toFixed(2)}h
         ${peak > jobSla ? `<span class="ml-1 text-[9px] font-bold" style="color:${isAdaptiveMode ? THEME.amber : THEME.red}">${isAdaptiveMode ? "▲BASE" : "▲SLA"}</span>` : ""}
       </td>
@@ -3527,11 +3562,11 @@ function renderTopBreachesTable(rows, kpis) {
         ${bufferDisplay}
       </td>
       <td class="px-3 py-2 text-right text-[11px]">
-        <div class="flex items-center justify-end gap-1.5">
+        <div class="flex items-center justify-end gap-1.5" title="${barTitle}">
           <div class="pe-progress-track w-14">
-            <div class="pe-progress-fill" style="width:${slaBarPct.toFixed(0)}%;background:${slaBarColor}"></div>
+            <div class="pe-progress-fill" style="width:${barWidth}%;background:${slaBarColor}"></div>
           </div>
-          <span class="font-mono text-[10px] text-Cmuted">${slaBarPct.toFixed(0)}%</span>
+          <span class="font-mono text-[10px] text-Cmuted">${rawSlaBarPct.toFixed(0)}%</span>
         </div>
       </td>
       <td class="px-3 py-2">
@@ -3563,7 +3598,14 @@ function renderTopBreachesTable(rows, kpis) {
     summaryDiv.id = "top-jobs-sla-summary";
     summaryDiv.className = "flex items-center gap-3 flex-wrap text-[9px] text-Cmuted mt-2 px-1";
     const parts = [];
-    parts.push(`SLA ceiling: <span class="font-bold text-Cwhite">${slaCeiling.toFixed(1)}h</span>`);
+    if (isAdaptiveMode) {
+      // In adaptive mode the per-job baseline is what matters — showing global cap
+      // as "SLA ceiling" confuses users who see e.g. 0.63h peak vs 6.0h cap
+      parts.push(`Mode: <span class="font-bold text-Camber">adaptive per-job baselines</span>`);
+      parts.push(`Global cap: <span class="font-bold text-Cwhite">${slaCeiling.toFixed(1)}h</span>`);
+    } else {
+      parts.push(`SLA ceiling: <span class="font-bold text-Cwhite">${slaCeiling.toFixed(1)}h</span>`);
+    }
     if (dataSpanDays > 0) parts.push(`Observation: <span class="font-bold text-Cwhite">${dataSpanDays}d</span>`);
     if (isFallback && displayRows.length > 0) {
       const avgBuf = displayRows.reduce((s, r) => {
