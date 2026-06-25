@@ -1334,15 +1334,18 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
     ]
     projectable.sort(key=lambda x: (x["new_secs"] - x["old_secs"]), reverse=True)
 
-    # "comparable" = genuine two-sided pairs only (both runtimes > 0). Excluding
-    # dropped/new_only keeps net_delta and regression_rate honest. Suspect collapses
-    # are excluded from net_delta (their "savings" are not real) but kept visible.
-    comparable = [r for r in rows if r["baseline_sec"] > 0 and r["current_sec"] > 0]
-    net_delta  = sum(
-        r["baseline_sec"] - r["current_sec"]
-        for r in comparable
-        if not _is_collapse(r["baseline_sec"], r["current_sec"])
-    )
+    # "comparable" = credible two-sided pairs: both runtimes > 0 AND not a suspect
+    # collapse. Suspect collapses (e.g. 1800s → 0.5s) are two-sided but not genuine
+    # comparisons, so they get their own bucket and are excluded here. This makes the
+    # buckets reconcile cleanly — comparable == regressions + improvements + no_change
+    # — and keeps net_delta and regression_rate honest (no phantom "savings" in the
+    # denominator). dropped/new_only are one-sided and already excluded by both>0.
+    comparable = [
+        r for r in rows
+        if r["baseline_sec"] > 0 and r["current_sec"] > 0
+        and not _is_collapse(r["baseline_sec"], r["current_sec"])
+    ]
+    net_delta  = sum(r["baseline_sec"] - r["current_sec"] for r in comparable)
     regression_rate = round(len(regressions) / len(comparable) * 100, 1) if comparable else 0.0
 
     return {

@@ -208,16 +208,18 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     cov.batch    = has_batch
     cov.resource = has_resource
 
-    # sla_loaded = True only when a CUSTOMER SLA file has been uploaded.
-    # Config-derived defaults (from _config_store early enrichment above) do NOT count
-    # as "customer SLA loaded" — those are system defaults, not approved contract values.
+    # sla_loaded = True only when a CUSTOMER SLA file has been uploaded and applied.
+    # The authoritative signal is the batch KPIs' own sla_source.type: batch_calculator
+    # sets it to "sla_matrix" / "batch_sla_xlsx" ONLY when the batch was actually
+    # re-solved against an uploaded customer SLA file (config-derived defaults stay
+    # "default"). We key off that alone rather than also requiring req.sla_ceilings —
+    # the frontend sends sla_ceilings as a redundant convenience field, and depending
+    # on it caused findings to falsely read "Assumed / matrix not uploaded" whenever
+    # that field was missing even though batch compliance was using customer values.
     _bk_sla_type = (bk.get("sla_source") or {}).get("type", "default") if bk else "default"
     sla_loaded = (
-        bool(req.sla_ceilings)                                  # explicit ceiling from upload
-        and _bk_sla_type in ("sla_matrix", "batch_sla_xlsx")   # batch was also re-solved against customer SLA
-    ) or (
-        # sla_matrix request field is populated (SLA Matrix tab was uploaded)
-        bool(req.sla_matrix)
+        _bk_sla_type in ("sla_matrix", "batch_sla_xlsx")   # batch resolved against customer SLA file
+        or bool(req.sla_matrix)                            # SLA Matrix intelligence tab uploaded
     )
 
     def add(level, icon, text, sub="", source="", confidence=100,
@@ -2184,6 +2186,14 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             bp_impr    = _i(bp.get("improvements", 0))
             bp_net     = _f(bp.get("net_delta_secs", 0))
             top_regr   = bp.get("top_regressions") or []
+            # Prefer substantial-baseline regressions (real elapsed-time additions) for
+            # the offenders list. top_regressions is ranked by % delta, so it surfaces
+            # near-zero-baseline noise (e.g. 3s→375s = +12400%) that is NOT a meaningful
+            # production risk and reads as alarming nonsense to a PE reviewer. The
+            # projectable list is baseline-floored and ranked by absolute seconds added.
+            _proj_regr = bp.get("projectable_regressions") or []
+            _offenders = _proj_regr if _proj_regr else top_regr
+            _offender_label = "Top regressions by time added" if _proj_regr else "Top regressions"
             regr_pct   = (bp_regr / bp_comp * 100) if bp_comp > 0 else 0.0
             # net_delta_secs: positive = time saved, negative = time added (per build convention)
             net_dir    = "saved" if bp_net >= 0 else "added"
@@ -2193,7 +2203,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     f"{(r.get('job') or '?')} "
                     f"{_f(r.get('old_secs')):.0f}s→{_f(r.get('new_secs')):.0f}s "
                     f"({_f(r.get('delta_pct')):+.0f}%)"
-                    for r in top_regr[:n]
+                    for r in _offenders[:n]
                 )
 
             _STOP = {"the","and","for","run","job","load","time","test","prod",
@@ -2211,7 +2221,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 add("critical", "⏱️",
                     f"Batch runtime: {bp_regr}/{bp_comp} jobs regressed "
                     f"({regr_pct:.0f}%) · net {abs(bp_net):.0f}s {net_dir}/run",
-                    f"Top regressions — {_bp_offenders()}",
+                    f"{_offender_label} — {_bp_offenders()}",
                     source="benchmark", evidence_class="measured",
                     impact="New release lengthens batch runtimes — risks SLA breach and "
                            "downstream batch-window overrun in production.",
@@ -2222,7 +2232,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 add("warning", "⏱️",
                     f"Batch runtime: {bp_regr}/{bp_comp} job(s) regressed "
                     f"· {bp_impr} improved · net {abs(bp_net):.0f}s {net_dir}/run",
-                    (f"Top regressions — {_bp_offenders()}" if top_regr
+                    (f"{_offender_label} — {_bp_offenders()}" if _offenders
                      else "Some jobs run slower on the new release — review before sign-off."),
                     source="benchmark", evidence_class="measured",
                     root_cause="BATCH_RUNTIME_REGRESSION")

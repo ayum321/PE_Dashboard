@@ -200,7 +200,13 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     else:
         sla_score = derive_sla_score(compliance, sla_breaches, sla_total)
 
-    oshs = dict(calc_oshs(batch_score, resource_score, sla_score))
+    # Resource evidence is "available" only when at least one server reported a
+    # real (non-zero) utilization metric. An image-only DOCX or a missing upload
+    # parses to all-zero metrics — that is "no data", not "zero pressure", so the
+    # resource pillar is dropped from OSHS rather than scored a misleading 100.
+    resource_available = len(known) > 0
+    oshs = dict(calc_oshs(batch_score, resource_score, sla_score,
+                          resource_available=resource_available))
 
     # ── Findings penalty (critical 3pts · warning 0.5pts, capped 15) ──
     findings_list = body.findings or []
@@ -253,17 +259,23 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
             "disk": round(_f(s.get("disk_used_max")), 1),
         })
 
-    # ── Waterfall data (BUG-M1 fix — targets are 100% of max weight, not 75%) ──
+    # ── Waterfall data ──────────────────────────────────────────────────────
+    # Targets are each pillar's actual weight × 100, read straight from the OSHS
+    # components so the bars can never disagree with the scoring math. When the
+    # resource pillar is dropped (no measured evidence) its weight is 0 and the
+    # batch/SLA targets widen to their re-normalised weights automatically.
+    _wc = oshs["components"]
     waterfall = {
-        "batch_contribution":    oshs["components"]["batch"]["contribution"],
-        "resource_contribution": oshs["components"]["resource"]["contribution"],
-        "sla_contribution":      oshs["components"]["sla"]["contribution"],
+        "batch_contribution":    _wc["batch"]["contribution"],
+        "resource_contribution": _wc["resource"]["contribution"],
+        "sla_contribution":      _wc["sla"]["contribution"],
         "total":                 oshs["score"],
-        "batch_target":    40.0,   # max weight = visual ceiling for batch bar
-        "resource_target": 35.0,   # max weight = visual ceiling for resource bar
-        "sla_target":      25.0,   # max weight = visual ceiling for SLA bar
+        "batch_target":    round(_wc["batch"]["weight"] * 100.0, 1),
+        "resource_target": round(_wc["resource"]["weight"] * 100.0, 1),
+        "sla_target":      round(_wc["sla"]["weight"] * 100.0, 1),
         "max_score":       100.0,  # anchor — JS must use this, never hardcode
         "findings_penalty": oshs.get("findings_penalty", 0.0),
+        "resource_available": oshs.get("resource_available", True),
     }
 
     # ── KPI strip ────────────────────────────────────────────────
@@ -274,6 +286,7 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         "oshs_score":          oshs["score"],
         "oshs_grade":          oshs["grade"],
         "oshs_label":          oshs["label"],
+        "resource_available":  resource_available,
         "batch_rate":          round(compliance, 1),
         "window_compliance":   round(window_comp, 1) if window_comp else None,
         "window_breach_days":  window_breach_days,

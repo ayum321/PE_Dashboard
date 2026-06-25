@@ -4264,11 +4264,26 @@ function renderResourceKpis(k) {
   _scoreDecomp = k.score_decomposition || null;
 
   const t = k.thresholds || RESOURCE_THRESHOLDS;
+  // No server reported parseable metrics (e.g. image-only DOCX). Rings must show
+  // "—/No data" rather than a misleading 0% "OK" green that reads as measured-idle.
+  const noResData = (k.known_servers ?? 0) === 0;
 
   // Animated SVG ring gauges (r=29, circ=2πr=182.21)
   const animateRing = (svgId, val, ok, warn, statusId, ringLabelId, invertColor = false) => {
     const svg = document.getElementById(svgId);
     if (!svg) return;
+    if (noResData) {
+      const ring = svg.querySelector(".rk-ring");
+      if (ring) { ring.setAttribute("stroke", THEME.muted); ring.style.strokeDashoffset = (2 * Math.PI * 29).toFixed(2); }
+      const rlEl = document.getElementById(ringLabelId);
+      if (rlEl) { rlEl.textContent = "—"; rlEl.style.color = THEME.muted; }
+      const statusEl = document.getElementById(statusId);
+      if (statusEl) {
+        statusEl.innerHTML = `<span style="color:${THEME.muted};background:${hexA(THEME.muted,.12)};border:1px solid ${hexA(THEME.muted,.3)}" class="rk-status-pill">NO DATA</span>`;
+        statusEl.classList.remove("hidden");
+      }
+      return;
+    }
     const v = Math.max(0, Math.min(100, Number(val) || 0));
     const ring = svg.querySelector(".rk-ring");
     const tick = svg.querySelector(".rk-tick");
@@ -4329,6 +4344,7 @@ function renderResourceKpis(k) {
   const setMetric = (id, val, ok, warn) => {
     const el = document.getElementById(id);
     if (!el) return;
+    if (noResData) { el.textContent = "—"; el.style.color = THEME.muted; return; }
     el.textContent = `${(val ?? 0).toFixed(1)}%`;
     el.style.color = metricColor(val ?? 0, ok, warn);
   };
@@ -4343,13 +4359,17 @@ function renderResourceKpis(k) {
     cpuDetailEl.textContent = parts.length ? parts.join(" · ") : `Warn ≥${t.cpu_warn}%`;
   }
   // Memory: show Available % (Azure native) — convert from backend's used %
-  const avgMemAvail = k.avg_mem != null ? 100 - k.avg_mem : null;
+  const avgMemAvail = (!noResData && k.avg_mem != null) ? 100 - k.avg_mem : null;
   const memAvailEl = document.getElementById("rk-mem");
-  if (memAvailEl && avgMemAvail != null) {
-    memAvailEl.textContent = `${avgMemAvail.toFixed(1)}%`;
-    // Invert color: low available = red
-    memAvailEl.style.color = avgMemAvail <= (100 - t.mem_warn) ? THEME.red
-      : avgMemAvail <= (100 - t.mem_ok) ? THEME.amber : THEME.green;
+  if (memAvailEl) {
+    if (noResData) {
+      memAvailEl.textContent = "—"; memAvailEl.style.color = THEME.muted;
+    } else if (avgMemAvail != null) {
+      memAvailEl.textContent = `${avgMemAvail.toFixed(1)}%`;
+      // Invert color: low available = red
+      memAvailEl.style.color = avgMemAvail <= (100 - t.mem_warn) ? THEME.red
+        : avgMemAvail <= (100 - t.mem_ok) ? THEME.amber : THEME.green;
+    }
   }
 
   // Memory fleet detail line: Avg · Min · N/M below floor
@@ -4401,6 +4421,7 @@ function renderResourceKpis(k) {
     const c = k.n_critical ?? 0;
     const w = k.n_warning  ?? 0;
     const o = k.n_healthy  ?? 0;
+    const u = k.image_only ?? 0;   // servers with no parseable metrics (image-only)
     const a = k.n_agg_trap ?? 0;
     const d = k.n_dual_pressure ?? 0;
     const badge = (n, label, color, pulse) =>
@@ -4409,6 +4430,7 @@ function renderResourceKpis(k) {
         <span class="text-[7px] font-bold uppercase tracking-wider" style="color:${color}">${label}</span>
       </div>`;
     let html = badge(c, 'Crit', THEME.red, c > 0) + badge(w, 'Warn', THEME.amber, false) + badge(o, 'OK', THEME.green, false);
+    if (u > 0) html += badge(u, 'No Data', THEME.muted, false);   // image-only — status not assessable
     if (a > 0) html += `<div class="flex flex-col items-center gap-1"><span class="inline-flex items-center justify-center rounded-lg font-extrabold" style="width:28px;height:28px;font-size:.9rem;color:${THEME.cyan};background:${hexA(THEME.cyan,.1)};border:1px solid ${hexA(THEME.cyan,.3)}" title="${a} aggregation artifact(s)">${a}</span><span class="text-[7px] font-bold uppercase tracking-wider" style="color:${THEME.cyan}">🔬</span></div>`;
     if (d > 0) html += `<div class="flex flex-col items-center gap-1"><span class="inline-flex items-center justify-center rounded-lg font-extrabold" style="width:28px;height:28px;font-size:.9rem;color:${THEME.red};background:${hexA(THEME.red,.1)};border:1px solid ${hexA(THEME.red,.3)}" title="${d} dual pressure">${d}</span><span class="text-[7px] font-bold uppercase tracking-wider" style="color:${THEME.red}">⚡</span></div>`;
     badgesEl.innerHTML = html;
@@ -4418,21 +4440,26 @@ function renderResourceKpis(k) {
   const dotsEl = document.getElementById("rk-health-dots");
   if (dotsEl) {
     const c = k.n_critical ?? 0, w = k.n_warning ?? 0, o = k.n_healthy ?? 0;
+    const scored = c + w + o;
     let dots = '';
     if (c > 0) dots += `<span class="w-2 h-2 rounded-full status-dot-red animate-pulse"></span>`;
     if (w > 0) dots += `<span class="w-2 h-2 rounded-full status-dot-amber"></span>`;
-    dots += `<span class="w-2 h-2 rounded-full status-dot-green"></span>`;
+    // Only show the green "all clear" dot when at least one server was actually scored.
+    if (scored === 0) dots += `<span class="w-2 h-2 rounded-full" style="background:${THEME.muted}"></span>`;
+    else              dots += `<span class="w-2 h-2 rounded-full status-dot-green"></span>`;
     dotsEl.innerHTML = dots;
   }
 
   // Health verdict pill
   const verdictEl = document.getElementById("rk-health-verdict");
   if (verdictEl) {
-    const c = k.n_critical ?? 0, w = k.n_warning ?? 0;
+    const c = k.n_critical ?? 0, w = k.n_warning ?? 0, o = k.n_healthy ?? 0;
+    const scored = c + w + o;
     let label, color;
-    if (c > 0)      { label = "CRITICAL"; color = THEME.red; }
-    else if (w > 0) { label = "WARNING"; color = THEME.amber; }
-    else            { label = "HEALTHY"; color = THEME.green; }
+    if (scored === 0) { label = "NO DATA"; color = THEME.muted; }   // no server scored — never claim HEALTHY
+    else if (c > 0)   { label = "CRITICAL"; color = THEME.red; }
+    else if (w > 0)   { label = "WARNING"; color = THEME.amber; }
+    else              { label = "HEALTHY"; color = THEME.green; }
     verdictEl.innerHTML = `<span class="text-[8px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md" style="color:${color};background:${hexA(color,.12)};border:1px solid ${hexA(color,.3)}">${label}</span>`;
     verdictEl.classList.remove("hidden");
   }

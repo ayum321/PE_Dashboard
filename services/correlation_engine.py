@@ -125,23 +125,50 @@ def calc_oshs(
     batch_score: float,
     resource_score: float,
     sla_score: float,
+    resource_available: bool = True,
 ) -> dict[str, Any]:
     """
     OSHS = batch_score × 0.40 + sla_score × 0.35 + resource_score × 0.25
 
-    Each component is 0–100. Returns {score, grade, label, components}.
+    Each component is 0–100. When resource evidence is missing or unusable
+    (e.g. an image-only utilization report with no parseable metrics, or no
+    resource upload at all), the resource pillar is dropped and its 0.25 weight
+    is re-normalised across batch and SLA. This keeps the score grounded in
+    measured evidence instead of awarding a fabricated 100 for "no pressure"
+    when the truth is "no data". Returns {score, grade, label,
+    resource_available, components}.
     """
-    oshs = batch_score * 0.40 + sla_score * 0.35 + resource_score * 0.25
+    W_BATCH, W_SLA, W_RES = 0.40, 0.35, 0.25
+    if resource_available:
+        w_batch, w_sla, w_res = W_BATCH, W_SLA, W_RES
+        oshs = batch_score * w_batch + sla_score * w_sla + resource_score * w_res
+        res_component = {
+            "score": round(resource_score, 1),
+            "weight": round(w_res, 4),
+            "contribution": round(resource_score * w_res, 1),
+            "available": True,
+        }
+    else:
+        _avail = W_BATCH + W_SLA            # 0.75 — re-normalise over measured pillars
+        w_batch, w_sla, w_res = W_BATCH / _avail, W_SLA / _avail, 0.0
+        oshs = batch_score * w_batch + sla_score * w_sla
+        res_component = {
+            "score": None,                 # not measured — never fabricate a value
+            "weight": 0.0,
+            "contribution": 0.0,
+            "available": False,
+        }
     oshs = min(100.0, max(0.0, oshs))
     letter, label = _grade(oshs)
     return {
         "score": round(oshs, 1),
         "grade": letter,
         "label": label,
+        "resource_available": resource_available,
         "components": {
-            "batch":    {"score": round(batch_score, 1),    "weight": 0.40, "contribution": round(batch_score * 0.40, 1)},
-            "sla":      {"score": round(sla_score, 1),      "weight": 0.35, "contribution": round(sla_score * 0.35, 1)},
-            "resource": {"score": round(resource_score, 1), "weight": 0.25, "contribution": round(resource_score * 0.25, 1)},
+            "batch":    {"score": round(batch_score, 1), "weight": round(w_batch, 4), "contribution": round(batch_score * w_batch, 1)},
+            "sla":      {"score": round(sla_score, 1),   "weight": round(w_sla, 4),   "contribution": round(sla_score * w_sla, 1)},
+            "resource": res_component,
         },
     }
 
@@ -265,6 +292,7 @@ def generate_narrative(
     grade  = oshs.get("grade", "?")
     label  = oshs.get("label", "")
     comps  = oshs.get("components", {})
+    res_avail = oshs.get("resource_available", True)
 
     # ── 1. COVERAGE — what we measured ───────────────────────────
     total_runs  = batch_kpis.get("total_runs", 0) or 0
@@ -275,12 +303,18 @@ def generate_narrative(
     b_score = round(_f(comps.get("batch",    {}).get("contribution", 0)), 1)
     r_score = round(_f(comps.get("resource", {}).get("contribution", 0)), 1)
     s_score = round(_f(comps.get("sla",      {}).get("contribution", 0)), 1)
+    _split = (
+        f"Score split — batch {b_score}pts · resource {r_score}pts · SLA {s_score}pts."
+        if res_avail else
+        f"Score split — batch {b_score}pts · SLA {s_score}pts "
+        f"(resource pillar excluded — no measured utilization; weight re-normalised over batch + SLA)."
+    )
     coverage_text = (
         f"Overall posture: OSHS {score:.1f}/100 → Grade {grade} ({label}). "
         f"Analysed {total_runs} batch runs across {total_jobs} jobs, "
         f"{srv_count} server(s), {sub_count} sub-application(s). "
         f"SLA ceiling {sla_ceiling}h. "
-        f"Score split — batch {b_score}pts · resource {r_score}pts · SLA {s_score}pts."
+        f"{_split}"
     )
 
     # ── 2. RISK — what's at stake ─────────────────────────────────
@@ -322,7 +356,11 @@ def generate_narrative(
         cause_text = (
             f"{zero_dur} job(s) show zero-second duration — pre-execution termination "
             f"(Ctrl-M timeout/dependency config, NOT resource pressure). "
+        )
+        cause_text += (
             f"Average fleet CPU {_avg_metric(servers, 'cpu_used'):.0f}%."
+            if res_avail else
+            "Resource utilization evidence not available — saturation not assessed."
         )
     else:
         high_crs = sorted(
@@ -331,17 +369,29 @@ def generate_narrative(
         )
         if high_crs:
             top = high_crs[0]
-            cause_text = (
-                f"Cascade risk in '{top['sub_app']}' (CRS {top['crs']:.2f}, "
-                f"{top['job_count']} jobs). "
+            _cpu_clause = (
                 f"Fleet CPU avg {_avg_metric(servers, 'cpu_used'):.0f}% — "
                 f"no critical saturation detected."
+                if res_avail else
+                "Resource utilization evidence not available — saturation not assessed."
+            )
+            cause_text = (
+                f"Cascade risk in '{top['sub_app']}' (CRS {top['crs']:.2f}, "
+                f"{top['job_count']} jobs). {_cpu_clause}"
             )
         else:
             cause_text = (
-                f"No critical resource saturation (fleet CPU avg "
-                f"{_avg_metric(servers, 'cpu_used'):.0f}%). "
-                f"Compliance issues driven by schedule/volume, not hardware pressure."
+                (
+                    f"No critical resource saturation (fleet CPU avg "
+                    f"{_avg_metric(servers, 'cpu_used'):.0f}%). "
+                    f"Compliance issues driven by schedule/volume, not hardware pressure."
+                )
+                if res_avail else
+                (
+                    "Resource utilization evidence not available — hardware pressure "
+                    "could not be evaluated. Compliance issues attributable to "
+                    "schedule/volume."
+                )
             )
 
     # ── 4. IMPACT — business effect ──────────────────────────────
