@@ -1249,7 +1249,7 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
     the schedule-aware default.
     """
     from services import config_store as _cs
-    from services.sla_engine import resolve_sla, classify_schedule, SlaContract
+    from services.sla_engine import resolve_sla, classify_schedule, SlaContract, ResolvedSla
 
     global_ceiling = _detect_sla_ceiling(df)
     result: Dict[str, Any] = {
@@ -1426,6 +1426,29 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
                   if "Sub_Application" in df.columns else ["Job_Name"])
     name_col   = "Sub_Application" if "Sub_Application" in df.columns else "Job_Name"
 
+    # ── Canonical sub-app provenance (single source of truth) ────────────────
+    # resolve_sla() matches individual JOB names; customer SLA workbooks usually
+    # carry WORKFLOW-tier contracts ("BY WEEKLY" governs every job under
+    # TEST_2025_WEEKLY). build_ceiling_map_detailed() is the SAME matcher the
+    # compliance math uses, so we consult it to honestly label a job whose
+    # sub-app is governed by the customer matrix as "sla_matrix" instead of
+    # mislabelling it "assumed" — and to give it the exact contracted ceiling
+    # (6h daily, 7.5h seq, 9h weekly …) rather than a flat global default.
+    _detail_ceiling: Dict[str, Dict[str, Any]] = {}
+    if "Sub_Application" in df.columns:
+        try:
+            from services import compliance_engine as _ce_prov
+            from services import config_store as _cs_prov
+            _detail_ceiling = _ce_prov.build_ceiling_map_detailed(
+                sub_applications=[
+                    str(s) for s in df["Sub_Application"].dropna().unique()
+                ],
+                xlsx_config=_cs_prov.get("_batch_sla_xlsx") or None,
+                pe_config_ref=pe_config,
+            )
+        except Exception:
+            _detail_ceiling = {}
+
     for _, row in df[group_cols].drop_duplicates().iterrows():
         job_name = str(row.get("Job_Name", ""))
         sub_app  = str(row.get("Sub_Application", "")) if "Sub_Application" in row else ""
@@ -1439,6 +1462,30 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
             alt = resolve_sla(job_name, job_name, contracts, result["ceilings"])
             if alt.source != "assumed":
                 resolved = alt
+
+        # ── Workflow-tier override ───────────────────────────────────────────
+        # When per-job matching produced no customer match (assumed/default) but
+        # the sub-app IS governed by a customer SLA-matrix contract, adopt that
+        # contract's ceiling + provenance. This is the binding workflow-tier SLA,
+        # so labelling it "assumed" would be misleading.
+        _det = _detail_ceiling.get(sub_app.upper()) if sub_app else None
+        if (_det and _det.get("source") == "sla_matrix"
+                and resolved.source not in ("sla_matrix", "customer_fallback")):
+            _mt    = _det.get("match_type", "token")
+            _score = float(_det.get("score") or 0.0)
+            _conf  = "high" if (_mt == "token" and _score >= 1.0) else "medium"
+            _pat   = _det.get("matched_pattern") or sub_app
+            resolved = ResolvedSla(
+                sla_hrs=float(_det["sla_hrs"]),
+                sla_model="WINDOW",
+                source="sla_matrix",
+                source_detail=(
+                    f"Resolved from customer SLA matrix workflow '{_pat}' "
+                    f"(workflow tier · {_mt} match)"
+                ),
+                schedule_type=resolved.schedule_type or _det.get("schedule_type", "UNKNOWN"),
+                confidence=_conf,
+            )
 
         key = f"{sub_app}|{job_name}" if sub_app else job_name
         _mc = resolved.matched_contract

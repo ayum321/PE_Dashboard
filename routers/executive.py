@@ -171,46 +171,47 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
                                             ceiling_map=_ceiling_map)
 
     # ── OSHS computation ─────────────────────────────────────────
-    batch_score    = derive_batch_score(compliance, fail_rate)
+    # Window compliance = the contracted daily batch-window on-time rate. It is
+    # the binding "did the batch finish inside its window" signal and MUST flow
+    # into the score — a batch can satisfy every per-job SLA yet blow its nightly
+    # window, so neither the batch nor the SLA component may read 100 while
+    # windows breach. (Reads window_compliance_pct, falls back to the legacy key.)
+    _win_comp_raw = bk.get("window_compliance_pct")
+    if _win_comp_raw is None:
+        _win_comp_raw = bk.get("batch_window_compliance")
+    _win_comp = _f(_win_comp_raw) if _win_comp_raw is not None else None
+
+    # Batch component: job-level health floored by window compliance, so a batch
+    # that breaches its windows can never present a clean 100.
+    _eff_batch_compliance = compliance if _win_comp is None else min(compliance, _win_comp)
+    batch_score    = derive_batch_score(_eff_batch_compliance, fail_rate)
     resource_score = derive_resource_score(avg_cpu, avg_mem, avg_disk)
 
-    # BUG-M5 fix: use explicit None sentinel — never seed window-level compliance
-    # from job-level compliance. They measure different things.
+    # SLA component: contractual window compliance. Prefer the SLA Matrix tab's
+    # number; fall back to the batch window compliance; only use job-level
+    # compliance as a last resort when no window data exists at all.
     sla_compliance_raw = sla_data.get("compliance_pct")   # None = SLA Matrix not run
     sla_breaches   = int(sla_data.get("breaching_runs") or bk.get("jobs_breach") or 0)
     sla_total      = int(sla_data.get("total_runs") or total_jobs or 1)
+    if sla_compliance_raw is None:
+        sla_compliance_raw = _win_comp        # batch window compliance
     if sla_compliance_raw is not None:
         sla_score = derive_sla_score(float(sla_compliance_raw), sla_breaches, sla_total)
     else:
-        # SLA Matrix not run — derive from batch job-level compliance as best-effort
         sla_score = derive_sla_score(compliance, sla_breaches, sla_total)
 
-    oshs = calc_oshs(batch_score, resource_score, sla_score)
+    oshs = dict(calc_oshs(batch_score, resource_score, sla_score))
 
-    # BUG-W1 fix: apply findings penalty to OSHS after computation.
-    # Critical findings each penalise 3pts; warnings 0.5pts. Cap at 15pts total.
+    # ── Findings penalty (critical 3pts · warning 0.5pts, capped 15) ──
     findings_list = body.findings or []
     _crit_f = [f for f in findings_list if str(f.get("level", "")).lower() == "critical"]
     _warn_f = [f for f in findings_list if str(f.get("level", "")).lower() == "warning"]
     findings_penalty = round(min(15.0, len(_crit_f) * 3.0 + len(_warn_f) * 0.5), 1)
-    if findings_penalty > 0:
-        _adj_score = max(0.0, oshs["score"] - findings_penalty)
-        oshs = dict(oshs)
-        oshs["score"]             = round(_adj_score, 1)
-        oshs["findings_penalty"]  = findings_penalty
-        # Re-derive grade from adjusted score
-        if _adj_score >= 90:   oshs["grade"] = "A+"
-        elif _adj_score >= 80: oshs["grade"] = "A"
-        elif _adj_score >= 70: oshs["grade"] = "B"
-        elif _adj_score >= 60: oshs["grade"] = "C"
-        elif _adj_score >= 50: oshs["grade"] = "D"
-        else:                  oshs["grade"] = "F"
-    else:
-        oshs = dict(oshs)
-        oshs["findings_penalty"] = 0.0
+    oshs["score"]            = round(max(0.0, oshs["score"] - findings_penalty), 1)
+    oshs["findings_penalty"] = findings_penalty
 
-    # Patch F — blend findings_penalty_score (from /api/generate-findings) into OSHS
-    # at 20% weight so executive grade stays in sync with findings engine grade.
+    # Patch F — blend the findings-engine penalty_score at 20% so the executive
+    # badge tracks the PE Findings grade rather than drifting from it.
     try:
         from services import session_cache as _sc_exec
         _fp_score = _sc_exec.ac_get("findings_penalty_score")
@@ -219,16 +220,28 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
             oshs["score"] = round(oshs["score"] * 0.80 + _fp * 0.20, 1)
             oshs["findings_blended"] = True
             oshs["findings_score"]   = round(_fp, 1)
-            # Re-derive grade after blend
-            _bs = oshs["score"]
-            if _bs >= 90:   oshs["grade"] = "A+"
-            elif _bs >= 80: oshs["grade"] = "A"
-            elif _bs >= 70: oshs["grade"] = "B"
-            elif _bs >= 60: oshs["grade"] = "C"
-            elif _bs >= 50: oshs["grade"] = "D"
-            else:           oshs["grade"] = "F"
     except Exception:
         pass
+
+    # ── Release-blocking hard floor (single source of truth: pe_config grades) ──
+    # The headline badge must never contradict the Go-Live Gate. Unresolved
+    # critical findings or sub-95% window compliance block sign-off, so the OSHS
+    # grade/label can never read APPROVED (A/B) regardless of the numeric score.
+    # Capping the score (not just the label) keeps the ring colour consistent
+    # with the verdict.
+    from services.pe_config import score_to_grade as _s2g
+    _floor_reason = None
+    if len(_crit_f) > 0:
+        _floor_reason = (f"{len(_crit_f)} unresolved critical finding(s)")
+    elif _win_comp is not None and _win_comp < 95.0:
+        _floor_reason = (f"window compliance {_win_comp:.0f}% below 95%")
+    if _floor_reason is not None and oshs["score"] > 70.0:
+        oshs["score"] = 70.0   # top of the CONDITIONAL HOLD band — never APPROVED
+        oshs["floor_applied"] = _floor_reason
+
+    _letter, _label = _s2g(oshs["score"])
+    oshs["grade"] = _letter
+    oshs["label"] = _label
 
     # ── Server Heatmap data ──────────────────────────────────────
     server_heatmap = []

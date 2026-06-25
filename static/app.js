@@ -1993,7 +1993,7 @@ function renderBatchReview(data) {
     if (slaSrcEl && slaSrc) {
       const slaType = slaSrc.type || "default";
       const ms = slaSrc.match_stats;
-      if (slaType === "sla_matrix") {
+      if (_isCustomerSlaType(slaType)) {
         const matchInfo = ms?.total_jobs > 0
           ? ` · ${ms.sla_matrix}/${ms.total_jobs} jobs matched`
           : "";
@@ -2150,6 +2150,15 @@ function _renderBatchBenchmarkXref() {
 
 
 // ── SLA source annotations on charts ──────────────────────────
+// A customer-sourced SLA type is any tier resolved from an uploaded customer
+// file — both the BatchSLA XLSX zone ("batch_sla_xlsx") and the full SLA
+// intelligence run ("sla_matrix"). Treating only "sla_matrix" as real caused
+// the false "no customer SLA matrix — indicative only" banner (and amber
+// "System Default" chips) to persist after a BatchSLA XLSX upload.
+function _isCustomerSlaType(t) {
+  return t === "sla_matrix" || t === "batch_sla_xlsx";
+}
+
 function renderBatchSlaSourceTags(sla, kpis) {
   const tag1 = document.getElementById("chart-sla-source-tag");
   const tag2 = document.getElementById("chart-window-source-tag");
@@ -2162,7 +2171,7 @@ function renderBatchSlaSourceTags(sla, kpis) {
   const bannerDetail = document.getElementById("sla-baseline-detail");
 
   if (sla) {
-    const isMatrix = sla.type === "sla_matrix";
+    const isMatrix = _isCustomerSlaType(sla.type);
     // For the banner, always use live pe_defaults (fresh from server) in default
     // mode so a stale cached sla.daily_hrs never shows wrong values.
     const pd = window.appData?.batch?.pe_defaults || {};
@@ -2598,7 +2607,7 @@ function renderBatchCoverageStrip(dc) {
 
   // SLA source quality from sla_source metadata
   const batchSla = (window.appData.batch || {}).sla_source || {};
-  const slaStatus = batchSla.type === "sla_matrix" ? "customer" :
+  const slaStatus = _isCustomerSlaType(batchSla.type) ? "customer" :
                     batchSla.type === "customer_fallback" ? "partial" : "default";
   badge("cov-sla", "SLA Source", slaStatus);
 
@@ -3529,7 +3538,7 @@ function renderTopBreachesTable(rows, kpis) {
   wrap?.classList.remove("hidden");
 
   // Detect if any job has a real SLA matrix contract — drives dynamic column
-  const hasSlaMatrix = (window.appData?.batch?.sla_source?.type === "sla_matrix")
+  const hasSlaMatrix = _isCustomerSlaType(window.appData?.batch?.sla_source?.type)
     || rows.some(r => r.sla_source === "sla_matrix" || r.sla_contract_type === "JOB_SPECIFIC");
 
   // Dynamically add/remove SLA / BASELINE column header
@@ -7515,7 +7524,7 @@ function _buildSlaComparison() {
   runtimeDeltas.sort((a, b) => a.buffer_pct - b.buffer_pct);
 
   // ── Summary ──────────────────────────────────────────────────────────────
-  const hasSlaMatrix = !!(window.appData?.batch?.sla_source?.type === "sla_matrix"
+  const hasSlaMatrix = !!(_isCustomerSlaType(window.appData?.batch?.sla_source?.type)
     || slaIntel?.intelligence?.valid_rows > 0);
 
   return {
@@ -10566,7 +10575,7 @@ function _renderExecSignoffStrip(data) {
 
   const sqEl = document.getElementById("exec-sla-quality");
   if (sqEl) {
-    const isMatrix = sla.type === "sla_matrix";
+    const isMatrix = _isCustomerSlaType(sla.type);
     const isAssumed = !sla.type || sla.type === "default" || sla.type === "assumed";
     const slaBlocked = sla.blocked;
     if (isMatrix) {
@@ -16942,7 +16951,7 @@ function _renderSlaIntelligenceDetail(intel) {
   html += '<div class="flex flex-wrap gap-3 mb-3">';
   // Show file-sourced ceilings
   for (const [sched, hrs] of Object.entries(ceil)) {
-    const fromFile = trace.type === "sla_matrix";
+    const fromFile = _isCustomerSlaType(trace.type);
     const srcLabel = fromFile ? "From SLA File" : "Config Assumed";
     const srcColor = fromFile ? "text-Cgreen" : "text-Camber";
     html += `<div class="rounded-lg border border-Cborder bg-Cbg/40 px-3 py-1.5 text-center min-w-[72px]">

@@ -265,6 +265,142 @@ def compute_window_compliance(
     }
 
 
+def build_ceiling_map_detailed(
+    sub_applications: List[str],
+    xlsx_config: Optional[Dict[str, Any]] = None,
+    pe_config_ref=None,
+) -> Dict[str, Dict[str, Any]]:
+    """Build a {sub_app_upper: provenance dict} ceiling map.
+
+    Identical resolution to build_ceiling_map() but returns the *provenance* of
+    every match so callers can label each sub-app honestly (was the ceiling
+    sourced from the customer SLA matrix, or assumed from a schedule default?).
+    build_ceiling_map() is a thin projection of this — both share one matcher,
+    so the per-job provenance panel and the compliance math never diverge.
+
+    Returns
+    -------
+    Dict mapping sub_app (UPPER) → {
+        "sla_hrs":         float,
+        "source":          "sla_matrix" | "default",
+        "match_type":      "token" | "substring" | "schedule_default",
+        "matched_pattern": Optional[str],   # the customer workflow row that won
+        "score":           float,           # dual-containment token score (0 if N/A)
+        "schedule_type":   str,             # classify_schedule(sub_app)
+    }
+    """
+    if pe_config_ref is None:
+        try:
+            from services import pe_config as pe_config_ref  # type: ignore[assignment]
+        except Exception:
+            pe_config_ref = None  # type: ignore[assignment]
+
+    try:
+        from services.sla_engine import classify_schedule as _classify
+    except Exception:
+        _classify = None  # type: ignore[assignment]
+
+    def _sched_type(sub_app: str) -> str:
+        if _classify is None:
+            return "DAILY"
+        try:
+            return _classify(sub_app) or "DAILY"
+        except Exception:
+            return "DAILY"
+
+    # Safe schedule-type → hours lookup
+    def _sched_hrs(stype: str) -> float:
+        defaults: Dict[str, float] = {
+            "DAILY":         getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
+            "WEEKLY":        getattr(pe_config_ref, "SLA_WEEKLY_HRS",  8.0),
+            "TWICE_DAILY":   getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
+            "BIWEEKLY":      getattr(pe_config_ref, "SLA_BIWEEKLY_HRS", 8.0),
+            "MONTHLY":       getattr(pe_config_ref, "SLA_MONTHLY_HRS", 24.0),
+            "SEQUENCING":    getattr(pe_config_ref, "SLA_DAILY_HRS",   3.0),  # shorter window
+        }
+        return defaults.get(stype, getattr(pe_config_ref, "SLA_DAILY_HRS", 6.0))
+
+    # Step 1 — build XLSX pattern → sla_hrs lookup (with precomputed signal tokens)
+    _xlsx_pairs: List[Tuple[str, float, Set[str]]] = []   # [(pattern_upper, sla_hrs, tokens)]
+    if xlsx_config:
+        for wf in xlsx_config.get("workflows") or []:
+            # Accept all known field-name variants from parse_batch_sla_xlsx()
+            pat = str(
+                wf.get("workflow") or wf.get("sub_app_pattern") or ""
+            ).upper().strip()
+            sla_h = float(
+                wf.get("sla_hours") or wf.get("window_sla_hrs") or wf.get("sla_hrs") or 0
+            )
+            if pat and sla_h > 0:
+                _xlsx_pairs.append((pat, sla_h, _signal_tokens(pat)))
+
+    detail_map: Dict[str, Dict[str, Any]] = {}
+    for sa in sub_applications:
+        sa_upper = str(sa).upper()
+        sa_tok   = _signal_tokens(sa_upper)
+        stype    = _sched_type(sa)
+
+        # Priority 1: token-overlap match against XLSX workflow patterns.
+        # Picks the most specific governing contract via dual-containment score,
+        # so cadence names ("BY WEEKLY") resolve to their Ctrl-M sub-app
+        # ("TEST_2025_WEEKLY") even when neither is a substring of the other.
+        best_score = 0.0
+        best_sla: Optional[float] = None
+        best_pat: Optional[str] = None
+        for pat, sla_h, pat_tok in _xlsx_pairs:
+            score = _token_match_score(sa_tok, pat_tok)
+            if score < _TOKEN_MATCH_THRESHOLD:
+                continue
+            # Higher score wins; tie-break on the tighter (smaller) contract
+            # window — the binding SLA when two contracts match equally well.
+            if best_sla is None or score > best_score or (score == best_score and sla_h < best_sla):
+                best_score = score
+                best_sla   = sla_h
+                best_pat   = pat
+
+        if best_sla is not None:
+            detail_map[sa_upper] = {
+                "sla_hrs":         best_sla,
+                "source":          "sla_matrix",
+                "match_type":      "token",
+                "matched_pattern": best_pat,
+                "score":           round(best_score, 3),
+                "schedule_type":   stype,
+            }
+            continue
+
+        # Priority 1b: legacy substring match — covers opaque codes with no
+        # clean alpha tokens (e.g. "EDI852") where tokenisation can't help.
+        matched: Optional[float] = None
+        matched_pat: Optional[str] = None
+        for pat, sla_h, _pt in _xlsx_pairs:
+            if pat in sa_upper or sa_upper in pat:
+                matched = sla_h
+                matched_pat = pat
+                break
+        if matched is not None:
+            detail_map[sa_upper] = {
+                "sla_hrs":         matched,
+                "source":          "sla_matrix",
+                "match_type":      "substring",
+                "matched_pattern": matched_pat,
+                "score":           0.0,
+                "schedule_type":   stype,
+            }
+        else:
+            # Priority 2 / 3: schedule-type default
+            detail_map[sa_upper] = {
+                "sla_hrs":         _sched_hrs(stype),
+                "source":          "default",
+                "match_type":      "schedule_default",
+                "matched_pattern": None,
+                "score":           0.0,
+                "schedule_type":   stype,
+            }
+
+    return detail_map
+
+
 def build_ceiling_map(
     sub_applications: List[str],
     xlsx_config: Optional[Dict[str, Any]] = None,
@@ -295,79 +431,5 @@ def build_ceiling_map(
     -------
     Dict mapping sub_app (UPPER) → contracted SLA hours (float).
     """
-    if pe_config_ref is None:
-        try:
-            from services import pe_config as pe_config_ref  # type: ignore[assignment]
-        except Exception:
-            pe_config_ref = None  # type: ignore[assignment]
-
-    # Safe schedule-type → hours lookup
-    def _sched_hrs(sub_app: str) -> float:
-        try:
-            from services.sla_engine import classify_schedule as _cs
-            stype = _cs(sub_app)
-        except Exception:
-            stype = "DAILY"
-        defaults: Dict[str, float] = {
-            "DAILY":         getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
-            "WEEKLY":        getattr(pe_config_ref, "SLA_WEEKLY_HRS",  8.0),
-            "TWICE_DAILY":   getattr(pe_config_ref, "SLA_DAILY_HRS",   6.0),
-            "BIWEEKLY":      getattr(pe_config_ref, "SLA_BIWEEKLY_HRS", 8.0),
-            "MONTHLY":       getattr(pe_config_ref, "SLA_MONTHLY_HRS", 24.0),
-            "SEQUENCING":    getattr(pe_config_ref, "SLA_DAILY_HRS",   3.0),  # shorter window
-        }
-        return defaults.get(stype, getattr(pe_config_ref, "SLA_DAILY_HRS", 6.0))
-
-    # Step 1 — build XLSX pattern → sla_hrs lookup (with precomputed signal tokens)
-    _xlsx_pairs: List[Tuple[str, float, Set[str]]] = []   # [(pattern_upper, sla_hrs, tokens)]
-    if xlsx_config:
-        for wf in xlsx_config.get("workflows") or []:
-            # Accept all known field-name variants from parse_batch_sla_xlsx()
-            pat = str(
-                wf.get("workflow") or wf.get("sub_app_pattern") or ""
-            ).upper().strip()
-            sla_h = float(
-                wf.get("sla_hours") or wf.get("window_sla_hrs") or wf.get("sla_hrs") or 0
-            )
-            if pat and sla_h > 0:
-                _xlsx_pairs.append((pat, sla_h, _signal_tokens(pat)))
-
-    ceiling_map: Dict[str, float] = {}
-    for sa in sub_applications:
-        sa_upper = str(sa).upper()
-        sa_tok   = _signal_tokens(sa_upper)
-
-        # Priority 1: token-overlap match against XLSX workflow patterns.
-        # Picks the most specific governing contract via dual-containment score,
-        # so cadence names ("BY WEEKLY") resolve to their Ctrl-M sub-app
-        # ("TEST_2025_WEEKLY") even when neither is a substring of the other.
-        best_score = 0.0
-        best_sla: Optional[float] = None
-        for pat, sla_h, pat_tok in _xlsx_pairs:
-            score = _token_match_score(sa_tok, pat_tok)
-            if score < _TOKEN_MATCH_THRESHOLD:
-                continue
-            # Higher score wins; tie-break on the tighter (smaller) contract
-            # window — the binding SLA when two contracts match equally well.
-            if best_sla is None or score > best_score or (score == best_score and sla_h < best_sla):
-                best_score = score
-                best_sla   = sla_h
-
-        if best_sla is not None:
-            ceiling_map[sa_upper] = best_sla
-            continue
-
-        # Priority 1b: legacy substring match — covers opaque codes with no
-        # clean alpha tokens (e.g. "EDI852") where tokenisation can't help.
-        matched: Optional[float] = None
-        for pat, sla_h, _pt in _xlsx_pairs:
-            if pat in sa_upper or sa_upper in pat:
-                matched = sla_h
-                break
-        if matched is not None:
-            ceiling_map[sa_upper] = matched
-        else:
-            # Priority 2 / 3: schedule-type default
-            ceiling_map[sa_upper] = _sched_hrs(sa)
-
-    return ceiling_map
+    detail = build_ceiling_map_detailed(sub_applications, xlsx_config, pe_config_ref)
+    return {sa: d["sla_hrs"] for sa, d in detail.items()}
