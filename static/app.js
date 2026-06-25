@@ -10982,10 +10982,14 @@ function _refreshExecResourceHealth() {
   _renderExecResourceHealth(cache.server_heatmap, cache.kpis);
 }
 
-// ── NEW: Resource Health Summary (replaces raw heatmap in Row 2) ─
+// ── Resource Health Summary — Grafana/Prometheus-style panel ───────────────
+// Shows fleet grade, per-metric arc gauges with role sub-breakdown (APP/DB/SRE),
+// environment segmentation (PROD/TEST/DEV), donut fleet health chart, and a
+// per-server risk table with inline bars. All data from session — no hardcoding.
 function _renderExecResourceHealth(servers, kpis) {
   const el = document.getElementById("exec-resource-health");
   if (!el) return;
+
   if (!servers?.length) {
     el.innerHTML = `<div class="py-6 text-center">
       <div class="text-2xl opacity-30 mb-2">🖥️</div>
@@ -10998,186 +11002,309 @@ function _renderExecResourceHealth(servers, kpis) {
     return;
   }
 
-  const fleetGrade = kpis?.fleet_grade || "—";
-  const gradeColor = fleetGrade === "A" ? "#10d96e" : fleetGrade === "B" ? "#3b82f6"
-                   : fleetGrade === "C" ? "#f59e0b" : "#f43f5e";
-  const total = servers.length;
+  const T = RESOURCE_THRESHOLDS;
+  const fleetGrade  = kpis?.fleet_grade || "—";
+  const gradeColor  = { A: THEME.green, B: THEME.blue, C: THEME.amber, D: "#f97316", F: THEME.red }[fleetGrade] || THEME.muted;
+  const total       = servers.length;
 
-  // ── Observation window: determine data source + duration ──
+  // ── Observation window ────────────────────────────────────────────────────
   const resourceServers = window.appData?.resource?.servers || [];
-  const isAzure = resourceServers.some(s => s.source === "azure_monitor");
-  const dd = window.appData?.deepDive;
-  const ddHours = dd?.hours_back || _deepDiveHoursBack || 0;
-  const ddDaysObs = dd?.baseline?.days_observed || 0;
-  // Deep dive time-series stats (authoritative when ≥15d baseline)
-  const ddVms = _deepDiveData?.vms || {};
+  const isAzure   = resourceServers.some(s => s.source === "azure_monitor");
+  const ddVms     = _deepDiveData?.vms || {};
   const hasDeepDive = Object.keys(ddVms).length > 0;
-  const hasSufficientBaseline = ddDaysObs >= 15;
+  const ddDaysObs = _deepDiveData?.baseline?.days_observed || window.appData?.deepDive?.baseline?.days_observed || 0;
+  const ddHours   = _deepDiveHoursBack || window.appData?.deepDive?.hours_back || 0;
+  const windowDays = ddDaysObs || (ddHours > 0 ? Math.round(ddHours / 24) : 0);
+  const windowLabel = isAzure && hasDeepDive
+    ? (windowDays >= 15 ? `✓ ${windowDays}d baseline` : windowDays > 0 ? `⚠ ${windowDays}d (15d ideal)` : "⚠ Azure snapshot")
+    : isAzure ? "⊘ Azure snapshot — load time-series"
+    : "⊘ Doc upload · point-in-time";
+  const windowColor = (isAzure && hasDeepDive && windowDays >= 15) ? THEME.green
+    : (isAzure && hasDeepDive && windowDays > 0) ? THEME.amber : THEME.muted;
 
-  let dataSourceLabel = "";
-  let dataQualityTag = "";
-  if (isAzure && hasDeepDive) {
-    const daysLabel = ddDaysObs >= 2 ? `${ddDaysObs}d` : ddHours >= 24 ? `${Math.round(ddHours / 24)}d` : `${ddHours}h`;
-    dataSourceLabel = `Azure Monitor · ${daysLabel} window`;
-    if (hasSufficientBaseline) {
-      dataQualityTag = `<div class="text-[7px] font-bold px-1 py-0.5 rounded mt-0.5" style="color:#10d96e;background:rgba(16,217,110,0.1)">✓ ${ddDaysObs}d baseline</div>`;
-    } else if (ddDaysObs >= 2) {
-      dataQualityTag = `<div class="text-[7px] font-bold px-1 py-0.5 rounded mt-0.5" style="color:#f59e0b;background:rgba(245,158,11,0.1)">⚠ ${ddDaysObs}d — 15d recommended</div>`;
-    }
-  } else if (isAzure) {
-    dataSourceLabel = "Azure Monitor · snapshot";
-    dataQualityTag = `<div class="text-[7px] font-bold px-1 py-0.5 rounded mt-0.5" style="color:#f59e0b;background:rgba(245,158,11,0.1)">Load Time-Series for baseline</div>`;
-  } else {
-    dataSourceLabel = "Document upload · point-in-time";
-  }
-
-  // ── Build enriched server metrics: prefer deep dive stats over snapshot ──
+  // ── Enrich: merge exec heatmap with deep-dive stats + resource record ─────
   const enriched = servers.map(s => {
-    const host = s.host || "";
-    // Try to find matching deep dive VM data (by hostname)
-    const ddKey = Object.keys(ddVms).find(k =>
-      k.toLowerCase() === host.toLowerCase() ||
-      k.toLowerCase().startsWith(host.toLowerCase().split(".")[0])
-    );
-    const vmStats = ddKey ? (ddVms[ddKey].stats || {}) : null;
+    const host  = s.host || "";
+    const base  = host.split(".")[0].toLowerCase();
+    const ddKey = Object.keys(ddVms).find(k => k.toLowerCase() === host.toLowerCase() || k.toLowerCase().startsWith(base));
+    const vmSt  = ddKey ? (ddVms[ddKey].stats || {}) : null;
+    const res   = resourceServers.find(r => (r.host || r.label || "").toLowerCase().split(".")[0] === base) || {};
 
-    if (vmStats) {
-      // Use time-series derived stats (P95 for sustained load, max for peak)
-      const cpuSt = vmStats["Percentage CPU"];
-      const memSt = vmStats["Available Memory Percentage"];
-      const diskSt = vmStats["OS Disk Bandwidth Consumed Percentage"];
+    if (vmSt) {
+      const cpuSt  = vmSt["Percentage CPU"]                    || {};
+      const memSt  = vmSt["Available Memory Percentage"]       || {};
+      const diskSt = vmSt["OS Disk Bandwidth Consumed Percentage"] || {};
       return {
         host,
-        cpu:  cpuSt?.p95 ?? cpuSt?.mean ?? s.cpu ?? 0,
-        cpuPeak: cpuSt?.max ?? s.cpu ?? 0,
-        cpuAvg: cpuSt?.mean ?? s.cpu ?? 0,
-        mem:  memSt ? (100 - (memSt.p5 ?? memSt.min ?? 0)) : (s.mem ?? 0),
-        memPeak: memSt ? (100 - (memSt.min ?? 0)) : (s.mem ?? 0),
-        memAvg: memSt ? (100 - (memSt.mean ?? 0)) : (s.mem ?? 0),
-        disk: diskSt?.p95 ?? diskSt?.mean ?? s.disk ?? 0,
-        diskPeak: diskSt?.max ?? s.disk ?? 0,
-        _source: "timeseries",
+        cpu:  cpuSt.p95 ?? cpuSt.mean ?? s.cpu ?? 0,   cpuPeak: cpuSt.max  ?? s.cpu ?? 0,
+        mem:  memSt.p95 != null ? memSt.p95 : (s.mem ?? 0),
+        memPeak: memSt.max != null ? memSt.max : (s.mem ?? 0),
+        disk: diskSt.p95 ?? diskSt.mean ?? s.disk ?? 0, diskPeak: diskSt.max ?? s.disk ?? 0,
+        type: res.type || "APP", env: res.environment || "?", status: res.status || "Healthy",
+        _src: "ts",
       };
     }
     return {
       host,
-      cpu: s.cpu ?? 0, cpuPeak: s.cpu ?? 0, cpuAvg: s.cpu ?? 0,
-      mem: s.mem ?? 0, memPeak: s.mem ?? 0, memAvg: s.mem ?? 0,
+      cpu: s.cpu ?? 0, cpuPeak: s.cpu ?? 0,
+      mem: s.mem ?? 0, memPeak: s.mem ?? 0,
       disk: s.disk ?? 0, diskPeak: s.disk ?? 0,
-      _source: "snapshot",
+      type: res.type || "APP", env: res.environment || "?", status: res.status || "Healthy",
+      _src: "snap",
     };
   });
 
-  const timeseriesCount = enriched.filter(e => e._source === "timeseries").length;
+  const tsCount = enriched.filter(e => e._src === "ts").length;
+  const metricLbl = hasDeepDive ? "P95" : "Avg";
 
-  // Compute per-metric aggregates from enriched data
-  const cpuVals  = enriched.map(s => s.cpu).filter(v => v > 0);
-  const memVals  = enriched.map(s => s.mem).filter(v => v > 0);
-  const diskVals = enriched.map(s => s.disk);
-  const cpuPeaks = enriched.map(s => s.cpuPeak).filter(v => v > 0);
-  const memPeaks = enriched.map(s => s.memPeak).filter(v => v > 0);
-  const diskPeaks = enriched.map(s => s.diskPeak);
-  const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
-  const peak = arr => arr.length ? Math.max(...arr) : 0;
+  // ── Fleet-level aggregates ────────────────────────────────────────────────
+  const _avg  = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+  const _peak = arr => arr.length ? Math.max(...arr) : 0;
+  const avgCpu  = _avg(enriched.map(s => s.cpu)),   peakCpu  = _peak(enriched.map(s => s.cpuPeak));
+  const avgMem  = _avg(enriched.map(s => s.mem)),   peakMem  = _peak(enriched.map(s => s.memPeak));
+  const avgDisk = _avg(enriched.map(s => s.disk)),  peakDisk = _peak(enriched.map(s => s.diskPeak));
 
-  // Use P95 for "avg" (sustained load) and max for "peak"
-  const avgCpu = avg(cpuVals), peakCpu = peak(cpuPeaks);
-  const avgMem = avg(memVals), peakMem = peak(memPeaks);
-  const avgDisk = avg(diskVals), peakDisk = peak(diskPeaks);
-
-  // Metric label changes based on data source
-  const metricLabel = hasDeepDive ? "P95" : "Avg";
-  const peakLabel = hasDeepDive ? "Max" : "Peak";
-
-  const statusFor = (avgV, peakV) => {
-    if (peakV >= RESOURCE_THRESHOLDS.cpu_warn) return { icon: "🔴", label: "CRITICAL", color: "#f43f5e" };
-    if (peakV >= RESOURCE_THRESHOLDS.cpu_ok || avgV >= 60) return { icon: "⚠️", label: "WARNING", color: "#f59e0b" };
-    return { icon: "✅", label: "OK", color: "#10d96e" };
-  };
-  const cpuStatus = statusFor(avgCpu, peakCpu);
-  const memStatus = statusFor(avgMem, peakMem);
-  const diskStatus = statusFor(avgDisk, peakDisk);
-
-  // Risk distribution
-  const bands = { critical: 0, warning: 0, healthy: 0 };
+  // ── Role-grouped averages for sub-breakdown chips ─────────────────────────
+  const byRole = {};
   enriched.forEach(s => {
-    const p = Math.max(s.cpuPeak, s.memPeak, s.diskPeak);
-    if (p >= RESOURCE_THRESHOLDS.cpu_warn) bands.critical++;
-    else if (p >= RESOURCE_THRESHOLDS.cpu_ok) bands.warning++;
-    else bands.healthy++;
+    const r = s.type || "APP";
+    if (!byRole[r]) byRole[r] = { cpu: [], mem: [], disk: [] };
+    byRole[r].cpu.push(s.cpu);
+    byRole[r].mem.push(s.mem);
+    byRole[r].disk.push(s.disk);
+  });
+  const roleAvg = (role, metric) => {
+    const arr = byRole[role]?.[metric];
+    return arr?.length ? _avg(arr) : null;
+  };
+
+  // ── Environment groups ────────────────────────────────────────────────────
+  const byEnv = {};
+  enriched.forEach(s => {
+    const e = s.env || "?";
+    if (!byEnv[e]) byEnv[e] = { total: 0, crit: 0, warn: 0, ok: 0 };
+    byEnv[e].total++;
+    if      (s.status === "Critical") byEnv[e].crit++;
+    else if (s.status === "Warning")  byEnv[e].warn++;
+    else                              byEnv[e].ok++;
   });
 
-  // 3 worst servers by peak metric
-  const worst3 = enriched
-    .map(s => ({ host: s.host, peak: Math.max(s.cpuPeak, s.memPeak, s.diskPeak), cpu: s.cpuPeak, mem: s.memPeak, disk: s.diskPeak }))
-    .sort((a, b) => b.peak - a.peak)
-    .slice(0, 3);
-  const worstMetric = s => s.mem >= s.cpu && s.mem >= s.disk ? "MEM" : s.cpu >= s.disk ? "CPU" : "DISK";
-  const worstVal = s => s.mem >= s.cpu && s.mem >= s.disk ? s.mem : s.cpu >= s.disk ? s.cpu : s.disk;
+  // ── Fleet risk bands ──────────────────────────────────────────────────────
+  const bands = { crit: 0, warn: 0, ok: 0 };
+  enriched.forEach(s => {
+    const p = Math.max(s.cpuPeak, s.memPeak, s.diskPeak);
+    if      (p >= T.cpu_warn) bands.crit++;
+    else if (p >= T.cpu_ok)   bands.warn++;
+    else                      bands.ok++;
+  });
 
+  // ── Colour helpers ────────────────────────────────────────────────────────
+  const _col = (v, ok, warn) => v >= warn ? THEME.red : v >= ok ? THEME.amber : THEME.green;
+  const _lbl = (v, ok, warn) => v >= warn ? "CRITICAL" : v >= ok ? "WARNING" : "OK";
+
+  // ── SVG arc gauge (no external lib) ──────────────────────────────────────
+  const _arc = (pct, col, sz = 46, sw = 5) => {
+    const r = (sz - sw) / 2, c = sz / 2, circ = 2 * Math.PI * r;
+    const d = (Math.min(Math.max(pct, 0), 100) / 100) * circ;
+    return `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" style="transform:rotate(-90deg);display:block;flex-shrink:0">
+      <circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="${sw}"/>
+      <circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="${sw - 1}"
+        stroke-dasharray="${d.toFixed(2)} ${circ.toFixed(2)}" stroke-linecap="round"/>
+    </svg>`;
+  };
+
+  // ── Mini fill bar ─────────────────────────────────────────────────────────
+  const _bar = (v, col, h = "h-1.5") =>
+    `<div class="${h} rounded-full bg-white/[0.06] overflow-hidden">
+       <div class="${h} rounded-full transition-all" style="width:${Math.min(Math.max(v, 0), 100).toFixed(1)}%;background:${col}"></div>
+     </div>`;
+
+  // ── Role sub-breakdown chips ──────────────────────────────────────────────
+  const ROLE_INFO = { APP: { col: THEME.blue, bg: "rgba(59,130,246,0.1)" },
+                      DB:  { col: THEME.amber, bg: "rgba(245,158,11,0.1)" },
+                      SRE: { col: THEME.purple, bg: "rgba(168,85,247,0.1)" } };
+  const _roleChips = (metric) =>
+    ["APP", "DB", "SRE"].map(role => {
+      const v = roleAvg(role, metric);
+      if (v === null) return "";
+      const ri = ROLE_INFO[role] || { col: THEME.muted, bg: "rgba(107,125,179,0.1)" };
+      return `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[8px] font-bold"
+                    style="color:${ri.col};background:${ri.bg};border:1px solid ${ri.col}33">${role} ${v.toFixed(0)}%</span>`;
+    }).join("");
+
+  // ── Metric card builder ───────────────────────────────────────────────────
+  const _metricCard = (label, icon, avgV, peakV, metric, okT, warnT) => {
+    const col  = _col(peakV, okT, warnT);
+    const lbl  = _lbl(peakV, okT, warnT);
+    const pct_ = Math.min(Math.max(avgV, 0), 100);
+    const chips = _roleChips(metric);
+    return `
+    <div class="rounded-xl p-3 flex flex-col gap-2 transition-all"
+         style="border:1px solid ${col}2e;background:linear-gradient(145deg,${col}08,rgba(255,255,255,0.01))">
+      <div class="flex items-center justify-between gap-1">
+        <div class="flex items-center gap-1.5">
+          <span class="text-base leading-none">${icon}</span>
+          <span class="text-[8px] uppercase tracking-widest font-bold text-Cmuted">${label}</span>
+        </div>
+        <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
+              style="color:${col};background:${col}1a">${lbl}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <div class="relative flex-shrink-0">
+          ${_arc(pct_, col, 46, 5)}
+          <div class="absolute inset-0 flex items-center justify-center">
+            <span class="text-[8px] font-extrabold leading-none" style="color:${col}">${avgV.toFixed(0)}</span>
+          </div>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-[18px] font-extrabold leading-none text-Cwhite tabular-nums">
+            ${avgV.toFixed(1)}<span class="text-[10px] text-Cmuted font-normal">%</span>
+          </div>
+          <div class="text-[8px] text-Cmuted mt-0.5">${metricLbl} &nbsp;·&nbsp; peak ${peakV.toFixed(0)}%</div>
+          ${_bar(pct_, col, "h-1.5")}
+        </div>
+      </div>
+      ${chips ? `<div class="flex flex-wrap gap-1 pt-0.5">${chips}</div>` : ""}
+    </div>`;
+  };
+
+  // ── Environment breakdown rows ────────────────────────────────────────────
+  const ENV_COL = { PROD: THEME.purple, TEST: THEME.blue, DEV: THEME.cyan };
+  const envRows = Object.entries(byEnv)
+    .sort(([a], [b]) => (a === "PROD" ? -1 : b === "PROD" ? 1 : a.localeCompare(b)))
+    .map(([env, cnt]) => {
+      const ec   = ENV_COL[env] || THEME.muted;
+      const hPct = cnt.total ? (cnt.ok  / cnt.total * 100) : 0;
+      const tag  = cnt.crit > 0
+        ? `<span class="font-bold" style="color:${THEME.red}">${cnt.crit} CRIT</span>`
+        : cnt.warn > 0
+        ? `<span class="font-bold" style="color:${THEME.amber}">${cnt.warn} WARN</span>`
+        : `<span class="font-bold" style="color:${THEME.green}">All OK</span>`;
+      return `<div class="flex items-center gap-2 py-1 border-b border-white/[0.04] last:border-0">
+        <span class="flex-shrink-0 w-1.5 h-1.5 rounded-full" style="background:${ec}"></span>
+        <span class="text-[10px] font-bold w-9" style="color:${ec}">${env}</span>
+        <div class="flex-1">${_bar(hPct, THEME.green, "h-1")}</div>
+        <span class="text-[9px] text-Cmuted">${cnt.total}svr</span>
+        <div class="text-[9px] w-16 text-right">${tag}</div>
+      </div>`;
+    }).join("");
+
+  // ── Worst servers (up to 5) ───────────────────────────────────────────────
+  const worst5 = enriched
+    .map(s => ({ ...s, worst: Math.max(s.cpuPeak, s.memPeak, s.diskPeak) }))
+    .sort((a, b) => b.worst - a.worst)
+    .slice(0, 5);
+
+  const serverRows = worst5.map(s => {
+    const dom  = s.memPeak >= s.cpuPeak && s.memPeak >= s.diskPeak ? ["MEM", s.memPeak]
+               : s.cpuPeak >= s.diskPeak                           ? ["CPU", s.cpuPeak]
+               :                                                     ["DISK", s.diskPeak];
+    const [mKey, mVal] = dom;
+    const col  = _col(mVal, T.cpu_ok, T.cpu_warn);
+    const ri   = ROLE_INFO[s.type] || { col: THEME.muted, bg: "rgba(107,125,179,0.1)" };
+    const name = s.host.length > 22 ? s.host.slice(0, 19) + "…" : s.host;
+    return `<div class="flex items-center gap-2 py-1 border-b border-white/[0.04] last:border-0">
+      <span class="flex-shrink-0 w-1.5 h-1.5 rounded-full" style="background:${col}"></span>
+      <span class="flex-1 text-[10px] text-Cwhite truncate" title="${_esc(s.host)}">${_esc(name)}</span>
+      <span class="flex-shrink-0 text-[7px] px-1.5 py-0.5 rounded font-bold"
+            style="color:${ri.col};background:${ri.bg}">${s.type || "APP"}</span>
+      <span class="flex-shrink-0 text-[8px] text-Cmuted w-7 text-right">${mKey}</span>
+      <div class="flex-shrink-0 w-20">${_bar(mVal, col, "h-1.5")}</div>
+      <span class="flex-shrink-0 text-[10px] font-bold font-mono tabular-nums w-9 text-right"
+            style="color:${col}">${mVal.toFixed(0)}%</span>
+    </div>`;
+  }).join("");
+
+  // ── Canvas donut ID (unique per render to avoid stale canvas) ─────────────
+  const cid = `rh-donut-${Date.now()}`;
+
+  // ── Final HTML ────────────────────────────────────────────────────────────
   el.innerHTML = `
-    <!-- Fleet grade + 3-metric columns -->
-    <div class="flex items-center gap-3 mb-2">
-      <div class="text-3xl font-extrabold" style="color:${gradeColor}">${fleetGrade}</div>
-      <div class="flex-1">
-        <div class="text-[9px] uppercase tracking-widest text-Cmuted">Fleet Grade</div>
-        <div class="text-[11px] text-Cwhite">${total} server${total!==1?'s':''}${timeseriesCount > 0 ? ` · ${timeseriesCount} with time-series` : ''}</div>
-      </div>
-      <div class="text-right">
-        <div class="text-[8px] uppercase tracking-widest text-Cmuted">${dataSourceLabel}</div>
-        ${dataQualityTag}
+  <!-- Header: grade + window badge -->
+  <div class="flex items-center justify-between pb-3 mb-1 border-b border-white/[0.05]">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl flex items-center justify-center font-extrabold text-2xl flex-shrink-0"
+           style="background:${gradeColor}18;border:1.5px solid ${gradeColor}44;color:${gradeColor}">${fleetGrade}</div>
+      <div>
+        <div class="text-[12px] font-bold text-Cwhite">${total} server${total !== 1 ? "s" : ""}</div>
+        <div class="text-[8px] text-Cmuted">${tsCount > 0 ? `${tsCount} with time-series · ` : ""}${isAzure ? "Azure Monitor" : "Document upload"}</div>
       </div>
     </div>
-    <!-- CPU / Memory / Disk strip -->
-    <div class="grid grid-cols-3 gap-1.5 text-center mb-2">
-      <div class="rounded-lg border border-Cborder/30 bg-Cbg/40 p-1.5">
-        <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold">CPU</div>
-        <div class="text-[13px] font-bold text-Cwhite">${avgCpu.toFixed(1)}%</div>
-        <div class="text-[9px] text-Cmuted">${metricLabel} · ${peakLabel} ${peakCpu.toFixed(0)}%</div>
-        <div class="text-[9px] font-bold" style="color:${cpuStatus.color}">${cpuStatus.icon} ${cpuStatus.label}</div>
+    <div class="text-right">
+      <div class="inline-flex items-center gap-1 text-[9px] font-semibold px-2.5 py-1 rounded-full border"
+           style="color:${windowColor};border-color:${windowColor}44;background:${windowColor}10">${windowLabel}</div>
+    </div>
+  </div>
+
+  <!-- Metric cards: CPU / Memory / Disk I/O -->
+  <div class="grid grid-cols-3 gap-2.5 mb-3">
+    ${_metricCard("CPU",      "⚡", avgCpu,  peakCpu,  "cpu",  T.cpu_ok,  T.cpu_warn)}
+    ${_metricCard("MEMORY",   "🧠", avgMem,  peakMem,  "mem",  T.mem_ok,  T.mem_warn)}
+    ${_metricCard("DISK I/O", "💿", avgDisk, peakDisk, "disk", T.disk_ok, T.disk_warn)}
+  </div>
+
+  <!-- Fleet topology donut + Environment breakdown -->
+  <div class="grid grid-cols-5 gap-2.5 mb-3">
+    <!-- Donut -->
+    <div class="col-span-2 rounded-xl border border-white/[0.06] bg-white/[0.015] p-3 flex flex-col items-center justify-center gap-2">
+      <div class="text-[7px] uppercase tracking-widest font-bold text-Cmuted">Fleet Health</div>
+      <div class="relative w-[80px] h-[80px]">
+        <canvas id="${cid}" width="80" height="80" style="display:block"></canvas>
+        <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+          <div class="text-[16px] font-extrabold leading-none text-Cwhite">${total}</div>
+          <div class="text-[7px] text-Cmuted">servers</div>
+        </div>
       </div>
-      <div class="rounded-lg border border-Cborder/30 bg-Cbg/40 p-1.5">
-        <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold">MEMORY</div>
-        <div class="text-[13px] font-bold text-Cwhite">${avgMem.toFixed(1)}%</div>
-        <div class="text-[9px] text-Cmuted">${metricLabel} · ${peakLabel} ${peakMem.toFixed(0)}%</div>
-        <div class="text-[9px] font-bold" style="color:${memStatus.color}">${memStatus.icon} ${memStatus.label}</div>
-      </div>
-      <div class="rounded-lg border border-Cborder/30 bg-Cbg/40 p-1.5">
-        <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold">DISK</div>
-        <div class="text-[13px] font-bold text-Cwhite">${avgDisk.toFixed(1)}%</div>
-        <div class="text-[9px] text-Cmuted">${metricLabel} · ${peakLabel} ${peakDisk.toFixed(0)}%</div>
-        <div class="text-[9px] font-bold" style="color:${diskStatus.color}">${diskStatus.icon} ${diskStatus.label}</div>
+      <div class="flex items-center gap-2.5 text-[8px]">
+        <span class="flex items-center gap-0.5">
+          <span class="w-2 h-2 rounded-full" style="background:${THEME.red}"></span>
+          <span class="text-Cmuted">${bands.crit} crit</span></span>
+        <span class="flex items-center gap-0.5">
+          <span class="w-2 h-2 rounded-full" style="background:${THEME.amber}"></span>
+          <span class="text-Cmuted">${bands.warn} warn</span></span>
+        <span class="flex items-center gap-0.5">
+          <span class="w-2 h-2 rounded-full" style="background:${THEME.green}"></span>
+          <span class="text-Cmuted">${bands.ok} ok</span></span>
       </div>
     </div>
-    <!-- Risk distribution bar -->
-    <div class="mb-1">
-      <div class="flex h-2.5 rounded overflow-hidden mb-1">
-        ${bands.critical ? `<div class="bg-[#f43f5e]" style="width:${(bands.critical/total*100).toFixed(1)}%"></div>` : ''}
-        ${bands.warning  ? `<div class="bg-[#f59e0b]" style="width:${(bands.warning/total*100).toFixed(1)}%"></div>` : ''}
-        ${bands.healthy  ? `<div class="bg-[#10d96e]" style="width:${(bands.healthy/total*100).toFixed(1)}%"></div>` : ''}
-      </div>
-      <div class="flex gap-2 text-[8px] text-Cmuted">
-        <span><span class="inline-block w-1.5 h-1.5 rounded-sm bg-[#f43f5e] mr-0.5"></span>${bands.critical} crit</span>
-        <span><span class="inline-block w-1.5 h-1.5 rounded-sm bg-[#f59e0b] mr-0.5"></span>${bands.warning} warn</span>
-        <span><span class="inline-block w-1.5 h-1.5 rounded-sm bg-[#10d96e] mr-0.5"></span>${bands.healthy} ok</span>
-      </div>
+    <!-- Environment breakdown -->
+    <div class="col-span-3 rounded-xl border border-white/[0.06] bg-white/[0.015] p-3">
+      <div class="text-[7px] uppercase tracking-widest font-bold text-Cmuted mb-2">By Environment</div>
+      ${envRows || '<div class="text-[9px] text-Cmuted py-1">No environment data</div>'}
     </div>
-    <!-- Worst 3 servers -->
-    <div>
-      <div class="text-[8px] uppercase tracking-widest text-Cmuted font-bold mb-0.5">Highest Risk</div>
-      ${worst3.map(s => {
-        const col = s.peak >= 80 ? "#f43f5e" : s.peak >= 60 ? "#f59e0b" : "#10d96e";
-        const name = s.host.length > 18 ? s.host.slice(0,15)+"…" : s.host;
-        const wm = worstMetric(s);
-        const wv = worstVal(s);
-        return `<div class="flex items-center gap-1.5 py-0.5 text-[10px]">
-          <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background:${col}"></span>
-          <span class="text-Cwhite truncate flex-1" title="${_esc(s.host)}">${_esc(name)}</span>
-          <span class="font-mono font-bold" style="color:${col}">${wm} ${wv.toFixed(0)}%</span>
-        </div>`;
-      }).join("")}
+  </div>
+
+  <!-- Worst servers risk table -->
+  <div class="rounded-xl border border-white/[0.06] bg-white/[0.015] p-3">
+    <div class="flex items-center justify-between mb-2">
+      <div class="text-[7px] uppercase tracking-widest font-bold text-Cmuted">Highest-Risk Servers</div>
+      <div class="text-[8px] text-Cmuted">worst metric · peak over window</div>
     </div>
-  `;
+    ${serverRows || '<div class="text-[9px] text-Cmuted py-1">No server data</div>'}
+  </div>`;
+
+  // ── Draw fleet health donut via Canvas 2D (no external lib) ──────────────
+  requestAnimationFrame(() => {
+    const canvas = document.getElementById(cid);
+    if (!canvas) return;
+    const ctx  = canvas.getContext("2d");
+    const cx = 40, cy = 40, r = 28, sw = 9;
+    // Background ring
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = sw; ctx.stroke();
+    // Data slices
+    if (total > 0) {
+      const slices = [{ v: bands.crit, c: THEME.red }, { v: bands.warn, c: THEME.amber }, { v: bands.ok, c: THEME.green }]
+        .filter(s => s.v > 0);
+      let start = -Math.PI / 2;
+      slices.forEach(sl => {
+        const sweep = (sl.v / total) * Math.PI * 2;
+        ctx.beginPath(); ctx.arc(cx, cy, r, start, start + sweep);
+        ctx.strokeStyle = sl.c; ctx.lineWidth = sw - 2; ctx.lineCap = "round"; ctx.stroke();
+        start += sweep;
+      });
+    }
+  });
 }
 
 // ── NEW: Top 3 At-Risk Jobs (replaces sub-app table in Row 2) ──
