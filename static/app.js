@@ -2342,12 +2342,25 @@ function renderBatchKpis(k) {
     winCompEl.style.color =
       bwc >= 95 ? THEME.green :
       bwc >= 80 ? THEME.amber : THEME.red;
+    // Tooltip explains the headline formula (pair-level compliance)
+    const wPairs  = k.window_total_pairs;
+    const wBPairs = k.window_breach_pairs || 0;
+    if (wPairs) {
+      winCompEl.title = `${wPairs - wBPairs}/${wPairs} (sub-app × day) batch windows within SLA · formula: compliant_windows ÷ total_windows × 100`;
+    }
   }
   const winSubEl = document.getElementById("bk-window-compliance-sub");
   if (winSubEl) {
     if (bwc != null) {
-      const passD = wtd - wbd;
-      winSubEl.textContent = `${passD}/${wtd} days pass · ${wbd} breach`;
+      const wPairs  = k.window_total_pairs;
+      const wBPairs = k.window_breach_pairs || 0;
+      const passD   = wtd - wbd;
+      if (wPairs) {
+        const okPairs = wPairs - wBPairs;
+        winSubEl.textContent = `${okPairs}/${wPairs} windows · ${passD}/${wtd} days all-pass`;
+      } else {
+        winSubEl.textContent = `${passD}/${wtd} days pass · ${wbd} breach`;
+      }
     } else {
       winSubEl.textContent = "Needs End_Time column";
     }
@@ -14771,25 +14784,62 @@ function _renderSlaMatrix(data) {
   if (compEl) {
     compEl.textContent = _n(headlineComp).toFixed(1) + "%";
     compEl.className = `text-2xl font-bold ${compColor}`;
-    // Denominator + formula trace — strongest audit rule: KPI must expose source + formula
-    const _eligible = (data.total_runs || 0) - (data.failed_runs || 0);
-    const _passing  = (data.ok_runs || 0) + (data.long_job_runs || 0) + (data.at_risk_runs || 0);
-    compEl.title = `${_passing}/${_eligible} eligible runs pass`
-      + ` · formula: (OK+LONG_JOB+AT_RISK) ÷ eligible × 100`
-      + (data.failed_runs ? ` · ${data.failed_runs} FAILED excluded from denominator` : ``)
-      + (data.window_total_days != null
-           ? ` · window: ${(data.window_total_days||0)-(data.window_breach_days||0)}/${data.window_total_days} days OK`
-           : ``);
-    if (data.window_warnings?.length) {
-      compEl.title += ` · ${data.window_warnings[0]}`;
-    }
+
+  // ── Tooltip: explain exactly what the headline percentage measures ──
+  // The headline IS window-pair compliance: (sub_app × day) windows within SLA.
+  // Do NOT show the job-run formula here — that's a different metric entirely.
+  const wPairs  = data.window_total_pairs;   // total (sub_app × day) pairs
+  const wBPairs = data.window_breach_pairs;  // breaching pairs
+  const wDays   = data.window_total_days;    // calendar days
+  const wBDays  = data.window_breach_days || 0;
+
+  const tipLines = [];
+  if (wPairs != null) {
+    const okPairs = wPairs - (wBPairs || 0);
+    tipLines.push(
+      `Window compliance: ${okPairs}/${wPairs} (sub-app × day) batch windows within SLA`
+    );
+  } else if (wDays != null) {
+    tipLines.push(`Window compliance: sub-app batch windows within SLA ÷ total windows`);
   }
-  // Show window context if available (X of Y days breached)
+  if (wDays != null) {
+    const passDays = wDays - wBDays;
+    tipLines.push(
+      `${passDays}/${wDays} calendar days ALL sub-apps clean`
+        + (wBDays > 0 ? ` · ${wBDays} day(s) had ≥1 sub-app breach` : "")
+    );
+  }
+  // Job-run compliance is a separate, distinct metric — show it clearly labelled
+  const _eligible = (data.total_runs || 0) - (data.failed_runs || 0);
+  const _passing  = (data.ok_runs || 0) + (data.long_job_runs || 0) + (data.at_risk_runs || 0);
+  const runSuffix = data.failed_runs
+    ? `, ${data.failed_runs} FAILED excluded from denominator`
+    : "";
+  tipLines.push(
+    `Job-run compliance (separate metric): ${_passing}/${_eligible} eligible runs pass`
+      + ` · formula: (OK+LONG_JOB+AT_RISK) ÷ eligible × 100${runSuffix}`
+  );
+  compEl.title = tipLines.join("\n");
+  }
+
+  // Sub-label: show the pair-level denominator (matches the headline %) and
+  // a clearly-labelled day-level stat. If pairs unavailable, fall back to days.
   const compSubEl = document.getElementById("slak-compliance-sub");
-  if (compSubEl && data.window_total_days != null && data.window_breach_days != null) {
-    const pass = data.window_total_days - data.window_breach_days;
-    compSubEl.textContent = `${pass}/${data.window_total_days} days pass · Window`;
-    compSubEl.className = `text-[10px] ${data.window_breach_days > 0 ? "text-Cred" : "text-Cmuted"}`;
+  if (compSubEl && data.window_total_days != null) {
+  const wPairs  = data.window_total_pairs;
+  const wBPairs = data.window_breach_pairs || 0;
+  const wDays   = data.window_total_days;
+  const wBDays  = data.window_breach_days || 0;
+  const passDays = wDays - wBDays;
+  let subText;
+  if (wPairs != null) {
+    const okPairs = wPairs - wBPairs;
+    subText = `${okPairs}/${wPairs} windows · ${passDays}/${wDays} days all-pass`;
+  } else {
+    subText = `${passDays}/${wDays} days pass · Window`;
+  }
+  compSubEl.textContent = subText;
+  compSubEl.className = `text-[10px] ${wBDays > 0 ? "text-Cred" : "text-Cmuted"}`;
   }
 
   // Explain the compliance vs breach distinction when they diverge

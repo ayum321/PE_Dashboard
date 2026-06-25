@@ -2262,6 +2262,9 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "batch_window_compliance": float(round(batch_window_comp, 1)),
         "window_breach_days":      window_breach_days,
         "window_total_days":       n_window_days,
+        # Pair-level counts (actual denominator for batch_window_compliance %)
+        "window_total_pairs":      int(window_compliance.get("total_windows") or 0) or None,
+        "window_breach_pairs":     int(window_compliance.get("breach_count") or 0) if int(window_compliance.get("total_windows") or 0) else None,
         "window_date_count":       len(unique_dates),
         # Canonical (sub_app, date)-granular window compliance from the shared engine
         "window_compliance":       window_compliance,
@@ -2718,6 +2721,8 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "batch_window_compliance":     m["batch_window_compliance"],
             "window_breach_days":      m["window_breach_days"],
             "window_total_days":       m["window_total_days"],
+            "window_total_pairs":      m.get("window_total_pairs"),
+            "window_breach_pairs":     m.get("window_breach_pairs"),
             # Canonical (sub_app, date)-granular window compliance (shared engine).
             # Both Batch Review and SLA Matrix read the same definition.
             "window_compliance":           m.get("window_compliance"),

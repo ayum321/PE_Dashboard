@@ -84,6 +84,10 @@ class SlaMatrixResponse(BaseModel):
     window_compliance_pct: Optional[float] = None
     window_total_days:     Optional[int]   = None
     window_breach_days:    Optional[int]   = None
+    # Pair-level counts — the ACTUAL denominator used for compliance_pct
+    # (each (sub_app × calendar_day) pair is one window)
+    window_total_pairs:    Optional[int]   = None
+    window_breach_pairs:   Optional[int]   = None
     window_detail:         Optional[List[Dict[str, Any]]] = None
     window_warnings:       Optional[List[str]] = None
     gate_audit:        Optional[Dict[str, Any]] = None
@@ -1020,8 +1024,10 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
     # whether the entire batch completed within its SLA window each day,
     # NOT whether individual job runtimes are under the ceiling.
     window_comp_pct = None
-    w_total_days = None
+    w_total_days  = None
     w_breach_days = None
+    w_total_pairs = None
+    w_breach_pairs = None
     w_detail_list = None
     window_warnings: list[str] = []
     try:
@@ -1112,16 +1118,24 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 try:
                     from services import compliance_engine as _ce
                     _wc = _ce.compute_window_compliance(w_detail_list, _sub_sla_lookup)
-                    window_comp_pct = _wc["compliance_pct"]
-                    w_total_days    = _wc.get("total_days", _wc["total_windows"])
-                    w_breach_days   = _wc.get("breach_days", _wc["breach_count"])
-                    window_warnings = _wc.get("warnings") or []
+                    window_comp_pct  = _wc["compliance_pct"]
+                    w_total_days     = _wc.get("total_days", _wc["total_windows"])
+                    w_breach_days    = _wc.get("breach_days", _wc["breach_count"])
+                    # Pair-level counts — actual denominator behind compliance_pct
+                    w_total_pairs    = int(_wc["total_windows"])
+                    w_breach_pairs   = int(_wc["breach_count"])
+                    window_warnings  = _wc.get("warnings") or []
                 except Exception:
                     pass
                 file_days = int(wdf["run_date"].nunique()) if "run_date" in wdf.columns else len(w_detail_list)
                 if w_total_days is not None and file_days and w_total_days != file_days:
+                    # Explain the discrepancy clearly: excluded types (CYCLIC etc.) cause some
+                    # calendar dates to have zero in-scope windows → dropped from analysis.
+                    diff = file_days - w_total_days
                     window_warnings.append(
-                        f"Window denominator mismatch: {file_days} unique date(s) loaded but {w_total_days} day(s) were analyzed."
+                        f"Note: {diff} calendar date(s) had only excluded job types "
+                        f"(e.g. CYCLIC/ADHOC) and were excluded from window analysis "
+                        f"({file_days} dates in file → {w_total_days} analyzed)."
                     )
     except Exception:
         pass
@@ -1151,6 +1165,8 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         window_compliance_pct=window_comp_pct,
         window_total_days=w_total_days,
         window_breach_days=w_breach_days,
+        window_total_pairs=w_total_pairs,
+        window_breach_pairs=w_breach_pairs,
         window_detail=w_detail_list,
         window_warnings=window_warnings or None,
         explicit_sla_matrix=explicit_sla_matrix,
