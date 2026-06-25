@@ -855,42 +855,71 @@ def azure_timeseries(body: TimeseriesRequest) -> Dict[str, Any]:
     patterns = raw.get("patterns", [])
     baseline = raw.get("baseline", {})
 
-    # ── Filter: keep only critical spikes (z ≥ 3σ or absolute breach), drop normal/moderate ──
+    # ── Spike filter: keep critical + warning; drop only "normal" noise ──────────
+    # Previously "critical_only" silenced warning-level spikes server-side,
+    # meaning early-warning signals (trending up, not yet critical) were
+    # permanently invisible to the user. The fix: keep warning + critical +
+    # critical_sustained, expose severity in the response so the frontend can
+    # choose its own display threshold per view (e.g., deep-dive shows all
+    # warnings; executive summary shows only critical).
+    _INCLUDE_SEVERITIES = {"critical", "critical_sustained", "warning"}
     for vm_data in result.values():
         filtered_spikes = {}
         for metric, spike_list in vm_data.get("spikes", {}).items():
-            critical_only = [s for s in spike_list if s["severity"] in ("critical", "critical_sustained")]
-            if critical_only:
-                filtered_spikes[metric] = critical_only
+            kept = [s for s in spike_list if s.get("severity") in _INCLUDE_SEVERITIES]
+            if kept:
+                filtered_spikes[metric] = kept
         vm_data["spikes"] = filtered_spikes
 
-    # Build fleet heatmap data: for each time slot, aggregate CPU across all VMs
-    all_timestamps = set()
+    # Build fleet heatmap data: for each time slot, aggregate per metric across
+    # all VMs. CPU, memory, and disk each get their own grid so the frontend
+    # can switch between them. Previously only CPU was built; memory and disk
+    # grids were missing entirely (frontend would have no data to render).
+    all_timestamps: set = set()
     for vm_data in result.values():
-        cpu_series = vm_data.get("series", {}).get("Percentage CPU", [])
-        for p in cpu_series:
-            all_timestamps.add(p["t"])
+        for series_pts in vm_data.get("series", {}).values():
+            for p in series_pts:
+                all_timestamps.add(p["t"])
 
     sorted_times = sorted(all_timestamps)
 
-    # Build heatmap matrix: rows=VMs, cols=time slots, values=CPU %
+    def _build_heatmap_grid(metric_key: str) -> list:
+        rows = []
+        for vm_name, vm_data in result.items():
+            pt_map = {p["t"]: p["v"] for p in vm_data.get("series", {}).get(metric_key, [])}
+            rows.append({"name": vm_name, "values": [pt_map.get(t) for t in sorted_times]})
+        return rows
+
+    # Map display key → Azure metric name (memory uses % variant so values are
+    # already 0-100; bytes variant needs unit conversion which the frontend
+    # doesn't do — % is the right signal for the heatmap colour scale anyway).
+    _HEATMAP_METRICS = {
+        "cpu":    "Percentage CPU",
+        "memory": "Available Memory Percentage",
+        "disk":   "OS Disk Bandwidth Consumed Percentage",
+    }
     heatmap = {
         "timestamps": sorted_times,
-        "vms": [],
+        "vms": _build_heatmap_grid("Percentage CPU"),  # default grid (backward compat)
+        "grids": {key: _build_heatmap_grid(metric) for key, metric in _HEATMAP_METRICS.items()},
     }
-    for vm_name, vm_data in result.items():
-        cpu_map = {p["t"]: p["v"] for p in vm_data.get("series", {}).get("Percentage CPU", [])}
-        row = [cpu_map.get(t) for t in sorted_times]
-        heatmap["vms"].append({"name": vm_name, "values": row})
 
-    # Count critical spikes only across fleet
+    # Count spikes by severity across fleet — critical and warning separately
+    # so the frontend summary can display "2 critical, 5 warnings" rather than
+    # conflating them (and the executive view can still show only critical count).
     total_critical = 0
+    total_warning = 0
     affected_vms = set()
     for vm_name, vm_data in result.items():
         for metric_spikes in vm_data.get("spikes", {}).values():
-            if metric_spikes:
-                total_critical += len(metric_spikes)
-                affected_vms.add(vm_name)
+            for sp in metric_spikes:
+                sev = sp.get("severity", "")
+                if sev in ("critical", "critical_sustained"):
+                    total_critical += 1
+                elif sev == "warning":
+                    total_warning += 1
+                if sev in _INCLUDE_SEVERITIES:
+                    affected_vms.add(vm_name)
 
     response = {
         "vms": result,
@@ -899,10 +928,11 @@ def azure_timeseries(body: TimeseriesRequest) -> Dict[str, Any]:
         "baseline": baseline,
         "window": raw.get("window", {}),
         "summary": {
-            "vm_count": len(result),
+            "vm_count":       len(result),
             "total_critical": total_critical,
-            "affected_vms": len(affected_vms),
-            "hours_back": raw.get("window", {}).get("hours_back", body.hours_back),
+            "total_warning":  total_warning,
+            "affected_vms":   len(affected_vms),
+            "hours_back":     raw.get("window", {}).get("hours_back", body.hours_back),
         },
     }
     _ts_cache_set(cache_key, response)

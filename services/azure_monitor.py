@@ -1024,7 +1024,10 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=hours_back)
 
-    # Use finer granularity for shorter time ranges
+    # Use finer granularity for shorter time ranges; coarsen for long windows
+    # to avoid large payloads and Azure Monitor throttling.
+    # 15-day (360h) PE audit window → 1h = 360 pts/metric/VM (nominal use case)
+    # 30-day (720h) → 4h = 180 pts;  60-day → 6h = 240 pts
     if hours_back <= 1:
         granularity = timedelta(minutes=1)
     elif hours_back <= 6:
@@ -1033,8 +1036,12 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         granularity = timedelta(minutes=15)
     elif hours_back <= 72:
         granularity = timedelta(hours=1)
+    elif hours_back <= 360:
+        granularity = timedelta(hours=1)   # 15-day nominal — 360 pts, within cap
+    elif hours_back <= 720:
+        granularity = timedelta(hours=4)   # 30-day — ~180 pts, faster query
     else:
-        granularity = timedelta(hours=1)
+        granularity = timedelta(hours=6)   # 60-day+ — cap payload size
 
     if not resource_ids:
         return {"vms": {}, "patterns": [], "baseline": {}}
