@@ -769,13 +769,28 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         res_evidence_class = "inferred" if not all_zero else "unavailable"
 
         if grade == "N/A" or all_zero:
+            try:
+                from services import config_store as _cs_vision
+                _has_vision_key = bool(_cs_vision.get_gemini_key())
+            except Exception:
+                _has_vision_key = False
+            if _has_vision_key:
+                _res_sub = ("Metrics are embedded as images and could not be read from text. "
+                            "A Gemini Vision key is configured — retry, or re-upload a text-based report.")
+                _res_rec = ("Re-run extraction (Vision key present), or re-upload a resource report "
+                            "with selectable text / numeric tables.")
+            else:
+                _res_sub = ("Metrics are embedded as images — no text values to parse, and no Gemini "
+                            "Vision key is configured to read them. Configure a Vision key in Settings "
+                            "or re-upload a text-based report.")
+                _res_rec = ("Configure a Gemini Vision API key in Settings to extract image-based "
+                            "metrics, or re-upload a resource report with selectable text / numeric tables.")
             add("warning", "📡",
                 f"Fleet Grade N/A — resource metrics unavailable ({total_s} servers, all 0.0%)",
-                "Image-only DOCX detected. Gemini Vision is extracting metrics — "
-                "re-upload or check Settings for Vision AI key",
+                _res_sub,
                 source="resource", evidence_class="unavailable",
                 impact="Cannot perform infrastructure readiness assessment — fleet status unknown",
-                recommendation="Re-upload resource report or configure Gemini Vision API key in Settings",
+                recommendation=_res_rec,
                 root_cause="MONITORING_GAP")
         elif crit > 0:
             real_crit = crit  # will adjust for agg traps below
