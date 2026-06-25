@@ -1668,6 +1668,72 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     "_enriched_from_cache":  True,
                 }
 
+        # ── sla_triage: synthesise from sla_matrix when client didn't send it ─
+        # The JS _buildSlaTriage() builds this from window.appData.slaMatrix, which is
+        # only available in the browser. Server-side regenerations (restart, direct call,
+        # PE narrative trigger) get req.sla_matrix populated above but never get
+        # req.sla_triage — causing the workflow audit summary and "overrun linked to N
+        # workflows" cross-reference to silently produce no output despite data being
+        # available in req.sla_matrix.workflow_summary.
+        if not req.sla_triage:
+            _wf_sum   = (req.sla_matrix or {}).get("workflow_summary") or []
+            _job_sum  = (req.sla_matrix or {}).get("job_summary")      or []
+            _brch_rows= (req.sla_matrix or {}).get("breaches")         or []
+            if _wf_sum or _job_sum:
+                _LOW = 20.0
+                _wf_br = [w for w in _wf_sum if w.get("status") == "BREACH"]
+                _wf_lb = [w for w in _wf_sum
+                           if w.get("status") != "BREACH"
+                           and _f(w.get("buffer_pct", 999)) < _LOW]
+                _lbj   = sorted(
+                    [j for j in _job_sum if _f(j.get("buffer_pct", 999)) < _LOW],
+                    key=lambda j: _f(j.get("buffer_pct", 999))
+                )[:10]
+                _ubr   = [r for r in _brch_rows if r.get("status") == "BREACH"][:10]
+
+                def _wf_row_br(w):
+                    return {"workflow":   w.get("workflow_name") or w.get("workflow") or w.get("sub_application") or "?",
+                            "batch_type": w.get("batch_type") or "?",
+                            "sla_hours":  _f(w.get("sla_h") or w.get("sla_hours") or 0),
+                            "runtime_h":  _f(w.get("runtime_h") or 0),
+                            "buffer_pct": w.get("buffer_pct"),
+                            "sla_source": w.get("sla_source") or "batch_sla_xlsx",
+                            "data_src":   "ctrl_m_canonical"}
+
+                def _wf_row_lb(w):
+                    return {**_wf_row_br(w),
+                            "status": w.get("status") or "AT_RISK"}
+
+                req.sla_triage = {
+                    "low_buffer_jobs": [
+                        {"job_name":    j.get("job_name") or j.get("Job_Name") or "?",
+                         "buffer_pct":  _f(j.get("buffer_pct")),
+                         "peak_hrs":    _f(j.get("peak_hrs")),
+                         "sla_hrs":     _f(j.get("sla_limit") or j.get("sla_limit_hrs") or j.get("sla_hrs") or 0),
+                         "breach_rate": _f(j.get("breach_rate"))}
+                        for j in _lbj
+                    ],
+                    "unexplained_breaches": [
+                        {"job_name":      r.get("job_name") or "?",
+                         "run_date":      r.get("run_date") or "",
+                         "run_hrs":       _f(r.get("run_hrs")),
+                         "sla_limit_hrs": _f(r.get("sla_limit_hrs")),
+                         "margin_hrs":    _f(r.get("breach_margin_hrs")),
+                         "sla_source":    r.get("sla_source") or "global"}
+                        for r in _ubr
+                    ],
+                    "wf_breaching":        [_wf_row_br(w) for w in _wf_br[:5]],
+                    "wf_low_buffer":       [_wf_row_lb(w) for w in _wf_lb[:5]],
+                    "total_jobs_analysed": len(_job_sum),
+                    "total_wfs_analysed":  len(_wf_sum),
+                    "source_active": {
+                        "batch_sla_xlsx":   False,
+                        "ctrl_m_canonical": bool(_wf_sum),
+                        "sow_ceilings":     False,
+                    },
+                    "_enriched_from_cache": True,
+                }
+
         # ── regression_df: jobs with timing anomalies (from batch upload) ─
         # Written by batch.py as resp_dict["anomalies"] — jobs whose runtime
         # this run is a statistical outlier vs their own recent history.
