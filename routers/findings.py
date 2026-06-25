@@ -222,6 +222,12 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         or bool(req.sla_matrix)                            # SLA Matrix intelligence tab uploaded
     )
 
+    # Set True once the canonical Batch Window Compliance verdict is emitted (R1b,
+    # batch section). The SLA-matrix section defers to this flag so the identical
+    # window metric never surfaces as two near-duplicate findings with potentially
+    # divergent severity.
+    _window_finding_emitted = False
+
     def add(level, icon, text, sub="", source="", confidence=100,
             impact="", evidence="", recommendation="", evidence_class="measured",
             root_cause=""):
@@ -390,8 +396,13 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 evidence=f"All job peaks below {_fmt_hrs(default_sla)}h {'customer' if sla_loaded else 'default'} {_sched_label} SLA · Source: {sla_src_label}",
                 evidence_class=sla_evidence_class)
 
-        # R1b — Batch Window Compliance (aggregate daily total vs SLA)
-        # Also embeds worst-day detail from R3 to avoid a separate finding.
+        # R1b — Batch Window Compliance (aggregate daily total vs SLA).
+        # SINGLE canonical window-compliance verdict: the SLA-matrix section below
+        # defers to it (via _window_finding_emitted) so the same metric never shows
+        # as two near-identical findings. Severity is threshold-based (critical when
+        # compliance < 75%, else warning) so a few breach days on an otherwise-healthy
+        # window isn't over-escalated — and can never disagree with the SLA section's
+        # own < 75% threshold.
         if win_total > 0 and win_breach > 0:
             # Find worst breach day inline for the sub-text.
             # Prefer elapsed_hrs (wall-clock) over total_hrs (summed) because
@@ -406,22 +417,26 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 _worst_day_detail = (f" · Worst day: {_worst.get('run_date','?')} at "
                                     f"{_worst_hrs:.1f}h "
                                     f"(+{_worst_hrs - default_sla:.1f}h overrun)")
-            add("critical", "📅",
+            _win_level = "critical" if window_comp < 75 else "warning"
+            add(_win_level, "📅",
                 f"Batch Window Compliance: {window_comp:.1f}% — SLA exceeded on {win_breach}/{win_total} day(s)",
                 f"Aggregate {_sched_label} runtime exceeded {_fmt_hrs(default_sla)}h limit · "
-                f"SLA source: {sla_src_label}"
+                f"SLA source: {sla_src_label}. "
+                f"Individual jobs may each be within SLA, but the total batch window is not."
                 f"{_worst_day_detail}",
                 source="batch", confidence=batch_conf,
                 impact=f"Batch window overrun on {win_breach} day(s) blocks PE sign-off",
                 evidence=f"{'Elapsed' if _has_elapsed else 'Summed'} batch window vs {_fmt_hrs(default_sla)}h {_sched_label} SLA · Source: {sla_src_label}",
                 recommendation="Reschedule overlapping jobs or request extended batch window",
                 evidence_class=sla_evidence_class)
+            _window_finding_emitted = True
         elif win_total > 0:
             add("ok", "✅",
                 f"Batch Window Compliance: {window_comp:.1f}% — aggregate {_sched_label} window within SLA",
                 f"All {win_total} day(s) within {_fmt_hrs(default_sla)}h {_sched_label} batch window · SLA source: {sla_src_label}",
                 source="batch", confidence=batch_conf,
                 evidence_class=sla_evidence_class)
+            _window_finding_emitted = True
 
         # R2 — Per-job SLA ceiling check using pe_utils.job_status (RULE 1)
         # Uses composite key Sub_Application + Job_Name (RULE 6)
@@ -1732,20 +1747,27 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         if win_comp_pct is not None and win_total_days > 0:
             pass_days = win_total_days - win_breach_days
             if win_breach_days > 0:
-                win_level = "critical" if win_comp_pct < 75 else "warning"
-                add(win_level, "📅",
-                    f"Batch Window Compliance: {win_comp_pct:.1f}% — {win_breach_days}/{win_total_days} day(s) breached",
-                    f"Elapsed batch window exceeded {sla_limit:.2f}h SLA on {win_breach_days} day(s). "
-                    f"Individual jobs may be within SLA but total batch window is not.",
-                    source="sla", evidence_class="measured",
-                    impact=f"PE sign-off blocked — batch window overran on {win_breach_days} of {win_total_days} days",
-                    evidence=f"SLA Matrix · Window compliance · {sla_limit:.2f}h ceiling · {win_total_days} days analysed",
-                    recommendation="Investigate job overlap and sequencing; parallelise or reschedule to compress total batch window",
-                    root_cause="BATCH_WINDOW_OVERRUN")
+                # Primary window verdict — emit only if the batch section (R1b) didn't
+                # already report the identical metric, to avoid a duplicate critical
+                # with potentially divergent severity.
+                if not _window_finding_emitted:
+                    win_level = "critical" if win_comp_pct < 75 else "warning"
+                    add(win_level, "📅",
+                        f"Batch Window Compliance: {win_comp_pct:.1f}% — {win_breach_days}/{win_total_days} day(s) breached",
+                        f"Elapsed batch window exceeded {sla_limit:.2f}h SLA on {win_breach_days} day(s). "
+                        f"Individual jobs may be within SLA but total batch window is not.",
+                        source="sla", evidence_class="measured",
+                        impact=f"PE sign-off blocked — batch window overran on {win_breach_days} of {win_total_days} days",
+                        evidence=f"SLA Matrix · Window compliance · {sla_limit:.2f}h ceiling · {win_total_days} days analysed",
+                        recommendation="Investigate job overlap and sequencing; parallelise or reschedule to compress total batch window",
+                        root_cause="BATCH_WINDOW_OVERRUN")
+                    _window_finding_emitted = True
 
                 # ── Cross-reference: which workflows are driving the window overrun ──
                 # When the batch window is breaching AND specific workflows are under SLA pressure,
                 # name them directly — this is the "root cause" the PE consultant actually needs.
+                # Unique value (names the pressure workflows) → fires regardless of which section
+                # emitted the primary verdict above.
                 _xref_triage = req.sla_triage or {}
                 if isinstance(_xref_triage, dict):
                     _xwf = (_xref_triage.get("wf_breaching") or []) + \
@@ -1778,11 +1800,13 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                             root_cause="WORKFLOW_DRIVEN_WINDOW_BREACH")
 
             else:
-                add("ok", "📅",
-                    f"Batch Window Compliance: {win_comp_pct:.1f}% — all {win_total_days} day(s) within SLA",
-                    f"Elapsed wall-clock window ≤ {sla_limit:.2f}h on every day",
-                    source="sla", evidence_class="measured",
-                    root_cause="")
+                if not _window_finding_emitted:
+                    add("ok", "📅",
+                        f"Batch Window Compliance: {win_comp_pct:.1f}% — all {win_total_days} day(s) within SLA",
+                        f"Elapsed wall-clock window ≤ {sla_limit:.2f}h on every day",
+                        source="sla", evidence_class="measured",
+                        root_cause="")
+                    _window_finding_emitted = True
 
         # ── SECONDARY: Per-run individual job findings ──
         if sla_breach > 0:
