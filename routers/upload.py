@@ -442,9 +442,8 @@ async def detect_env(body: EnvDetectRequest) -> EnvDetectResponse:
 @router.post(
     "/sla-ceilings",
     summary="Extract SLA window ceilings from a customer SLA Matrix XLSX",
-    response_model=Dict[str, float],
 )
-async def extract_sla_ceilings(file: UploadFile = File(...)) -> Dict[str, float]:
+async def extract_sla_ceilings(file: UploadFile = File(...)) -> Dict[str, Any]:
     """
     Parse a customer SLA Matrix XLSX and return SLA window (hours) per batch type.
 
@@ -526,8 +525,7 @@ async def extract_sla_ceilings(file: UploadFile = File(...)) -> Dict[str, float]
         import logging as _log_c
         _log_c.getLogger("pe_dashboard").warning("sla-ceilings recompute failed: %s", _e)
 
-    # Return only float-valued ceilings — response_model=Dict[str,float] rejects strings
-    return {k: float(v) for k, v in sla_map.items() if isinstance(v, (int, float))}
+    return {**sla_map, "recompute_status": _recompute_status}
 
 
 # ── /api/sla-intelligence (full SLA analysis) ────────────────────

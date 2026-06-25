@@ -220,11 +220,6 @@ async def get_audit_context() -> dict:
     if last_batch.get("hourly_counts"):
         extra["hourly_counts"] = last_batch["hourly_counts"]
 
-    # Benchmark restore: full payload so UI + narrative + findings can rebuild
-    last_bench = session_cache.get("last_benchmark") or {}
-    if last_bench.get("rows"):
-        extra["last_benchmark"] = last_bench
-
     # Live-patch stale sla_source in last_batch if BatchSLA XLSX has since been
     # uploaded.  Without this, a page reload after BatchSLA upload would still show
     # the amber "No customer SLA matrix" banner because last_batch was persisted

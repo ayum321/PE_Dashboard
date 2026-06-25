@@ -82,7 +82,7 @@ SLA_ATRISK_PCT:   float = 15.0   # % buffer threshold → AT_RISK below this
 SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
 
 # ── Benchmark ─────────────────────────────────────────────────────────────────
-BENCH_THRESHOLD_PCT: float = 10.0   # % degradation threshold → WATCH boundary
+BENCH_THRESHOLD_PCT: float = 10.0   # % degradation → RED
 
 # Action-type SLA defaults for UI benchmark (seconds).
 # WATCH triggers when current is within 10% of SLA, BREACH when current > SLA.
@@ -127,33 +127,56 @@ CTRLM_COLUMN_MAP: dict = {
     "runtime_sec": ["runtimesec", "runtime_sec", "run_time_sec", "run_sec"],
 }
 
-# ── Utility job patterns (auto-tag for exclusion from SLA analysis) ──────────
-# Normalized job name (lowercase, spaces+hyphens→_) is substring-matched.
-# "Ctrl-M File Watcher_W" normalises to "ctrl_m_file_watcher_w" → matches "file_watcher".
-# Configurable via config_store["utility_job_patterns"]. No customer names here.
-UTILITY_JOB_PATTERNS: list = [
-    # FileWatcher (Ctrl-M native utility — marks data arrival, not batch logic)
-    # Matches: filewatcher, file_watcher, ctrl_m_file_watcher, fw_anything, anything_fw
-    "file_watcher", "filewatcher", "ctrl_m_file_watcher", "fw_", "_fw",
-    # DB maintenance (backup, restore, index, stats)
-    "db_backup", "database_backup", "dbbackup", "db_maint", "db_maintenance",
-    "db_restore", "dbcleanup", "db_cleanup", "purge_db", "truncate_log",
-    "archive_log", "archive_logs", "db_stats", "update_stats", "rebuild_index",
-    "index_rebuild", "shrink_db",
-    # DB stats gathering (e.g. GATHER_DB_STATS_D, GATHER_DB_STATS_W)
-    "gather_db_stats",
-    # Type4 forecast delete (Ctrl-M cleanup utility, not batch SLA job)
-    "delete_type4_fcst", "delete_type",
-    # Generic backup jobs (any job whose name contains 'backup')
-    "backup",
-    # Outbound file delivery — always file push, never batch computation
-    # (e.g. EXPORT_OUTBOUND_DEMAND_D, EXPORT_OUTBOUND_FF_D, MOVE_FILE_TO_OUTBOX_D)
-    "export_outbound", "move_file_to_outbox", "outbound_file",
-    # Generic export pattern (e.g. export_report, daily_export, file_export)
-    "_export", "export_",
-    # Health check / monitoring heartbeat (when combined with high frequency → cyclic)
-    "health_check", "ping_job", "heartbeat",
-]
+# ── Utility job exclusion rules (generic, signal-based) ──────────────────────
+# The rules are split into:
+#   - STRONG tokens: name match alone is sufficient
+#   - RUNTIME-gated patterns: name match plus runtime threshold is required
+DEFAULT_STRONG_UTILITY_TOKENS: frozenset[str] = frozenset({
+    "file_watcher", "filewatcher", "ctrl_m_file_watcher",
+    "ping_job", "heartbeat", "health_check",
+    "export_outbound", "outbound_export",
+    "move_file_to_outbox", "outbound_file",
+})
+
+DEFAULT_RUNTIME_GATED_UTILITY: dict[str, float] = {
+    "_fw": 0.05,
+    "fw_": 0.05,
+    "gather_db_stats": 0.25,
+    "update_stats": 0.25,
+    "rebuild_index": 0.25,
+    "db_stats": 0.25,
+    "delete_type": 0.05,
+    "purge_": 0.10,
+    "truncate_": 0.05,
+    "archive_log": 0.05,
+    "batch_start": 0.02,
+    "batch_end": 0.02,
+    "batchstart": 0.02,
+    "batchend": 0.02,
+    "pre_batch_node": 0.02,
+    "post_batch_node": 0.02,
+    "qwbatchstart": 0.02,
+    "qwbatchend": 0.02,
+    "seq_disable_login": 0.05,
+    "seq_enable_users": 0.05,
+    "disable_users": 0.05,
+    "enable_users": 0.05,
+    "disable_login": 0.05,
+    "enable_login": 0.05,
+    "zabbix_monitors": 0.05,
+    "export_": 0.01,
+    "_export": 0.01,
+    "db_backup": 0.25,
+    "db_restore": 0.25,
+    "db_cleanup": 0.25,
+    "backup": 0.10,
+}
+
+# Mutable runtime copies used by the app. Legacy UTILITY_JOB_PATTERNS remains
+# as a compatibility alias for any code that still expects a flat list.
+STRONG_UTILITY_TOKENS: set[str] = set(DEFAULT_STRONG_UTILITY_TOKENS)
+RUNTIME_GATED_UTILITY: dict[str, float] = dict(DEFAULT_RUNTIME_GATED_UTILITY)
+UTILITY_JOB_PATTERNS: list[str] = sorted(set(STRONG_UTILITY_TOKENS) | set(RUNTIME_GATED_UTILITY))
 
 # ── Sentinel detection patterns (Stage 4 Level 2 fallback) ───────────────────
 # Normalized job name substrings indicating batch WINDOW START (first job) or
@@ -229,10 +252,11 @@ def reload() -> None:
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT
-    global BENCH_THRESHOLD_PCT, ANOMALY_Z_THRESHOLD
+    global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
     global SOW_DFU, SOW_SKU, SOW_ORDERS, SOW_BATCH_JOBS
     global JOB_TYPE_PATTERNS, EXCLUDE_FROM_SLA, ENV_PREFIXES_TO_STRIP, CTRLM_COLUMN_MAP
-    global UTILITY_JOB_PATTERNS, SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
+    global STRONG_UTILITY_TOKENS, RUNTIME_GATED_UTILITY, UTILITY_JOB_PATTERNS
+    global SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
     global SENTINEL_MIN_WINDOW_HRS, SENTINEL_MAX_WINDOW_HRS, CYCLIC_MAX_RUNTIME_HRS
 
     CPU_WARN          = _f("cpu_warning",       75.0)
@@ -252,6 +276,16 @@ def reload() -> None:
     SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
     SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
     BENCH_THRESHOLD_PCT = _f("benchmark_threshold", 10.0)
+    _bench_actions = _cfg("benchmark_action_sla")
+    if isinstance(_bench_actions, dict) and _bench_actions:
+        _bam: dict[str, float] = {}
+        for k, v in _bench_actions.items():
+            try:
+                _bam[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if _bam:
+            BENCHMARK_ACTION_SLA = _bam
     ANOMALY_Z_THRESHOLD = _f("anomaly_z_threshold", 2.0)
     SOW_DFU           = _f("sow_dfu",           499_999.0)
     SOW_SKU           = _f("sow_sku",           80_000.0)
@@ -270,9 +304,47 @@ def reload() -> None:
     _cmap = _cfg("ctrlm_column_map")
     if isinstance(_cmap, dict) and _cmap:
         CTRLM_COLUMN_MAP = _cmap
-    _util = _cfg("utility_job_patterns")
-    if isinstance(_util, list) and _util:
-        UTILITY_JOB_PATTERNS = _util
+    STRONG_UTILITY_TOKENS = set(DEFAULT_STRONG_UTILITY_TOKENS)
+    RUNTIME_GATED_UTILITY = dict(DEFAULT_RUNTIME_GATED_UTILITY)
+
+    def _norm_token(v: Any) -> str:
+        return str(v).strip().lower()
+
+    _strong = _cfg("strong_utility_tokens")
+    _runtime = _cfg("runtime_gated_utility")
+    _legacy = _cfg("utility_job_patterns")
+
+    if isinstance(_strong, (list, set, tuple)) and _strong:
+        STRONG_UTILITY_TOKENS = {_norm_token(v) for v in _strong if str(v).strip()}
+
+    if isinstance(_runtime, dict) and _runtime:
+        _rt: dict[str, float] = {}
+        for k, v in _runtime.items():
+            try:
+                _rt[_norm_token(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if _rt:
+            RUNTIME_GATED_UTILITY = _rt
+    elif isinstance(_legacy, list) and _legacy:
+        # Legacy compatibility: treat the flat list as an allowlist over the
+        # built-in defaults. Unknown tokens are kept as strong tokens so older
+        # persisted overrides still have an effect.
+        _legacy_norm = {_norm_token(v) for v in _legacy if str(v).strip()}
+        if _legacy_norm:
+            STRONG_UTILITY_TOKENS = {
+                t for t in STRONG_UTILITY_TOKENS
+                if t in _legacy_norm
+            } | {
+                t for t in _legacy_norm
+                if t not in DEFAULT_RUNTIME_GATED_UTILITY and t not in DEFAULT_STRONG_UTILITY_TOKENS
+            }
+            RUNTIME_GATED_UTILITY = {
+                pat: thr for pat, thr in RUNTIME_GATED_UTILITY.items()
+                if pat in _legacy_norm
+            }
+
+    UTILITY_JOB_PATTERNS = sorted(set(STRONG_UTILITY_TOKENS) | set(RUNTIME_GATED_UTILITY))
     _ss = _cfg("sentinel_start_patterns")
     if isinstance(_ss, list) and _ss:
         SENTINEL_START_PATTERNS = _ss
