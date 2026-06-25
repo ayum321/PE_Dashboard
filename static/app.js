@@ -2230,9 +2230,21 @@ function renderBatchSlaSourceTags(sla, kpis) {
           : "";
         const schemaLine = sla.schema_type ? `${sla.schema_type.toUpperCase()} model` : "Job-specific model";
         const details = [schemaLine, matchLine].filter(Boolean).join("  ·  ");
+        // Honest window summary: a customer matrix usually has several distinct
+        // contracted windows. Show the actual resolved range so the banner never
+        // asserts a single "Daily Xh" that contradicts the per-job table.
+        const rc = sla.resolved_ceilings;
+        let windowLine;
+        if (Array.isArray(rc) && rc.length > 1) {
+          windowLine = `${rc.length} distinct contract windows ${Number(sla.resolved_ceiling_min).toFixed(1)}–${Number(sla.resolved_ceiling_max).toFixed(1)}h across ${sla.resolved_workflow_count || rc.length} workflows`;
+        } else if (Array.isArray(rc) && rc.length === 1) {
+          windowLine = `Contract window ${Number(rc[0]).toFixed(1)}h`;
+        } else {
+          windowLine = `Daily ${Number(dailyHrs).toFixed(1)}h · Weekly ${Number(weeklyHrs).toFixed(1)}h`;
+        }
         bannerIcon.textContent = "✅";
         bannerTitle.textContent = `SLA Baseline: Customer Matrix — ${sla.filename || "uploaded"}`;
-        bannerDetail.textContent = `Per-job SLA contracts active. Daily ${Number(dailyHrs).toFixed(1)}h · Weekly ${Number(weeklyHrs).toFixed(1)}h${details ? "  ·  " + details : ""}`;
+        bannerDetail.textContent = `Per-job SLA contracts active. ${windowLine}${details ? "  ·  " + details : ""}`;
         banner.className = "mt-2 px-3 py-2 rounded-lg border border-Cgreen/40 bg-Cgreen/5 text-Cgreen text-[11px] flex items-start gap-2";
       } else {
         // Amber: defaults only
@@ -2533,9 +2545,13 @@ function renderBatchLayerCards(data) {
     if (isMatrix || isBatchXlsx) {
       slaEl.textContent = "Tier 1 — BatchSLA XLSX";
       slaEl.style.color = THEME.green;
-      setText("bk-sla-source-sub",
-        `Daily ${sla.daily_hrs?.toFixed(1) || "?"}h · Weekly ${sla.weekly_hrs?.toFixed(1) || "?"}h · High-confidence`
-      );
+      const _rc = sla.resolved_ceilings;
+      const _win = (Array.isArray(_rc) && _rc.length > 1)
+        ? `${_rc.length} windows ${Number(sla.resolved_ceiling_min).toFixed(1)}–${Number(sla.resolved_ceiling_max).toFixed(1)}h`
+        : (Array.isArray(_rc) && _rc.length === 1)
+          ? `Window ${Number(_rc[0]).toFixed(1)}h`
+          : `Daily ${sla.daily_hrs?.toFixed(1) || "?"}h · Weekly ${sla.weekly_hrs?.toFixed(1) || "?"}h`;
+      setText("bk-sla-source-sub", `${_win} · High-confidence`);
     } else if (isSow) {
       slaEl.textContent = "Tier 2 — SOW Contract";
       slaEl.style.color = THEME.cyan;
@@ -11298,6 +11314,15 @@ function _renderExecWaterfall(wf, oshs) {
   const totalCol = total >= 75 ? "#10d96e" : total >= 60 ? "#f59e0b" : "#f43f5e";
   const grade = oshs?.grade || "?";
 
+  // Reconcile the headline: pillar contributions sum to the *base* OSHS, but the
+  // final score is further reduced by the findings penalty (and any release floor).
+  // Surface that deduction explicitly so the three rings always add up to the
+  // number in the centre — no silent ~17-point gap the viewer can't explain.
+  const compSum = pillars.reduce((s, p) => s + _n(p.val), 0);
+  const adjust  = Math.round((compSum - total) * 10) / 10;   // >0 → score was reduced
+  const _floorTxt = oshs?.floor_applied ? ` · release floor: ${oshs.floor_applied}` : "";
+  const _adjTitle = `Base pillar score ${compSum.toFixed(1)} − findings/penalty ${Math.abs(adjust).toFixed(1)} = ${total.toFixed(1)}${_floorTxt}`;
+
   // Build SVG: concentric arcs, semicircle from -180° → 0°
   const W = 320, H = 240, CX = 160, CY = 200;
   const radii = [110, 85, 60];
@@ -11339,6 +11364,12 @@ function _renderExecWaterfall(wf, oshs) {
             <span class="font-bold" style="color:${p.color};">${_n(p.val).toFixed(1)}<span class="text-Cmuted/60 font-normal">/${p.max}</span></span>
             <span class="text-[9px] text-Cmuted">(${Math.round((p.val / p.max) * 100)}%)</span>
           </span>`).join("")}
+        ${Math.abs(adjust) > 0.1 ? `
+          <span class="flex items-center gap-1.5" title="${_adjTitle}">
+            <span class="inline-block w-2 h-2 rounded-full" style="background:#f43f5e;box-shadow:0 0 6px #f43f5e;"></span>
+            <span class="text-Cmuted">Findings adj</span>
+            <span class="font-bold" style="color:#f43f5e;">${adjust > 0 ? "−" : "+"}${Math.abs(adjust).toFixed(1)}</span>
+          </span>` : ""}
       </div>
     </div>
   `;

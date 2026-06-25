@@ -1504,12 +1504,21 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
             "sla_contract_type":    getattr(_mc, "sla_source_type", "INFERRED") if _mc else "INFERRED",
         }
 
+    # Expose the per-sub_app resolved ceilings (workflow tier) so the SLA-source
+    # payload can present the customer's *actual* contracted windows honestly
+    # instead of a single global daily number that may not match any one job.
+    if _detail_ceiling:
+        result["sub_app_ceilings"] = {
+            sa: {
+                "sla_hrs":         d.get("sla_hrs"),
+                "source":          d.get("source"),
+                "schedule_type":   d.get("schedule_type"),
+                "matched_pattern": d.get("matched_pattern"),
+            }
+            for sa, d in _detail_ceiling.items()
+        }
+
     return result
-
-
-# ─────────────────────────────────────────────────────────────────
-# detect_cyclic_subs — generic cyclic/polling sub-app filter
-# ─────────────────────────────────────────────────────────────────
 def detect_cyclic_subs(df: pd.DataFrame, threshold: int = 20) -> set:
     """Return a set of Sub_Application names that match cyclic/polling behaviour.
 
@@ -3168,7 +3177,25 @@ def _build_sla_source_payload(m: dict) -> dict:
         "custom_hrs":  pe_config.SLA_CUSTOM_HRS,
     }
 
-    # ── Match quality statistics ──────────────────────────────────────────────
+    # ── Contracted-window summary (honest multi-contract view) ─────────────────
+    # A customer matrix usually carries several distinct windows (Dawn Foods:
+    # 6h daily, 7.5h seq, 9h weekly/monthly, 14h outbound). A single "Daily Xh"
+    # banner number can't represent that and contradicts the per-job table, so
+    # expose the DISTINCT resolved ceilings (customer-sourced only) for the UI.
+    _sa_ceilings = sla_index.get("sub_app_ceilings") or {}
+    if _sa_ceilings:
+        _matrix_hrs = sorted({
+            round(float(v.get("sla_hrs")), 2)
+            for v in _sa_ceilings.values()
+            if v.get("source") == "sla_matrix" and v.get("sla_hrs") is not None
+        })
+        if _matrix_hrs:
+            base["resolved_ceilings"]    = _matrix_hrs
+            base["resolved_ceiling_min"] = _matrix_hrs[0]
+            base["resolved_ceiling_max"] = _matrix_hrs[-1]
+            base["resolved_workflow_count"] = len([
+                1 for v in _sa_ceilings.values() if v.get("source") == "sla_matrix"
+            ])
     if job_sla:
         src_counts: dict = {}
         for entry in job_sla.values():
