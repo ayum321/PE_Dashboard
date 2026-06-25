@@ -2071,6 +2071,81 @@ function renderBatchReview(data) {
 
   // 5. Show amber banner if BatchSLA XLSX is loaded but not yet applied to KPIs
   _renderSlaStaleWarningBanner();
+
+  // 6. Benchmark cross-reference: show a slim callout when benchmark runtime data
+  // is loaded, so the analyst knows it feeds the PE Findings and what it contains.
+  _renderBatchBenchmarkXref();
+}
+
+
+// ── Benchmark cross-reference callout in Batch Review ─────────
+/**
+ * Shows a slim informational callout in the Batch Review view when
+ * Batch Runtime Performance data is loaded. Makes the link between
+ * the Ctrl-M operational data and the benchmark regression comparison
+ * explicit — user should know the benchmark data feeds the Findings.
+ *
+ * Injected lazily into the batch-review-body container (idempotent).
+ */
+function _renderBatchBenchmarkXref() {
+  const host = document.getElementById("batch-review-body");
+  if (!host) return;
+
+  const b = window.appData?.benchmarkBatch;
+  const bps = b?.batch_perf_summary;
+
+  // Remove any existing callout first (re-render on each call)
+  document.getElementById("batch-bench-xref")?.remove();
+
+  if (!bps) return;   // no benchmark data → nothing to show
+
+  const totalJobs = bps.total_jobs || 0;
+  const comp      = bps.comparable || 0;
+  const regr      = bps.regressions || 0;
+  const impr      = bps.improvements || 0;
+  const netSecs   = bps.net_delta_secs || 0;
+  const filename  = b.filename || "Batch Runtime Performance";
+
+  const hasReg = regr > 0;
+  const netDir = netSecs >= 0 ? "saved" : "added";
+  const netMin = (Math.abs(netSecs) / 60).toFixed(1);
+
+  const xref = document.createElement("div");
+  xref.id = "batch-bench-xref";
+  xref.className = "rounded-xl border px-4 py-3 flex items-center justify-between gap-3 flex-wrap";
+  xref.style.cssText = hasReg
+    ? `border-color:${hexA(THEME.amber,0.3)};background:${hexA(THEME.amber,0.04)}`
+    : `border-color:${hexA(THEME.green,0.25)};background:${hexA(THEME.green,0.03)}`;
+
+  xref.innerHTML = `
+    <div class="flex items-center gap-3 min-w-0">
+      <span class="shrink-0 text-base">${hasReg ? "⚠️" : "✅"}</span>
+      <div class="min-w-0">
+        <div class="text-[11px] font-bold uppercase tracking-wider mb-0.5"
+             style="color:${hasReg ? THEME.amber : THEME.green}">
+          Batch Runtime Comparison loaded
+        </div>
+        <div class="text-[10px] text-Cmuted font-mono truncate" title="${_esc(filename)}">
+          ${_esc(filename)} ·
+          ${comp} jobs compared ·
+          <span style="color:${hasReg ? THEME.red : THEME.green}">${regr} regression(s)</span> ·
+          ${impr} improvement(s) ·
+          net ${netMin} min ${netDir}/run
+        </div>
+        <div class="text-[9px] text-Cmuted mt-0.5">
+          This data feeds <strong class="text-Cwhite">PE Findings</strong> —
+          regression analysis is separate from Ctrl-M SLA compliance above.
+        </div>
+      </div>
+    </div>
+    <button onclick="setActiveView('benchmark')"
+            class="shrink-0 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all"
+            style="background:${hexA(THEME.purple,0.15)};border:1px solid ${hexA(THEME.purple,0.3)};color:${THEME.purple}">
+      View Benchmark →
+    </button>`;
+
+  // Insert at the very top of the body so it's visible immediately
+  host.insertBefore(xref, host.firstChild);
 }
 
 
@@ -16050,31 +16125,47 @@ function _renderBenchmark(data) {
   }
 
   // ── Mode tabs — show both, set badge counts, auto-activate correct mode ──
+  // Only show the tab bar when at least one side has real data.
+  // Hide the secondary tab when only one source is loaded to avoid the
+  // confusing "no data" badge sitting next to live data.
+  const hasBatchSlot = isBatchPerf;
+  const hasUISlot    = !isBatchPerf && total > 0;
   const tabWrap = document.getElementById("bench-mode-tabs");
   if (tabWrap) tabWrap.classList.remove("hidden");
 
   // Batch tab badge
   const batchBadge = document.getElementById("bench-tab-batch-badge");
-  if (batchBadge) {
-    if (isBatchPerf) {
+  const batchTab   = document.getElementById("bench-tab-batch");
+  if (batchBadge && batchTab) {
+    if (hasBatchSlot) {
       batchBadge.textContent = `${total} jobs`;
       const hasReg = (data.batch_perf_summary?.regressions || 0) > 0;
       batchBadge.className = `ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors duration-150 ${hasReg ? "bg-Cred/20 text-Cred" : "bg-Cgreen/20 text-Cgreen"}`;
+      batchTab.classList.remove("hidden");
     } else {
-      batchBadge.textContent = "no data";
-      batchBadge.className = "ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-Cmuted/20 text-Cmuted transition-colors duration-150";
+      // No batch data — hide tab entirely; user can upload via Zone D
+      batchBadge.textContent = "";
+      batchTab.classList.add("hidden");
     }
   }
+
   // UI tab badge
   const uiBadge = document.getElementById("bench-tab-ui-badge");
-  if (uiBadge) {
-    if (!isBatchPerf && total > 0) {
+  const uiTab   = document.getElementById("bench-tab-ui");
+  if (uiBadge && uiTab) {
+    if (hasUISlot) {
       uiBadge.textContent = `${total} txns`;
       const hasBreaches = breachCount > 0;
       uiBadge.className = `ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors duration-150 ${hasBreaches ? "bg-Cred/20 text-Cred" : "bg-Cpurple/20 text-Cpurple"}`;
+      uiTab.classList.remove("hidden");
+    } else if (hasBatchSlot) {
+      // Batch is loaded; UI is not. Show a small "add" hint instead of "no data"
+      uiBadge.textContent = "+ add UI data";
+      uiBadge.className   = "ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-Cpurple/10 text-Cpurple/60 border border-Cpurple/20 transition-colors duration-150";
+      uiTab.classList.remove("hidden");
     } else {
-      uiBadge.textContent = "no data";
-      uiBadge.className = "ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-Cmuted/20 text-Cmuted transition-colors duration-150";
+      uiBadge.textContent = "";
+      uiTab.classList.add("hidden");
     }
   }
 
@@ -17313,6 +17404,9 @@ function _mergeBenchmarkSources() {
   merged.correlation = _computeBenchCorrelation(b, u);
   window.appData.benchmark = merged;
   if (window._execCache !== undefined) window._execCache = null;  // invalidate exec cache
+  // Update the cross-reference callout in the Batch Review tab immediately
+  // so it reflects the latest benchmark data without requiring a Ctrl-M re-upload.
+  if (window.appData.batch?.kpis) _renderBatchBenchmarkXref();
 }
 
 /**
