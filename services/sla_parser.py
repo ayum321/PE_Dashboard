@@ -42,12 +42,26 @@ def _parse_time(raw: str):
 
     Handles:
       9:00 PM, 10.45 AM, 21:00, 5AM CST, 5AM IST (timezone suffix stripped)
+      0.375 (Excel time-of-day fraction: 0 < v < 1 → hours = v × 24)
     """
     from datetime import datetime
     import re as _re
     if not raw or str(raw).lower() in ("nan", "none", ""):
         return None
     raw = str(raw).strip()
+    # P2 #12: Excel bare time-of-day fractions — a float in (0, 1) represents a
+    # fraction of a 24-hour day.  E.g. 0.375 = 9:00 AM, 0.9167 ≈ 22:00.
+    # Confirmed on THS IO and Haleon UK SLA workbooks.
+    try:
+        _fv = float(raw)
+        if 0 < _fv < 1:
+            _total_mins = round(_fv * 24 * 60)
+            _hh = _total_mins // 60
+            _mm = _total_mins % 60
+            from datetime import time as _dtime
+            return _dtime(min(_hh, 23), _mm)
+    except (ValueError, TypeError):
+        pass
     # Strip trailing timezone qualifiers: "5AM CST", "11:00 PM EDT", "6 PM IST"
     raw = _re.sub(r'\s+(?:CST|CDT|EST|EDT|PST|PDT|MST|MDT|IST|GMT|UTC[+-]?\d*)\s*$', '', raw, flags=_re.IGNORECASE).strip()
     # Strip parenthetical notes: "11:00 AM (Sequencing SLA)"
