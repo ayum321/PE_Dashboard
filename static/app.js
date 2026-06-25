@@ -1692,7 +1692,12 @@ function _renderSlaStaleWarningBanner() {
   const existing = document.getElementById("sla-stale-banner");
 
   const batchSlaLoaded = (window.appData?.batchSlaInfo?.workflows?.length || 0) > 0;
-  const batchUsesXlsx  = window.appData?.batch?.sla_source?.type === "batch_sla_xlsx";
+  // Banner hides when the KPIs were actually recomputed with the XLSX contracts.
+  // Accepts both "batch_sla_xlsx" (from BatchSLA upload) and "sla_matrix" (from
+  // full SLA intelligence). Previously only "batch_sla_xlsx" was checked, so the
+  // banner always stayed visible after a successful refresh.
+  const slaAppliedType = window.appData?.batch?.sla_source?.type || "";
+  const batchUsesXlsx  = slaAppliedType === "batch_sla_xlsx" || slaAppliedType === "sla_matrix";
   const refreshing     = window._batchRefreshing === true;
 
   // Hide if XLSX not loaded, already applied, or refresh in progress
@@ -1803,6 +1808,12 @@ async function _refreshBatchFromServer(toastMsg) {
     const data = await res.json();
     window.appData.batch = data;
     renderBatchReview(data);
+    // renderBatchReview calls _renderSlaStaleWarningBanner internally; that now
+    // correctly hides the banner when sla_source.type is "batch_sla_xlsx" or
+    // "sla_matrix". Explicit removal here as a safety net for any race.
+    if (["batch_sla_xlsx", "sla_matrix"].includes(data?.sla_source?.type || "")) {
+      document.getElementById("sla-stale-banner")?.remove();
+    }
     // Cascade: fresh batch data invalidates exec cache and findings
     window._execCache     = null;
     window._execCacheHash = null;

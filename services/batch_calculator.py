@@ -1277,6 +1277,7 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
     # When no full SLA-intelligence run happened, the simpler BatchSLA XLSX upload
     # stores parsed {workflow, sla_hours, schedule} rows under '_batch_sla_xlsx'.
     # Convert those to contract dicts so per-job resolution still works.
+    _from_batch_sla_xlsx = False
     if not raw_contracts:
         try:
             _bsla = _cs.get("_batch_sla_xlsx") or {}
@@ -1314,6 +1315,7 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
                 "source_row":       int(_w.get("row", 0) or 0),
             })
         if raw_contracts:
+            _from_batch_sla_xlsx = True
             logger.info(
                 "build_sla_index: using %d workflow SLA(s) from _batch_sla_xlsx fallback",
                 len(raw_contracts),
@@ -1374,7 +1376,10 @@ def build_sla_index(df: pd.DataFrame) -> Dict[str, Any]:
 
     result["contracts"] = contracts
     result["ceilings"]  = {k: float(v) for k, v in raw_ceilings.items() if v}
-    result["source"]    = "sla_matrix"
+    # Preserve source provenance: "batch_sla_xlsx" when from the simple XLSX upload,
+    # "sla_matrix" when from the full SLA-intelligence run.
+    # The frontend stale banner hides only when source == "batch_sla_xlsx" or "sla_matrix".
+    result["source"]    = "batch_sla_xlsx" if _from_batch_sla_xlsx else "sla_matrix"
 
     # ── Best-sheet contract selection (Fix 2) ────────────────────────────────
     # When the SLA XLSX has multiple sheets (e.g. a generic C&A template on
