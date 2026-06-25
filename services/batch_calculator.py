@@ -1661,6 +1661,23 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             _info["job_count"] = int(_sub_df["Job_Name"].nunique()) if "Job_Name" in _sub_df.columns else 0
             _info["peak_hrs"]  = round(float(_sub_df["run_time_hrs"].max()), 2) if "run_time_hrs" in _sub_df.columns and not _sub_df.empty else 0.0
 
+    # ── Canonical IN-SCOPE frame for the daily picture ───────────────────────
+    # The daily time-series (jobs/day, batch elapsed/day) and the heatmaps must
+    # reflect the SAME post-exclusion scope used by window compliance.  Without
+    # this, the headline "jobs per day" (built from df_analysis) silently counts
+    # MONTHLY/OUTBOUND/cyclic sub-apps that the compliance denominator already
+    # dropped — so the review tells two contradicting stories on the same screen.
+    # df_scope removes every out-of-scope sub_app (user-excluded ∪ cyclic ∪
+    # MONTHLY/OUTBOUND/QUARTERLY/…), exactly the set used by window_agg above.
+    if _out_of_scope_subs and "Sub_Application" in df_analysis.columns:
+        df_scope = df_analysis[
+            ~df_analysis["Sub_Application"].astype(str).isin(_out_of_scope_subs)
+        ].copy()
+        if df_scope.empty:
+            df_scope = df_analysis   # never scope away the entire batch
+    else:
+        df_scope = df_analysis
+
 
     # Per-job SLA breach counting ──────────────────────────────────────────────
     # Breach = Sub_Application window (wall-clock: last End_Time − first Start_Time
@@ -1891,7 +1908,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         _worst_window_info: dict = {}
 
         # Merge back to daily (Job_Name level) for compatibility with heatmap
-        daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
+        daily = (df_scope.groupby(["Job_Name", "run_date"], as_index=False)
                    .agg(total_hrs=("run_time_hrs", "sum"), runs=("run_time_hrs", "count")))
         # Carry the per-Sub_App breach flags into the daily Job_Name frame
         sub_breach = (window_agg.groupby("run_date")["breach"].any().reset_index()
@@ -1908,7 +1925,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
     else:
         # Fallback: per-Job_Name per-day sum vs per-job SLA
-        daily = (df_analysis.groupby(["Job_Name", "run_date"], as_index=False)
+        daily = (df_scope.groupby(["Job_Name", "run_date"], as_index=False)
                    .agg(total_hrs=("run_time_hrs", "sum"), runs=("run_time_hrs", "count")))
 
         def _job_sla_for_row(row) -> float:
@@ -1947,7 +1964,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         if "Job_Name" in df.columns and "run_date" in df.columns
         else pd.DataFrame(columns=["run_date", "raw_job_names"])
     )
-    window = (df_analysis.groupby("run_date", as_index=False)
+    # job_count / total_hrs are IN-SCOPE (post-exclusion). raw_job_count is the
+    # full per-day count (every sub_app), so excluded_job_count = raw − in-scope
+    # now reflects ALL removed jobs (user-excluded + cyclic + MONTHLY/OUTBOUND),
+    # not just the user-excluded ones.
+    window = (df_scope.groupby("run_date", as_index=False)
                 .agg(total_hrs=("run_time_hrs", "sum"),
                      job_count=("Job_Name", "nunique"))
                 .sort_values("run_date"))
@@ -1975,8 +1996,18 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         try:
             # Canonical daily elapsed window: first job start → last job end for
             # the whole batch on each day. This is the number used everywhere.
+            # Scope to in-scope sub_apps only — a MONTHLY job running before/after
+            # the daily window would otherwise inflate the wall-clock elapsed and
+            # contradict the per-sub-app compliance denominator.
+            _df_win_scoped = _df_win_for_agg
+            if _out_of_scope_subs and "Sub_Application" in _df_win_for_agg.columns:
+                _df_win_scoped = _df_win_for_agg[
+                    ~_df_win_for_agg["Sub_Application"].astype(str).isin(_out_of_scope_subs)
+                ]
+                if _df_win_scoped.empty:
+                    _df_win_scoped = _df_win_for_agg
             _daily_elapsed = (
-                _df_win_for_agg.groupby("run_date", as_index=False)
+                _df_win_scoped.groupby("run_date", as_index=False)
                 .agg(first_start=("Start_Time", "min"),
                      last_end=("End_Time", "max"),
                      job_count=("Job_Name", "nunique"))
@@ -2180,9 +2211,13 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "jobs_breach":      int(j_breach),
         "jobs_at_risk":     int(j_at_risk),
         "total_runs":       int(len(df)),
-        # PROMPT 4: summed_runtime uses df_window (cyclic excluded) not raw df
-        # raw df is kept for total_runs count (fail_count, anomaly visibility)
-        "total_hrs":        float(round(df_window["run_time_hrs"].sum() if has_end_time else df_analysis["run_time_hrs"].sum(), 2)),
+        # PROMPT 4: summed_runtime uses df_scope (all out-of-scope sub_apps
+        # excluded) so the summed-runtime KPI agrees with the in-scope daily
+        # picture and the window-compliance denominator.
+        "total_hrs":        float(round(df_scope["run_time_hrs"].sum() if has_end_time else df_analysis["run_time_hrs"].sum(), 2)),
+        # Out-of-scope sub_apps (user-excluded ∪ cyclic ∪ MONTHLY/OUTBOUND/…) —
+        # exposed so build_batch_payload scopes the heatmaps identically.
+        "out_of_scope_subs": sorted(str(s) for s in _out_of_scope_subs),
         # Sub-application rollup
         "sub_stats":        sub,
         "top_jobs":         top_jobs,
@@ -2457,6 +2492,17 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     window_df:   pd.DataFrame = m["window"]
     sub_df:      pd.DataFrame = m["sub_stats"]
 
+    # In-scope frame for the heatmaps / gantt / hourly density — same exclusion
+    # set used by the daily picture and window compliance, so every temporal
+    # surface in the Ctrl-M review correlates against one coherent scope.
+    _oos_subs = set(m.get("out_of_scope_subs", []))
+    if _oos_subs and "Sub_Application" in df.columns:
+        _df_payload_scope = df[~df["Sub_Application"].astype(str).isin(_oos_subs)].copy()
+        if _df_payload_scope.empty:
+            _df_payload_scope = df
+    else:
+        _df_payload_scope = df
+
     # Addition 4 — Multi-application-per-folder detection
     # When a single Folder contains 2+ distinct Application values, each
     # Application should be analyzed independently for window compliance.
@@ -2685,10 +2731,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "window":       window_records,
         "sub_stats":    sub_df.round({"total_hrs": 2}).to_dict(orient="records"),
         "anomalies":    m["anomalies"],
-        "hourly_counts": _build_hourly_counts(df),
+        "hourly_counts": _build_hourly_counts(_df_payload_scope),
         "sla_heatmap":  _build_sla_heatmap(m["daily"], ceiling=m.get("sla_ceiling")),
-        "hour_heatmap": _build_hour_heatmap(df),
-        "daily_jobs":   _build_daily_jobs(df),
+        "hour_heatmap": _build_hour_heatmap(_df_payload_scope),
+        "daily_jobs":   _build_daily_jobs(_df_payload_scope),
     }
 
 
