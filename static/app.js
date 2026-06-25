@@ -7836,7 +7836,15 @@ function _buildFindingsPayload() {
   // data_coverage lives at batch ROOT (not inside kpis) — enrich batch_kpis explicitly
   // Gap 2 fix: backend reads (req.batch_kpis or {}).get("data_coverage")
   const dataCoverage = ad.batch?.data_coverage || ad.batch?.kpis?.data_coverage || null;
-  const batchKpisEnriched = bk ? { ...bk, data_coverage: dataCoverage } : null;
+  // sla_source is the AUTHORITATIVE provenance signal (set by batch_calculator only when
+  // the batch was re-solved against a customer SLA file). It also lives at the batch ROOT,
+  // not inside kpis — so we must nest it explicitly or findings can't tell a customer SLA
+  // upload from system defaults (causing "SLA source: Assumed" / "matrix not uploaded" to
+  // contradict the SLA panel that correctly shows the customer ceilings).
+  const slaSource = ad.batch?.sla_source || ad.batch?.kpis?.sla_source || null;
+  const batchKpisEnriched = bk
+    ? { ...bk, data_coverage: dataCoverage, ...(slaSource ? { sla_source: slaSource } : {}) }
+    : null;
 
   // Pillar 3 — SOW compare: prefer live comparison, fall back to manual entry
   const sowCompare = ad.sowCompare || _buildSowCompareFromManual() || null;

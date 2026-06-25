@@ -1887,8 +1887,12 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 impact="Repeat breaches indicate systemic issue, not transient spike",
                 recommendation="Engage app/DB owner — review last 30-day trend in SLA tab")
 
-        # SLA ceilings notice (if we parsed them from the uploaded XLSX)
-        if req.sla_ceilings:
+        # SLA ceilings notice — only when a CUSTOMER SLA file was genuinely loaded.
+        # req.sla_ceilings is enriched from config_store, which ALWAYS carries default
+        # values, so gating on it alone would falsely claim "loaded from XLSX" even with
+        # no upload. sla_loaded is the authoritative signal (batch sla_source.type or the
+        # SLA-matrix tab), keeping this notice consistent with the batch-section labels.
+        if sla_loaded and req.sla_ceilings:
             parts = [f"{k}: {_fmt_hrs(v)}h" for k, v in req.sla_ceilings.items()]
             add("info", "📐",
                 f"Customer SLA ceilings loaded from XLSX",
