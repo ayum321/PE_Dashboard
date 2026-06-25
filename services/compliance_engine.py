@@ -252,6 +252,74 @@ def compute_window_compliance(
     total_days = len(distinct_days)
     breach_days = len(breach_day_set)
 
+    # ── Per-sub-app window rollup ────────────────────────────────────────────
+    # The Executive "at-risk" panels must reflect the SAME window reality as the
+    # headline compliance — the contracted ceiling governs the daily batch
+    # WINDOW (first-start → last-end), NOT a single job's runtime. Comparing a
+    # 0.6h job peak against a 6h window ceiling makes a breached batch look "98%
+    # within SLA", which directly contradicts the decision gate. This rollup
+    # gives every consumer the worst daily window, its ceiling, and the breach
+    # days per sub-app so the panels can show the binding verdict.
+    _sa_roll: Dict[str, Dict[str, Any]] = {}
+    for row in daily.values():
+        sa = str(row.get("sub_app") or "").strip()
+        key = sa.upper()
+        rec = _sa_roll.get(key)
+        if rec is None:
+            rec = _sa_roll[key] = {
+                "sub_app": sa or key, "total_windows": 0, "breach_windows": 0,
+                "at_risk_windows": 0, "ok_windows": 0, "worst_window_hrs": 0.0,
+                "ceiling": 0.0, "schedule_type": row.get("schedule_type") or "",
+                "_breach_days": set(),
+            }
+        elapsed = float(row.get("elapsed_hrs") or 0.0)
+        ceil_f = float(row.get("sla_ceil") or 0.0)
+        rec["total_windows"] += 1
+        if ceil_f > 0:
+            rec["ceiling"] = ceil_f
+        if elapsed > rec["worst_window_hrs"]:
+            rec["worst_window_hrs"] = elapsed
+        if bool(row.get("breach")):
+            rec["breach_windows"] += 1
+            rec["_breach_days"].add(row.get("run_date"))
+        elif ceil_f > 0 and ((ceil_f - elapsed) / ceil_f * 100) <= _atrisk_pct:
+            rec["at_risk_windows"] += 1
+        else:
+            rec["ok_windows"] += 1
+
+    per_sub_app: List[Dict[str, Any]] = []
+    for rec in _sa_roll.values():
+        tw = rec["total_windows"]
+        cl = rec["ceiling"]
+        ww = rec["worst_window_hrs"]
+        comp = round((rec["ok_windows"] + rec["at_risk_windows"]) / tw * 100, 1) if tw else 0.0
+        buf = round((cl - ww) / cl * 100, 1) if cl > 0 else None
+        if rec["breach_windows"] > 0:
+            status = "BREACH"
+        elif buf is not None and buf <= _atrisk_pct:
+            status = "AT_RISK"
+        else:
+            status = "OK"
+        # Window severity ratio (worst window ÷ ceiling): >1 = over the window,
+        # mirrors the SRI 0–1+ scale so the bubble/treemap colour by real breach.
+        severity = round(ww / cl, 3) if cl > 0 else 0.0
+        per_sub_app.append({
+            "sub_app":          rec["sub_app"],
+            "schedule_type":    rec["schedule_type"],
+            "total_windows":    tw,
+            "breach_windows":   rec["breach_windows"],
+            "breach_days":      len(rec["_breach_days"]),
+            "ok_windows":       rec["ok_windows"],
+            "at_risk_windows":  rec["at_risk_windows"],
+            "worst_window_hrs": round(ww, 3),
+            "ceiling":          round(cl, 3),
+            "buffer_pct":       buf,
+            "compliance_pct":   comp,
+            "severity":         severity,
+            "status":           status,
+        })
+    per_sub_app.sort(key=lambda r: (-r["breach_windows"], -(r["severity"] or 0)))
+
     return {
         "compliance_pct":   compliance_pct,
         "breach_count":     breach_count,
@@ -262,6 +330,7 @@ def compute_window_compliance(
         "total_days":       total_days,
         "breach_days":      breach_days,
         "breach_day_list":  sorted(str(d) for d in breach_day_set if d),
+        "per_sub_app":      per_sub_app,
         "warnings":         warnings,
     }
 

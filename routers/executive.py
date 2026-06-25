@@ -44,6 +44,7 @@ class ExecDashRequest(BaseModel):
     sla_data:      Optional[Dict[str, Any]]       = None
     sub_stats:     Optional[List[Dict[str, Any]]] = None
     window:        Optional[List[Dict[str, Any]]] = None
+    window_sub_app: Optional[List[Dict[str, Any]]] = None
     hourly_counts: Optional[Dict[str, Any]]       = None
     sow_compare:   Optional[Dict[str, Any]]       = None
     findings:      Optional[List[Dict[str, Any]]] = None
@@ -62,6 +63,14 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     sla_data = body.sla_data      or {}
     sub_stats = body.sub_stats    or []
     window   = body.window        or []
+    window_sub_app = body.window_sub_app or []
+    # Fast lookup of per-sub-app WINDOW reality (worst daily window vs ceiling,
+    # breach days). This is the BINDING SLA — the contracted ceiling governs the
+    # daily batch window, not a single job's runtime.
+    _sa_win_map = {
+        str(w.get("sub_app", "")).upper().strip(): w
+        for w in window_sub_app if w.get("sub_app")
+    }
 
     sla_ceiling = float(bk.get("daily_limit_hrs") or pe_config.SLA_DAILY_HRS)
 
@@ -169,6 +178,52 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     # ── Formula 4+5: Sub-app metrics (BUG-W5 fix — pass ceiling_map for per-sub-app SRI/CRS) ─
     sub_app_metrics = build_sub_app_metrics(top_jobs, servers, sla_ceiling,
                                             ceiling_map=_ceiling_map)
+    # Overlay the per-sub-app WINDOW reality so the "Worst Sub-App" hotspot tile,
+    # treemap, and bubble colour by real batch-window breach — not single-job
+    # peak runtime (which makes a breached batch look green and contradicts the
+    # decision gate). Window severity (worst window ÷ ceiling) dominates SRI so a
+    # sub-app whose daily window breaches can never render as low-risk.
+    for sm in sub_app_metrics:
+        _w = _sa_win_map.get(str(sm.get("sub_app", "")).upper().strip())
+        if not _w:
+            continue
+        sm["window_breach_days"]    = int(_w.get("breach_days") or 0)
+        sm["worst_window_hrs"]      = float(_w.get("worst_window_hrs") or 0.0)
+        sm["window_ceiling"]        = float(_w.get("ceiling") or 0.0)
+        sm["window_status"]         = _w.get("status", "OK")
+        sm["window_compliance_pct"] = _w.get("compliance_pct")
+        sm["sri"] = round(max(float(sm.get("sri") or 0.0), float(_w.get("severity") or 0.0)), 3)
+        sm["breach_count"] = max(int(sm.get("breach_count") or 0),
+                                 int(_w.get("breach_windows") or 0))
+
+    # ── Window-risk panel data (the BINDING SLA view for the Executive) ────────
+    # When wall-clock windows exist, the "At-Risk" panels show per-sub-app window
+    # breach (worst daily window vs contracted ceiling + breach days) so they can
+    # never claim "within SLA" while the gate is BLOCKED on window compliance.
+    # The frontend falls back to per-job peak (job_sla_bars) only when no window
+    # data is available (e.g. pre-SLA upload, or no elapsed/wall-clock times).
+    window_risk = []
+    for w in sorted(window_sub_app,
+                    key=lambda r: (-int(r.get("breach_windows") or 0),
+                                   -float(r.get("severity") or 0.0))):
+        ceil = float(w.get("ceiling") or 0.0)
+        ww   = float(w.get("worst_window_hrs") or 0.0)
+        window_risk.append({
+            "sub_app":          w.get("sub_app", "?"),
+            "job_name":         w.get("sub_app", "?"),   # render label slot
+            "peak_hrs":         round(ww, 2),            # worst daily WINDOW elapsed
+            "worst_window_hrs": round(ww, 2),
+            "sla_ceiling":      round(ceil, 2),
+            "buffer_pct":       w.get("buffer_pct"),
+            "sri":              float(w.get("severity") or 0.0),
+            "status":           w.get("status", "OK"),
+            "breach_days":      int(w.get("breach_days") or 0),
+            "total_windows":    int(w.get("total_windows") or 0),
+            "breach_windows":   int(w.get("breach_windows") or 0),
+            "compliance_pct":   w.get("compliance_pct"),
+            "schedule_type":    w.get("schedule_type", ""),
+            "is_window":        True,
+        })
 
     # ── OSHS computation ─────────────────────────────────────────
     # Window compliance = the contracted daily batch-window on-time rate. It is
@@ -412,6 +467,7 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         "waterfall":       waterfall,
         "narrative":       narrative,
         "job_sla_bars":    job_sla_bars,
+        "window_risk":     window_risk,
         "decision":        decision,
         "breach_calendar": breach_calendar,
         "concurrency":     concurrency,

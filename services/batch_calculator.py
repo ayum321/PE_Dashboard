@@ -2886,6 +2886,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,
+        "window_sub_app": (m.get("window_compliance") or {}).get("per_sub_app", []),
         "sub_stats":    sub_df.round({"total_hrs": 2}).to_dict(orient="records"),
         "anomalies":    m["anomalies"],
         "hourly_counts": _build_hourly_counts(_df_payload_scope),

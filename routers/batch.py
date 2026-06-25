@@ -112,6 +112,10 @@ class BatchResponse(BaseModel):
     customer_name: Optional[str] = None
     # Per-day job timings for the concurrency Gantt chart.
     daily_jobs: Optional[Dict[str, Any]] = None
+    # Per-sub-app WINDOW rollup (worst daily batch window vs contracted ceiling
+    # + breach days). Drives the Executive at-risk panels from the binding
+    # window metric instead of peak-vs-window-ceiling.
+    window_sub_app: Optional[List[Dict[str, Any]]] = None
 
 
 class BatchJsonRequest(BaseModel):
@@ -219,6 +223,7 @@ def _payload_to_response(
         sla_matrix=sla_mx_dict,
         customer_name=customer_name,
         daily_jobs=payload.get("daily_jobs"),
+        window_sub_app=payload.get("window_sub_app", []),
     )
 
     # Cache the full batch response so the agent tools can query it

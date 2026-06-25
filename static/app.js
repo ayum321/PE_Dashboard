@@ -9740,6 +9740,7 @@ async function renderOverview() {
       sla_data:      window.appData.slaMatrix || {},
       sub_stats:     window.appData.batch?.sub_stats    || [],
       window:        window.appData.batch?.window       || [],
+      window_sub_app: window.appData.batch?.window_sub_app || [],
       hourly_counts: window.appData.batch?.hourly_counts || {},
       benchmark:     window.appData.benchmark || null,
       sow_compare:   window.appData.sowCompare || _buildSowCompareFromManual() || null,
@@ -9760,10 +9761,10 @@ async function renderOverview() {
       _renderExecKPIs(data.kpis);
       _renderExecBenchmarkSummary(window.appData.benchmark);
       _renderExecResourceHealth(data.server_heatmap, data.kpis);
-      _renderExecTopRiskJobs(data.job_sla_bars);
+      _renderExecTopRiskJobs(data.window_risk?.length ? data.window_risk : data.job_sla_bars);
       _renderExecSowPanel(data.sow_panel);
       requestAnimationFrame(() => {
-        _renderExecSLABars(data.job_sla_bars);
+        _renderExecSLABars(data.window_risk?.length ? data.window_risk : data.job_sla_bars);
         _renderExecTemporal(data.temporal, data.kpis);
         _renderExecBreachCalendar(data.breach_calendar);
         _renderExecConcurrency(data.concurrency);
@@ -9797,12 +9798,12 @@ async function renderOverview() {
     _renderExecKPIs(data.kpis);
     _renderExecBenchmarkSummary(window.appData.benchmark);
     _renderExecResourceHealth(data.server_heatmap, data.kpis);
-    _renderExecTopRiskJobs(data.job_sla_bars);
+    _renderExecTopRiskJobs(data.window_risk?.length ? data.window_risk : data.job_sla_bars);
     _renderExecSowPanel(data.sow_panel);
 
     // ── Phase 2: deferred — heavy Plotly charts staggered across frames
     const deferredCharts = [
-      () => _renderExecSLABars(data.job_sla_bars),
+      () => _renderExecSLABars(data.window_risk?.length ? data.window_risk : data.job_sla_bars),
       () => _renderExecTemporal(data.temporal, data.kpis),
       () => _renderExecBreachCalendar(data.breach_calendar),
       () => _renderExecConcurrency(data.concurrency),
@@ -10844,45 +10845,84 @@ function _renderExecSLABars(jobs) {
   const el = document.getElementById("exec-chart-sla-bars");
   if (!el || !jobs?.length) return;
 
-  const labels = jobs.map(j => j.job_name.length > 25 ? j.job_name.slice(0, 22) + "…" : j.job_name);
-  const peaks  = jobs.map(j => j.peak_hrs);
+  // Window mode: bars are the worst daily batch WINDOW per sub-app, judged
+  // against each sub-app's OWN contracted ceiling (markers), so a breached
+  // window crosses its ceiling instead of looking like huge headroom.
+  const isWin  = !!jobs[0]?.is_window;
+  const labels = jobs.map(j => { const s = j.job_name || j.sub_app || ""; return s.length > 25 ? s.slice(0, 22) + "…" : s; });
+
+  // Relabel the panel badge + subtitle so the scope (window vs job) is honest.
+  const badgeEl = document.getElementById("exec-slabars-badge");
+  const subEl   = document.getElementById("exec-slabars-subtitle");
+  if (badgeEl) {
+    badgeEl.textContent = isWin ? "Window-level" : "Job-level";
+    badgeEl.title = isWin
+      ? "Scope: each sub-app's worst daily batch window (first-start → last-end) vs its contracted ceiling. This is the BINDING SLA view — it matches the Breach Calendar and decision gate."
+      : "Scope: each job's peak runtime vs its own SLA ceiling. Green here ≠ the daily batch window passing — see the Breach Calendar for window-level results.";
+  }
+  if (subEl) {
+    subEl.textContent = isWin
+      ? "Each bar = one sub-app's worst daily batch window vs its ceiling (markers) · sorted by risk (worst at top)"
+      : "Each bar = one job's peak runtime vs its own ceiling · sorted by SRI (worst at top)";
+  }
+  const vals   = jobs.map(j => _n(j.peak_hrs));
   const colors = jobs.map(j => j.status === "BREACH" ? "#f43f5e" : (j.status === "AT_RISK" ? "#f59e0b" : "#10d96e"));
-  const sla    = jobs.length ? jobs[0].sla_ceiling : 6;
 
   const traces = [
     {
       type: "bar", orientation: "h",
-      y: labels, x: peaks,
+      y: labels, x: vals,
       marker: { color: colors, line: { width: 0 } },
-      text: jobs.map(j => `SRI: ${_n(j.sri).toFixed(2)}`),
+      text: jobs.map(j => isWin ? `${j.breach_days || 0}d` : `SRI: ${_n(j.sri).toFixed(2)}`),
       textposition: "outside",
       textfont: { size: 9, color: "#6b7db3" },
-      hovertemplate: "%{y}<br>Peak: %{x:.2f}h<br>Buffer: %{customdata:.0f}%<extra></extra>",
-      customdata: jobs.map(j => j.buffer_pct),
-      name: "Peak Runtime",
+      hovertemplate: isWin
+        ? "%{y}<br>Worst window: %{x:.2f}h<br>Ceiling: %{customdata[0]:.1f}h<br>Buffer: %{customdata[1]:.0f}%<br>%{customdata[2]} day(s) breached<extra></extra>"
+        : "%{y}<br>Peak: %{x:.2f}h<br>Buffer: %{customdata:.0f}%<extra></extra>",
+      customdata: isWin
+        ? jobs.map(j => [_n(j.sla_ceiling), (j.buffer_pct ?? 0), (j.breach_days || 0)])
+        : jobs.map(j => j.buffer_pct),
+      name: isWin ? "Worst Window" : "Peak Runtime",
     },
   ];
 
+  // Per-sub-app ceiling markers (window mode) — each sub-app is judged against
+  // its OWN contracted ceiling, so there is no single misleading global line.
+  if (isWin) {
+    traces.push({
+      type: "scatter", mode: "markers",
+      y: labels, x: jobs.map(j => _n(j.sla_ceiling)),
+      marker: { symbol: "line-ns-open", size: 18, color: "#f43f5e", line: { width: 2.5 } },
+      hovertemplate: "Ceiling: %{x:.1f}h<extra></extra>",
+      name: "SLA ceiling",
+    });
+  }
+
+  const sla = jobs.length ? _n(jobs[0].sla_ceiling) : 6;
   const layout = {
     ..._EXEC_LAYOUT_BASE,
     margin: { l: 140, r: 60, t: 10, b: 35 },
     xaxis: { ..._EXEC_LAYOUT_BASE.xaxis, title: { text: "Hours", font: { size: 10 } } },
     yaxis: { ..._EXEC_LAYOUT_BASE.yaxis, autorange: "reversed" },
-    shapes: [{
+    showlegend: false,
+    bargap: 0.15,
+  };
+  // Single dashed SLA line only in per-job mode (one global ceiling). Window
+  // mode uses the per-bar ceiling markers above because ceilings differ by
+  // schedule type (e.g. 6h DAILY vs 9h WEEKLY).
+  if (!isWin) {
+    layout.shapes = [{
       type: "line", x0: sla, x1: sla, y0: -0.5, y1: labels.length - 0.5,
       line: { color: "#f43f5e", width: 2, dash: "dash" },
-    }],
-    annotations: [{
-      // Problem 3: pin SLA label to the top of the dashed line, not floating bottom-right
+    }];
+    layout.annotations = [{
       xref: "x", yref: "paper",
       x: sla, y: 1.02, xanchor: "center", yanchor: "bottom",
       text: `SLA: ${sla}h`, showarrow: false,
       font: { size: 9, color: "#f43f5e", family: "monospace" },
       bgcolor: "rgba(13,21,38,0.7)", borderpad: 2,
-    }],
-    showlegend: false,
-    bargap: 0.15,
-  };
+    }];
+  }
 
   _plotlyPurge(el);
   Plotly.newPlot(el, traces, layout, _EXEC_CFG);
@@ -11144,39 +11184,62 @@ function _renderExecResourceHealth(servers, kpis) {
 function _renderExecTopRiskJobs(jobs) {
   const el = document.getElementById("exec-top-risk-jobs");
   if (!el) return;
+  const titleEl = document.getElementById("exec-risk-title");
+  const subEl   = document.getElementById("exec-risk-subtitle");
   if (!jobs?.length) {
-    el.innerHTML = '<p class="text-Cmuted text-[11px] py-4 text-center">No SLA job data loaded</p>';
+    el.innerHTML = '<p class="text-Cmuted text-[11px] py-4 text-center">No SLA window data loaded</p>';
     return;
   }
 
-  // Sort by SRI descending (worst first), deduplicate by job name, take top 3
+  // Window mode = the BINDING SLA view (per-sub-app daily batch window vs the
+  // contracted ceiling). Falls back to per-job peak only when no window data.
+  const isWin = !!jobs[0]?.is_window;
+  if (titleEl) titleEl.textContent = isWin ? "Top At-Risk Sub-Apps" : "Top At-Risk Jobs";
+  if (subEl)   subEl.textContent   = isWin
+    ? "Worst daily batch window vs contracted SLA ceiling"
+    : "Highest per-job runtime vs its SLA ceiling";
+
+  const statusCol = (s, sri) =>
+    s === "BREACH"  ? "#f43f5e" :
+    s === "AT_RISK" ? "#f59e0b" :
+    s === "OK"      ? "#10d96e" :
+    (sri > 1 ? "#f43f5e" : sri > 0.85 ? "#f59e0b" : "#10d96e");
+
+  // Sort by SRI/severity descending (worst first), dedupe by label, take top 3
   const _seen = new Set();
   const top3 = jobs.slice().sort((a, b) => (b.sri||0) - (a.sri||0))
-    .filter(j => { const k = j.job_name || ''; if (_seen.has(k)) return false; _seen.add(k); return true; })
+    .filter(j => { const k = j.job_name || j.sub_app || ''; if (_seen.has(k)) return false; _seen.add(k); return true; })
     .slice(0, 3);
 
   el.innerHTML = top3.map((j, i) => {
     const sri = j.sri || 0;
-    const col = sri > 1 ? "#f43f5e" : sri > 0.85 ? "#f59e0b" : "#10d96e";
-    const pct = j.sla_ceiling > 0 ? ((j.peak_hrs / j.sla_ceiling) * 100).toFixed(0) : "—";
-    const buffer = j.buffer_pct != null ? j.buffer_pct.toFixed(1) : "—";
-    const name = (j.job_name || "Unknown").length > 30
-               ? (j.job_name || "Unknown").slice(0,27) + "…"
-               : (j.job_name || "Unknown");
+    const col = statusCol(j.status, sri);
+    const ceil = _n(j.sla_ceiling);
+    const val  = _n(j.peak_hrs);
+    const pct  = ceil > 0 ? ((val / ceil) * 100).toFixed(0) : "—";
+    const buffer = j.buffer_pct != null ? _n(j.buffer_pct).toFixed(1) : "—";
+    const label = (j.job_name || j.sub_app || "Unknown");
+    const name = label.length > 30 ? label.slice(0,27) + "…" : label;
+    const valLbl = isWin ? "Worst Window" : "Peak";
+    // Window context: how many days this sub-app's window breached + its window
+    // compliance — so a red card always explains WHY (never just a bare status).
+    const ctx = isWin
+      ? `${j.breach_days || 0} day${(j.breach_days===1)?"":"s"} breached · ${j.compliance_pct != null ? _n(j.compliance_pct).toFixed(0) : "—"}% windows within SLA`
+      : `SRI ${sri.toFixed(2)} · ${pct}% of ceiling`;
     return `
       <div class="rounded-lg border border-Cborder/40 bg-Ccard/40 p-3" style="border-left:3px solid ${col};">
         <div class="flex items-center justify-between gap-2 mb-1">
-          <span class="text-[12px] font-bold text-Cwhite truncate" title="${_esc(j.job_name||'')}">#${i+1} ${_esc(name)}</span>
-          <span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style="color:${col};background:${col}22;">${j.status || (sri>1?'BREACH':'OK')}</span>
+          <span class="text-[12px] font-bold text-Cwhite truncate" title="${_esc(label)}">#${i+1} ${_esc(name)}</span>
+          <span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style="color:${col};background:${col}22;">${_esc(j.status || (sri>1?'BREACH':'OK'))}</span>
         </div>
         <div class="grid grid-cols-3 gap-1 text-center">
           <div>
-            <div class="text-[9px] text-Cmuted">Peak</div>
-            <div class="text-[12px] font-bold text-Cwhite">${_n(j.peak_hrs).toFixed(1)}h</div>
+            <div class="text-[9px] text-Cmuted">${valLbl}</div>
+            <div class="text-[12px] font-bold text-Cwhite">${val.toFixed(1)}h</div>
           </div>
           <div>
             <div class="text-[9px] text-Cmuted">Ceiling</div>
-            <div class="text-[12px] font-bold text-Cwhite">${_n(j.sla_ceiling).toFixed(1)}h</div>
+            <div class="text-[12px] font-bold text-Cwhite">${ceil.toFixed(1)}h</div>
           </div>
           <div>
             <div class="text-[9px] text-Cmuted">Buffer</div>
@@ -11186,7 +11249,7 @@ function _renderExecTopRiskJobs(jobs) {
         <div class="mt-1.5 h-1.5 rounded bg-Cbg/80 overflow-hidden">
           <div class="h-full rounded" style="width:${Math.min(Number(pct)||0, 100)}%;background:${col}"></div>
         </div>
-        <div class="text-[9px] text-Cmuted mt-0.5 text-right">SRI ${sri.toFixed(2)} · ${pct}% utilization</div>
+        <div class="text-[9px] text-Cmuted mt-0.5 text-right">${_esc(ctx)}</div>
       </div>`;
   }).join("");
 }
@@ -11605,15 +11668,22 @@ function _renderExecHotSpots(data) {
 
   const tiles = [];
 
-  // 1. Worst Sub-App (highest SRI)
+  // 1. Worst Sub-App (highest SRI — now window-aware via executive.py overlay)
   const subs = (data?.sub_app_metrics || []).slice().sort((a, b) => (b.sri || 0) - (a.sri || 0));
   if (subs.length) {
     const w = subs[0];
     const col = w.sri > 1 ? "#f43f5e" : w.sri > 0.85 ? "#f59e0b" : "#10d96e";
+    // When the per-sub-app WINDOW overlay is present, explain the risk in window
+    // terms (days the daily batch window breached) instead of a bare SRI number,
+    // so a red tile always matches the Breach Calendar / decision gate.
+    const wbd = Number(w.window_breach_days || 0);
+    const subTxt = wbd > 0
+      ? `SRI ${_n(w.sri).toFixed(2)} · ${wbd} day${wbd !== 1 ? "s" : ""} window breach`
+      : `SRI ${_n(w.sri).toFixed(2)} · ${w.job_count} jobs`;
     tiles.push({
       label: "Worst Sub-App",
       value: w.sub_app,
-      sub: `SRI ${_n(w.sri).toFixed(2)} · ${w.job_count} jobs`,
+      sub: subTxt,
       color: col,
       icon: "🎯",
     });
@@ -11659,11 +11729,17 @@ function _renderExecHotSpots(data) {
 
   // 4. Total Breach Hours (from breach calendar data)
   //    Prefer elapsed_hrs (wall-clock) over total_hrs (summed parallel jobs).
+  //    Gate BOTH the day count and the overrun sum by the canonical per-day
+  //    breach flag (re-stamped from the window-compliance breach-day set) so
+  //    this tile can never disagree with the Breach Calendar / decision gate.
+  //    A naive `elapsed > 6h` recompute would falsely flag an 8h WEEKLY window
+  //    (OK vs its own 9h ceiling) as a breach — the canonical flag already
+  //    accounts for each sub-app's own ceiling.
   const win = window.appData?.batch?.window || [];
   const sla = data?.kpis?.sla_daily_hrs || 6;
   const _whrs = (w) => { const e = Number(w.elapsed_hrs ?? 0); return e > 0 ? e : Number(w.total_hrs ?? 0); };
-  const totalOverrun = win.reduce((s, w) => s + Math.max(0, _whrs(w) - sla), 0);
-  const breachDays = win.filter(w => _whrs(w) > sla).length;
+  const totalOverrun = win.reduce((s, w) => s + (w.breach ? Math.max(0, _whrs(w) - sla) : 0), 0);
+  const breachDays = win.filter(w => w.breach).length;
   if (win.length) {
     const col = totalOverrun > 10 ? "#f43f5e" : totalOverrun > 0 ? "#f59e0b" : "#10d96e";
     tiles.push({
