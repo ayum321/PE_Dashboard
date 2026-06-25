@@ -10164,6 +10164,12 @@ function _renderExecBreachCalendar(payload) {
     const dow = d.day_of_week ? `${d.day_of_week} ` : "";
     const over = (d.over_by ?? 0) >= 0 ? `+${d.over_by}h` : `${d.over_by}h`;
     const tj = (d.top_jobs || []).filter(Boolean).join(", ") || "—";
+    // A "sub_app" breach means the daily total is within the daily ceiling but a
+    // sub-application exceeded its OWN tighter contracted ceiling — explain it so
+    // a red bar sitting below the ceiling line is never read as a contradiction.
+    if (d.breach_basis === "sub_app") {
+      return `${dow}${d.date}<br>Window: ${(d.hours ?? 0).toFixed?.(2) ?? d.hours}h (within ${d.ceiling ?? ceiling}h daily)<br>Breach: a sub-application exceeded its contracted SLA ceiling<br>Top jobs: ${tj}`;
+    }
     return `${dow}${d.date}<br>Window: ${(d.hours ?? 0).toFixed?.(2) ?? d.hours}h<br>Ceiling: ${d.ceiling ?? ceiling}h<br>Δ: ${over}<br>Top jobs: ${tj}`;
   });
 

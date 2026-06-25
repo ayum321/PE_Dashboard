@@ -473,11 +473,17 @@ def _compute_decision_gate(
     # Invariant guard: a breach-day count can never exceed total days.
     if total_days and breach_days > total_days:
         breach_days = total_days
-    compliant_days = total_days - breach_days
-    if total_days > 0:
-        window_compliance = round(compliant_days / total_days * 100.0, 1)
+    # Window-compliance % MUST be the same canonical figure the KPI strip and
+    # narrative report (per-(sub_app,date) compliance from the shared engine) so
+    # the gate can never contradict the rest of the board. Only re-derive a
+    # per-day on-time rate when the canonical value is unavailable.
+    _canon_wc = kpis.get("window_compliance")
+    if _canon_wc is not None:
+        window_compliance = round(float(_canon_wc), 1)
+    elif total_days > 0:
+        window_compliance = round((total_days - breach_days) / total_days * 100.0, 1)
     else:
-        window_compliance = float(kpis.get("window_compliance") or 0.0)
+        window_compliance = 0.0
 
     # ── 3. Fleet health
     bad_servers = [
@@ -696,13 +702,29 @@ def _build_breach_calendar(
         this_ceil = ceiling_map.get(_sa, sla_ceiling)
         over_by = round(hrs - this_ceil, 2)
 
-        if hrs > this_ceil:
+        # Canonical per-day breach: prefer the authoritative flag stamped by the
+        # batch engine (it matches the compliance % + breach-day KPI and excludes
+        # non-daily schedule types). Fall back to an elapsed-vs-ceiling recompute
+        # only when the flag is absent, so the calendar bars + summary count the
+        # same days as the decision gate and narrative.
+        _canon_breach = w.get("breach")
+        is_breach = (hrs > this_ceil) if _canon_breach is None else bool(_canon_breach)
+        if is_breach:
             status = "breach"
             breach_count += 1
         elif hrs > this_ceil * 0.9:
             status = "near"
         else:
             status = "ok"
+        # Distinguish HOW the day breached so the bar chart never looks wrong:
+        #  - "window": the day's total batch window exceeded the daily ceiling
+        #    (bar sits above the ceiling line, as expected).
+        #  - "sub_app": the daily total is within the daily ceiling, but a
+        #    sub-application exceeded its OWN (tighter) contracted ceiling — the
+        #    bar sits below the line yet is still a real SLA breach. The frontend
+        #    uses this to explain the red bar instead of showing a misleading
+        #    negative delta.
+        breach_basis = "window" if (is_breach and hrs > this_ceil) else ("sub_app" if is_breach else "")
         if hrs > worst_hrs:
             worst_hrs = hrs
             worst_day = date_str
@@ -714,6 +736,7 @@ def _build_breach_calendar(
             "ceiling":      round(this_ceil, 2),   # per-row contracted ceiling
             "over_by":      over_by,
             "status":       status,
+            "breach_basis": breach_basis,
             "top_jobs":     top_2_jobs,
             "sub_app":      _sa,
         })

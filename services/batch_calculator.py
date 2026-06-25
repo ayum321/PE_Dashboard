@@ -2191,6 +2191,17 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             # use the engine's distinct-day rollups, not the window counts.
             window_breach_days = int(_wc.get("breach_days", _wc.get("breach_count", 0)))
             n_window_days = int(_wc.get("total_days", _wc.get("total_windows", n_window_days)))
+            # Re-stamp the per-day window breach flag from the engine's canonical
+            # distinct breach-day set so the bar chart, breach calendar, and
+            # decision gate all count the SAME days the compliance % is based on.
+            # The raw per-sub-app rollup (window["breach"]) includes excluded
+            # MONTHLY/CYCLIC/OUTBOUND types and can report one more breach day than
+            # the compliance engine — re-stamping keeps every surface on 26, not 27.
+            _bd_list = _wc.get("breach_day_list")
+            if _bd_list is not None and "run_date" in window.columns:
+                _bd_set = set(str(d) for d in _bd_list)
+                window["breach"] = window["run_date"].astype(str).isin(_bd_set)
+                window_records_daily = window.to_dict(orient="records")
         except Exception:
             batch_window_comp = round(
                 ((n_window_days - int(window["breach"].sum())) / n_window_days * 100)

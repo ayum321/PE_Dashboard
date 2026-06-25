@@ -261,6 +261,7 @@ def compute_window_compliance(
         "excluded_windows": excluded_windows,
         "total_days":       total_days,
         "breach_days":      breach_days,
+        "breach_day_list":  sorted(str(d) for d in breach_day_set if d),
         "warnings":         warnings,
     }
 
