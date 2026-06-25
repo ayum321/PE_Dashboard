@@ -12188,18 +12188,21 @@ function renderSlaHeatmap(data) {
     return s.slice(-5);
   };
 
-  // Cell background colour
+  // Cell background colour — uses per-cell sla_limit when available (set by
+  // _build_sla_heatmap using per-job SLA from BatchSLA XLSX), else global limit.
   const cellColor = (c) => {
     if (!c || c.hrs === null || c.hrs === undefined) return "#0f3d24";
-    if (c.breach)                return "#f43f5e";
-    if (c.hrs > limit * 0.85)   return "#f59e0b";
+    const cel = c.sla_limit ?? limit;
+    if (c.breach)               return "#f43f5e";
+    if (c.hrs > cel * 0.85)    return "#f59e0b";
     return "#10d96e";
   };
 
-  // Tooltip text
+  // Tooltip text — show the per-job SLA ceiling so analysts see what was used
   const cellTitle = (c) => {
     if (!c || c.hrs === null || c.hrs === undefined) return "No run";
-    return `${c.hrs.toFixed(2)} h — ${c.breach ? "BREACH" : "OK"}`;
+    const cel = c.sla_limit ?? limit;
+    return `${c.hrs.toFixed(2)} h — ${c.breach ? "BREACH" : "OK"} (SLA: ${cel.toFixed(2)}h)`;
   };
 
   const shortDates = dates.map(fmtDate);

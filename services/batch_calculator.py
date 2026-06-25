@@ -1679,6 +1679,24 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         df_scope = df_analysis
 
 
+    # Per-day breach from window_agg (populated inside the has_end_time block below).
+    # Used to set window["breach"] from per-sub-app ceilings instead of global_ceil
+    # so the bar chart and drill-down table are consistent with compliance_engine's verdict.
+    _window_day_breach = None
+
+    # Reverse map: job_name → sub_application (from df_scope).
+    # Used by SLA lookups to build composite "SubApp|JobName" keys that match
+    # job_sla_map's key format, and by the has_end_time path to resolve sub-app
+    # ceilings from _win_ceiling_map.
+    _job_sub_rev: Dict[str, str] = {}
+    if "Sub_Application" in df_scope.columns and "Job_Name" in df_scope.columns:
+        for _jn, _sa in (df_scope[["Job_Name", "Sub_Application"]]
+                         .drop_duplicates()
+                         .itertuples(index=False, name=None)):
+            _sa_str = str(_sa) if _sa and str(_sa) not in ("", "nan", "None") else ""
+            if _sa_str:
+                _job_sub_rev[str(_jn)] = _sa_str
+
     # Per-job SLA breach counting ──────────────────────────────────────────────
     # Breach = Sub_Application window (wall-clock: last End_Time − first Start_Time
     # per Sub_App per run_date) > per-job SLA ceiling resolved from SLA matrix.
@@ -1917,6 +1935,28 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         daily["breach"] = daily["_day_breach"].fillna(False)
         daily.drop(columns=["_day_breach"], inplace=True)
 
+        # Save per-day breach so window["breach"] (the bar chart) uses per-sub-app
+        # ceilings — not global_ceil — making the chart consistent with compliance %.
+        _window_day_breach = sub_breach.rename(columns={"_day_breach": "_wb"})
+
+        # Add per-job SLA ceiling to daily for correct heatmap cell coloring.
+        # Without this the heatmap compares every job against the global ceiling and
+        # can show a job as red when it is actually within its own contracted SLA.
+        # Build per-job ceiling using _win_ceiling_map (sub_app → resolved ceiling).
+        # This avoids the "SubApp|JobName" composite key mismatch that prevents
+        # job_sla_map.get(job_name) from finding any entries.
+        _job_ceil_ht: Dict[str, float] = {
+            str(_jn): _win_ceiling_map.get(str(_sa), global_ceil)
+            for _jn, _sa in (df_scope[["Job_Name", "Sub_Application"]]
+                             .drop_duplicates()
+                             .itertuples(index=False, name=None))
+        } if "Sub_Application" in df_scope.columns and "Job_Name" in df_scope.columns else {}
+
+        def _job_sla_for_daily_ht(row) -> float:
+            return _job_ceil_ht.get(str(row.get("Job_Name", "")), global_ceil)
+        if "sla_hrs" not in daily.columns:
+            daily["sla_hrs"] = daily.apply(_job_sla_for_daily_ht, axis=1)
+
         # Per-job breach column for heatmap (per-job wall-clock vs per-job SLA)
         job_breach_map = {}
         for _, r in window_agg.iterrows():
@@ -1930,7 +1970,10 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
         def _job_sla_for_row(row) -> float:
             job_name = str(row["Job_Name"])
-            entry = job_sla_map.get(job_name)
+            sub_app = _job_sub_rev.get(job_name, "")
+            # Try composite key first (standard format in job_sla_map), fallback to bare name
+            key = f"{sub_app}|{job_name}" if sub_app else job_name
+            entry = job_sla_map.get(key) or job_sla_map.get(job_name)
             if entry and entry.get("sla_hrs", 0) > 0:
                 return float(entry["sla_hrs"])
             return global_ceil
@@ -2040,7 +2083,15 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # flag. Feed those directly into the shared compliance engine so Batch and
     # SLA Matrix always agree on the same denominator.
     if "breach" not in window.columns:
-        if elapsed_available:
+        if _window_day_breach is not None:
+            # Per-sub-app breach: a day is "breached" if ANY in-scope sub_app exceeded
+            # its own resolved SLA ceiling (XLSX → schedule-type → global default).
+            # Keeps the bar chart, drill-down table, and spike detector consistent
+            # with the compliance % KPI — all derived from the same per-sub-app verdict.
+            window = window.merge(_window_day_breach, on="run_date", how="left")
+            window["breach"] = window["_wb"].fillna(False)
+            window.drop(columns=["_wb"], inplace=True, errors="ignore")
+        elif elapsed_available:
             window["breach"] = window["elapsed_hrs"] > global_ceil
         else:
             window["breach"] = window["total_hrs"] > global_ceil
@@ -2087,10 +2138,13 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             )
             window_breach_days = int(window["breach"].sum()) if n_window_days else 0
 
-    # Sub-application rollup
+    # Sub-application rollup — ALL sub_apps from df_analysis (not scoped) so the
+    # analyst can see what MONTHLY/OUTBOUND contributed.  in_scope=False marks
+    # sub_apps excluded from the compliance denominator.
     sub = (df_analysis.groupby("Sub_Application", as_index=False)
              .agg(total_hrs=("run_time_hrs", "sum"),
                   jobs=("Job_Name", "nunique")))
+    sub["in_scope"] = ~sub["Sub_Application"].astype(str).isin(_out_of_scope_subs)
 
     # ── Per-job frame + compliance scope ─────────────────────────
     top_jobs = build_top_jobs_df(df_analysis, sla_index=sla_index)
@@ -2297,6 +2351,20 @@ def _build_sla_heatmap(daily_df: pd.DataFrame, ceiling: float | None = None) -> 
     if work.empty:
         return {"jobs": [], "dates": [], "cells": [], "limit": lim}
 
+    # Per-job SLA ceiling map: use the sla_hrs column from daily_df when available
+    # (set from job_sla_map in compute_metrics).  This means a job with an XLSX
+    # ceiling of 8h is judged against 8h, not the global 6h default, so heatmap
+    # cell colors agree with the per-sub-app compliance %.
+    job_sla_lim: Dict[str, float] = {}
+    if "sla_hrs" in work.columns:
+        for _jn, _grp in work.groupby("Job_Name"):
+            _vals = pd.to_numeric(_grp["sla_hrs"], errors="coerce").dropna()
+            if not _vals.empty:
+                try:
+                    job_sla_lim[str(_jn)] = float(_vals.mode().iloc[0])
+                except Exception:
+                    job_sla_lim[str(_jn)] = float(_vals.max())
+
     dates = sorted(work["run_date"].unique())[-21:]   # last 21 days
 
     # Rank jobs by operational attention first:
@@ -2306,8 +2374,9 @@ def _build_sla_heatmap(daily_df: pd.DataFrame, ceiling: float | None = None) -> 
     for job_name, grp in work.groupby("Job_Name", dropna=True):
         job = str(job_name)
         vals = pd.to_numeric(grp[hrs_col], errors="coerce").fillna(0.0)
-        breach_days = int((vals > lim).sum())
-        near_days   = int(((vals > lim * 0.85) & (vals <= lim)).sum())
+        job_ceil = job_sla_lim.get(job, lim)   # per-job SLA ceiling, falls back to global
+        breach_days = int((vals > job_ceil).sum())
+        near_days   = int(((vals > job_ceil * 0.85) & (vals <= job_ceil)).sum())
         peak_hrs    = float(vals.max()) if not vals.empty else 0.0
         total_hrs    = float(vals.sum()) if not vals.empty else 0.0
         avg_hrs      = float(vals.mean()) if not vals.empty else 0.0
@@ -2328,6 +2397,7 @@ def _build_sla_heatmap(daily_df: pd.DataFrame, ceiling: float | None = None) -> 
             "peak_hrs": round(peak_hrs, 2),
             "avg_hrs": round(avg_hrs, 2),
             "total_hrs": round(total_hrs, 2),
+            "sla_limit": round(job_ceil, 2),
             "reason": "; ".join(reasons) if reasons else "Total runtime only",
         }
         ranked_jobs.append((score, job))
@@ -2348,8 +2418,10 @@ def _build_sla_heatmap(daily_df: pd.DataFrame, ceiling: float | None = None) -> 
                 cells.append({"job": job, "date": str(d), "hrs": None, "breach": False})
             else:
                 h = float(pd.to_numeric(sub[hrs_col], errors="coerce").fillna(0.0).sum())
+                job_ceil = job_sla_lim.get(str(job), lim)
                 cells.append({"job": job, "date": str(d), "hrs": round(h, 2),
-                               "breach": h > lim})
+                               "breach": h > job_ceil,
+                               "sla_limit": round(job_ceil, 2)})
 
     return {
         "jobs":  all_jobs,
