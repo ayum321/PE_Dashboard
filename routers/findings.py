@@ -1690,8 +1690,16 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         if not req.sow_compare:
             _vol = _sc.ac_get("volume_vs_sow") or {}
             _sow = _sc.ac_get("sow_contract")  or {}
-            if _vol or _sow:
-                req.sow_compare = {**_sow, **_vol, "_enriched_from_cache": True}
+            # Only treat the cached contract as a real SOW when it carries the
+            # canonical SOW structure written by the SOW parser (sow.py). Presence
+            # of these keys — not their truthiness — is the signal, so a sparse but
+            # genuine SOW still counts, while a stray slot can't masquerade as a SOW
+            # and trigger false "SOW comparison included" claims.
+            _SOW_STRUCT_KEYS = ("sla_windows", "volume_by_year", "operational_standards")
+            _sow_is_real = isinstance(_sow, dict) and any(k in _sow for k in _SOW_STRUCT_KEYS)
+            if _vol or _sow_is_real:
+                req.sow_compare = {**(_sow if _sow_is_real else {}), **_vol,
+                                   "_enriched_from_cache": True}
 
     except Exception:
         pass
@@ -2923,13 +2931,30 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         date_span  = _i((batch_cov or {}).get("date_span_days", 0))
         scope_parts.append(f"{total_runs} batch runs across {total_jobs} jobs ({date_span}-day window)")
     if has_resource:
-        scope_parts.append(f"{len(servers)} servers reviewed")
+        # Only claim a server was "reviewed" when its metrics are actually readable.
+        # Image-only / all-zero resource docs are detected but cannot be reviewed,
+        # so the scope line must not imply an infrastructure assessment happened.
+        _res_reviewed = bool(servers) and not all(
+            _f(s.get("effective_cpu") or s.get("cpu_pct") or 0) == 0
+            and _f(s.get("mem_pct")) == 0
+            for s in servers
+        )
+        _n_srv = len(servers) if servers else _i(rk.get("total_servers"))
+        if _res_reviewed:
+            scope_parts.append(f"{_n_srv} server(s) reviewed")
+        elif _n_srv:
+            scope_parts.append(f"{_n_srv} server(s) detected (metrics unreadable — not reviewed)")
     if sla_loaded:
         scope_parts.append("customer SLA matrix applied")
     elif has_batch:
         scope_parts.append("default SLA thresholds applied (customer matrix not uploaded)")
     if bench:
-        scope_parts.append("UI benchmark comparison included")
+        # Distinguish a batch-runtime benchmark (PROD-vs-TEST job timings) from a
+        # UI transaction benchmark — they are different measurement types.
+        _bench_label = ("batch runtime benchmark included"
+                        if (isinstance(bench, dict) and bench.get("kind") == "batch")
+                        else "UI benchmark comparison included")
+        scope_parts.append(_bench_label)
     if sow_cmp:
         scope_parts.append("SOW volume comparison included")
     line_scope = f"Scope: {'; '.join(scope_parts)}." if scope_parts else ""

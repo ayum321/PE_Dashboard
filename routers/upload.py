@@ -681,15 +681,11 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
     if (result.get("workflows") or []):
         config_store.set("_sla_source_type", "batch_sla_xlsx")
 
-    # ── Audit context: volume_vs_sow gets BatchSLA workflow SLA overrides ─
-    try:
-        from services import session_cache
-        session_cache.ac_set("sow_contract", {
-            **(session_cache.ac_get("sow_contract") or {}),
-            "batch_sla_workflows": result.get("workflows") or [],
-        })
-    except Exception:
-        pass
+    # NOTE: BatchSLA workflow rows are persisted to config_store under
+    # '_batch_sla_xlsx' (above) — the single source the SLA engines read.
+    # They are deliberately NOT mirrored into the 'sow_contract' audit slot:
+    # doing so used to make findings/narrative falsely report "SOW volume
+    # comparison included" when only a BatchSLA matrix (not a SOW) was uploaded.
 
     # ── Silent batch KPI recompute so the gauge reflects the new per-job SLAs ──
     # When BatchSLA_info.xlsx is uploaded AFTER Ctrl-M, the gauge and compliance
