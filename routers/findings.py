@@ -1981,14 +1981,25 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     root_cause="WORKFLOW_SLA_AT_RISK")
 
     # ═══════════════════════════════════════════════════════════════
-    # BENCHMARK RULES
+    # BENCHMARK RULES — TWO ISOLATED SECTIONS
+    # ═══════════════════════════════════════════════════════════════
+    # Section A: UI performance findings (Transaction Comparison Matrix data).
+    # Section B: Batch runtime regression findings (batch_perf_summary data).
+    # These two measurement types must never be mixed. A benchmark object with
+    # kind="batch" has rows=[] and must not trigger UI performance findings.
     # ═══════════════════════════════════════════════════════════════
     bench = req.benchmark or {}
     if bench:
         cov.benchmark = True
-        rows       = bench.get("rows") or []
+        bench_kind = bench.get("kind", "ui")   # "batch" | "ui"
+
+        # ── Section A: UI performance findings ────────────────────
+        # Only fires when rows are present AND this is a UI benchmark file.
+        # Batch files (kind="batch") have rows=[] by design — skip entirely.
+        rows = bench.get("rows") or []
+        ui_rows = [r for r in rows if bench_kind != "batch"]   # empty for batch files
         bench_summ = bench.get("summary") or {}
-        total_tx   = _i(bench_summ.get("total", bench.get("total_transactions", len(rows))))
+        total_tx   = _i(bench_summ.get("total", bench.get("total_transactions", len(ui_rows))))
         threshold  = _f(bench.get("threshold_pct", 10.0))
         sla_breaches_b = _i(bench.get("sla_breaches", 0))
 
@@ -1999,38 +2010,40 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         b_sla_breach_cnt = _i(bench.get("sla_breach_count") or sla_breaches_b)
 
         # Status vocabulary: OK | WATCH | BREACH (legacy: GREEN | AMBER | RED)
-        red_rows   = [r for r in rows if r.get("status") in ("BREACH", "RED")]
-        watch_rows = [r for r in rows if r.get("status") in ("WATCH", "AMBER")]
+        # Only applies to UI rows — batch files have ui_rows=[] so this whole
+        # block produces nothing, which is the correct and intended behaviour.
+        red_rows   = [r for r in ui_rows if r.get("status") in ("BREACH", "RED")]
+        watch_rows = [r for r in ui_rows if r.get("status") in ("WATCH", "AMBER")]
         slow_pct   = (len(red_rows) / total_tx * 100) if total_tx > 0 else 0
         # Summary-based degraded pct (when rows are missing)
-        b_slow_pct = (b_degraded / total_tx * 100) if (not rows and total_tx > 0) else 0
+        b_slow_pct = (b_degraded / total_tx * 100) if (not ui_rows and total_tx > 0) else 0
 
         if slow_pct > 20 or b_slow_pct > 20:
-            _nbreach = len(red_rows) if rows else b_degraded
+            _nbreach = len(red_rows) if ui_rows else b_degraded
             add("critical", "🐢",
-                f"Benchmark: {_nbreach}/{total_tx} transactions in BREACH (>{threshold:.0f}% regression or SLA exceeded)",
+                f"UI Benchmark: {_nbreach}/{total_tx} transactions in BREACH (>{threshold:.0f}% regression or SLA exceeded)",
                 f"Severe UI performance degradation — investigate top offenders",
                 source="benchmark", evidence_class="measured",
                 root_cause="UI_PERFORMANCE_REGRESSION")
-        elif red_rows or b_sla_breach_cnt > 0 or (not rows and b_degraded > 0 and b_worst_delta > threshold):
+        elif red_rows or b_sla_breach_cnt > 0 or (not ui_rows and b_degraded > 0 and b_worst_delta > threshold):
             _nbreach = len(red_rows) or b_degraded
             _wdstr = (f" · worst: '{b_worst_tx}' +{b_worst_delta:.0f}%"
-                      if not rows and b_worst_tx != "—" else "")
+                      if not ui_rows and b_worst_tx != "—" else "")
             add("warning", "📉",
-                f"Benchmark: {_nbreach} BREACH/degraded transaction(s)"
+                f"UI Benchmark: {_nbreach} BREACH/degraded transaction(s)"
                 + (f" · {b_sla_breach_cnt} SLA breach(es)" if b_sla_breach_cnt else "")
                 + (f" · {len(watch_rows)} on WATCH" if watch_rows else "")
                 + _wdstr,
                 f"Transactions exceeding {threshold:.0f}% regression threshold or contractual SLA"
-                + (f". Worst: '{b_worst_tx}'" if not rows and b_worst_tx != "—" else ""),
+                + (f". Worst: '{b_worst_tx}'" if not ui_rows and b_worst_tx != "—" else ""),
                 source="benchmark", evidence_class="measured",
                 root_cause="UI_PERFORMANCE_REGRESSION")
-        elif watch_rows or (not rows and b_worst_delta > threshold):
+        elif watch_rows or (not ui_rows and b_worst_delta > threshold):
             _nw = len(watch_rows) or (1 if b_worst_delta > 0 else 0)
             _wdstr = (f". Worst: '{b_worst_tx}' +{b_worst_delta:.0f}%"
-                      if not rows and b_worst_tx != "—" else "")
+                      if not ui_rows and b_worst_tx != "—" else "")
             add("warning", "👀",
-                f"Benchmark: {_nw}/{total_tx} transaction(s) on WATCH — within 10% of SLA or {threshold:.0f}-{threshold*2:.0f}% regressed"
+                f"UI Benchmark: {_nw}/{total_tx} transaction(s) on WATCH — within 10% of SLA or {threshold:.0f}-{threshold*2:.0f}% regressed"
                 + _wdstr,
                 "No breaches, but these flows are trending toward SLA limits — monitor under production load",
                 source="benchmark")
@@ -2038,35 +2051,33 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             _wdstr = (f" — worst: '{b_worst_tx}' +{b_worst_delta:.0f}%"
                       if b_worst_tx != "—" and b_worst_delta > 0 else "")
             add("ok", "⚡",
-                f"Benchmark: All {total_tx} transactions within {threshold:.0f}% of baseline{_wdstr}",
+                f"UI Benchmark: All {total_tx} transactions within {threshold:.0f}% of baseline{_wdstr}",
                 "UI performance meets contractual benchmark targets",
                 source="benchmark", evidence_class="measured")
 
         # Worst offender
-        if rows:
-            worst = max(rows, key=lambda r: abs(_f(r.get("delta_pct"))))
+        if ui_rows:
+            worst = max(ui_rows, key=lambda r: abs(_f(r.get("delta_pct"))))
             dev   = _f(worst.get("delta_pct"))
             if abs(dev) > threshold:
                 tx = worst.get("transaction") or "?"
                 add("info", "🔍",
-                    f"Slowest transaction: '{tx}' at {dev:+.1f}% vs baseline",
+                    f"Slowest UI transaction: '{tx}' at {dev:+.1f}% vs baseline",
                     f"Actual: {worst.get('current_sec', '?')}s  ·  "
                     f"Baseline: {worst.get('baseline_sec', '?')}s"
                     + (f"  ·  SLA: {worst['sla_sec']}s" if worst.get('sla_sec') else ""),
                     source="benchmark")
 
-        # Worksheet load / export time analysis
-        # Detect worksheets with slow load times (>15s) or high export times (>5s)
-        # and report aggregate load/export performance stats.
+        # Worksheet load / export time analysis (UI-only: screen load times)
         load_times  = [_f(r.get("current_sec") or r.get("baseline_sec") or 0)
-                       for r in rows if _f(r.get("current_sec") or r.get("baseline_sec") or 0) > 0]
+                       for r in ui_rows if _f(r.get("current_sec") or r.get("baseline_sec") or 0) > 0]
         export_times = [_f(r.get("export_time_current") or r.get("export_time_baseline") or 0)
-                        for r in rows if _f(r.get("export_time_current") or r.get("export_time_baseline") or 0) > 0]
+                        for r in ui_rows if _f(r.get("export_time_current") or r.get("export_time_baseline") or 0) > 0]
 
         if load_times:
             avg_load = sum(load_times) / len(load_times)
             max_load = max(load_times)
-            slow_loads = [r for r in rows
+            slow_loads = [r for r in ui_rows
                           if _f(r.get("current_sec") or r.get("baseline_sec") or 0) > 15]
             avg_export = (sum(export_times) / len(export_times)) if export_times else 0
 
@@ -2096,7 +2107,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
 
             # Export time anomaly: any worksheet taking >5s to export
             if export_times:
-                slow_exports = [r for r in rows
+                slow_exports = [r for r in ui_rows
                                 if _f(r.get("export_time_current") or r.get("export_time_baseline") or 0) > 5]
                 if slow_exports:
                     exp_names = ", ".join(
@@ -2110,7 +2121,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                         source="benchmark", evidence_class="measured",
                         root_cause="WORKSHEET_EXPORT_SLOW")
 
-        # Category-level findings (multi-sheet XLSX)
+        # Category-level findings (multi-sheet UI XLSX only — not batch windows)
         for cat in bench.get("categories") or []:
             name = cat.get("name", "?")
             total_c = _i(cat.get("total", 0))
@@ -2118,9 +2129,9 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             failed_c = _i(cat.get("failed", 0))
             if degraded_c > 0:
                 add("warning", "📊",
-                    f"{name}: {degraded_c}/{total_c} regressions detected",
+                    f"UI Benchmark — {name}: {degraded_c}/{total_c} regressions detected",
                     f"Average delta: {_f(cat.get('avg_delta', 0)):+.1f}% — review environment parity",
-                    source="benchmark", root_cause=f"Performance regression in {name}")
+                    source="benchmark", root_cause=f"UI performance regression in {name}")
 
         # Fill rate drift findings
         fr = bench.get("fill_rate") or []

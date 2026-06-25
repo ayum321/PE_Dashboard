@@ -1756,30 +1756,23 @@ async def benchmark_upload(
     if bp_all_rows is not None:
         batch_perf_summary = _build_batch_perf_summary(bp_all_rows, thresh)
 
-    result_rows, summary = _compute_benchmark(rows, thresh)
-    categories = _build_categories(result_rows)
-
-    breaches  = sum(1 for r in result_rows if r.status == "BREACH")
-    watches   = sum(1 for r in result_rows if r.status == "WATCH")
-    oks       = sum(1 for r in result_rows if r.status == "OK")
-    unchanged = sum(1 for r in result_rows if abs(r.delta_pct) <= 1.0)
-    sla_brs   = sum(1 for r in result_rows if r.sla_breach)
-    avg_delta = round(sum(r.delta_pct for r in result_rows) / len(result_rows), 2) if result_rows else 0.0
-
-    # Single-time capture (no PROD baseline)
-    is_single_time = result_rows and all(r.baseline_sec == 0.0 for r in result_rows)
-    if is_single_time:
-        total = len(result_rows)
-        summary = (
-            f"📋 UAT performance capture — {total} transaction(s) recorded. "
-            f"No PROD baseline loaded; times shown as-is for review. "
-            f"Upload a file with PROD + TEST/UAT columns to enable regression comparison."
-        )
-
-    # For batch perf files override summary
-    elif batch_perf_summary is not None:
-        bp = batch_perf_summary
-        net = bp["net_delta_secs"]
+    # ── ISOLATION WALL ────────────────────────────────────────────────────
+    # Batch-runtime files (JOB / RUNTIME_<new> / RUNTIME_<old>) and UI-perf
+    # files (Transaction | Baseline (sec) | Current (sec)) are fundamentally
+    # different measurement types and must NEVER be processed by the same
+    # scoring formula or mixed in the same rows list.
+    #
+    # Rule: when this is a batch-runtime file (batch_perf_summary present),
+    # do NOT run the rows through _compute_benchmark (UI scoring).
+    # All batch data lives exclusively in batch_perf_summary.
+    # result_rows stays empty → resp.rows = [], resp.total_transactions = 0
+    # so the UI Transaction Comparison Matrix is never populated with batch jobs.
+    # ──────────────────────────────────────────────────────────────────────
+    if batch_perf_summary is not None:
+        # Batch-runtime file — UI formula does not apply
+        result_rows: list[BenchmarkRow] = []
+        bp   = batch_perf_summary
+        net  = bp["net_delta_secs"]
         direction = "saved" if net >= 0 else "added"
         summary = (
             f"{'⚠️' if bp['regressions'] > 0 else '✅'} "
@@ -1787,10 +1780,36 @@ async def benchmark_upload(
             f"across {bp['total_jobs']} jobs. "
             f"Net: {abs(net):.0f}s {direction} per run."
         )
+        categories = []
+        breaches = watches = oks = unchanged = sla_brs = 0
+        avg_delta = 0.0
+        is_single_time = False
+    else:
+        # UI-perf file — use the UI scoring formula exclusively
+        result_rows, summary = _compute_benchmark(rows, thresh)
+        categories = _build_categories(result_rows)
+        breaches  = sum(1 for r in result_rows if r.status == "BREACH")
+        watches   = sum(1 for r in result_rows if r.status == "WATCH")
+        oks       = sum(1 for r in result_rows if r.status == "OK")
+        unchanged = sum(1 for r in result_rows if abs(r.delta_pct) <= 1.0)
+        sla_brs   = sum(1 for r in result_rows if r.sla_breach)
+        avg_delta = round(sum(r.delta_pct for r in result_rows) / len(result_rows), 2) if result_rows else 0.0
+        is_single_time = bool(result_rows and all(r.baseline_sec == 0.0 for r in result_rows))
+        if is_single_time:
+            total = len(result_rows)
+            summary = (
+                f"📋 UAT performance capture — {total} transaction(s) recorded. "
+                f"No PROD baseline loaded; times shown as-is for review. "
+                f"Upload a file with PROD + TEST/UAT columns to enable regression comparison."
+            )
 
-    evidence_sentences = _build_evidence_sentences(result_rows)
-    coverage_summary   = _build_coverage_summary(result_rows)
+    # Evidence sentences and coverage summary apply to UI files only.
+    # Batch-runtime files have no UI transactions — these would be meaningless.
+    evidence_sentences = _build_evidence_sentences(result_rows) if result_rows else []
+    coverage_summary   = _build_coverage_summary(result_rows)   if result_rows else None
 
+    # total_transactions = UI transaction count only.
+    # For batch files this is 0 — batch job count is inside batch_perf_summary.total_jobs.
     resp = BenchmarkResponse(
         filename=file.filename or "",
         kind="batch" if batch_perf_summary is not None else "ui",

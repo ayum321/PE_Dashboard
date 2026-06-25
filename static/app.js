@@ -17389,23 +17389,47 @@ function _mergeBenchmarkSources() {
 
   if (!b && !u) { window.appData.benchmark = null; return; }
 
+  // ── ISOLATION WALL ──────────────────────────────────────────────────────
+  // Batch-runtime data (b) and UI-perf data (u) are fundamentally different
+  // measurement types and must NEVER be mixed in the same rows array or
+  // computed together. Rules:
+  //   - merged.rows              = UI rows only (from u)
+  //   - merged.batch_perf_summary = batch summary only (from b)
+  //   - batch job names must never appear in the Transaction Comparison Matrix
+  //   - UI transaction metrics must never influence batch regression analysis
+  // ──────────────────────────────────────────────────────────────────────────
   let merged;
   if (u && b) {
-    // UI as base; graft batch runtime summary on top. Combine source filenames.
+    // Both loaded: UI is the base object; graft batch_perf_summary on top.
+    // merged.rows = UI rows only (b.rows is empty for batch files by design).
     merged = { ...u };
     merged.batch_perf_summary = b.batch_perf_summary || null;
     merged.batch_filename     = b.filename || "";
     merged.ui_filename        = u.filename || "";
     merged.filename           = `${u.filename || "UI"} + ${b.filename || "Batch"}`;
+  } else if (b && !u) {
+    // Batch only: start from b but explicitly zero out rows so batch job names
+    // never appear in the UI Transaction Comparison Matrix or UI findings rules.
+    merged = { ...b };
+    merged.rows               = [];          // UI table must stay empty
+    merged.total_transactions = 0;           // batch job count is in batch_perf_summary
+    merged.categories         = [];          // batch window categories ≠ UI categories
+    merged.evidence_sentences = [];
+    merged.coverage_summary   = null;
+    merged.ui_filename        = "";
+    merged.batch_filename     = b.filename || "";
   } else {
-    merged = { ...(u || b) };
+    // UI only
+    merged = { ...u };
+    merged.batch_perf_summary = null;
+    merged.batch_filename     = "";
+    merged.ui_filename        = u.filename || "";
   }
 
   merged.correlation = _computeBenchCorrelation(b, u);
   window.appData.benchmark = merged;
   if (window._execCache !== undefined) window._execCache = null;  // invalidate exec cache
-  // Update the cross-reference callout in the Batch Review tab immediately
-  // so it reflects the latest benchmark data without requiring a Ctrl-M re-upload.
+  // Update the cross-reference callout in the Batch Review tab immediately.
   if (window.appData.batch?.kpis) _renderBatchBenchmarkXref();
 }
 
