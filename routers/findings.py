@@ -331,12 +331,14 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
 
         # Resolve the dominant schedule type for this dataset.
         # batch_calculator exports sla_detected_mode (from _detect_sla_ceiling)
-        # plus batch_type.  Fall back to DAILY only when not detected.
-        _detected_sched = (
-            bk.get("sla_detected_mode") or bk.get("batch_type") or ""
-        ).upper() or "DAILY"
-        # Also detect from sub_stats / top_jobs if batch_calculator didn't tag it
-        if _detected_sched == "DAILY" and sub_stats:
+        # plus batch_type.  Trust that explicit detection — only infer from
+        # sub_stats when batch_calculator gave us nothing, otherwise a daily batch
+        # that merely *contains* a weekly/monthly sub-app would be mislabelled
+        # (e.g. "monthly" paired with the 7.5h daily ceiling — internally
+        # inconsistent and misleading).
+        _raw_sched = (bk.get("sla_detected_mode") or bk.get("batch_type") or "").upper()
+        _detected_sched = _raw_sched or "DAILY"
+        if not _raw_sched and sub_stats:
             for _ss in sub_stats:
                 _ss_name = (_ss.get("Sub_Application") or _ss.get("sub_application") or "")
                 _ss_type = detect_batch_type(_ss_name)
