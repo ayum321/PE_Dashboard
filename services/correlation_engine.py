@@ -309,10 +309,15 @@ def generate_narrative(
         f"Score split — batch {b_score}pts · SLA {s_score}pts "
         f"(resource pillar excluded — no measured utilization; weight re-normalised over batch + SLA)."
     )
+    # Only claim servers were "analysed" when resource metrics are actually usable.
+    # An image-only / all-zero resource doc yields no measured utilization, so the
+    # coverage line must not imply a server was assessed (the score split below
+    # already explains the resource pillar was excluded).
+    _srv_clause = f"{srv_count} server(s), " if (res_avail and srv_count) else ""
     coverage_text = (
         f"Overall posture: OSHS {score:.1f}/100 → Grade {grade} ({label}). "
         f"Analysed {total_runs} batch runs across {total_jobs} jobs, "
-        f"{srv_count} server(s), {sub_count} sub-application(s). "
+        f"{_srv_clause}{sub_count} sub-application(s). "
         f"SLA ceiling {sla_ceiling}h. "
         f"{_split}"
     )

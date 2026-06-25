@@ -11343,12 +11343,17 @@ function _renderExecWaterfall(wf, oshs) {
   if (typeof Plotly === "undefined") return;
 
   // Multi-arc radial gauge: each pillar is its own concentric ring.
-  // Score = (contribution / weight_pts) * 100 (compliance %).
+  // Ring fill = contribution / target_pts, where target_pts is the pillar's
+  // weight × 100 (read from the backend so the rings track the real scoring
+  // math). When the resource pillar is dropped (no measured utilization), its
+  // weight is 0 and the batch/SLA targets widen to their re-normalised values
+  // — so the maxes MUST come from wf.*_target, never hardcoded 40/35/25.
+  const _resAvail = wf.resource_available !== false;
   const pillars = [
-    { name: "Batch",    val: wf.batch_contribution,    max: 40, color: "#22d3ee" },
-    { name: "Resource", val: wf.resource_contribution, max: 35, color: "#a78bfa" },
-    { name: "SLA",      val: wf.sla_contribution,      max: 25, color: "#fbbf24" },
-  ];
+    { name: "Batch",    val: _n(wf.batch_contribution),    max: _n(wf.batch_target)    || 40, color: "#22d3ee" },
+    { name: "Resource", val: _n(wf.resource_contribution), max: _n(wf.resource_target) || 35, color: "#a78bfa", excluded: !_resAvail },
+    { name: "SLA",      val: _n(wf.sla_contribution),      max: _n(wf.sla_target)      || 25, color: "#fbbf24" },
+  ].filter(p => !p.excluded);
   const total = _n(wf.total);
   const totalCol = total >= 75 ? "#10d96e" : total >= 60 ? "#f59e0b" : "#f43f5e";
   const grade = oshs?.grade || "?";
@@ -11400,9 +11405,14 @@ function _renderExecWaterfall(wf, oshs) {
           <span class="flex items-center gap-1.5">
             <span class="inline-block w-2 h-2 rounded-full" style="background:${p.color};box-shadow:0 0 6px ${p.color};"></span>
             <span class="text-Cmuted">${p.name}</span>
-            <span class="font-bold" style="color:${p.color};">${_n(p.val).toFixed(1)}<span class="text-Cmuted/60 font-normal">/${p.max}</span></span>
-            <span class="text-[9px] text-Cmuted">(${Math.round((p.val / p.max) * 100)}%)</span>
+            <span class="font-bold" style="color:${p.color};">${_n(p.val).toFixed(1)}<span class="text-Cmuted/60 font-normal">/${_n(p.max).toFixed(1)}</span></span>
+            <span class="text-[9px] text-Cmuted">(${p.max > 0 ? Math.round((p.val / p.max) * 100) : 0}%)</span>
           </span>`).join("")}
+        ${!_resAvail ? `
+          <span class="flex items-center gap-1.5" title="No measured resource utilization (image-only or no upload) — the resource pillar is excluded and its weight re-normalised over Batch + SLA.">
+            <span class="inline-block w-2 h-2 rounded-full" style="background:#475569;"></span>
+            <span class="text-Cmuted">Resource excluded (no data)</span>
+          </span>` : ""}
         ${Math.abs(adjust) > 0.1 ? `
           <span class="flex items-center gap-1.5" title="${_adjTitle}">
             <span class="inline-block w-2 h-2 rounded-full" style="background:#f43f5e;box-shadow:0 0 6px #f43f5e;"></span>
