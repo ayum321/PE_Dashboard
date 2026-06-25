@@ -1253,17 +1253,50 @@ def _parse_batch_perf_sheet(ws, sheet_name: str) -> list[dict] | None:
 
 
 def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
-    """Compute regression / improvement breakdown and top-10 lists from batch perf rows."""
+    """Compute regression / improvement breakdown and top-10 lists from batch perf rows.
+
+    A genuine before/after comparison requires BOTH runtimes > 0. Jobs missing one
+    side are bucketed separately and NEVER counted as a regression/improvement, so
+    the headline numbers reflect real runtime movement rather than measurement gaps:
+
+      • old == 0, new  > 0  → new_only  (no prior baseline — newly added/measured)
+      • new == 0, old  > 0  → dropped   (not run / no data in new env — NOT a win)
+      • both > 0            → real delta → regression | improvement | no_change
+
+    Counting a dropped job (e.g. 320s → 0s) as a "-100% improvement" and crediting
+    its full runtime as time "saved" would make a regressing batch look healthy —
+    the exact misleading signal we must avoid.
+    """
     regressions: list[dict] = []
     improvements: list[dict] = []
+    suspect:     list[dict] = []
     no_change = 0
-    new_only  = 0
+    new_only  = 0   # old == 0, new > 0
+    dropped   = 0   # new == 0, old > 0
+
+    from services import pe_config as _pc
+    _nowork  = float(getattr(_pc, "BATCH_NOWORK_SEC", 5.0))
+    _min_old = float(getattr(_pc, "BATCH_COLLAPSE_MIN_OLD_SEC", 60.0))
+    _ratio   = float(getattr(_pc, "BATCH_COLLAPSE_RATIO", 0.02))
+
+    def _is_collapse(old: float, new: float) -> bool:
+        # A substantial job (old >= _min_old) whose runtime either drops to a
+        # near-instant absolute value (new < _nowork) or collapses to a tiny
+        # fraction of its baseline (new <= old × _ratio, i.e. >=98% reduction).
+        # Genuine tuning wins essentially never reach this — almost always the
+        # job did no real work in the new env (empty data / early exit).
+        return old >= _min_old and (new < _nowork or new <= old * _ratio)
 
     for r in rows:
         old, new = r["baseline_sec"], r["current_sec"]
         job = r["transaction"]
+        if old == 0 and new == 0:
+            continue
         if old == 0:
             new_only += 1
+            continue
+        if new == 0:
+            dropped += 1
             continue
         delta_pct  = (new - old) / old * 100
         delta_secs = old - new  # positive = time saved
@@ -1274,6 +1307,10 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
             "delta_secs": round(delta_secs, 1),
             "delta_pct":  round(delta_pct,  1),
         }
+        # Suspect near-instant / extreme collapse — NOT a genuine improvement.
+        if _is_collapse(old, new):
+            suspect.append(entry)
+            continue
         if delta_pct > threshold_pct:
             regressions.append(entry)
         elif delta_pct < -5:
@@ -1283,9 +1320,29 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
 
     regressions.sort(key=lambda x: x["delta_pct"], reverse=True)   # worst first
     improvements.sort(key=lambda x: x["delta_pct"])                 # best first
+    suspect.sort(key=lambda x: x["old_secs"], reverse=True)        # biggest collapse first
 
-    comparable = [r for r in rows if r["baseline_sec"] > 0]
-    net_delta  = sum(r["baseline_sec"] - r["current_sec"] for r in comparable)
+    # Projectable regressions = those whose baseline did real work (>= min_baseline).
+    # A percentage drawn from a 3-second baseline is not a reliable predictor of how
+    # a multi-minute production job will scale, so only credible-baseline regressions
+    # may feed the release→production SLA projection. Ranked by ABSOLUTE seconds added
+    # (new − old), because SLA breach risk is driven by real elapsed time, not %.
+    _proj_min = float(getattr(_pc, "BATCH_PROJECT_MIN_BASELINE_SEC", 60.0))
+    projectable = [
+        e for e in regressions
+        if e["old_secs"] >= _proj_min
+    ]
+    projectable.sort(key=lambda x: (x["new_secs"] - x["old_secs"]), reverse=True)
+
+    # "comparable" = genuine two-sided pairs only (both runtimes > 0). Excluding
+    # dropped/new_only keeps net_delta and regression_rate honest. Suspect collapses
+    # are excluded from net_delta (their "savings" are not real) but kept visible.
+    comparable = [r for r in rows if r["baseline_sec"] > 0 and r["current_sec"] > 0]
+    net_delta  = sum(
+        r["baseline_sec"] - r["current_sec"]
+        for r in comparable
+        if not _is_collapse(r["baseline_sec"], r["current_sec"])
+    )
     regression_rate = round(len(regressions) / len(comparable) * 100, 1) if comparable else 0.0
 
     return {
@@ -1293,12 +1350,16 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
         "comparable":       len(comparable),
         "regressions":      len(regressions),
         "improvements":     len(improvements),
+        "suspect":          len(suspect),
         "new_only":         new_only,
+        "dropped":          dropped,
         "no_change":        no_change,
         "net_delta_secs":   round(net_delta, 1),
         "regression_rate":  regression_rate,
         "top_regressions":  regressions[:10],
+        "projectable_regressions": projectable[:10],
         "top_improvements": improvements[:10],
+        "top_suspect":      suspect[:10],
     }
 
 

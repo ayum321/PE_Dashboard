@@ -10765,6 +10765,10 @@ function _execBatchPerfBlock(bp, isFirst) {
         <span class="text-lg font-bold text-Cgreen">${_n(bp.improvements)}</span>
         <span class="text-Cmuted"> improved</span>
       </div>
+      ${_n(bp.suspect) > 0 ? `<div class="px-3 py-1.5 rounded-lg bg-Camber/10 border border-Camber/30 text-[10px]">
+        <span class="text-lg font-bold text-Camber">${_n(bp.suspect)}</span>
+        <span class="text-Cmuted"> suspect (no-data?)</span>
+      </div>` : ""}
       <div class="px-3 py-1.5 rounded-lg bg-Ccard/50 border border-Cborder/30 text-[10px]">
         <span class="text-lg font-bold ${dirCol}">${net >= 0 ? "−" : "+"}${netMin}m</span>
         <span class="text-Cmuted"> net ${dir}/run</span>
@@ -16574,6 +16578,9 @@ function _renderBatchPerfSummary(data) {
   const netMin  = Math.abs(netSecs / 60).toFixed(1);
   const netDir  = netSecs >= 0 ? "saved" : "added";
   const netCol  = netSecs >= 0 ? "text-Cgreen" : "text-Cred";
+  const dropped = _n(bps.dropped);
+  const newOnly = _n(bps.new_only);
+  const suspect = _n(bps.suspect);
 
   const statCard = (label, value, color, sub) =>
     `<div class="rounded-xl border border-Cborder bg-Cbg/40 p-3 text-center min-w-[130px]">
@@ -16612,7 +16619,10 @@ function _renderBatchPerfSummary(data) {
       ${statCard("Regressions",  bps.regressions,   bps.regressions > 0 ? "text-Cred"   : "text-Cgreen", "worse than before")}
       ${statCard("Improvements", bps.improvements,  bps.improvements > 0 ? "text-Cgreen" : "text-Cmuted", "faster than before")}
       ${statCard("No Change",    bps.no_change,     "text-Cmuted",  "within ±threshold")}
-      ${statCard("Net Runtime",  `${netSecs >= 0 ? "−" : "+"}${netMin} min`, netCol, `${netDir} per run`)}
+      ${suspect > 0 ? statCard("Suspect",  suspect, "text-Camber", "near-instant · no-data?") : ""}
+      ${dropped > 0 ? statCard("Not Run",  dropped, "text-Camber", "no data in new env") : ""}
+      ${newOnly > 0 ? statCard("New Only",  newOnly, "text-Cmuted", "no prior baseline") : ""}
+      ${statCard("Net Runtime",  `${netSecs >= 0 ? "−" : "+"}${netMin} min`, netCol, `${netDir} per run · comparable only`)}
     </div>`;
 
   // Top regressions / improvements side-by-side
@@ -16639,6 +16649,19 @@ function _renderBatchPerfSummary(data) {
     </div>`;
   }
   html += `</div>`;
+
+  // Suspect near-instant collapses — surfaced explicitly so they're never silently
+  // banked as "improvements". These need PE review (likely no-data / early-exit).
+  const susp = bps.top_suspect || [];
+  if (susp.length) {
+    html += `<div class="mb-5 rounded-xl border border-Camber/40 bg-Camber/5 p-3">
+      <div class="text-xs font-bold text-Camber uppercase tracking-wider mb-1">⚠ Suspect Collapses <span class="font-normal text-Cmuted normal-case">(${suspect} total — excluded from improvements & net savings)</span></div>
+      <div class="text-[10px] text-Cmuted mb-2">Multi-minute jobs that now finish in seconds — most likely processed no data / exited early in the new environment, not a genuine tuning win. Verify before crediting as improvement.</div>
+      <div class="overflow-x-auto"><table class="w-full text-xs">${colHead}<tbody>
+        ${susp.map(e => bpRow(e, false)).join("")}
+      </tbody></table></div>
+    </div>`;
+  }
 
   // Per-batch-window category breakdown (e.g. Monthly / Daily / SEQ Daily / Weekly Run 1 / Weekly Run 2)
   const cats = (data.categories || []).filter(c => c.total > 0);

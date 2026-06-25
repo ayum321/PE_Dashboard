@@ -1989,6 +1989,15 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     # kind="batch" has rows=[] and must not trigger UI performance findings.
     # ═══════════════════════════════════════════════════════════════
     bench = req.benchmark or {}
+    if not bench:
+        # Server-side fallback: pick up the last uploaded benchmark from session
+        # cache so batch-perf / UI findings survive page reloads and server-side
+        # regeneration even when the caller didn't echo it back in the request.
+        try:
+            if _session_cache:
+                bench = _session_cache.get("last_benchmark") or {}
+        except Exception as _be:
+            log.debug("benchmark session fallback failed: %s", _be)
     if bench:
         cov.benchmark = True
         bench_kind = bench.get("kind", "ui")   # "batch" | "ui"
@@ -2225,6 +2234,31 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     source="benchmark", evidence_class="measured",
                     root_cause="BATCH_RUNTIME_CLEAN")
 
+            # ── Coverage gap: jobs that did not genuinely run on the new release ──
+            # Suspect near-instant collapses + dropped (zero-runtime) jobs are
+            # excluded from the regression/improvement counts to keep them honest,
+            # but a material share signals the new-env run lacked representative
+            # data — which limits how much of the batch the comparison validated.
+            bp_suspect = _i(bp.get("suspect", 0))
+            bp_dropped = _i(bp.get("dropped", 0))
+            _gap = bp_suspect + bp_dropped
+            if _gap > 0 and bp_total > 0:
+                _gap_pct = _gap / bp_total * 100
+                _gap_sev = "warning" if _gap_pct >= 10 else "info"
+                add(_gap_sev, "🕳️",
+                    f"Batch perf coverage gap: {_gap}/{bp_total} job(s) ({_gap_pct:.0f}%) "
+                    f"had no comparable runtime ({bp_suspect} near-instant · {bp_dropped} not run)",
+                    f"These jobs collapsed to near-zero or did not run on the new release — "
+                    f"most likely no test data or early exit. They are excluded from the "
+                    f"regression and improvement counts so those stay credible, but they "
+                    f"reduce how much of the batch the runtime comparison actually validated.",
+                    source="benchmark", evidence_class="measured",
+                    impact="A material share of jobs were not genuinely exercised on the new "
+                           "release, so the runtime comparison covers only part of the batch.",
+                    recommendation="Re-run the near-instant / not-run jobs against representative "
+                                   "data volumes before relying on this comparison for go-live sign-off.",
+                    root_cause="BATCH_PERF_COVERAGE_GAP")
+
             # ── Cross-layer correlation: systemic vs isolated ──
             # If the same subsystem token regresses in BOTH a batch job and a
             # UI transaction, the root cause is shared infra/DB, not isolated.
@@ -2271,8 +2305,22 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     "peak_hrs": _f(j.get("peak_hrs")),
                 })
 
+            # Source for SLA projection: only regressions with a credible baseline.
+            # projectable_regressions (substantial baseline, ranked by absolute seconds
+            # added) is emitted by _build_batch_perf_summary. Fall back to filtering
+            # top_regressions for older cached payloads that predate that field.
+            try:
+                from services import pe_config as _pec_proj
+                _proj_min_base = float(getattr(_pec_proj, "BATCH_PROJECT_MIN_BASELINE_SEC", 60.0))
+                _proj_max_ratio = float(getattr(_pec_proj, "BATCH_PROJECT_MAX_BASELINE_RATIO", 10.0))
+            except Exception:
+                _proj_min_base, _proj_max_ratio = 60.0, 10.0
+            proj_regr = bp.get("projectable_regressions")
+            if proj_regr is None:
+                proj_regr = [r for r in top_regr if _f(r.get("old_secs")) >= _proj_min_base]
+
             regr_jobs = []
-            for r in top_regr:
+            for r in proj_regr:
                 r_name = r.get("job") or r.get("transaction") or ""
                 tokens = _tokset(r_name)
                 if not r_name or not tokens:
@@ -2282,6 +2330,8 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     "job_name": str(r_name),
                     "tokens": tokens,
                     "delta_pct": _f(r.get("delta_pct")),
+                    "old_secs": _f(r.get("old_secs")),
+                    "new_secs": _f(r.get("new_secs")),
                 })
 
             matched_impacts = []
@@ -2304,6 +2354,20 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 j_name = best["job_name"]
                 prod_peak_hrs = _f(best["peak_hrs"])
                 release_delta_pct = _f(reg_job["delta_pct"])
+
+                # Baseline-consistency guard: a benchmark job and a Ctrl-M job are the
+                # SAME job only if their production-side runtimes are in the same
+                # ballpark. If the benchmark baseline (prod env) and the Ctrl-M peak
+                # differ by more than _proj_max_ratio×, the token match is a false
+                # positive — different jobs that merely share a name prefix — and the
+                # percentage projection would be meaningless. Skip it.
+                bench_base_secs = _f(reg_job.get("old_secs"))
+                prod_peak_secs  = prod_peak_hrs * 3600.0
+                if bench_base_secs > 0 and prod_peak_secs > 0:
+                    _ratio = max(bench_base_secs, prod_peak_secs) / min(bench_base_secs, prod_peak_secs)
+                    if _ratio > _proj_max_ratio:
+                        continue
+
                 prod_sla_hrs = _f(get_sla_hrs(detect_batch_type(j_name), sla_ceil))
                 if prod_sla_hrs <= 0:
                     continue

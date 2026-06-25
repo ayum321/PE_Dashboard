@@ -99,6 +99,34 @@ BENCHMARK_ACTION_SLA: dict[str, float] = {
 # ── Anomaly detection ─────────────────────────────────────────────────────────
 ANOMALY_Z_THRESHOLD: float = 2.0    # z-score cutoff for statistical outliers
 
+# ── Batch runtime comparison — suspect "near-instant collapse" guard ──────────
+# In a PROD-vs-TEST batch runtime file, a job whose runtime collapses from a
+# multi-minute baseline to a couple of seconds almost never reflects a genuine
+# tuning win — far more often the job processed no data, exited early, or was a
+# no-op in the test environment. Counting these as "improvements" (and crediting
+# their full runtime as time "saved") inflates the upgrade's apparent benefit.
+# These two values bound that guard:
+#   • a NEW runtime below BATCH_NOWORK_SEC seconds is treated as "did no work"
+#   • only flagged as suspect when the OLD baseline was >= BATCH_COLLAPSE_MIN_OLD_SEC
+# Both are tunable via pe_config.json ("batch_nowork_sec", "batch_collapse_min_old_sec").
+BATCH_NOWORK_SEC: float          = 5.0    # new runtime < this ⇒ effectively no work
+BATCH_COLLAPSE_MIN_OLD_SEC: float = 30.0  # only suspect when baseline did real work (>= this)
+BATCH_COLLAPSE_RATIO: float       = 0.05  # new <= old×this (>=95% drop) ⇒ implausible win
+
+# ── Release→production SLA projection guard ───────────────────────────────────
+# When projecting a benchmark (PROD-vs-TEST) runtime regression onto a matched
+# Ctrl-M production job's SLA, a percentage drawn from a tiny baseline is not a
+# reliable predictor. A 3s→375s job is +12400%, but multiplying that onto a
+# 30-minute production job yields an absurd, misleading "will breach SLA" verdict.
+# Only regressions whose baseline did real work (>= this many seconds) are
+# statistically credible enough to project. Tunable via "batch_project_min_baseline_sec".
+BATCH_PROJECT_MIN_BASELINE_SEC: float = 60.0
+# A benchmark job and a Ctrl-M job are only the SAME job if their production-side
+# runtimes are in the same ballpark. If the benchmark baseline and the Ctrl-M
+# peak differ by more than this factor, the token match is a false positive
+# (different jobs that merely share a name prefix) and must not drive a projection.
+BATCH_PROJECT_MAX_BASELINE_RATIO: float = 10.0
+
 # ── Ctrl-M job classification (customer-configurable) ─────────────────────────
 # job_type_patterns: batch_type → list of substrings to match in job/workflow name
 JOB_TYPE_PATTERNS: dict = {
@@ -253,6 +281,8 @@ def reload() -> None:
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT
     global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
+    global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO
+    global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
     global SOW_DFU, SOW_SKU, SOW_ORDERS, SOW_BATCH_JOBS
     global JOB_TYPE_PATTERNS, EXCLUDE_FROM_SLA, ENV_PREFIXES_TO_STRIP, CTRLM_COLUMN_MAP
     global STRONG_UTILITY_TOKENS, RUNTIME_GATED_UTILITY, UTILITY_JOB_PATTERNS
@@ -287,6 +317,11 @@ def reload() -> None:
         if _bam:
             BENCHMARK_ACTION_SLA = _bam
     ANOMALY_Z_THRESHOLD = _f("anomaly_z_threshold", 2.0)
+    BATCH_NOWORK_SEC           = _f("batch_nowork_sec",            5.0)
+    BATCH_COLLAPSE_MIN_OLD_SEC = _f("batch_collapse_min_old_sec", 30.0)
+    BATCH_COLLAPSE_RATIO       = _f("batch_collapse_ratio",        0.05)
+    BATCH_PROJECT_MIN_BASELINE_SEC   = _f("batch_project_min_baseline_sec",   60.0)
+    BATCH_PROJECT_MAX_BASELINE_RATIO = _f("batch_project_max_baseline_ratio", 10.0)
     SOW_DFU           = _f("sow_dfu",           499_999.0)
     SOW_SKU           = _f("sow_sku",           80_000.0)
     SOW_ORDERS        = _f("sow_orders",        200_000.0)
