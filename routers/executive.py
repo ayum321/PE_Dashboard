@@ -48,7 +48,6 @@ class ExecDashRequest(BaseModel):
     hourly_counts: Optional[Dict[str, Any]]       = None
     sow_compare:   Optional[Dict[str, Any]]       = None
     findings:      Optional[List[Dict[str, Any]]] = None
-    daily_jobs:    Optional[Dict[str, Any]]       = None  # { "YYYY-MM-DD": [{job, start_hr, end_hr}] }
     customer_name: Optional[str]                  = None
     deep_dive:     Optional[Dict[str, Any]]       = None  # time-series spike evidence
 
@@ -429,11 +428,6 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         total_days=breach_calendar.get("total_days"),
     )
 
-    # ── Job concurrency timeline (worst day Gantt) ───────────────
-    concurrency = _build_concurrency_timeline(
-        body.daily_jobs or {}, window, sla_ceiling,
-    )
-
     # ── SOW vs Actual panel ──────────────────────────────────────
     sow_panel = _build_sow_panel(body.sow_compare, bk, rk, servers)
 
@@ -483,7 +477,6 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         "window_risk":     window_risk,
         "decision":        decision,
         "breach_calendar": breach_calendar,
-        "concurrency":     concurrency,
         "sow_panel":       sow_panel,
         "volume_vs_sow":   _volume_vs_sow,
         "deep_dive_summary": deep_dive_summary,
@@ -821,122 +814,6 @@ def _build_breach_calendar(
         "summary":      summary,
         "breach_count": breach_count,
         "total_days":   len(days),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────
-# Job Concurrency Timeline (Gantt for worst day)
-# ─────────────────────────────────────────────────────────────────
-def _build_concurrency_timeline(
-    daily_jobs: Dict[str, Any],
-    window: List[Dict[str, Any]],
-    sla_ceiling: float,
-) -> Dict[str, Any]:
-    """Build a Gantt-style timeline for the worst day.
-
-    daily_jobs format: { "YYYY-MM-DD": [{"job": str, "start_hr": float, "end_hr": float}] }
-    """
-    if not daily_jobs:
-        return {"available": False, "reason": "Per-day job timing data not loaded."}
-
-    # Identify worst day from window data (prefer elapsed_hrs = actual wall-clock breach)
-    worst_date = None
-    worst_hrs = 0.0
-    for w in (window or []):
-        hrs = _f(w.get("elapsed_hrs") or w.get("total_hrs"))
-        if hrs > worst_hrs:
-            worst_hrs = hrs
-            worst_date = str(w.get("run_date") or w.get("date") or "")
-
-    available_dates = sorted(daily_jobs.keys())
-    if worst_date not in daily_jobs:
-        return {
-            "available": False,
-            "reason": (
-                "Worst-day date is outside the loaded job-level timing range. "
-                "Reload the batch file to clear stale summary state."
-            ),
-        }
-
-    raw_jobs = daily_jobs[worst_date] or []
-
-    # Compute window boundaries from daily_jobs (may be capped at 60)
-    all_starts = [_f(j.get("start_hr")) for j in raw_jobs if _f(j.get("start_hr")) > 0]
-    all_ends   = [_f(j.get("end_hr"))   for j in raw_jobs if _f(j.get("end_hr")) > 0]
-    if all_starts and all_ends:
-        window_start = min(all_starts)
-        window_end   = max(all_ends)
-        window_len   = round(window_end - window_start, 2)
-    else:
-        window_start = 0
-        window_end = 0
-        window_len = 0
-
-    # Prefer authoritative elapsed_hrs from window data (covers ALL jobs,
-    # not just the capped 60 in daily_jobs).  Adjust window_start accordingly.
-    win_rec = next(
-        (w for w in (window or [])
-         if str(w.get("run_date") or w.get("date") or "") == worst_date),
-        None,
-    )
-    if win_rec:
-        true_elapsed = _f(win_rec.get("elapsed_hrs"))
-        if true_elapsed > 0 and window_end > 0:
-            window_len   = round(true_elapsed, 2)
-            window_start = round(window_end - true_elapsed, 2)
-
-    sla_deadline = round(window_start + sla_ceiling, 2)  # hour-of-day by which all jobs must finish
-
-    # Sort by end_hr desc (jobs that push the window latest = highest impact)
-    jobs_sorted = sorted(
-        raw_jobs,
-        key=lambda j: _f(j.get("end_hr", 0)),
-        reverse=True,
-    )[:15]
-    top_3 = [j.get("job", "?") for j in jobs_sorted[:3]]
-
-    # Concurrency density — how many jobs run at each integer hour (use ALL jobs)
-    hour_buckets = {h: 0 for h in range(int(window_start), int(window_end) + 2)}
-    for j in raw_jobs:
-        s = int(_f(j.get("start_hr")))
-        e = int(_f(j.get("end_hr"))) + 1
-        for h in range(s, e):
-            if h in hour_buckets:
-                hour_buckets[h] += 1
-    peak_concurrency = max(hour_buckets.values()) if hour_buckets else 0
-    peak_hour = max(hour_buckets, key=hour_buckets.get) if hour_buckets else None
-
-    # Format jobs for chart — exceeds_sla = job finishes AFTER the SLA deadline
-    bars = [
-        {
-            "job":       j.get("job", "?"),
-            "start_hr":  round(_f(j.get("start_hr")), 2),
-            "end_hr":    round(_f(j.get("end_hr")), 2),
-            "duration":  round(_f(j.get("end_hr")) - _f(j.get("start_hr")), 2),
-            "exceeds_sla": _f(j.get("end_hr")) > sla_deadline,
-        }
-        for j in jobs_sorted
-    ]
-
-    summary = (
-        f"On {worst_date}, {peak_concurrency} jobs ran concurrently around hour {peak_hour}, "
-        f"window elapsed {window_len}h (SLA: {sla_ceiling}h). "
-        f"Top 3 contributors: {', '.join(top_3) if top_3 else '—'}."
-    )
-
-    return {
-        "available":      True,
-        "selected_date":  worst_date,
-        "available_dates": available_dates,
-        "bars":           bars,
-        "ceiling":        sla_ceiling,
-        "window_start":   round(window_start, 2),
-        "window_end":     round(window_end, 2),
-        "window_length":  window_len,
-        "peak_concurrency": peak_concurrency,
-        "peak_hour":      peak_hour,
-        "top_contributors": top_3,
-        "summary":        summary,
     }
 
 

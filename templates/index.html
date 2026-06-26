@@ -1490,27 +1490,6 @@
               </div>
             </div>
 
-            <!-- ROW 3 — CONCURRENCY + MEMORY OVERLAY (full-width) -->
-            <div id="exec-concurrency-card"
-                 class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-              <div class="flex flex-wrap items-center justify-between gap-3 mb-2">
-                <div>
-                  <h3 class="text-sm font-bold text-Cwhite">Job Concurrency Timeline</h3>
-                  <p class="text-[10px] text-Cmuted">Gantt + fleet avg memory% overlay (red line)</p>
-                </div>
-                <div class="flex items-center gap-2">
-                  <label for="exec-concurrency-date" class="text-[10px] uppercase tracking-widest text-Cmuted font-semibold">Date</label>
-                  <select id="exec-concurrency-date"
-                          class="text-xs bg-Cbg border border-Cborder rounded px-2 py-1 text-Cwhite focus:outline-none focus:border-Cpurple/60"></select>
-                </div>
-              </div>
-              <div id="exec-chart-concurrency" style="height:380px;"></div>
-              <div id="exec-concurrency-summary" class="text-[11px] text-Cmuted mt-2">—</div>
-              <div id="exec-concurrency-empty" class="hidden py-12 text-center text-xs text-Cmuted">
-                Per-job timing data not loaded — re-upload the Ctrl-M CSV to enable the concurrency timeline.
-              </div>
-            </div>
-
             <!-- ROW 4 — BREACH CALENDAR (daily) + SLA FORECAST (labeled) -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
               <!-- Panel: Enhanced Breach Calendar — daily granularity cells -->

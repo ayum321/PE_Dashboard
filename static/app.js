@@ -9880,7 +9880,6 @@ async function renderOverview() {
       benchmark:     window.appData.benchmark || null,
       sow_compare:   window.appData.sowCompare || _buildSowCompareFromManual() || null,
       findings:      window._lastFindings || [],   // now populated from await above
-      daily_jobs:    window.appData.batch?.daily_jobs   || {},
       customer_name: window.appData.customerName || null,
       deep_dive:     window.appData.deepDive || _buildDeepDiveSummary(),
     };
@@ -9902,7 +9901,6 @@ async function renderOverview() {
         _renderExecSLABars(data.window_risk?.length ? data.window_risk : data.job_sla_bars);
         _renderExecTemporal(data.temporal, data.kpis);
         _renderExecBreachCalendar(data.breach_calendar);
-        _renderExecConcurrency(data.concurrency);
         _renderExecForecast(window.appData?.batch?.window || [], data.kpis?.sla_daily_hrs || 6);
         _renderSignoffChecklistV2(data.decision);
         _renderExecHotSpots(data);
@@ -9941,7 +9939,6 @@ async function renderOverview() {
       () => _renderExecSLABars(data.window_risk?.length ? data.window_risk : data.job_sla_bars),
       () => _renderExecTemporal(data.temporal, data.kpis),
       () => _renderExecBreachCalendar(data.breach_calendar),
-      () => _renderExecConcurrency(data.concurrency),
       () => _renderExecForecast(
              window.appData?.batch?.window || [],
              data.kpis?.sla_daily_hrs || 6),
@@ -10357,164 +10354,6 @@ function _renderExecBreachCalendar(payload) {
     days.forEach(d => { csv += `${d.date || d.run_date},${d.hours ?? d.total_hrs ?? 0},${d.ceiling ?? ceiling},${d.status || ""}\n`; });
     return csv;
   });
-}
-
-// ── Job Concurrency Timeline (worst-day Gantt) ────────────────
-function _renderExecConcurrency(payload) {
-  const el       = document.getElementById("exec-chart-concurrency");
-  const empty    = document.getElementById("exec-concurrency-empty");
-  const sumEl    = document.getElementById("exec-concurrency-summary");
-  const dateSel  = document.getElementById("exec-concurrency-date");
-  if (!el) return;
-
-  if (!payload?.available || !payload.bars?.length) {
-    el.innerHTML = "";
-    if (empty) empty.classList.remove("hidden");
-    if (sumEl) sumEl.textContent = payload?.reason || "";
-    if (dateSel) dateSel.innerHTML = "";
-    return;
-  }
-  if (empty) empty.classList.add("hidden");
-
-  // Date dropdown — populated once per render of fresh payload
-  if (dateSel) {
-    const dates = payload.available_dates || [payload.selected_date];
-    dateSel.innerHTML = dates.map(d =>
-      `<option value="${_esc(d)}" ${d === payload.selected_date ? "selected" : ""}>${_esc(d)}</option>`
-    ).join("");
-    dateSel.onchange = () => _renderExecConcurrencyForDate(dateSel.value);
-  }
-
-  _drawConcurrencyChart(payload, payload.bars);
-  if (sumEl) sumEl.textContent = payload.summary || "";
-}
-
-function _renderExecConcurrencyForDate(date) {
-  const dailyJobs = window.appData?.batch?.daily_jobs || {};
-  const ceiling   = window._execCache?.kpis?.sla_daily_hrs || 6;
-  const raw = dailyJobs[date] || [];
-  if (!raw.length) return;
-  // Compute window boundaries from capped daily_jobs
-  const allStarts = raw.map(j => Number(j.start_hr || 0)).filter(h => h > 0);
-  const allEnds   = raw.map(j => Number(j.end_hr   || 0)).filter(h => h > 0);
-  let wStart = allStarts.length ? Math.min(...allStarts) : 0;
-  let wEnd   = allEnds.length   ? Math.max(...allEnds)   : 0;
-  let windowLen = wEnd - wStart;
-
-  // Prefer authoritative elapsed_hrs from window data (covers ALL jobs,
-  // not just the capped subset in daily_jobs).
-  const winRec = (window.appData?.batch?.window || []).find(
-    w => (w.run_date || w.date) === date
-  );
-  if (winRec && Number(winRec.elapsed_hrs) > 0 && wEnd > 0) {
-    windowLen = Number(winRec.elapsed_hrs);
-    wStart    = wEnd - windowLen;
-  }
-
-  const slaDeadline = wStart + ceiling;
-  // Sort by end_hr desc, top 15
-  const bars = raw.slice().sort((a,b) => (b.end_hr||0) - (a.end_hr||0)).slice(0, 15)
-    .map(j => ({
-      job:       j.job,
-      start_hr:  Number(j.start_hr || 0),
-      end_hr:    Number(j.end_hr   || 0),
-      duration:  Number((j.end_hr || 0) - (j.start_hr || 0)),
-      exceeds_sla: Number(j.end_hr || 0) > slaDeadline,
-    }));
-  const top3 = bars.slice(0, 3).map(b => b.job);
-  const summary = `On ${date}, window elapsed ${windowLen.toFixed(2)}h (SLA: ${ceiling}h). Top 3: ${top3.join(", ")}.`;
-  _drawConcurrencyChart({ ceiling, selected_date: date, summary, window_start: wStart }, bars);
-  setText("exec-concurrency-summary", summary);
-}
-
-function _drawConcurrencyChart(meta, bars) {
-  const el = document.getElementById("exec-chart-concurrency");
-  if (!el || typeof Plotly === "undefined") return;
-  const ceiling = meta.ceiling || 6;
-  const wStart  = meta.window_start ?? Math.min(...bars.map(b => b.start_hr));
-  const slaDeadline = wStart + ceiling;  // SLA ceiling as hour-of-day
-  // Sort: latest-ending at top → earliest-ending at bottom (Plotly flips, so push descending)
-  const sorted = bars.slice().sort((a,b) => a.end_hr - b.end_hr);
-  const yLabels = sorted.map(b => b.job);
-  // Use a stacked bar: invisible "spacer" up to start_hr, then duration bar.
-  const spacer = {
-    type: "bar", orientation: "h",
-    y: yLabels, x: sorted.map(b => b.start_hr),
-    marker: { color: "rgba(0,0,0,0)" },
-    hoverinfo: "skip",
-    showlegend: false,
-  };
-  const main = {
-    type: "bar", orientation: "h",
-    y: yLabels, x: sorted.map(b => b.duration),
-    marker: {
-      color: sorted.map(b => b.exceeds_sla ? "#f43f5e" : "#10d96e"),
-      line:  { color: "#0f172a", width: 0.5 },
-    },
-    hovertemplate: sorted.map(b =>
-      `${b.job}<br>Start: ${b.start_hr}h<br>End: ${b.end_hr}h<br>Duration: ${b.duration}h<extra></extra>`),
-    showlegend: false,
-  };
-
-  const traces = [spacer, main];
-
-  // Memory overlay — fleet average memory % as a red line on secondary Y axis
-  const serverData = window.appData?.servers || [];
-  const avgMem = serverData.length
-    ? serverData.reduce((s, sv) => s + (parseFloat(sv.mem_used || sv.mem || 0)), 0) / serverData.length
-    : 0;
-  if (avgMem > 0) {
-    // Show as a horizontal annotation line at the fleet avg memory level
-    // Since this is a horizontal bar chart, we overlay memory info as text
-    traces.push({
-      type: "scatter", mode: "lines", name: `Fleet Avg Mem ${avgMem.toFixed(0)}%`,
-      x: [0, ceiling + 2], y: [yLabels[yLabels.length-1], yLabels[yLabels.length-1]],
-      line: { color: "#f43f5e", width: 0 },
-      showlegend: true,
-      hoverinfo: "skip",
-    });
-  }
-
-  const layout = {
-    paper_bgcolor: "transparent",
-    plot_bgcolor:  "transparent",
-    barmode: "stack",
-    margin: { l: 130, r: 24, t: 10, b: 36 },
-    xaxis: {
-      title: { text: "Hour of day", font: { size: 10, color: "#94a3b8" } },
-      tickfont: { size: 9, color: "#94a3b8" },
-      gridcolor: "rgba(148,163,184,0.08)",
-    },
-    yaxis: {
-      tickfont: { size: 9, color: "#cbd5e1" },
-      automargin: true,
-    },
-    shapes: [{
-      type: "line",
-      x0: slaDeadline, x1: slaDeadline,
-      yref: "paper", y0: 0, y1: 1,
-      line: { color: "#f43f5e", width: 1.6, dash: "dash" },
-    }],
-    annotations: [
-      {
-        x: slaDeadline, xanchor: "left",
-        yref: "paper", y: 1.02,
-        text: `SLA ceiling ${ceiling}h`,
-        font: { size: 9, color: "#f43f5e", family: "monospace" },
-        showarrow: false,
-      },
-      ...(avgMem > 0 ? [{
-        xref: "paper", x: 0.99, yref: "paper", y: 0.97,
-        xanchor: "right", yanchor: "top",
-        text: `Fleet Avg Mem: ${avgMem.toFixed(1)}%`,
-        font: { size: 10, color: avgMem >= 80 ? "#f43f5e" : avgMem >= 60 ? "#f59e0b" : "#10d96e", family: "monospace" },
-        showarrow: false,
-        bgcolor: "rgba(13,21,38,0.8)", borderpad: 3,
-      }] : []),
-    ],
-    legend: avgMem > 0 ? { orientation: "h", y: -0.15, font: { size: 9, color: "#a8b3d9" } } : undefined,
-  };
-  Plotly.react(el, traces, layout, _plotlyConfig({ scrollZoom: false }));
 }
 
 // ── SOW vs Actual panel (3-column) ────────────────────────────
