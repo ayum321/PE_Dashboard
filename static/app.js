@@ -9607,6 +9607,74 @@ async function _triggerPeNarrativeImpl() {
   }
 }
 
+// crit → red, warn → amber, ok → green (matches build_batch_panel tones)
+function _toneHex(t) {
+  return t === "crit" ? THEME.red
+       : t === "warn" ? THEME.amber
+       : t === "ok"   ? THEME.green
+       : THEME.cyan;
+}
+
+// Conclusive batch verdict panel: verdict banner + KPI strip + two-clocks
+// explainer + root-cause direction. Sourced from judgment_engine.build_batch_panel
+// (same numbers as the Final Judgment) so it can never contradict the verdict.
+function _batchVerdictPanelHtml(panel) {
+  if (!panel || typeof panel !== "object") return "";
+  const v      = panel.verdict || {};
+  const tone   = v.tone || "warn";
+  const tHex   = _toneHex(tone);
+  const status = v.status || "";
+  const head   = v.headline || "";
+
+  const bannerHtml = `
+    <div class="px-4 py-4 border-b border-Cborder/30"
+         style="background:linear-gradient(135deg, ${hexA(tHex,0.16)}, ${hexA(tHex,0.04)})">
+      <div class="flex items-start gap-3">
+        <span class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-extrabold uppercase tracking-wider border"
+              style="color:${tHex};border-color:${hexA(tHex,0.5)};background:${hexA(tHex,0.12)}">
+          <span class="inline-block w-2 h-2 rounded-full" style="background:${tHex};box-shadow:0 0 8px ${tHex}"></span>
+          ${_esc(status)}
+        </span>
+        <p class="text-[15px] leading-snug font-bold text-Cwhite">${_esc(head)}</p>
+      </div>
+    </div>`;
+
+  const kpis = Array.isArray(panel.kpis) ? panel.kpis : [];
+  const kpiHtml = kpis.length ? `
+    <div class="grid gap-2 px-4 py-3 border-b border-Cborder/30"
+         style="grid-template-columns:repeat(auto-fit,minmax(148px,1fr))">
+      ${kpis.map(k => {
+        const kHex = _toneHex(k.tone);
+        const ring = k.binding ? `box-shadow:0 0 0 1px ${hexA(kHex,0.55)}, 0 0 14px ${hexA(kHex,0.18)};` : "";
+        return `
+        <div class="rounded-lg border border-Cborder/50 bg-Ccard/60 px-3 py-2.5" style="${ring}">
+          <div class="flex items-center justify-between gap-1 mb-1.5">
+            <span class="text-[10px] uppercase tracking-wider text-Cmuted font-semibold leading-tight">${_esc(k.label || "")}</span>
+            ${k.binding ? `<span class="shrink-0 text-[8px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded" style="color:${kHex};background:${hexA(kHex,0.16)}">BINDING</span>` : ""}
+          </div>
+          <div class="text-2xl font-extrabold leading-none" style="color:${kHex}">${_esc(String(k.value ?? "—"))}</div>
+          ${k.sub ? `<div class="text-[10px] text-Cmuted/80 mt-1.5 leading-tight">${_esc(k.sub)}</div>` : ""}
+        </div>`;
+      }).join("")}
+    </div>` : "";
+
+  const explainerHtml = panel.explainer ? `
+    <div class="px-4 py-3 border-b border-Cborder/30" style="background:${hexA(THEME.cyan,0.04)}">
+      <span class="inline-block text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded mr-2 align-middle"
+            style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.14)}">RECONCILED</span>
+      <span class="text-[13px] leading-relaxed text-Cwhite/85">${_esc(panel.explainer)}</span>
+    </div>` : "";
+
+  const directionHtml = panel.direction ? `
+    <div class="px-4 py-3 border-b border-Cborder/30" style="background:${hexA(tHex,0.05)}">
+      <span class="inline-block text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded mr-2 align-middle"
+            style="color:${tHex};background:${hexA(tHex,0.14)}">DIRECTION</span>
+      <span class="text-[13px] leading-relaxed font-medium text-Cwhite/90">${_esc(panel.direction)}</span>
+    </div>` : "";
+
+  return bannerHtml + kpiHtml + explainerHtml + directionHtml;
+}
+
 function renderPeNarrative(data) {
   if (!data) return;
   const card = document.getElementById("pe-narrative-card");
@@ -9672,7 +9740,16 @@ function renderPeNarrative(data) {
       </div>`;
 
     const proseHtml = sec.prose
-      ? `<p class="px-4 py-3 text-xs text-Cwhite/80 leading-relaxed border-b border-Cborder/30">${_esc(sec.prose)}</p>`
+      ? `<p class="px-4 py-3 text-[13px] text-Cwhite/80 leading-relaxed border-b border-Cborder/30">${_esc(sec.prose)}</p>`
+      : "";
+
+    // Conclusive verdict panel (batch_sla) — rendered above the evidence table.
+    const panelHtml = _batchVerdictPanelHtml(sec.panel);
+
+    // Caption that tells the reader WHAT the table below is (e.g. "Breach days,
+    // worst overrun first" vs "Longest jobs — reference only, all within SLA").
+    const captionHtml = sec.table_caption
+      ? `<p class="px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider font-semibold" style="color:${hexA(accent,0.9)}">${_esc(sec.table_caption)}</p>`
       : "";
 
     // Table
@@ -9684,10 +9761,10 @@ function renderPeNarrative(data) {
                                             || String(c).trim().toUpperCase().startsWith("NA")));
     const tableHtml = headers.length
       ? `<div class="overflow-x-auto">
-           <table class="w-full text-left border-collapse text-xs">
+           <table class="w-full text-left border-collapse text-[13px]">
              <thead>
                <tr style="background:${hexA(accent, 0.08)}">
-                 ${headers.map(h => `<th class="px-3 py-2 font-semibold uppercase tracking-wider text-[10px]"
+                 ${headers.map(h => `<th class="px-3 py-2 font-semibold uppercase tracking-wider text-[11px]"
                                           style="color:${accent}">${_esc(String(h))}</th>`).join("")}
                </tr>
              </thead>
@@ -9700,7 +9777,7 @@ function renderPeNarrative(data) {
          </div>`
       : "";
 
-    block.innerHTML = headHtml + proseHtml + tableHtml;
+    block.innerHTML = headHtml + panelHtml + proseHtml + captionHtml + tableHtml;
     wrap.appendChild(block);
   });
 }

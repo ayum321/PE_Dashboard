@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
+from services import judgment_engine
+
 log = logging.getLogger("pe_dashboard.pe_narrative")
 router = APIRouter()
 
@@ -479,6 +481,10 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
             ],
             "evidence_sentences": (bm.get("evidence_sentences") or [])[:10],
             "coverage_summary":   bm.get("coverage_summary"),
+            # Batch-runtime regression rollup (regressions / comparable / improvements)
+            # so the narrative can build a clean "X of Y slower, Z improved" line
+            # instead of slicing raw finding titles mid-word.
+            "batch_perf_summary": bm.get("batch_perf_summary"),
         }
     rf = payload.get("red_flags") or session_cache.get("last_red_flags") or {}
     if rf:
@@ -735,8 +741,42 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
 
     # -- 2. Batch & SLA ----------------------------------------------------
     sla_rows: List[List[str]] = []
+    # Header + caption travel with the rows so the frontend labels the table for
+    # whichever evidence source actually populated it (what-failed vs reference).
+    sla_headers: List[str] = ["Job / Workflow", "Peak Runtime", "SLA Ceiling", "Buffer"]
+    table_caption: str = ""
 
-    # Priority order for SLA table rows:
+    # Priority 0: WINDOW-BREACH DAYS — the evidence that matches the binding
+    # (window-day) compliance metric. A panel about a failing batch must lead with
+    # the days the whole batch missed its wall-clock window, not the healthiest
+    # jobs. Overrun is kept honest/positive by only listing days whose runtime
+    # actually exceeded the ceiling.
+    _win_recs = b.get("window") or []
+    if sla_limit:
+        _ceil = float(sla_limit)
+        _breach_rows = []
+        for w in _win_recs:
+            if not w.get("breach"):
+                continue
+            _rt = _num(w.get("elapsed_hrs")) or 0.0
+            if _rt <= 0:
+                _rt = _num(w.get("total_hrs")) or 0.0
+            if _rt <= _ceil:
+                continue
+            _breach_rows.append((w, _rt, _rt - _ceil))
+        _breach_rows.sort(key=lambda t: t[2], reverse=True)
+        if _breach_rows:
+            for w, _rt, _ov in _breach_rows[:6]:
+                _fc = _int(w.get("fail_count"), 0)
+                _lbl = str(w.get("run_date", "NA")) + (f"  ·  {_fc} job fail" if _fc else "")
+                sla_rows.append([_lbl, f"{_rt:.2f} hrs", f"{_ceil:.1f} hrs", f"+{_ov:.2f} hrs"])
+            sla_headers = ["Breach Date", "Window Runtime", "SLA Ceiling", "Overrun"]
+            table_caption = (
+                f"Days the batch missed its SLA window — worst overrun first "
+                f"({len(_breach_rows)} day(s) breached)."
+            )
+
+    # Priority order for the remaining SLA table rows:
     # 1. Production Ctrl-M breach data (top_breaches) — authoritative measured runtime
     # 2. SLA XLSX snapshot (contracts) — static test-env data, may be stale
     # Production data wins because it reflects what actually happened, not what
@@ -747,8 +787,8 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         for j in _prod_breaches
     )
 
-    if _has_prod_breach_data:
-        # Priority 1: Production Ctrl-M breach records
+    if not sla_rows and _has_prod_breach_data:
+        # Priority 1: Production Ctrl-M breach records (worst job-ceiling breaches)
         for j in _prod_breaches[:6]:
             _j_peak = _num(j.get("peak_hrs") or j.get("elapsed_hrs"))
             _j_sla  = _num(j.get("sla_hrs") or j.get("sla_limit")) or _num(sla_limit)
@@ -765,7 +805,9 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 f"{_j_sla:.1f} hrs" if _j_sla else "NA",
                 _j_buf_s,
             ])
-    else:
+        if sla_rows:
+            table_caption = table_caption or "Worst job-ceiling breaches — biggest overrun first."
+    elif not sla_rows:
         # Priority 2: XLSX contracts (only when no production breach data is available)
         for c in (si.get("contracts") or [])[:6]:
             _act = _num(c.get("actual_window_hrs"))
@@ -803,6 +845,15 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 f"{sla_h:.1f} hrs" if sla_h else "NA",
                 buf_s,
             ])
+        if sla_rows:
+            # These are the longest-running jobs, NOT breaches — label them so the
+            # table can never be misread as "all green = compliant" when the window
+            # may still be failing (that verdict lives in the panel above).
+            sla_headers = ["Longest Jobs (reference)", "Peak Runtime", "SLA Ceiling", "Buffer"]
+            table_caption = (
+                "No window or job-ceiling breaches in scope — showing the longest-running "
+                "jobs for reference; all are within their ceiling."
+            )
 
     # BUG 3 FIX: Priority 4 -- smart_findings top jobs
     if not sla_rows and sf:
@@ -840,15 +891,37 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     regression_note = ""
     priority_note   = ""
     critical_count  = 0
+
+    # Structured batch-runtime regression counts (regressed / comparable / improved)
+    # from the Batch-Runtime-Performance rollup — used for a clean, never-truncated
+    # regression line and for the panel's "Runtime Regressions" KPI.
+    _bm_d = digest.get("benchmark") or {}
+    _bp_d = (_bm_d.get("batch_perf_summary") if isinstance(_bm_d, dict) else None) or {}
+    _reg_jobs = _int(_bp_d.get("regressions"))  if _bp_d.get("regressions")  is not None else None
+    _reg_comp = _int(_bp_d.get("comparable"))   if _bp_d.get("comparable")   is not None else None
+    _reg_impr = _int(_bp_d.get("improvements")) if _bp_d.get("improvements") is not None else None
+
     if sf_findings:
         regressions    = [f for f in sf_findings if "RUNTIME_REGRESSION" in str(f.get("root_cause", ""))]
         critical_count = len([f for f in sf_findings if str(f.get("severity", "")).upper() == "CRITICAL"])
-        if regressions:
-            reg_jobs = ", ".join(
-                str(f.get("finding") or f.get("title") or "")[:50]
+        if _reg_jobs is not None and _reg_comp:
+            _impr_s = f"; {_reg_impr:,} improved" if _reg_impr is not None else ""
+            regression_note = (
+                f" Runtime regressions: {_reg_jobs:,} of {_reg_comp:,} comparable job(s) "
+                f"slower vs baseline{_impr_s}."
+            )
+        elif regressions:
+            # Fall back to the FULL finding text — never slice mid-word (the old
+            # `[:50]` produced garbled fragments like "(>3σ above ba," / "791 imp.").
+            _reg_txt = "; ".join(
+                str(f.get("finding") or f.get("title") or "").strip()
                 for f in regressions[:2]
             )
-            regression_note = f" Runtime regression detected: {reg_jobs}."
+            regression_note = f" Runtime regression detected: {_reg_txt}."
+    # When smart-findings carry no critical tally, fall back to the rule-engine count
+    # so the panel's "critical findings block sign-off" matches the findings table.
+    if not critical_count:
+        critical_count = len((digest.get("rule_findings") or {}).get("critical") or [])
 
     if isinstance(triage, dict):
         low_buf_jobs = triage.get("low_buffer_jobs") or []
@@ -876,6 +949,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 suffix = "…" if len(unexplained) > 3 else ""
                 priority_note = f" Unexplained breaches needing attention: {names}{suffix}."
 
+    batch_panel = None
     if (total_runs or total_jobs) is not None:
         _runs_n  = int(total_runs or total_jobs or 0)
         _jobs_n  = int(total_jobs or 0)
@@ -905,6 +979,36 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             + (f" {critical_count} critical finding(s) require resolution before PE sign-off."
                if critical_count > 0 else "")
         )
+
+        # Conclusive, contradiction-free batch verdict panel — built from the SAME
+        # canonical numbers as the prose above, routed through the reasoning engine
+        # so it can never disagree with the Final Judgment (window is the binding
+        # metric; job-level is a labelled secondary).
+        _fail_rate = _bk_get("fail_rate_pct")
+        if _fail_rate is None and fail_runs is not None and (total_runs or total_jobs):
+            _fail_rate = round(int(fail_runs) / int(total_runs or total_jobs) * 100, 2)
+        try:
+            batch_panel = judgment_engine.build_batch_panel({
+                "window_pct":        compliance,
+                "window_estimated":  _window_compliance_is_estimated,
+                "job_pct":           job_sla_comp,
+                "total_days":        wtd,
+                "breach_days":       wbd,
+                "sla_breaches":      breaches,
+                "exec_failures":     fail_runs,
+                "fail_rate_pct":     _fail_rate,
+                "total_runs":        total_runs,
+                "total_jobs":        total_jobs,
+                "reg_count":         _bk_get("regression_count", "runtime_regression_count"),
+                "reg_jobs":          _reg_jobs,
+                "reg_comparable":    _reg_comp,
+                "reg_improved":      _reg_impr,
+                "critical_findings": critical_count,
+                "sla_limit_hrs":     sla_limit,
+            })
+        except Exception:
+            log.exception("build_batch_panel failed")
+            batch_panel = None
     else:
         sf_prose = sf.get("summary") or sf.get("batch_summary") or ""
         if sf_prose:
@@ -915,11 +1019,16 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 "for SLA compliance analysis. Then click Refresh Narrative."
             )
 
-    sections.append({
+    _batch_section = {
         "id": "batch_sla", "title": "Batch Execution & SLA Compliance",
         "prose": prose_b,
-        "table": {"headers": ["Job / Workflow", "Peak Runtime", "SLA Ceiling", "Buffer"], "rows": sla_rows},
-    })
+        "table": {"headers": sla_headers, "rows": sla_rows},
+    }
+    if table_caption:
+        _batch_section["table_caption"] = table_caption
+    if batch_panel:
+        _batch_section["panel"] = batch_panel
+    sections.append(_batch_section)
 
     # -- 3. Infrastructure -------------------------------------------------
     inf_rows: List[List[str]] = []
@@ -1357,6 +1466,11 @@ def _validate_and_merge(ai_payload: Any, fallback: Dict[str, Any],
                 "title": ai_sec.get("title") or proto["title"],
                 "prose": ai_sec.get("prose") or (fb_sec.get("prose") if fb_sec else ""),
                 "table": {"headers": headers, "rows": rows},
+                # Deterministic, single-source extras the AI must NOT override or drop:
+                # the verdict panel + table caption always come from the fallback so the
+                # batch conclusion can never be reworded into a contradiction by the LLM.
+                **({"panel": fb_sec["panel"]} if (fb_sec and fb_sec.get("panel")) else {}),
+                **({"table_caption": fb_sec["table_caption"]} if (fb_sec and fb_sec.get("table_caption")) else {}),
             })
         elif fb_sec:
             merged.append(fb_sec)

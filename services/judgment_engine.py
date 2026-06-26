@@ -650,3 +650,220 @@ def compute_cross_pillar_links(
             })
 
     return links
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BATCH PANEL — one conclusive, contradiction-free verdict for the narrative
+# ═════════════════════════════════════════════════════════════════════════════
+def _tone_for_compliance(pct: Optional[float]) -> str:
+    """Map a compliance % to a severity tone using the canonical grade floor."""
+    if pct is None:
+        return "warn"
+    if pct >= 90.0:      # GRADE_TABLE A floor == APPROVED
+        return "ok"
+    if pct >= 70.0:      # C floor == CONDITIONAL HOLD
+        return "warn"
+    return "crit"
+
+
+def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Build a conclusive, contradiction-free batch verdict panel from CANONICAL
+    batch numbers (already resolved by the caller — single source of truth).
+
+    The BINDING metric is window-day compliance: the share of calendar days the
+    whole batch finished inside its SLA window. This is the SAME rule
+    `_score_batch` uses, so this panel can never contradict the Final Judgment.
+    Job-level compliance (each job under its own ceiling) is shown as a clearly
+    labelled secondary — the two are reconciled in plain English so "100% job /
+    7% window" reads as a story, not a contradiction.
+
+    Input dict `m` (all keys optional / None-safe):
+      window_pct, window_estimated, job_pct, total_days, breach_days,
+      sla_breaches, exec_failures, fail_rate_pct, total_runs, total_jobs,
+      reg_count, reg_jobs, reg_comparable, reg_improved, critical_findings,
+      sla_limit_hrs
+
+    Returns {verdict:{status,tone,headline}, kpis:[...], explainer, direction,
+    binding_metric} — or None when there is not enough data to render a verdict.
+    """
+    window = _f(m.get("window_pct"))
+    job    = _f(m.get("job_pct"))
+    if window is None and job is None:
+        return None
+
+    est       = bool(m.get("window_estimated"))
+    wtd       = _i(m.get("total_days"))
+    wbd       = _i(m.get("breach_days"))
+    clean     = (wtd - wbd) if (wtd is not None and wbd is not None) else None
+    sla_brc   = _i(m.get("sla_breaches")) or 0
+    failures  = _i(m.get("exec_failures")) or 0
+    fail_rate = _f(m.get("fail_rate_pct"))
+    crit_n    = _i(m.get("critical_findings")) or 0
+    reg_count = _i(m.get("reg_count")) or 0
+    reg_jobs  = _i(m.get("reg_jobs"))
+    reg_comp  = _i(m.get("reg_comparable"))
+    reg_impr  = _i(m.get("reg_improved"))
+
+    # Binding metric: prefer the real window; fall back to job-day estimate.
+    if window is not None and not est:
+        binding = "window"
+        prime   = window
+    elif window is not None and est:
+        binding = "job_estimate"
+        prime   = window
+    else:
+        binding = "job_level"
+        prime   = job
+
+    job_healthy = job is not None and job >= 90.0
+
+    # ── tone / status (window binds; critical findings always block) ──────────
+    if (prime is not None and prime < 70.0) or crit_n > 0:
+        tone, status = "crit", "NOT READY"
+    elif (prime is not None and prime < 90.0) or sla_brc > 0 or reg_jobs or reg_count \
+            or (fail_rate is not None and fail_rate > pe_config.BATCH_FAIL_RATE):
+        tone, status = "warn", "AT RISK"
+    else:
+        tone, status = "ok", "READY"
+
+    # ── headline (plain language, leads with the binding metric) ──────────────
+    if binding == "window":
+        if tone == "crit":
+            if wtd:
+                headline = (f"Batch missed its delivery window on {wbd} of {wtd} day(s) "
+                            f"({window:.1f}%). Not ready for PE sign-off.")
+            else:
+                headline = (f"Batch window compliance is {window:.1f}%. "
+                            f"Not ready for PE sign-off.")
+            if crit_n > 0 and (window is None or window >= 90.0):
+                headline = (f"{crit_n} critical finding(s) block PE sign-off "
+                            f"despite {window:.1f}% window compliance.")
+        elif tone == "warn":
+            _cl = clean if clean is not None else "—"
+            _wt = wtd if wtd else "—"
+            headline = (f"Batch made its delivery window on {_cl} of {_wt} day(s) "
+                        f"({window:.1f}%) — review the flagged risks before sign-off.")
+        else:
+            _wt = wtd if wtd else "every"
+            headline = (f"Batch met its delivery window on all {_wt} day(s) "
+                        f"({window:.1f}%). Clear for PE sign-off.")
+    elif binding == "job_estimate":
+        _verdict = {"crit": "Not ready for PE sign-off.",
+                    "warn": "Review the flagged risks before sign-off.",
+                    "ok": "Clear for PE sign-off."}[tone]
+        headline = (f"Batch SLA compliance (job-day estimate — no wall-clock window "
+                    f"data) is {window:.1f}%. {_verdict}")
+    else:
+        _verdict = {"crit": "Not ready for PE sign-off.",
+                    "warn": "Review the flagged risks before sign-off.",
+                    "ok": "Clear for PE sign-off."}[tone]
+        _jp = f"{job:.1f}%" if job is not None else "n/a"
+        headline = f"Job-level SLA compliance is {_jp}. {_verdict}"
+
+    # ── KPI strip (only tiles we actually have data for) ──────────────────────
+    kpis: List[Dict[str, Any]] = []
+    if window is not None:
+        sub = (f"{clean}/{wtd} day(s) clean" if (clean is not None and wtd) else
+               "wall-clock batch deadline")
+        kpis.append({
+            "label": "Window Compliance" + (" (est.)" if est else ""),
+            "value": f"{window:.1f}%",
+            "tone":  _tone_for_compliance(window),
+            "sub":   sub,
+            "binding": binding in ("window", "job_estimate"),
+        })
+    if job is not None:
+        kpis.append({
+            "label": "Job-Level Pass",
+            "value": f"{job:.1f}%",
+            "tone":  _tone_for_compliance(job),
+            "sub":   "each job under its own ceiling",
+        })
+    kpis.append({
+        "label": "SLA Breaches",
+        "value": f"{sla_brc:,}",
+        "tone":  "ok" if sla_brc == 0 else "crit",
+        "sub":   "job-ceiling breaches",
+    })
+    if m.get("exec_failures") is not None:
+        ftone = "ok" if failures == 0 else ("crit" if (fail_rate or 0) > pe_config.BATCH_FAIL_RATE else "warn")
+        fsub  = (f"ENDED NOT OK ({fail_rate:.1f}%)" if fail_rate is not None
+                 else "ENDED NOT OK runs")
+        kpis.append({
+            "label": "Execution Failures",
+            "value": f"{failures:,}",
+            "tone":  ftone,
+            "sub":   fsub,
+        })
+    if reg_jobs is not None and reg_comp:
+        kpis.append({
+            "label": "Runtime Regressions",
+            "value": f"{reg_jobs:,} / {reg_comp:,}",
+            "tone":  "warn" if reg_jobs > 0 else "ok",
+            "sub":   (f"{reg_impr:,} improved" if reg_impr is not None else "vs baseline"),
+        })
+    elif reg_count > 0:
+        kpis.append({
+            "label": "Runtime Regressions",
+            "value": f"{reg_count:,}",
+            "tone":  "warn",
+            "sub":   "severe (>3σ vs baseline)",
+        })
+    kpis.append({
+        "label": "Critical Findings",
+        "value": f"{crit_n:,}",
+        "tone":  "ok" if crit_n == 0 else "crit",
+        "sub":   "block sign-off" if crit_n else "none open",
+    })
+
+    # ── explainer: reconcile window vs job-level so they read as one story ─────
+    explainer = ""
+    if est:
+        explainer = (f"No wall-clock window data was available, so the figure above is a "
+                     f"job-day estimate ({window:.1f}%). Upload batch data with End_Time "
+                     f"to get the authoritative window-compliance number.")
+    elif window is not None and job is not None and (job - window) > 1.0:
+        _days = (f"on {wbd} of {wtd} day(s)" if (wbd and wtd) else "")
+        explainer = (f"Window {window:.1f}% vs Job-level {job:.1f}%: every job finished under "
+                     f"its own ceiling, but the batch as a whole missed its wall-clock "
+                     f"delivery deadline {_days}. Window is the binding SLA for sign-off.")
+
+    # ── direction: root-cause-aware next step ─────────────────────────────────
+    if tone == "ok":
+        direction = ("No action required — the batch is within both its delivery window "
+                     "and every job ceiling. Cleared for sign-off.")
+    else:
+        if binding == "window" and (window is not None and window < 90.0) and job_healthy:
+            root = ("Job ceilings are healthy, so the fix is batch ordering / start-time "
+                    "scheduling, not per-job tuning.")
+        elif job is not None and job < 90.0:
+            root = ("Both individual job runtimes and the batch window are failing — tune "
+                    "the slowest jobs and the batch schedule together.")
+        else:
+            root = "Address the flagged risks below."
+        acts: List[str] = []
+        if crit_n > 0:
+            acts.append(f"resolve the {crit_n} critical finding(s)")
+        _rn = reg_jobs if reg_jobs else reg_count
+        if _rn:
+            acts.append(f"investigate the {_rn} regressed job(s)")
+        if wbd:
+            acts.append(f"clear the sub-apps driving the {wbd} window miss(es)")
+        elif failures:
+            acts.append(f"triage the {failures} execution failure(s)")
+        tail = ""
+        if acts:
+            if len(acts) == 1:
+                tail = f" Next: {acts[0]} before sign-off."
+            else:
+                tail = f" Next: {', '.join(acts[:-1])}, and {acts[-1]} before sign-off."
+        direction = root + tail
+
+    return {
+        "verdict": {"status": status, "tone": tone, "headline": headline},
+        "kpis": kpis,
+        "explainer": explainer,
+        "direction": direction,
+        "binding_metric": binding,
+    }
