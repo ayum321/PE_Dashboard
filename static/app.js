@@ -13213,6 +13213,87 @@ async function runFinalJudgment() {
       });
     }
 
+    // Evidence Ledger — every fact that moved the score (show-your-work audit trail)
+    const ledgerWrap  = document.getElementById("fj-ledger-wrap");
+    const ledgerEl    = document.getElementById("fj-ledger");
+    const ledgerCount = document.getElementById("fj-ledger-count");
+    if (ledgerWrap && ledgerEl) {
+      const chain = Array.isArray(r.evidence_chain) ? r.evidence_chain : [];
+      // Lead with the penalties that actually moved the score, then the PASS
+      // checks so the reviewer sees what was evaluated AND cleared.
+      const moved  = chain.filter(e => (e.status === "FAIL" || e.status === "PENALTY") && e.points);
+      const passed = chain.filter(e => e.status === "PASS");
+      const scoreLn = chain.filter(e => e.signal === "score");
+      if (chain.length) {
+        ledgerWrap.classList.remove("hidden");
+        ledgerEl.innerHTML = "";
+        const modeTag = r.scoring_mode === "recompute" ? " · recompute mode" : "";
+        if (ledgerCount) ledgerCount.textContent =
+          `· ${moved.length} penalty${moved.length === 1 ? "" : "ies"}${modeTag}`;
+
+        const pillarColor = { batch:"#60a5fa", sla:"#c084fc", resource:"#34d399",
+                              benchmark:"#fbbf24", sow:"#f472b6", correlation:"#22d3ee" };
+        // Per-pillar base→final headline lines first
+        scoreLn.forEach(e => {
+          const row = document.createElement("div");
+          row.className = "flex items-center gap-2 text-[10px]";
+          row.innerHTML =
+            `<span class="font-bold uppercase tracking-wide w-20 truncate" style="color:${pillarColor[e.pillar]||'#94a3b8'}">${_esc(e.pillar)}</span>
+             <span class="text-Cwhite/70">${_esc(e.fact)}</span>`;
+          ledgerEl.appendChild(row);
+        });
+        // Then the penalty lines with their points
+        moved.forEach(e => {
+          const row = document.createElement("div");
+          row.className = "flex items-start gap-2 rounded border border-Cred/25 bg-Cred/5 px-2 py-1";
+          row.innerHTML =
+            `<span class="text-[10px] font-mono font-bold text-Cred w-12 text-right shrink-0">${e.points.toFixed(1)}</span>
+             <span class="text-[10px] uppercase tracking-wide font-bold w-16 truncate shrink-0" style="color:${pillarColor[e.pillar]||'#94a3b8'}">${_esc(e.pillar)}</span>
+             <span class="text-[11px] text-Cwhite/90 leading-snug">${_esc(e.fact)}</span>`;
+          ledgerEl.appendChild(row);
+        });
+        // Then a compact line of what was checked and passed
+        if (passed.length) {
+          const ok = document.createElement("div");
+          ok.className = "text-[10px] text-Cgreen/80 pt-0.5";
+          ok.innerHTML = `✓ Checked &amp; cleared: ${passed.map(e => _esc(e.signal.replace(/_/g," "))).join(", ")}`;
+          ledgerEl.appendChild(ok);
+        }
+      } else {
+        ledgerWrap.classList.add("hidden");
+      }
+    }
+
+    // Cross-Pillar Links — computed (not LLM-guessed) correlations
+    const linksWrap = document.getElementById("fj-links-wrap");
+    const linksEl   = document.getElementById("fj-links");
+    if (linksWrap && linksEl) {
+      const links = Array.isArray(r.cross_pillar_links) ? r.cross_pillar_links : [];
+      if (links.length) {
+        linksWrap.classList.remove("hidden");
+        linksEl.innerHTML = "";
+        const sevTone = {
+          HIGH:   "border-Cred/40 bg-Cred/5 text-Cred",
+          MEDIUM: "border-Camber/40 bg-Camber/5 text-Camber",
+          INFO:   "border-Cblue/40 bg-Cblue/5 text-Cblue",
+        };
+        links.forEach(l => {
+          const tone = sevTone[l.severity] || sevTone.INFO;
+          const div = document.createElement("div");
+          div.className = `rounded-lg border px-2.5 py-1.5 ${tone.split(" ").slice(0,2).join(" ")}`;
+          div.innerHTML =
+            `<div class="flex items-center gap-1.5 mb-0.5">
+               <span class="text-[9px] font-extrabold uppercase tracking-widest ${tone.split(" ")[2]}">${_esc(l.severity || "INFO")}</span>
+               <span class="text-[9px] text-Cmuted/70">${(l.pillars||[]).map(_esc).join(" × ")}</span>
+             </div>
+             <div class="text-[11px] text-Cwhite/90 leading-snug">${_esc(l.text)}</div>`;
+          linksEl.appendChild(div);
+        });
+      } else {
+        linksWrap.classList.add("hidden");
+      }
+    }
+
     // Narrative + actions
     const narEl = document.getElementById("fj-narrative");
     if (narEl) narEl.textContent = r.narrative || r.verdict || "";

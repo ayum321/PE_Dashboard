@@ -53,6 +53,10 @@ class FinalJudgmentResponse(BaseModel):
     pillars:      Dict[str, float]
     pillar_weights: Dict[str, float] = {}
     pillar_contributions: Dict[str, float] = {}
+    pillar_details: Dict[str, Any] = {}        # per-pillar base/final/penalty breakdown
+    evidence_chain: List[Dict[str, Any]] = []  # auditable fact→threshold→points ledger
+    cross_pillar_links: List[Dict[str, Any]] = []  # computed (not LLM-guessed) correlations
+    scoring_mode: str = "additive"
     verdict_reason: str = ""
     narrative:    Optional[str] = None
     next_actions: List[str]
@@ -60,69 +64,13 @@ class FinalJudgmentResponse(BaseModel):
     ai_model:     Optional[str] = None
 
 
-# ── Deterministic scoring (always works, even without AI) ─────────
-def _score_resource(r: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not r:
-        return None
-    servers = r.get("servers") or []
-    if not servers:
-        return None
-    healths = [float(s.get("health_score") or 0) for s in servers
-               if float(s.get("health_score") or 0) > 0]
-    if not healths:
-        return None
-    return round(sum(healths) / len(healths), 1)
-
-
-def _score_batch(b: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not b:
-        return None
-    kpis = b.get("kpis") or {}
-    comp = kpis.get("compliance_pct")
-    if comp is None:
-        return None
-    return round(float(comp), 1)
-
-
-def _score_sla(s: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not s:
-        return None
-    comp = s.get("compliance_pct")
-    if comp is None:
-        return None
-    return round(float(comp), 1)
-
-
-def _score_benchmark(bm: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not bm:
-        return None
-    total = int(bm.get("total_transactions") or 0)
-    if total == 0:
-        return None
-    degraded = int(bm.get("degraded") or 0)
-    return round(max(0.0, 100.0 * (1.0 - degraded / total)), 1)
-
-
-def _score_sow(sw: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not sw:
-        return None
-    metrics = sw.get("metrics") or []
-    if not metrics:
-        return None
-    optimal = sum(1 for m in metrics if m.get("status") == "OPTIMAL")
-    return round(100.0 * optimal / len(metrics), 1)
-
-
-def _score_correlation(c: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not c:
-        return None
-    rows = c.get("rows") or []
-    if not rows:
-        return None
-    crit = sum(1 for r in rows if r.get("risk") == "CRITICAL")
-    high = sum(1 for r in rows if r.get("risk") == "HIGH")
-    # Higher = better; subtract penalty per risky correlation
-    return round(max(0.0, 100.0 - (crit * 12.0 + high * 6.0)), 1)
+# ── Per-pillar scoring ────────────────────────────────────────────
+# The deterministic, severity-weighted pillar scores + evidence ledger +
+# cross-pillar correlations now live in services/judgment_engine.py so they are
+# unit-testable in isolation and shared with any future surface. This router
+# orchestrates: it asks the engine for scores, builds the composite, runs the
+# decision matrix, then has the LLM narrate FROM the computed evidence.
+from services import judgment_engine
 
 
 # ── Decision matrix ────────────────────────────────────────────────
@@ -454,17 +402,39 @@ def _parse_actions(text: str) -> List[str]:
 
 @router.post("/final-judgment", response_model=FinalJudgmentResponse)
 def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
-    # 1. Per-pillar scoring (deterministic)
-    pillars_raw: Dict[str, Optional[float]] = {
-        "resource":    _score_resource(body.resource),
-        "batch":       _score_batch(body.batch),
-        "sla":         _score_sla(body.sla_matrix),
-        "benchmark":   _score_benchmark(body.benchmark),
-        "sow":         _score_sow(body.sow),
-        "correlation": _score_correlation(body.correlation),
-    }
-    pillars: Dict[str, float] = {k: v for k, v in pillars_raw.items() if v is not None}
+    # 1. Per-pillar scoring — pass-rate base + bounded severity penalties, with a
+    #    fully-cited evidence ledger. Mode (additive|recompute) is per-customer.
+    scoring = judgment_engine.score_all_pillars(
+        resource=body.resource,
+        batch=body.batch,
+        sla=body.sla_matrix,
+        benchmark=body.benchmark,
+        sow=body.sow,
+        correlation=body.correlation,
+    )
+    pillars: Dict[str, float] = dict(scoring.scores)
     pillars_present = list(pillars.keys())
+    evidence_chain = scoring.evidence_chain
+    scoring_mode = scoring.mode
+    pillar_details: Dict[str, Any] = {
+        name: {
+            "base":            ps.base,
+            "final":           ps.score,
+            "penalty_applied": ps.penalty_applied,
+            "penalty_raw":     ps.penalty_raw,
+            "capped":          ps.capped,
+        }
+        for name, ps in scoring.details.items()
+    }
+
+    # 1b. Computed (not LLM-guessed) cross-pillar correlations.
+    cross_pillar_links = judgment_engine.compute_cross_pillar_links(
+        resource=body.resource,
+        batch=body.batch,
+        sla=body.sla_matrix,
+        benchmark=body.benchmark,
+        sow=body.sow,
+    )
 
     # 2. Composite score — weighted, only over pillars present
     #    Pillars with no data get neutral 50 in the numerator
@@ -499,7 +469,7 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         score, pillars, rf_critical, len(pillars), kpi_ev
     ) if pillars else ("INSUFFICIENT_DATA", "No pillar data loaded")
 
-    # 4. AI verdict via narrator (best-effort)
+    # 4. AI verdict via narrator (best-effort) — narrate FROM the computed ledger
     digest = _build_digest(body, pillars)
     digest["composite_score"] = score
     digest["composite_grade"] = grade
@@ -507,6 +477,18 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
     digest["redflag_critical"]  = rf_critical
     digest["evidence_facts"] = kpi_ev
     digest["verdict_reason"] = verdict_reason
+    digest["scoring_mode"] = scoring_mode
+    # Only the FAIL/PENALTY lines drive the narrative — keep the prompt focused on
+    # what actually moved the score, with the points each fact removed.
+    digest["evidence_ledger"] = [
+        {"pillar": e["pillar"], "fact": e["fact"], "points": e["points"]}
+        for e in evidence_chain
+        if e.get("status") in ("FAIL", "PENALTY") and e.get("points")
+    ][:12]
+    digest["pillar_score_detail"] = pillar_details
+    digest["cross_pillar_links"] = [
+        {"severity": l["severity"], "text": l["text"]} for l in cross_pillar_links
+    ]
 
     narrative, ai_model = None, None
     try:
@@ -588,6 +570,10 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         pillars=pillars,
         pillar_weights=weights,
         pillar_contributions=pillar_contributions,
+        pillar_details=pillar_details,
+        evidence_chain=evidence_chain,
+        cross_pillar_links=cross_pillar_links,
+        scoring_mode=scoring_mode,
         verdict_reason=final_verdict_reason,
         narrative=narrative,
         next_actions=final_actions,

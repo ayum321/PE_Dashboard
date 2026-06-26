@@ -81,6 +81,44 @@ SLA_BUFFER_WARN:  float = 15.0   # % buffer below which job is AT_RISK (kept for
 SLA_ATRISK_PCT:   float = 15.0   # % buffer threshold → AT_RISK below this
 SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
 
+# ── Final-Judgment severity scoring (judgment_engine.py) ──────────────────────
+# The cross-pillar Final Judgment scores each pillar on its pass-rate, then
+# applies BOUNDED severity penalties so a catastrophic-but-rare event (a 10×
+# overrun on 5% of runs) cannot hide behind a healthy-looking average.
+#
+# Two modes, per-customer switchable via config_store["fj_scoring_mode"]:
+#   "additive"  (default, safe): base = pass-rate, then SUBTRACT capped severity
+#               penalties. A verdict can only get STRICTER, never falsely looser.
+#   "recompute" (aggressive): binding constraint (window vs job-level) becomes the
+#               base and per-signal penalties apply with no per-pillar total cap.
+FJ_SCORING_MODE: str = "additive"   # "additive" | "recompute"
+
+# Per-pillar TOTAL penalty cap (additive mode only) — keeps Option A bounded so a
+# single pillar can't be driven to absurd lows by stacked penalties. The decision
+# matrix's hard-block floors (in final_judgment.py) handle catastrophic cases.
+FJ_PEN_TOTAL_CAP: float = 45.0
+
+# Per-signal penalty caps (points removed from a pillar's 0–100 score).
+FJ_PEN_WINDOW_CAP:     float = 35.0   # batch/SLA window non-compliance (binding)
+FJ_PEN_FAILRATE_CAP:   float = 20.0   # ENDED-NOT-OK execution failure rate
+FJ_PEN_OVERRUN_CAP:    float = 20.0   # worst single-job overrun magnitude vs ceiling
+FJ_PEN_REGRESSION_CAP: float = 15.0   # runtime regression depth (count of jobs)
+FJ_PEN_SLA_MAG_CAP:    float = 25.0   # SLA-matrix breach breadth
+FJ_PEN_BENCH_MAG_CAP:  float = 20.0   # benchmark worst-delta magnitude
+FJ_PEN_RES_CRIT_CAP:   float = 30.0   # critical servers (hard infra signal)
+FJ_PEN_RES_DUAL_CAP:   float = 20.0   # servers under simultaneous CPU+mem pressure
+FJ_PEN_SOW_MAG_CAP:    float = 15.0   # SOW metrics breaching contractual baseline
+
+# Per-unit penalty rates (multiplied by the excess, then clamped to the cap above).
+FJ_PEN_FAILRATE_PER_PCT:   float = 1.0    # pts per % failure-rate over BATCH_FAIL_RATE
+FJ_PEN_OVERRUN_PER_PCT:    float = 0.25   # pts per % a job ran past its SLA ceiling
+FJ_PEN_REGRESSION_PER_JOB: float = 3.0    # pts per regressed job
+FJ_PEN_SLA_PER_PCT:        float = 0.40   # pts per % of runs breaching SLA
+FJ_PEN_BENCH_PER_PCT:      float = 0.30   # pts per % the worst tx exceeded threshold
+FJ_PEN_RES_CRIT_PER:       float = 12.0   # pts per critical server
+FJ_PEN_RES_DUAL_PER:       float = 8.0    # pts per dual-pressure server
+FJ_PEN_SOW_PER:            float = 6.0    # pts per metric over contractual baseline
+
 # ── Benchmark ─────────────────────────────────────────────────────────────────
 BENCH_THRESHOLD_PCT: float = 10.0   # % degradation → RED
 
@@ -295,6 +333,11 @@ def reload() -> None:
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT
+    global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
+    global FJ_PEN_WINDOW_CAP, FJ_PEN_FAILRATE_CAP, FJ_PEN_OVERRUN_CAP, FJ_PEN_REGRESSION_CAP
+    global FJ_PEN_SLA_MAG_CAP, FJ_PEN_BENCH_MAG_CAP, FJ_PEN_RES_CRIT_CAP, FJ_PEN_RES_DUAL_CAP, FJ_PEN_SOW_MAG_CAP
+    global FJ_PEN_FAILRATE_PER_PCT, FJ_PEN_OVERRUN_PER_PCT, FJ_PEN_REGRESSION_PER_JOB
+    global FJ_PEN_SLA_PER_PCT, FJ_PEN_BENCH_PER_PCT, FJ_PEN_RES_CRIT_PER, FJ_PEN_RES_DUAL_PER, FJ_PEN_SOW_PER
     global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
     global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO
     global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
@@ -321,6 +364,27 @@ def reload() -> None:
     SLA_BUFFER_WARN   = _f("sla_buffer_warn",   15.0)
     SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
     SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
+    # Final-Judgment severity scoring (per-customer switchable)
+    _fj_mode = str(_cfg("fj_scoring_mode", "additive") or "additive").strip().lower()
+    FJ_SCORING_MODE   = _fj_mode if _fj_mode in ("additive", "recompute") else "additive"
+    FJ_PEN_TOTAL_CAP      = _f("fj_pen_total_cap",      45.0)
+    FJ_PEN_WINDOW_CAP     = _f("fj_pen_window_cap",     35.0)
+    FJ_PEN_FAILRATE_CAP   = _f("fj_pen_failrate_cap",   20.0)
+    FJ_PEN_OVERRUN_CAP    = _f("fj_pen_overrun_cap",    20.0)
+    FJ_PEN_REGRESSION_CAP = _f("fj_pen_regression_cap", 15.0)
+    FJ_PEN_SLA_MAG_CAP    = _f("fj_pen_sla_mag_cap",    25.0)
+    FJ_PEN_BENCH_MAG_CAP  = _f("fj_pen_bench_mag_cap",  20.0)
+    FJ_PEN_RES_CRIT_CAP   = _f("fj_pen_res_crit_cap",   30.0)
+    FJ_PEN_RES_DUAL_CAP   = _f("fj_pen_res_dual_cap",   20.0)
+    FJ_PEN_SOW_MAG_CAP    = _f("fj_pen_sow_mag_cap",    15.0)
+    FJ_PEN_FAILRATE_PER_PCT   = _f("fj_pen_failrate_per_pct",   1.0)
+    FJ_PEN_OVERRUN_PER_PCT    = _f("fj_pen_overrun_per_pct",    0.25)
+    FJ_PEN_REGRESSION_PER_JOB = _f("fj_pen_regression_per_job", 3.0)
+    FJ_PEN_SLA_PER_PCT        = _f("fj_pen_sla_per_pct",        0.40)
+    FJ_PEN_BENCH_PER_PCT      = _f("fj_pen_bench_per_pct",      0.30)
+    FJ_PEN_RES_CRIT_PER       = _f("fj_pen_res_crit_per",       12.0)
+    FJ_PEN_RES_DUAL_PER       = _f("fj_pen_res_dual_per",       8.0)
+    FJ_PEN_SOW_PER            = _f("fj_pen_sow_per",            6.0)
     BENCH_THRESHOLD_PCT = _f("benchmark_threshold", 10.0)
     _bench_actions = _cfg("benchmark_action_sla")
     if isinstance(_bench_actions, dict) and _bench_actions:

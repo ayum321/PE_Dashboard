@@ -1632,6 +1632,24 @@
                   <div id="fj-pillars" class="grid grid-cols-2 sm:grid-cols-3 gap-1.5"></div>
                 </div>
 
+                <!-- Evidence Ledger — show-your-work: every fact that moved the score -->
+                <div id="fj-ledger-wrap" class="hidden">
+                  <button onclick="document.getElementById('fj-ledger').classList.toggle('hidden')"
+                          class="flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-Cmuted hover:text-Cwhite transition mb-1 cursor-pointer">
+                    <span>▾</span> Evidence Ledger
+                    <span id="fj-ledger-count" class="text-Cmuted/60 normal-case tracking-normal font-normal"></span>
+                  </button>
+                  <div id="fj-ledger" class="space-y-1"></div>
+                </div>
+
+                <!-- Cross-Pillar Links — deterministic computed correlations -->
+                <div id="fj-links-wrap" class="hidden">
+                  <div class="text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">
+                    Cross-Pillar Links <span class="text-Cmuted/50 normal-case tracking-normal font-normal">· computed</span>
+                  </div>
+                  <div id="fj-links" class="space-y-1.5"></div>
+                </div>
+
                 <div>
                   <div class="text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">AI Verdict</div>
                   <pre id="fj-narrative" class="text-[11px] font-mono leading-relaxed text-Cwhite/95 bg-Cbg/60 border border-Cborder rounded-lg p-3 whitespace-pre-wrap"></pre>
