@@ -509,8 +509,11 @@ def _build_consultant_digest(req: PeConsultantRequest, cross: list[CrossLink]) -
             "limit_hrs":         sla.get("sla_limit_hrs"),
             "compliance_pct":    sla.get("compliance_pct"),
             "run_sla_compliance_pct":  sla.get("compliance_pct"),
+            "window_day_compliance_pct": bk.get("window_day_compliance_pct"),
             "window_compliance_pct":   bk.get("window_compliance_pct") or bk.get("batch_window_compliance"),
             "batch_window_compliance": bk.get("batch_window_compliance"),
+            "window_breach_days":      bk.get("window_breach_days"),
+            "window_total_days":       bk.get("window_total_days"),
             "breach":            sla.get("breaching_runs"),
             "at_risk":           sla.get("at_risk_runs"),
             "ok":                sla.get("ok_runs"),
@@ -546,7 +549,9 @@ def _build_consultant_digest(req: PeConsultantRequest, cross: list[CrossLink]) -
             "failed_runs":           bk.get("failed_runs"),
             "fail_rate_pct":         bk.get("fail_rate_pct"),
             "batch_window_compliance": bk.get("batch_window_compliance"),
+            "window_day_compliance_pct": bk.get("window_day_compliance_pct"),
             "window_breach_days":    bk.get("window_breach_days"),
+            "window_total_days":     bk.get("window_total_days"),
         },
         "batch_window": {
             "breach_days":     window_breach_days,
@@ -589,9 +594,13 @@ def _consultant_llm(digest: Dict[str, Any], accuracy: AccuracySignal) -> Consult
     # supplied a run-level metric, keep it for reference but don't seed the
     # score with it — the window metric is the contractual measure.
     sla_d = digest.get("sla") or {}
-    _raw_comp = (sla_d.get("window_compliance_pct")
-                 or sla_d.get("batch_window_compliance")
-                 or sla_d.get("compliance_pct"))
+    # Day-level window compliance is the canonical scoring baseline (strictest, most
+    # honest contractual measure). Pair-level / run-level kept only as fallbacks.
+    _raw_comp = (sla_d.get("window_day_compliance_pct")
+                 if sla_d.get("window_day_compliance_pct") is not None
+                 else (sla_d.get("window_compliance_pct")
+                       or sla_d.get("batch_window_compliance")
+                       or sla_d.get("compliance_pct")))
     sla_comp = _f(_raw_comp, 100.0)
     fc  = _i((digest.get("findings_summary") or {}).get("critical"))
     fw  = _i((digest.get("findings_summary") or {}).get("warning"))

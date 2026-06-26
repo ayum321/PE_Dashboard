@@ -104,6 +104,181 @@ def _int(v, default=0):
         return default
 
 
+def _fmt_pct(v: Any) -> str:
+    n = _num(v)
+    return "NA" if n is None else f"{n:.1f}%"
+
+
+def _fmt_hrs(v: Any) -> str:
+    n = _num(v)
+    return "NA" if n is None else f"{n:.2f}h"
+
+
+def _build_evidence_facts(digest: Dict[str, Any]) -> Dict[str, Any]:
+    """Named evidence facts passed to AI and reused for deterministic reasons."""
+    bk = (digest.get("batch") or {}).get("kpis") or {}
+    slak = (digest.get("sla_matrix") or {}).get("kpis") or {}
+    _res_digest = digest.get("resource") or {}
+    rk = _res_digest.get("kpis") or _res_digest or {}
+    rf_sum = (digest.get("red_flags") or {}).get("summary") or {}
+    rule_f = digest.get("rule_findings") or {}
+    bm = digest.get("benchmark") or {}
+    sf = digest.get("smart_findings") or {}
+
+    def _first(*vals):
+        for val in vals:
+            if val is not None:
+                return val
+        return None
+
+    dc = (digest.get("batch") or {}).get("deadline_compliance") or bk.get("deadline_compliance") or {}
+    # Day-level window compliance DERIVED from the same breach/total days emitted below,
+    # so the verdict reason's % reconciles exactly with its "{breach}/{total}" fraction.
+    _wbd_fact = _first(bk.get("window_breach_days"), slak.get("window_breach_days"))
+    _wtd_fact = _first(bk.get("window_total_days"), slak.get("window_total_days"))
+    _day_comp_fact = None
+    try:
+        _wtd_i = int(_wtd_fact) if _wtd_fact is not None else 0
+        _wbd_i = int(_wbd_fact) if _wbd_fact is not None else 0
+        if _wtd_i > 0:
+            _day_comp_fact = round((_wtd_i - _wbd_i) / _wtd_i * 100, 1)
+    except (TypeError, ValueError):
+        _day_comp_fact = None
+    facts: Dict[str, Any] = {
+        "batch_window_compliance_pct": _first(
+            _day_comp_fact,
+            bk.get("window_day_compliance_pct"),
+            slak.get("window_day_compliance_pct"),
+            bk.get("window_compliance_pct"),
+            bk.get("batch_window_compliance"),
+            slak.get("window_compliance_pct"),
+            slak.get("batch_window_compliance"),
+        ),
+        # Pair-level ((sub_app × day) window) compliance — secondary detail only, kept
+        # distinct so it is never confused with the canonical day-level headline above.
+        "window_pair_compliance_pct": _first(
+            bk.get("window_compliance_pct"),
+            bk.get("batch_window_compliance"),
+            slak.get("window_compliance_pct"),
+            slak.get("batch_window_compliance"),
+        ),
+        "window_breach_days": _wbd_fact,
+        "window_total_days": _wtd_fact,
+        "job_sla_compliance_pct": _first(
+            bk.get("job_sla_compliance_pct"),
+            bk.get("job_sla_compliance"),
+            bk.get("compliance_pct"),
+            slak.get("run_sla_compliance_pct"),
+            slak.get("compliance_pct"),
+        ),
+        "fleet_grade": rk.get("fleet_grade"),
+        "fleet_score": rk.get("fleet_score"),
+        "peak_mem_pct": _first(rk.get("peak_mem_pct"), rk.get("max_mem_pct"), rk.get("mem_peak_pct")),
+        "avg_cpu": _first(rk.get("avg_cpu"), rk.get("avg_cpu_pct"), rk.get("cpu_avg")),
+        "n_critical_findings": (
+            _int(rf_sum.get("critical") or rf_sum.get("CRITICAL"))
+            + len(rule_f.get("critical") or [])
+        ),
+        "regression_count": _first(
+            bk.get("regression_count"),
+            bk.get("runtime_regression_count"),
+            sf.get("regression_count"),
+        ),
+        "net_runtime_delta": _first(
+            bk.get("net_runtime_delta"),
+            bk.get("net_runtime_delta_pct"),
+            sf.get("net_runtime_delta"),
+        ),
+        "benchmark_breach_count": len([
+            r for r in (bm.get("rows") or []) if str(r.get("status")) in ("BREACH", "RED")
+        ]),
+    }
+    if isinstance(dc, dict) and dc.get("has_deadlines"):
+        facts.update({
+            "deadline_compliance_pct": dc.get("compliance_pct"),
+            "deadline_breach_days": dc.get("breach_days") or dc.get("breach_windows"),
+            "worst_deadline_overrun_hrs": dc.get("worst_overrun_hrs"),
+            "deadline_assessable_windows": dc.get("assessable_windows"),
+        })
+    return {k: v for k, v in facts.items() if v is not None}
+
+
+def _evidence_facts_block(facts: Dict[str, Any]) -> str:
+    if not facts:
+        return "evidence_available: false"
+    lines = []
+    for key in sorted(facts):
+        lines.append(f"{key}: {facts[key]}")
+    return "\n".join(lines)
+
+
+def _build_verdict_reason(verdict: str, facts: Dict[str, Any]) -> str:
+    verdict_txt = (verdict or "CONDITIONAL").upper()
+    drivers: List[str] = []
+
+    window_comp = _num(facts.get("batch_window_compliance_pct"))
+    window_breach_days = _int(facts.get("window_breach_days"), 0)
+    window_total_days = _int(facts.get("window_total_days"), 0)
+    if window_comp is not None and window_comp < 90:
+        # window_comp is the DAY-LEVEL figure, so the clean/total day fraction below
+        # reconciles arithmetically with it (e.g. 2/28 days == 7.1%).
+        if window_total_days:
+            clean_days = window_total_days - window_breach_days
+            fact = (
+                f"batch finished within its SLA window on only {clean_days}/{window_total_days} "
+                f"day(s) ({window_comp:.1f}%, < 90% floor)"
+            )
+        else:
+            fact = f"batch-window SLA compliance {window_comp:.1f}% (< 90% floor)"
+        drivers.append(fact)
+
+    job_comp = _num(facts.get("job_sla_compliance_pct"))
+    if job_comp is not None and job_comp < 90:
+        drivers.append(f"job-level SLA compliance {job_comp:.1f}% (< 90% floor)")
+
+    deadline_comp = _num(facts.get("deadline_compliance_pct"))
+    deadline_breach_days = _int(facts.get("deadline_breach_days"), 0)
+    if deadline_comp is not None and deadline_breach_days > 0:
+        drivers.append(
+            f"wall-clock deadline compliance {deadline_comp:.1f}% "
+            f"({deadline_breach_days} breach days, worst overrun "
+            f"{_fmt_hrs(facts.get('worst_deadline_overrun_hrs'))})"
+        )
+
+    n_critical = _int(facts.get("n_critical_findings"), 0)
+    if n_critical > 0:
+        drivers.append(f"{n_critical} critical finding(s)")
+
+    bench_breach = _int(facts.get("benchmark_breach_count"), 0)
+    if bench_breach > 0:
+        drivers.append(f"{bench_breach} UAT benchmark breach transaction(s)")
+
+    if not drivers:
+        if verdict_txt == "APPROVED":
+            drivers.append("batch, resource, findings, and UAT evidence within approval thresholds")
+        else:
+            drivers.append("approval criteria not fully met across loaded evidence")
+
+    despite_parts: List[str] = []
+    if facts.get("peak_mem_pct") is not None:
+        despite_parts.append(f"DB mem peak {_fmt_pct(facts.get('peak_mem_pct'))}")
+    if facts.get("avg_cpu") is not None:
+        despite_parts.append(f"avg CPU {_fmt_pct(facts.get('avg_cpu'))}")
+    if facts.get("fleet_grade"):
+        fleet_txt = f"fleet grade {facts.get('fleet_grade')}"
+        if facts.get("fleet_score") is not None:
+            fleet_txt += f" ({_num(facts.get('fleet_score')):.1f})"
+        despite_parts.append(fleet_txt)
+    despite = ""
+    fleet_score_for_despite = _num(facts.get("fleet_score"))
+    if verdict_txt == "BLOCKED" and despite_parts and (
+        fleet_score_for_despite is None or fleet_score_for_despite >= 70
+    ):
+        despite = f", despite healthy resource metrics ({', '.join(despite_parts)})"
+
+    return f"{verdict_txt} — driven by {' and '.join(drivers)}{despite}"
+
+
 # ---------------------------------------------------------------------------
 # BUG 5 FIX: Resource field normalisation
 # ---------------------------------------------------------------------------
@@ -185,6 +360,7 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
             "window":        wf_roll[:30],
             "anomalies":     anom[:8],
             "data_coverage": b.get("data_coverage"),
+            "deadline_compliance": b.get("deadline_compliance") or bk.get("deadline_compliance"),
         }
 
     # -- SLA matrix --------------------------------------------------------
@@ -377,19 +553,37 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     total_runs   = _bk_get("total_runs") or total_jobs              # execution count
     total_ok     = _bk_get("ok_runs")
     fail_runs    = _bk_get("fail_runs", "failed_runs", "jobs_breach")
-    # Canonical compliance = ONLY window-level (wall-clock batch window vs SLA ceiling).
-    # NEVER fall back to compliance_pct (job-day metric) here — job-day typically
-    # runs 10-20pts higher than window compliance and would give a misleadingly
-    # optimistic headline figure.  If no window data is available, leave as None.
-    compliance   = _bk_get("window_compliance_pct", "batch_window_compliance")
-    # Job-day compliance tracked separately — this is the per-job-day SLA adherence
-    # figure that is distinct from window compliance and must NEVER overwrite it.
+    # Canonical headline compliance = DAY-LEVEL window compliance: the share of
+    # calendar days the batch finished inside its SLA window. This is the strictest,
+    # most honest PE sign-off figure and it reconciles arithmetically with the
+    # "{breach}/{total} day(s)" fraction shown beside it. Pair-level ((sub_app × day)
+    # window) compliance is kept ONLY as a clearly-labeled secondary detail.
+    # Canonical headline = DAY-LEVEL window compliance, DERIVED from the breach/total
+    # days so it ALWAYS reconciles with the "{breach}/{total} day(s)" fraction shown
+    # beside it — even after the SLA Matrix overwrites those counts. Falls back to the
+    # pre-computed field only when day counts are unavailable.
+    _wbd0 = _int(_bk_get("window_breach_days"), 0)
+    _wtd0 = _int(_bk_get("window_total_days"), 0)
+    if _wtd0 > 0:
+        compliance = round((_wtd0 - _wbd0) / _wtd0 * 100, 1)
+    else:
+        compliance = _bk_get("window_day_compliance_pct")
+    # Pair-level window compliance — secondary detail, NEVER the headline. Matches the
+    # SLA Matrix tab's (sub_app, date) granularity; typically reads higher than the
+    # day-level figure because one clean sub-app on a breached day still counts.
+    window_pair_compliance  = _bk_get("window_compliance_pct", "batch_window_compliance")
+    # Job-day compliance tracked separately — per-job-day SLA adherence, distinct from
+    # window compliance and must NEVER overwrite it (usually 10-20pts more optimistic).
     job_sla_comp = _bk_get("job_sla_compliance_pct", "job_sla_compliance", "compliance_pct")
-    # If no window compliance is available, fall back to job-day compliance as the
-    # best available figure — but flag it clearly so the reader knows the context.
-    _window_compliance_is_estimated = compliance is None and job_sla_comp is not None
-    if _window_compliance_is_estimated:
-        compliance = job_sla_comp  # use job-day as fallback only
+    # Fallbacks when no day-level window data exists: prefer pair-level (still a window
+    # metric), then job-day (flagged as estimated so the reader knows the context).
+    _window_compliance_is_estimated = False
+    if compliance is None:
+        if window_pair_compliance is not None:
+            compliance = window_pair_compliance
+        elif job_sla_comp is not None:
+            compliance = job_sla_comp
+            _window_compliance_is_estimated = True
     # Run-level compliance from SLA matrix (if available)
     run_sla_comp = slak.get("run_sla_compliance_pct") or slak.get("compliance_pct")
     breaches     = _bk_get("breaching_runs", "jobs_breach")
@@ -629,10 +823,17 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
 
     window_note = ""
     if wtd:
-        pct_ok = round((wtd - wbd) / wtd * 100, 1) if wtd else 0
+        # The `compliance` headline above already states the day-level window % — here
+        # we add the breach-day fraction (which reconciles with it) plus the pair-level
+        # figure as an explicitly labeled secondary, never juxtaposed as one number.
+        _pair_n = _num(window_pair_compliance)
+        _pair_detail = ""
+        if _pair_n is not None and compliance is not None and abs(_pair_n - float(compliance)) > 0.1:
+            _pair_detail = f" (per sub-app \u00d7 day window: {_pair_n:.1f}%)"
         window_note = (
-            f" Batch Window Compliance: {pct_ok}% — "
-            f"SLA {'met' if wbd == 0 else f'exceeded on {wbd}/{wtd}'} day(s)."
+            f" Batch made its window on {wtd - wbd}/{wtd} day(s)"
+            + (f"; exceeded on {wbd}/{wtd}" if wbd else "")
+            + f".{_pair_detail}"
         )
 
     sf_findings     = sf.get("findings") or []
@@ -887,8 +1088,12 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     # Rule-engine criticals + benchmark breaches now feed the verdict so the
     # narrative agrees with the PE Findings table (same evidence, same call).
     verdict  = "CONDITIONAL"
+    evidence_facts = _build_evidence_facts(digest)
     rf_crit  = _int(rf_sum.get("critical") or rf_sum.get("CRITICAL"))
     _comp_n  = _num(compliance)
+    _window_pair_n = _num(window_pair_compliance)
+    _deadline_comp = _num(evidence_facts.get("deadline_compliance_pct"))
+    _deadline_breach_days = _int(evidence_facts.get("deadline_breach_days"), 0)
 
     rule_f      = digest.get("rule_findings") or {}
     rule_crit_n = len(rule_f.get("critical") or [])
@@ -897,7 +1102,12 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     if (_comp_n is not None and _comp_n >= 98 and rf_crit == 0
             and rule_crit_n == 0 and bench_breach_n == 0):
         verdict = "APPROVED"
-    elif rf_crit > 0 or rule_crit_n > 0 or (_comp_n is not None and _comp_n < 90):
+    elif (
+        rf_crit > 0
+        or rule_crit_n > 0
+        or (_comp_n is not None and _comp_n < 90)
+        or (_deadline_comp is not None and _deadline_breach_days > 0 and _deadline_comp < 90)
+    ):
         verdict = "BLOCKED"
 
     try:
@@ -907,6 +1117,8 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             verdict = sf_verdict
     except Exception:
         pass
+
+    verdict_reason = _build_verdict_reason(verdict, evidence_facts)
 
     # -- Cross-pillar diagnosis -------------------------------------------
     # Determine the audit scenario label and a one-sentence diagnosis.
@@ -918,6 +1130,33 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     _cp_atrisk          = _int(bk.get("jobs_at_risk") or bk.get("at_risk_runs") or 0)
     _cp_crit_srv        = _int(rk.get("n_critical") or 0)
     _cp_warn_srv        = _int(rk.get("n_warning") or 0)
+    # Batch-level breach signals beyond per-job ceilings. A batch that misses its
+    # wall-clock window / deadline on calendar days is NOT "healthy" even when every
+    # individual job had per-job buffer headroom. Folding these in is what lets the
+    # diagnosis point at scheduling instead of falsely declaring "all clear".
+    _cp_window_breach   = _int(bk.get("window_breach_days") or 0)
+    _cp_window_total    = _int(bk.get("window_total_days") or 0)
+    _cp_deadline_breach = _int(
+        bk.get("deadline_breach_days")
+        or ((bk.get("deadline_compliance") or {}).get("breach_days"))
+        or 0
+    )
+    _cp_batch_unhealthy = (_cp_breach > 0) or (_cp_window_breach > 0) or (_cp_deadline_breach > 0)
+
+    def _cp_batch_breach_phrase() -> str:
+        # Cite the actual driver — window days first (the canonical PE sign-off signal)
+        # so the scenario text reconciles with the headline window-compliance figure.
+        if _cp_window_breach > 0 and _cp_window_total:
+            base = f"batch missed its SLA window on {_cp_window_breach}/{_cp_window_total} day(s)"
+            if _cp_breach == 0:
+                base += " despite every job clearing its individual ceiling"
+            return base
+        if _cp_breach > 0:
+            return f"{_cp_breach} SLA breach(es)"
+        if _cp_deadline_breach > 0:
+            return f"batch missed its wall-clock deadline on {_cp_deadline_breach} day(s)"
+        return "a batch SLA issue"
+
     # suppress the scenario when all resource metrics are 0 (image-only docx)
     _cp_all_zero_res    = all(
         _num(s.get("cpu_pct") or s.get("cpu_utilisation") or 0) == 0
@@ -927,33 +1166,40 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     _cp_diagnosis: str = ""
 
     if _cp_batch_loaded and _cp_resource_loaded and not _cp_all_zero_res:
-        if _cp_breach == 0 and _cp_crit_srv == 0:
+        if not _cp_batch_unhealthy and _cp_crit_srv == 0:
             _cp_diagnosis = (
                 "Scenario: BATCH + RESOURCE — both pillars healthy. "
-                "All jobs within SLA and no critical infrastructure pressure detected."
+                "All jobs within SLA, the batch made its window every day, and no "
+                "critical infrastructure pressure was detected."
             )
-        elif _cp_breach > 0 and _cp_crit_srv == 0 and _cp_warn_srv <= 1:
+        elif _cp_batch_unhealthy and _cp_crit_srv == 0:
+            _warn_note = (
+                f" Note: {_cp_warn_srv} server(s) in a warning state — monitor, but they "
+                f"are not on the batch's critical path."
+                if _cp_warn_srv > 1 else ""
+            )
             _cp_diagnosis = (
-                f"Scenario: SCHEDULING ISSUE — {_cp_breach} SLA breach(es) with healthy fleet "
-                f"(grade {fleet_grade}, 0 critical servers). "
-                "Root cause is scheduling logic or SQL regression, not hardware capacity."
+                f"Scenario: SCHEDULING ISSUE — {_cp_batch_breach_phrase()} with an "
+                f"otherwise healthy fleet (grade {fleet_grade}, 0 critical servers). "
+                "Root cause is scheduling logic, batch sequencing, or SQL regression — "
+                "not hardware capacity." + _warn_note
             )
-        elif _cp_breach == 0 and _cp_crit_srv > 0:
+        elif not _cp_batch_unhealthy and _cp_crit_srv > 0:
             _cp_diagnosis = (
                 f"Scenario: HIDDEN INFRA RISK — batch currently within SLA but "
                 f"{_cp_crit_srv} server(s) are at critical state (grade {fleet_grade}). "
                 "Infrastructure must be remediated before sign-off."
             )
-        elif _cp_breach > 0 and _cp_crit_srv > 0:
+        elif _cp_batch_unhealthy and _cp_crit_srv > 0:
             _cp_diagnosis = (
-                f"Scenario: COMPOUND RISK — {_cp_breach} SLA breach(es) AND "
+                f"Scenario: COMPOUND RISK — {_cp_batch_breach_phrase()} AND "
                 f"{_cp_crit_srv} critical server(s) simultaneously. "
                 "Two parallel workstreams required: infrastructure scale-up + job optimisation."
             )
     elif _cp_batch_loaded and not _cp_resource_loaded:
-        if _cp_breach > 0:
+        if _cp_batch_unhealthy:
             _cp_diagnosis = (
-                f"Scenario: BATCH-ONLY — {_cp_breach} SLA breach(es) with no resource data available. "
+                f"Scenario: BATCH-ONLY — {_cp_batch_breach_phrase()} with no resource data available. "
                 "Root cause cannot be confirmed without infrastructure evidence."
             )
         else:
@@ -969,13 +1215,21 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
 
     # -- Summary -----------------------------------------------------------
     parts = [f"Completed the PE Review for {customer or 'the account'}."]
-    if _comp_n is not None:
-        parts.append(f"Batch SLA compliance: {_comp_n:.1f}%.")
-    if wbd and wtd:
-        parts.append(
-            f"Batch Window Compliance: {round((wtd - wbd)/wtd*100, 1)}% "
-            f"— SLA exceeded on {wbd}/{wtd} day(s)."
+    # Headline = DAY-LEVEL window compliance, paired with the breach-day fraction it
+    # reconciles with. Pair-level ((sub_app × day)) shown only as a labeled secondary.
+    if wtd:
+        _clean_days = wtd - wbd
+        _day_comp = _comp_n if _comp_n is not None else round(_clean_days / wtd * 100, 1)
+        _win_line = (
+            f"Batch window compliance: {_day_comp:.1f}% "
+            f"— made its window on {_clean_days}/{wtd} day(s)"
+            + (f", exceeded on {wbd}/{wtd}" if wbd else "") + "."
         )
+        if _window_pair_n is not None and abs(_window_pair_n - _day_comp) > 0.1:
+            _win_line += f" (per sub-app \u00d7 day window: {_window_pair_n:.1f}%.)"
+        parts.append(_win_line)
+    elif _comp_n is not None:
+        parts.append(f"Batch SLA compliance: {_comp_n:.1f}%.")
     if fleet_grade and fleet_grade != "N/A":
         parts.append(
             f"Fleet grade: {fleet_grade}"
@@ -997,11 +1251,13 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             f"{rf_crit} critical finding(s) require immediate attention before PE sign-off."
         )
     parts.append(
-        f"Overall verdict: {verdict}. Sections below contain the full evidence breakdown."
+        f"Overall verdict: {verdict}. {verdict_reason}. Sections below contain the full evidence breakdown."
     )
 
     return {
         "verdict":  verdict,
+        "verdict_reason": verdict_reason,
+        "evidence_facts": evidence_facts,
         "summary":  " ".join(parts),
         "sections": sections,
         "model":    "deterministic",
@@ -1054,6 +1310,9 @@ def _validate_and_merge(ai_payload: Any, fallback: Dict[str, Any],
             key=lambda x: x[1],
         )[0]
         out["verdict"] = final or det_verdict
+        _facts = out.get("evidence_facts") or _build_evidence_facts(digest)
+        out["evidence_facts"] = _facts
+        out["verdict_reason"] = _build_verdict_reason(out["verdict"], _facts)
     else:
         _vrank = {"BLOCKED": 2, "CONDITIONAL": 1, "APPROVED": 0}
         out["verdict"] = (
@@ -1061,9 +1320,14 @@ def _validate_and_merge(ai_payload: Any, fallback: Dict[str, Any],
             if _vrank.get(ai_verdict, -1) >= _vrank.get(det_verdict, -1)
             else det_verdict
         )
+        out["verdict_reason"] = out.get("verdict_reason") or _build_verdict_reason(
+            out["verdict"], out.get("evidence_facts") or {}
+        )
 
     if isinstance(ai_payload.get("summary"), str) and ai_payload["summary"].strip():
         out["summary"] = ai_payload["summary"].strip()
+    if out.get("verdict_reason") and out["verdict_reason"] not in out.get("summary", ""):
+        out["summary"] = (out.get("summary") or "").rstrip() + " " + out["verdict_reason"] + "."
 
     ai_secs = ai_payload.get("sections") or []
     by_id   = {s.get("id"): s for s in ai_secs if isinstance(s, dict)}
@@ -1104,6 +1368,8 @@ def _validate_and_merge(ai_payload: Any, fallback: Dict[str, Any],
 def _bare_fallback(customer: str) -> Dict[str, Any]:
     return {
         "verdict": "CONDITIONAL",
+        "verdict_reason": "CONDITIONAL — driven by insufficient evidence loaded",
+        "evidence_facts": {},
         "summary": (
             f"Completed the PE Review for {customer or 'the account'}. "
             "Analysis data could not be fully compiled. "
@@ -1254,18 +1520,26 @@ async def _pe_narrative_inner(body: PeNarrativeRequest, customer: str) -> Dict[s
         ready = _ai.is_ready()
         if ready.get("nvidia_key") or ready.get("gemini_key"):
             _section_ids = [s["id"] for s in _SECTIONS]
+            evidence_facts = fallback.get("evidence_facts") or _build_evidence_facts(digest)
+            verdict_reason = fallback.get("verdict_reason") or _build_verdict_reason(
+                fallback.get("verdict", "CONDITIONAL"), evidence_facts
+            )
             ai_prompt = (
                 "You are a senior Performance Engineering reviewer writing the "
                 f"PE Review narrative for customer '{customer or 'the account'}'.\n"
-                "Using ONLY the data in the DIGEST below, return a strict JSON object:\n"
+                "Make the verdict using ONLY the named EVIDENCE FACTS below. "
+                "Your verdict MUST cite which evidence facts caused the "
+                "BLOCKED/APPROVED/CONDITIONAL decision. Do not invent additional context.\n"
+                "Return a strict JSON object:\n"
                 '{\n'
                 '  "verdict": "APPROVED" | "CONDITIONAL" | "BLOCKED",\n'
                 '  "summary": "<3-4 sentence executive summary, lead with hard numbers>",\n'
                 '  "sections": [ {"id": "<section id>", "prose": "<2-4 factual sentences>"} ]\n'
                 '}\n'
                 f"Valid section ids (use each at most once): {_section_ids}.\n"
+                f"Canonical deterministic verdict reason to cite exactly where applicable: {verdict_reason}.\n"
                 "Rules: be direct and factual, no hedging, lead with numbers, do NOT "
-                "invent values absent from the digest, do NOT output tables (numbers "
+                "invent values absent from the evidence facts or digest, do NOT output tables (numbers "
                 "are supplied separately). Choose the verdict strictly from the data: "
                 "any SLA breach / critical finding / sub-85% compliance => not APPROVED."
             )
@@ -1276,7 +1550,10 @@ async def _pe_narrative_inner(body: PeNarrativeRequest, customer: str) -> Dict[s
             if len(ai_body) > 16000:
                 ai_body = ai_body[:16000] + " …<truncated>"
             ai_payload, ai_model = _ai.chat_json(
-                f"{ai_prompt}\n\nDIGEST:\n{ai_body}",
+                (
+                    f"{ai_prompt}\n\nEVIDENCE FACTS:\n{_evidence_facts_block(evidence_facts)}"
+                    f"\n\nDIGEST (supporting detail only):\n{ai_body}"
+                ),
                 max_tokens=1400, temperature=0.25,
             )
             merged = _validate_and_merge(ai_payload, fallback, digest)

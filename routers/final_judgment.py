@@ -140,56 +140,218 @@ def _grade(score: float) -> str:
     return letter
 
 
+def _safe_float(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(v: Any) -> Optional[int]:
+    try:
+        if v is None:
+            return None
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_not_none(*vals: Any) -> Any:
+    """Coalesce that treats 0/0.0 as valid (unlike `a or b`)."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def _fmt_pct(v: Any) -> str:
+    n = _safe_float(v)
+    return "NA" if n is None else f"{n:.1f}%"
+
+
+def _fmt_count(v: Any) -> str:
+    n = _safe_int(v)
+    return "NA" if n is None else str(n)
+
+
+def _build_kpi_evidence(body: FinalJudgmentRequest) -> Dict[str, Any]:
+    """Extract named evidence facts used by deterministic verdict reconciliation."""
+    ev: Dict[str, Any] = {}
+    if body.batch:
+        kpis = body.batch.get("kpis") if isinstance(body.batch.get("kpis"), dict) else {}
+        dc = body.batch.get("deadline_compliance") or kpis.get("deadline_compliance") or {}
+        # Day-level window compliance DERIVED from breach/total days so the verdict
+        # reason's % always reconciles with its "{breach}/{total}" fraction.
+        _wbd_ev = _safe_int(kpis.get("window_breach_days"))
+        _wtd_ev = _safe_int(kpis.get("window_total_days"))
+        _day_comp_ev = (
+            round((_wtd_ev - _wbd_ev) / _wtd_ev * 100, 1)
+            if _wtd_ev and _wtd_ev > 0 and _wbd_ev is not None else None
+        )
+        ev["batch"] = {
+            "compliance_pct": kpis.get("compliance_pct"),
+            "job_sla_compliance_pct": (
+                kpis.get("job_sla_compliance_pct")
+                or kpis.get("job_sla_compliance")
+                or kpis.get("compliance_pct")
+            ),
+            "window_compliance_pct": _first_not_none(
+                _day_comp_ev,
+                kpis.get("window_day_compliance_pct"),
+                kpis.get("window_compliance_pct"),
+                kpis.get("batch_window_compliance"),
+            ),
+            "window_pair_compliance_pct": _first_not_none(
+                kpis.get("window_compliance_pct"),
+                kpis.get("batch_window_compliance"),
+            ),
+            "jobs_breach": kpis.get("jobs_breach") or kpis.get("breaching_runs"),
+            "window_breach_days": kpis.get("window_breach_days"),
+            "window_total_days": kpis.get("window_total_days"),
+            "deadline_compliance": dc if isinstance(dc, dict) else {},
+            "regression_count": kpis.get("regression_count") or kpis.get("runtime_regression_count"),
+            "net_runtime_delta": kpis.get("net_runtime_delta") or kpis.get("net_runtime_delta_pct"),
+        }
+    if body.sla_matrix:
+        ev["sla"] = {
+            "compliance_pct": body.sla_matrix.get("compliance_pct"),
+            "breaching_runs": body.sla_matrix.get("breaching_runs"),
+            "window_breach_days": body.sla_matrix.get("window_breach_days"),
+            "window_total_days": body.sla_matrix.get("window_total_days"),
+        }
+    if body.resource:
+        rk = body.resource.get("kpis") if isinstance(body.resource.get("kpis"), dict) else {}
+        ev["resource"] = {
+            "n_critical": body.resource.get("n_critical") or rk.get("n_critical"),
+            "avg_cpu": body.resource.get("avg_cpu") or rk.get("avg_cpu") or rk.get("avg_cpu_pct"),
+            "peak_mem_pct": (
+                body.resource.get("peak_mem_pct") or rk.get("peak_mem_pct")
+                or rk.get("max_mem_pct") or rk.get("mem_peak_pct")
+            ),
+            "fleet_grade": body.resource.get("fleet_grade") or rk.get("fleet_grade"),
+            "fleet_score": body.resource.get("fleet_score") or rk.get("fleet_score"),
+        }
+    if body.redflags:
+        ev["redflags"] = body.redflags.get("by_risk") or {}
+    return ev
+
+
+def _deadline_fact(kpi_evidence: Dict[str, Any]) -> Optional[str]:
+    dc = ((kpi_evidence.get("batch") or {}).get("deadline_compliance") or {})
+    if not isinstance(dc, dict) or not dc.get("has_deadlines"):
+        return None
+    comp = _fmt_pct(dc.get("compliance_pct"))
+    breach_days = _fmt_count(dc.get("breach_days") or dc.get("breach_windows"))
+    worst = _safe_float(dc.get("worst_overrun_hrs"))
+    worst_txt = "NA" if worst is None else f"{worst:.2f}h"
+    return (
+        f"wall-clock deadline compliance {comp} "
+        f"({breach_days} breach days, worst overrun {worst_txt})"
+    )
+
+
+def _resource_despite(kpi_evidence: Dict[str, Any]) -> Optional[str]:
+    res = kpi_evidence.get("resource") or {}
+    n_critical = _safe_int(res.get("n_critical")) or 0
+    grade = res.get("fleet_grade")
+    score = _safe_float(res.get("fleet_score"))
+    peak_mem = _safe_float(res.get("peak_mem_pct"))
+    avg_cpu = _safe_float(res.get("avg_cpu"))
+    if n_critical > 0 or (score is not None and score < 70):
+        return None
+    if not any(v is not None for v in (score, peak_mem, avg_cpu)) and not grade:
+        return None
+    parts = []
+    if peak_mem is not None:
+        parts.append(f"DB mem peak {peak_mem:.1f}%")
+    if avg_cpu is not None:
+        parts.append(f"avg CPU {avg_cpu:.1f}%")
+    if grade:
+        parts.append(f"fleet grade {grade}" + (f" ({score:.1f})" if score is not None else ""))
+    return "healthy resource metrics (" + ", ".join(parts) + ")"
+
+
 def _decision_with_reason(
     score: float,
     pillars: Dict[str, float],
     redflag_critical: int,
     loaded_count: int,
+    kpi_evidence: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """Return (decision, reason) using algorithmic thresholds."""
+    kpi = kpi_evidence or {}
+    batch = kpi.get("batch") or {}
+    window_comp = _safe_float(batch.get("window_compliance_pct"))
+    window_breach_days = _safe_int(batch.get("window_breach_days"))
+    window_total_days = _safe_int(batch.get("window_total_days"))
+    deadline = _deadline_fact(kpi)
+
+    def _with_support(primary: str) -> str:
+        facts = [primary]
+        if deadline:
+            facts.append(deadline)
+        res = _resource_despite(kpi)
+        suffix = f", despite {res}" if res and primary.upper().startswith(("SLA", "BATCH")) else ""
+        return "; ".join(facts) + suffix
+
     # Hard blocks
     for name, val in pillars.items():
         if val < 40:
             return ("BLOCKED",
-                    f"{name.upper()} score {val:.0f}% — below 40% hard-block threshold")
+                    _with_support(f"{name.upper()} score {val:.1f}% < 40% hard-block floor"))
     if redflag_critical >= 3:
         return ("BLOCKED",
-                f"{redflag_critical} CRITICAL red-flags — remediation required before sign-off")
+                f"{redflag_critical} CRITICAL red-flags >= 3 hard-block floor")
 
     # SLA-specific hard block
     sla_score = pillars.get("sla")
     if sla_score is not None and sla_score < 50:
+        if window_comp is not None:
+            # window_comp is the DAY-LEVEL figure, so the clean/total day fraction
+            # reconciles with it (e.g. 2/28 days == 7.1%).
+            if window_breach_days is not None and window_total_days:
+                clean_days = window_total_days - window_breach_days
+                fact = (
+                    f"batch finished within its SLA window on only "
+                    f"{clean_days}/{window_total_days} day(s) ({window_comp:.1f}%, < 50% floor)"
+                )
+            else:
+                fact = f"batch-window SLA compliance {window_comp:.1f}% < 50% floor"
+        else:
+            fact = f"SLA compliance {sla_score:.1f}% < 50% floor"
         return ("BLOCKED",
-                f"SLA compliance {sla_score:.0f}% — more than half the period in breach")
+                _with_support(fact))
 
     # Resource-specific hard block
     resource_score = pillars.get("resource")
     if resource_score is not None and resource_score < 60:
         return ("BLOCKED",
-                f"Resource health {resource_score:.0f}% — critical server pressure unresolved")
+                f"Resource health {resource_score:.1f}% < 60% hard-block floor")
 
     # Conditional hold checks
     for name, val in pillars.items():
         if val < 60:
             return ("HOLD",
-                    f"{name.upper()} score {val:.0f}% — below 60% threshold. Resolve before sign-off")
+                    _with_support(f"{name.upper()} score {val:.1f}% < 60% hold threshold"))
 
     if loaded_count < 3:
         return ("HOLD",
                 f"Only {loaded_count}/6 pillars loaded — insufficient evidence for approval")
 
     if score < 60:
-        return ("HOLD", f"Composite score {score:.0f}% — below 60% minimum")
+        return ("HOLD", f"Composite score {score:.1f}% < 60% minimum")
 
     # Approval zone
     if score >= 80:
-        reason = "All pillars above threshold. Ready for sign-off"
+        reason = "all loaded pillars above approval thresholds"
         return ("GO", reason)
     if score >= 70:
         return ("GO_WITH_NOTES",
-                "All pillars passing but composite below 80% — approved with observations")
+                f"all loaded pillars passing; composite score {score:.1f}% < 80% observation threshold")
 
-    return ("HOLD", f"Composite score {score:.0f}% — between 70-80%, review recommended")
+    return ("HOLD", f"Composite score {score:.1f}% between 60-70% review band")
 
 
 def _build_digest(body: FinalJudgmentRequest, pillars: Dict[str, float]) -> Dict[str, Any]:
@@ -328,9 +490,13 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
     if body.redflags:
         rf_critical = int((body.redflags.get("by_risk") or {}).get("CRITICAL") or 0)
 
+    # Build named KPI evidence once, before both deterministic decisioning and
+    # LLM reconciliation, so every downstream surface cites the same facts.
+    kpi_ev = _build_kpi_evidence(body)
+
     grade    = _grade(score) if pillars else "N/A"
     decision, verdict_reason = _decision_with_reason(
-        score, pillars, rf_critical, len(pillars)
+        score, pillars, rf_critical, len(pillars), kpi_ev
     ) if pillars else ("INSUFFICIENT_DATA", "No pillar data loaded")
 
     # 4. AI verdict via narrator (best-effort)
@@ -339,6 +505,8 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
     digest["composite_grade"] = grade
     digest["proposed_decision"] = decision
     digest["redflag_critical"]  = rf_critical
+    digest["evidence_facts"] = kpi_ev
+    digest["verdict_reason"] = verdict_reason
 
     narrative, ai_model = None, None
     try:
@@ -367,25 +535,6 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
             if gm:
                 llm_grade_parsed = gm.group(1)
 
-    # Build KPI evidence from the body for validation
-    kpi_ev: Dict[str, Any] = {}
-    if body.batch:
-        kpi_ev["batch"] = {
-            "compliance_pct": body.batch.get("kpis", {}).get("compliance_pct")
-                              if isinstance(body.batch.get("kpis"), dict)
-                              else None,
-            "jobs_breach": body.batch.get("kpis", {}).get("jobs_breach")
-                           if isinstance(body.batch.get("kpis"), dict)
-                           else None,
-        }
-    if body.resource:
-        kpi_ev["resource"] = {
-            "n_critical": body.resource.get("n_critical"),
-            "avg_cpu": body.resource.get("avg_cpu"),
-        }
-    if body.redflags:
-        kpi_ev["redflags"] = body.redflags.get("by_risk") or {}
-
     det_actions: List[str] = []
     if rf_critical >= 1:
         det_actions.append(f"Resolve {rf_critical} CRITICAL red-flag(s) before next release")
@@ -409,14 +558,24 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         llm_actions=next_actions or None,
         llm_narrative=narrative,
         kpi_evidence=kpi_ev,
+        det_verdict_reason=verdict_reason,
     )
 
     # Use reconciled values
     final_decision = recon.final_decision
     final_actions = recon.final_next_actions or det_actions
+    final_verdict_reason = recon.verdict_reason or verdict_reason
+    if narrative and final_verdict_reason not in narrative:
+        narrative = f"{narrative.rstrip()}\nVERDICT_REASON: {final_verdict_reason}"
 
+    _reason_body = final_verdict_reason
+    if " — driven by " in _reason_body:
+        _reason_body = _reason_body.split(" — driven by ", 1)[1]
+    elif " — " in _reason_body:
+        _reason_body = _reason_body.split(" — ", 1)[1]
     verdict_line = (
-        f"Composite score {score}/100 (grade {grade}) — decision: {final_decision}."
+        f"Composite score {score}/100 (grade {grade}) — decision: {final_decision} "
+        f"— driven by: {_reason_body}."
     )
     if recon.mismatches:
         verdict_line += f" [{len(recon.mismatches)} mismatch(es) reconciled]"
@@ -429,7 +588,7 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         pillars=pillars,
         pillar_weights=weights,
         pillar_contributions=pillar_contributions,
-        verdict_reason=verdict_reason,
+        verdict_reason=final_verdict_reason,
         narrative=narrative,
         next_actions=final_actions,
         pillars_present=pillars_present,

@@ -362,9 +362,18 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         # R1 — Job SLA Compliance (individual job peaks vs SLA)
         batch_conf = int(_f((batch_cov or {}).get("confidence", 100)))
         job_sla_comp = _f(bk.get("job_sla_compliance", bk.get("compliance_pct")))
-        window_comp  = _f(bk.get("batch_window_compliance", 100))
+        # Window compliance: DAY-LEVEL is the canonical headline (% of calendar days the
+        # batch made its window). DERIVE it from the breach/total days shown beside it so
+        # the headline % and the "{breach}/{total} day(s)" fraction always reconcile.
+        # Pair-level ((sub_app × day)) is retained only as a labeled secondary detail.
+        window_comp_pair = _f(bk.get("batch_window_compliance", 100))
         win_breach   = _i(bk.get("window_breach_days"))
         win_total    = _i(bk.get("window_total_days"))
+        if win_total and win_total > 0:
+            window_comp = round((win_total - win_breach) / win_total * 100, 1)
+        else:
+            _day_comp_raw = bk.get("window_day_compliance_pct")
+            window_comp = _f(_day_comp_raw) if _day_comp_raw is not None else window_comp_pair
 
         sla_evidence_class = "measured" if sla_loaded else "defaulted"
         sla_src_label = "From SLA Matrix" if sla_loaded else "Assumed"
@@ -424,7 +433,8 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 f"Batch Window Compliance: {window_comp:.1f}% — SLA exceeded on {win_breach}/{win_total} day(s)",
                 f"Aggregate {_sched_label} runtime exceeded {_fmt_hrs(default_sla)}h limit · "
                 f"SLA source: {sla_src_label}. "
-                f"Individual jobs may each be within SLA, but the total batch window is not."
+                f"Individual jobs may each be within SLA, but the total batch window is not. "
+                f"(Per sub-app \u00d7 day window: {window_comp_pair:.1f}%.)"
                 f"{_worst_day_detail}",
                 source="batch", confidence=batch_conf,
                 impact=f"Batch window overrun on {win_breach} day(s) blocks PE sign-off",
@@ -439,6 +449,51 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 source="batch", confidence=batch_conf,
                 evidence_class=sla_evidence_class)
             _window_finding_emitted = True
+
+        # R1c — Wall-clock SLA DEADLINE compliance (absolute clock ceiling).
+        # Distinct failure mode from R1b: a batch can use FEWER hours than its
+        # window allows yet still FINISH past its contracted clock-time deadline
+        # (e.g. a DAILY batch that ends 09:13 against a 06:00 EST ceiling used
+        # only 9h but breached by 3h13m). This reads the single canonical
+        # deadline_compliance summary so the count here can never disagree with
+        # the Batch Review / SLA Matrix tiles.
+        _dl = bk.get("deadline_compliance") or {}
+        if _dl.get("has_deadlines"):
+            _dl_breach_days = _i(_dl.get("breach_days"))
+            _dl_assessable  = _i(_dl.get("assessable_windows"))
+            _dl_pct         = _dl.get("compliance_pct")
+            _dl_worst       = _f(_dl.get("worst_overrun_hrs"))
+            _dl_pct_txt     = f"{_f(_dl_pct):.1f}%" if _dl_pct is not None else "n/a"
+            if _dl_breach_days > 0:
+                _ex = (_dl.get("breaches") or [{}])[0]
+                _ex_sa  = _ex.get("sub_app", "?")
+                _ex_end = str(_ex.get("last_end_clock") or "")[11:16] or "?"
+                _ex_dl  = str(_ex.get("sla_deadline_clock") or "")[11:16] or "?"
+                _ex_ovr = _f(_ex.get("overrun_hrs"))
+                _dl_level = "critical" if (_dl_pct is not None and _f(_dl_pct) < 75) else "warning"
+                add(_dl_level, "⏰",
+                    f"SLA Deadline Compliance: {_dl_pct_txt} — clock deadline missed on "
+                    f"{_dl_breach_days}/{_dl_assessable} window(s)",
+                    f"Batches finished past their contracted wall-clock ceiling · "
+                    f"Worst: {_ex_sa} ended {_ex_end} vs {_ex_dl} deadline (+{_ex_ovr:.1f}h overrun). "
+                    f"This is separate from duration: a batch within its hour-budget can still "
+                    f"miss the absolute clock deadline.",
+                    source="batch", confidence=batch_conf,
+                    impact=f"Wall-clock SLA deadline breached on {_dl_breach_days} window(s) — "
+                           f"downstream consumers receive data late; blocks PE sign-off",
+                    evidence=f"Actual last End_Time vs contracted sla_end clock ceiling · "
+                             f"worst overrun {_dl_worst:.2f}h · Source: {sla_src_label}",
+                    recommendation="Pull batch start earlier or accelerate the late-finishing "
+                                   "workflow so completion lands before the contracted deadline",
+                    evidence_class=sla_evidence_class,
+                    root_cause="SLA_DEADLINE_BREACH")
+            else:
+                add("ok", "✅",
+                    f"SLA Deadline Compliance: {_dl_pct_txt} — all batches finished before clock deadline",
+                    f"All {_dl_assessable} assessable window(s) completed within their contracted "
+                    f"wall-clock ceiling · Source: {sla_src_label}",
+                    source="batch", confidence=batch_conf,
+                    evidence_class=sla_evidence_class)
 
         # R2 — Per-job SLA ceiling check using pe_utils.job_status (RULE 1)
         # Uses composite key Sub_Application + Job_Name (RULE 6)
@@ -1833,23 +1888,26 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         cov.sla = True
         sla_label   = sla.get("sla_label") or "SLA"
         sla_limit   = _f(sla.get("sla_limit_hrs"))
-        sla_comp    = _f(sla.get("compliance_pct"), 100.0)
         sla_breach  = _i(sla.get("breaching_runs"))
         sla_atrisk  = _i(sla.get("at_risk_runs"))
         sla_ok      = _i(sla.get("ok_runs"))
         sla_runs    = _i(sla.get("total_runs"))
         sla_jobs    = _i(sla.get("total_jobs"))
+        # Per-JOB SLA compliance = fraction of runs that stayed within their
+        # individual ceiling (run-level pass rate). This is distinct from the
+        # window/day-level headline compliance and is the only metric the
+        # "Per-Job SLA" findings below should ever cite.
+        sla_comp    = (((sla_runs - sla_breach) / sla_runs) * 100.0
+                       if sla_runs > 0 else 100.0)
         breach_rows = sla.get("breaches") or []
         job_summary = sla.get("job_summary") or []
         worst_job   = sla.get("worst_job") or ""
         worst_hrs   = _f(sla.get("worst_hrs"))
         worst_marg  = _f(sla.get("worst_margin_hrs"))
-        # Window compliance (canonical daily-window signal)
-        win_comp_pct = sla.get("window_compliance_pct")
-        if win_comp_pct is None:
-            win_comp_pct = bk.get("window_compliance_pct")
-        if win_comp_pct is None:
-            win_comp_pct = bk.get("batch_window_compliance")
+        # Window compliance — resolve breach/total days first, then DERIVE the
+        # day-level compliance % from them so the headline % and the
+        # "{breach}/{total} day(s)" fraction always reconcile. Pair-level
+        # ((sub_app × day)) compliance is retained only as a labeled secondary.
         win_total_days = _i(
             sla.get("window_total_days")
             or bk.get("window_total_days")
@@ -1860,6 +1918,15 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             or bk.get("window_breach_days")
             or 0
         )
+        win_comp_pair = sla.get("window_compliance_pct")
+        if win_comp_pair is None:
+            win_comp_pair = bk.get("window_compliance_pct")
+        if win_comp_pair is None:
+            win_comp_pair = bk.get("batch_window_compliance")
+        if win_total_days > 0:
+            win_comp_pct = round((win_total_days - win_breach_days) / win_total_days * 100, 1)
+        else:
+            win_comp_pct = win_comp_pair
 
         # Distinct breaching jobs
         breach_names: list[str] = []
@@ -1884,7 +1951,8 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     add(win_level, "📅",
                         f"Batch Window Compliance: {win_comp_pct:.1f}% — {win_breach_days}/{win_total_days} day(s) breached",
                         f"Elapsed batch window exceeded {sla_limit:.2f}h SLA on {win_breach_days} day(s). "
-                        f"Individual jobs may be within SLA but total batch window is not.",
+                        f"Individual jobs may be within SLA but total batch window is not."
+                        + (f" (Per sub-app \u00d7 day window: {_f(win_comp_pair):.1f}%.)" if win_comp_pair is not None else ""),
                         source="sla", evidence_class="measured",
                         impact=f"PE sign-off blocked — batch window overran on {win_breach_days} of {win_total_days} days",
                         evidence=f"SLA Matrix · Window compliance · {sla_limit:.2f}h ceiling · {win_total_days} days analysed",

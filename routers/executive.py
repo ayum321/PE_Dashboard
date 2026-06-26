@@ -230,8 +230,11 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     # the binding "did the batch finish inside its window" signal and MUST flow
     # into the score — a batch can satisfy every per-job SLA yet blow its nightly
     # window, so neither the batch nor the SLA component may read 100 while
-    # windows breach. (Reads window_compliance_pct, falls back to the legacy key.)
-    _win_comp_raw = bk.get("window_compliance_pct")
+    # windows breach. (Day-level compliance is canonical; falls back to pair-level
+    # then the legacy key.)
+    _win_comp_raw = bk.get("window_day_compliance_pct")
+    if _win_comp_raw is None:
+        _win_comp_raw = bk.get("window_compliance_pct")
     if _win_comp_raw is None:
         _win_comp_raw = bk.get("batch_window_compliance")
     _win_comp = _f(_win_comp_raw) if _win_comp_raw is not None else None
@@ -334,8 +337,16 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     }
 
     # ── KPI strip ────────────────────────────────────────────────
-    window_comp = _f(bk.get("batch_window_compliance"))
+    # Day-level window compliance is the canonical headline KPI: derive it from the
+    # breach/total days shown beside it so the % and the "{breach}/{total}" fraction
+    # always reconcile. Pair-level ((sub_app × day)) is exposed as a secondary KPI.
     window_breach_days = int(bk.get("window_breach_days") or 0)
+    window_total_days  = int(bk.get("window_total_days") or 0)
+    window_comp_pair   = _f(bk.get("batch_window_compliance"))
+    if window_total_days > 0:
+        window_comp = round((window_total_days - window_breach_days) / window_total_days * 100, 1)
+    else:
+        window_comp = window_comp_pair
 
     kpis = {
         "oshs_score":          oshs["score"],
@@ -343,8 +354,10 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         "oshs_label":          oshs["label"],
         "resource_available":  resource_available,
         "batch_rate":          round(compliance, 1),
-        "window_compliance":   round(window_comp, 1) if window_comp else None,
+        "window_compliance":   round(window_comp, 1) if window_comp is not None else None,
+        "window_compliance_pair": round(window_comp_pair, 1) if window_comp_pair is not None else None,
         "window_breach_days":  window_breach_days,
+        "window_total_days":   window_total_days,
         "sla_daily_hrs":       sla_ceiling,
         "fleet_grade":         rk.get("fleet_grade", "N/A"),
         "sla_breaches":        sla_breaches,

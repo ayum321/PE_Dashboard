@@ -325,7 +325,12 @@ def generate_narrative(
     # ── 2. RISK — what's at stake ─────────────────────────────────
     breach_days = batch_kpis.get("window_breach_days", 0) or 0
     total_days  = batch_kpis.get("window_total_days", 1) or 1
-    win_comp    = batch_kpis.get("batch_window_compliance", 100) or 100
+    # Day-level window compliance — derived from the breach/total days shown beside it
+    # so the headline % and the "(breach/total breach days)" fraction always reconcile
+    # (e.g. 2/28 clean days == 7%). Pair-level is intentionally NOT used in this prose.
+    win_comp    = round((total_days - breach_days) / total_days * 100, 1) if total_days else (
+        batch_kpis.get("batch_window_compliance", 100) or 100
+    )
     at_risk_subs = sorted(
         [s for s in sub_app_metrics if s.get("sri", 0) > 0.85],
         key=lambda x: x.get("sri", 0), reverse=True,

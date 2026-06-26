@@ -2355,6 +2355,9 @@
                         class="text-[9px] font-mono px-1.5 py-0.5 rounded border border-Cborder text-Cmuted" title="Source model">—</span>
                 </div>
                 <p id="pe-narr-summary" class="text-[13px] text-Cwhite/85 leading-relaxed mt-2 max-w-4xl">—</p>
+                <p id="pe-narr-verdict-reason"
+                   class="hidden text-[11px] text-Cwhite/80 mt-2 rounded-lg border border-Cpurple/25 bg-Cpurple/5 px-3 py-2 max-w-4xl leading-relaxed"
+                   title="Deterministic, evidence-cited reason this verdict was reached — the same facts shown on Final Judgment and the Findings table."></p>
               </div>
               <button id="pe-narr-refresh-btn" onclick="triggerPeNarrative()"
                       class="shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold bg-Cpurple/20 border border-Cpurple/40 text-Cpurple hover:bg-Cpurple/30 transition-colors">
@@ -2955,8 +2958,9 @@
 
           <!-- KPI badges -->
           <div id="sla-kpi-row" class="hidden grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
-            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Compliance</div>
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center kpi-explain"
+                 data-explain="Window SLA compliance = % of CALENDAR DAYS on which every in-scope sub-app finished within its window (the canonical day-level sign-off metric, identical to the Executive Dashboard and PE Findings). It is NOT the job-run pass rate (≈100% when almost every job ENDED OK). A low day-level figure with near-100% job completion means the batch collectively ran late on most days — late starts, queue delays, or sequential jobs — even though each job individually passed. Hover the number for the day fraction and the secondary (sub-app × day) pair detail.">
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Window SLA</div>
               <div id="slak-compliance" class="text-2xl font-bold text-Cwhite">—</div>
               <div id="slak-compliance-sub" class="text-[10px] text-Cmuted"></div>
             </div>
@@ -3279,6 +3283,11 @@
                 (JOB / RUNTIME_&lt;new&gt; / RUNTIME_&lt;old&gt;) or
                 <span class="font-mono text-Cpurple">UI Benchmark XLSX/CSV</span>
                 (Transaction | Baseline (sec) | Current (sec)).
+              </p>
+              <p class="text-[11px] text-Cmuted/80 mt-2">
+                A <strong class="text-Cmuted">baseline</strong> is the prior-release runtime each job is measured against.
+                Until a file is loaded, Pass Rate reads <span class="font-mono">N/A</span> and counts show 0 —
+                that is the expected empty state, not an error.
               </p>
             </div>
             <button onclick="setActiveView('upload')"

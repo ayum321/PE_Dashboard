@@ -1252,6 +1252,30 @@ def _parse_batch_perf_sheet(ws, sheet_name: str) -> list[dict] | None:
     return rows_out if rows_out else None
 
 
+def _classify_collapse_reason(job_name: str, delta_pct: float) -> tuple[str, str]:
+    """Classify WHY a suspect collapse is suspicious (Gap 1).
+
+    A blanket "suspect" warning forces a PE reviewer to re-open the raw data to
+    judge each one. The job CLASS already carries most of that signal:
+
+      • data-heavy load/extract jobs (HIST_TRANSFER, EXTRACT_SKUPROJ, IO_SRE …)
+        collapsing to seconds → almost certainly a TEST data-volume artifact
+        (empty/stub data), NOT a tuning win  → DATA_VOLUME_SUSPECT (red)
+      • any other job with a near-total (>=99%) drop                 → NEEDS_VERIFICATION (amber)
+      • everything else that tripped the collapse gate                → POSSIBLE_GENUINE (grey)
+
+    Returns (reason_code, human_label).
+    """
+    from services import pe_config as _pc2
+    _patterns = [str(p).upper() for p in getattr(_pc2, "BATCH_DATA_HEAVY_PATTERNS", [])]
+    name_u = str(job_name).upper()
+    if any(p and p in name_u for p in _patterns):
+        return ("DATA_VOLUME_SUSPECT", "data-volume suspect")
+    if delta_pct <= -99:
+        return ("NEEDS_VERIFICATION", "needs verification")
+    return ("POSSIBLE_GENUINE", "possible genuine")
+
+
 def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
     """Compute regression / improvement breakdown and top-10 lists from batch perf rows.
 
@@ -1267,17 +1291,11 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
     its full runtime as time "saved" would make a regressing batch look healthy —
     the exact misleading signal we must avoid.
     """
-    regressions: list[dict] = []
-    improvements: list[dict] = []
-    suspect:     list[dict] = []
-    no_change = 0
-    new_only  = 0   # old == 0, new > 0
-    dropped   = 0   # new == 0, old > 0
-
     from services import pe_config as _pc
     _nowork  = float(getattr(_pc, "BATCH_NOWORK_SEC", 5.0))
     _min_old = float(getattr(_pc, "BATCH_COLLAPSE_MIN_OLD_SEC", 60.0))
     _ratio   = float(getattr(_pc, "BATCH_COLLAPSE_RATIO", 0.02))
+    _proj_min = float(getattr(_pc, "BATCH_PROJECT_MIN_BASELINE_SEC", 60.0))
 
     def _is_collapse(old: float, new: float) -> bool:
         # A substantial job (old >= _min_old) whose runtime either drops to a
@@ -1287,83 +1305,136 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
         # job did no real work in the new env (empty data / early exit).
         return old >= _min_old and (new < _nowork or new <= old * _ratio)
 
-    for r in rows:
-        old, new = r["baseline_sec"], r["current_sec"]
-        job = r["transaction"]
-        if old == 0 and new == 0:
-            continue
-        if old == 0:
-            new_only += 1
-            continue
-        if new == 0:
-            dropped += 1
-            continue
-        delta_pct  = (new - old) / old * 100
-        delta_secs = old - new  # positive = time saved
-        entry = {
-            "job":       job,
-            "old_secs":  round(old,  1),
-            "new_secs":  round(new,  1),
-            "delta_secs": round(delta_secs, 1),
-            "delta_pct":  round(delta_pct,  1),
+    def _bucket(subset: list[dict]) -> dict:
+        """Bucket a row subset into regression/improvement/suspect/etc.
+
+        Pure function over a row list — called once for the overall summary and
+        once per batch-type group (Gap 6) so the per-type counts use the EXACT
+        same logic as the headline and always reconcile.
+        """
+        regressions: list[dict] = []
+        improvements: list[dict] = []
+        suspect:     list[dict] = []
+        no_change = 0
+        new_only  = 0   # old == 0, new > 0
+        dropped   = 0   # new == 0, old > 0
+
+        for r in subset:
+            old, new = r["baseline_sec"], r["current_sec"]
+            job = r["transaction"]
+            if old == 0 and new == 0:
+                continue
+            if old == 0:
+                new_only += 1
+                continue
+            if new == 0:
+                dropped += 1
+                continue
+            delta_pct  = (new - old) / old * 100
+            delta_secs = old - new  # positive = time saved
+            entry = {
+                "job":       job,
+                "old_secs":  round(old,  1),
+                "new_secs":  round(new,  1),
+                "delta_secs": round(delta_secs, 1),
+                "delta_pct":  round(delta_pct,  1),
+                "category":  str(r.get("category") or ""),
+            }
+            # Suspect near-instant / extreme collapse — NOT a genuine improvement.
+            if _is_collapse(old, new):
+                _rc, _rl = _classify_collapse_reason(job, delta_pct)
+                entry["reason"] = _rc
+                entry["reason_label"] = _rl
+                suspect.append(entry)
+                continue
+            if delta_pct > threshold_pct:
+                regressions.append(entry)
+            elif delta_pct < -5:
+                improvements.append(entry)
+            else:
+                no_change += 1
+
+        regressions.sort(key=lambda x: x["delta_pct"], reverse=True)   # worst first
+        improvements.sort(key=lambda x: x["delta_pct"])                 # best first
+        suspect.sort(key=lambda x: x["old_secs"], reverse=True)        # biggest collapse first
+
+        # Projectable regressions = those whose baseline did real work (>= min_baseline).
+        # A percentage drawn from a 3-second baseline is not a reliable predictor of how
+        # a multi-minute production job will scale, so only credible-baseline regressions
+        # may feed the release→production SLA projection. Ranked by ABSOLUTE seconds added
+        # (new − old), because SLA breach risk is driven by real elapsed time, not %.
+        projectable = [e for e in regressions if e["old_secs"] >= _proj_min]
+        projectable.sort(key=lambda x: (x["new_secs"] - x["old_secs"]), reverse=True)
+
+        # "comparable" = credible two-sided pairs: both runtimes > 0 AND not a suspect
+        # collapse. Suspect collapses (e.g. 1800s → 0.5s) are two-sided but not genuine
+        # comparisons, so they get their own bucket and are excluded here. This makes the
+        # buckets reconcile cleanly — comparable == regressions + improvements + no_change.
+        comparable = [
+            r for r in subset
+            if r["baseline_sec"] > 0 and r["current_sec"] > 0
+            and not _is_collapse(r["baseline_sec"], r["current_sec"])
+        ]
+        net_delta  = sum(r["baseline_sec"] - r["current_sec"] for r in comparable)
+        regression_rate = round(len(regressions) / len(comparable) * 100, 1) if comparable else 0.0
+
+        return {
+            "total_jobs":       len(subset),
+            "comparable":       len(comparable),
+            "regressions":      len(regressions),
+            "improvements":     len(improvements),
+            "suspect":          len(suspect),
+            "new_only":         new_only,
+            "dropped":          dropped,
+            "no_change":        no_change,
+            "net_delta_secs":   round(net_delta, 1),
+            "regression_rate":  regression_rate,
+            "top_regressions":  regressions[:10],
+            "projectable_regressions": projectable[:10],
+            "top_improvements": improvements[:10],
+            "top_suspect":      suspect[:10],
         }
-        # Suspect near-instant / extreme collapse — NOT a genuine improvement.
-        if _is_collapse(old, new):
-            suspect.append(entry)
-            continue
-        if delta_pct > threshold_pct:
-            regressions.append(entry)
-        elif delta_pct < -5:
-            improvements.append(entry)
-        else:
-            no_change += 1
 
-    regressions.sort(key=lambda x: x["delta_pct"], reverse=True)   # worst first
-    improvements.sort(key=lambda x: x["delta_pct"])                 # best first
-    suspect.sort(key=lambda x: x["old_secs"], reverse=True)        # biggest collapse first
+    overall = _bucket(rows)
 
-    # Projectable regressions = those whose baseline did real work (>= min_baseline).
-    # A percentage drawn from a 3-second baseline is not a reliable predictor of how
-    # a multi-minute production job will scale, so only credible-baseline regressions
-    # may feed the release→production SLA projection. Ranked by ABSOLUTE seconds added
-    # (new − old), because SLA breach risk is driven by real elapsed time, not %.
-    _proj_min = float(getattr(_pc, "BATCH_PROJECT_MIN_BASELINE_SEC", 60.0))
-    projectable = [
-        e for e in regressions
-        if e["old_secs"] >= _proj_min
-    ]
-    projectable.sort(key=lambda x: (x["new_secs"] - x["old_secs"]), reverse=True)
+    # ── Gap 6: per-batch-type segregation ────────────────────────────────────
+    # Multi-group runtime sheets carry a real batch-type tag per row
+    # ("Run 1: Monthly Batch", "Run 1: Daily Batch", "SEQ DAILY", "WEEKLY"…).
+    # A flat regression count hides that a Monthly regression carries far more
+    # PE weight than a SEQ-optimizer regression. Group by category and bucket
+    # each independently so the audit can see WHERE the movement is. Single-group
+    # files (all rows tagged "Batch Performance") produce one bucket — we suppress
+    # that degenerate case so the UI only shows the breakdown when it adds signal.
+    from collections import OrderedDict
+    _cats: "OrderedDict[str, list[dict]]" = OrderedDict()
+    for r in rows:
+        _cats.setdefault(str(r.get("category") or "Batch Performance"), []).append(r)
 
-    # "comparable" = credible two-sided pairs: both runtimes > 0 AND not a suspect
-    # collapse. Suspect collapses (e.g. 1800s → 0.5s) are two-sided but not genuine
-    # comparisons, so they get their own bucket and are excluded here. This makes the
-    # buckets reconcile cleanly — comparable == regressions + improvements + no_change
-    # — and keeps net_delta and regression_rate honest (no phantom "savings" in the
-    # denominator). dropped/new_only are one-sided and already excluded by both>0.
-    comparable = [
-        r for r in rows
-        if r["baseline_sec"] > 0 and r["current_sec"] > 0
-        and not _is_collapse(r["baseline_sec"], r["current_sec"])
-    ]
-    net_delta  = sum(r["baseline_sec"] - r["current_sec"] for r in comparable)
-    regression_rate = round(len(regressions) / len(comparable) * 100, 1) if comparable else 0.0
+    by_batch_type: list[dict] = []
+    _meaningful = [c for c in _cats if c and c != "Batch Performance"]
+    if len(_cats) >= 2 or _meaningful:
+        for _label, _subset in _cats.items():
+            _s = _bucket(_subset)
+            by_batch_type.append({
+                "batch_type":       _label,
+                "total_jobs":       _s["total_jobs"],
+                "comparable":       _s["comparable"],
+                "regressions":      _s["regressions"],
+                "improvements":     _s["improvements"],
+                "suspect":          _s["suspect"],
+                "no_change":        _s["no_change"],
+                "new_only":         _s["new_only"],
+                "dropped":          _s["dropped"],
+                "net_delta_secs":   _s["net_delta_secs"],
+                "regression_rate":  _s["regression_rate"],
+                "top_regressions":  _s["top_regressions"][:5],
+                "top_suspect":      _s["top_suspect"][:5],
+            })
+        # Highest-PE-impact batch types first: most regressions, then worst net delta.
+        by_batch_type.sort(key=lambda b: (b["regressions"], -b["net_delta_secs"]), reverse=True)
 
-    return {
-        "total_jobs":       len(rows),
-        "comparable":       len(comparable),
-        "regressions":      len(regressions),
-        "improvements":     len(improvements),
-        "suspect":          len(suspect),
-        "new_only":         new_only,
-        "dropped":          dropped,
-        "no_change":        no_change,
-        "net_delta_secs":   round(net_delta, 1),
-        "regression_rate":  regression_rate,
-        "top_regressions":  regressions[:10],
-        "projectable_regressions": projectable[:10],
-        "top_improvements": improvements[:10],
-        "top_suspect":      suspect[:10],
-    }
+    overall["by_batch_type"] = by_batch_type
+    return overall
 
 
 def _parse_multigroup_runtime_sheet(ws, sheet_name: str) -> list[dict] | None:

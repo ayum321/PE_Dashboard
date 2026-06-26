@@ -2421,13 +2421,18 @@ function renderBatchKpis(k) {
   }
 
   // Show both compliance types in subtitle
-  const bwc = k.batch_window_compliance;
+  // Day-level window compliance is the canonical headline (matches Executive
+  // Dashboard, PE Findings and the SLA Matrix tab) and reconciles exactly with
+  // the breach-day count below. Falls back to pair-level batch_window_compliance.
+  const bwc = (k.window_day_compliance_pct != null)
+    ? k.window_day_compliance_pct
+    : k.batch_window_compliance;
   const wbd = k.window_breach_days || 0;
   const wtd = k.window_total_days || 0;
   let compSub = `${k.jobs_ok} OK · ${k.total_jobs} total`;
   if (bwc != null) {
     compSub += ` · Window: ${_n(bwc).toFixed(0)}%`;
-    if (wbd > 0) compSub += ` (${wbd}d breached)`;
+    if (wbd > 0) compSub += ` (${wbd}/${wtd}d breached)`;
   }
   setText("bk-compliance-sub", compSub);
 
@@ -2438,12 +2443,15 @@ function renderBatchKpis(k) {
     winCompEl.style.color =
       bwc >= 95 ? THEME.green :
       bwc >= 80 ? THEME.amber : THEME.red;
-    // Tooltip explains the headline formula (pair-level compliance)
+    // Tooltip: day-level headline formula, with pair-level as a secondary line
     const wPairs  = k.window_total_pairs;
     const wBPairs = k.window_breach_pairs || 0;
+    const passDt  = wtd - wbd;
+    let _wtip = `${passDt}/${wtd} calendar days ALL sub-apps finished within SLA · formula: clean_days ÷ total_days × 100`;
     if (wPairs) {
-      winCompEl.title = `${wPairs - wBPairs}/${wPairs} (sub-app × day) batch windows within SLA · formula: compliant_windows ÷ total_windows × 100`;
+      _wtip += `\nPair detail: ${wPairs - wBPairs}/${wPairs} (sub-app × day) windows within SLA`;
     }
+    winCompEl.title = _wtip;
   }
   const winSubEl = document.getElementById("bk-window-compliance-sub");
   if (winSubEl) {
@@ -2453,7 +2461,7 @@ function renderBatchKpis(k) {
       const passD   = wtd - wbd;
       if (wPairs) {
         const okPairs = wPairs - wBPairs;
-        winSubEl.textContent = `${okPairs}/${wPairs} windows · ${passD}/${wtd} days all-pass`;
+        winSubEl.textContent = `${passD}/${wtd} days all-pass · ${okPairs}/${wPairs} windows`;
       } else {
         winSubEl.textContent = `${passD}/${wtd} days pass · ${wbd} breach`;
       }
@@ -8667,10 +8675,20 @@ function renderPeReviewSections(findingsResp, smartVerdictData) {
   if (sec2) {
     const bk    = ad.batch?.kpis || {};
     const comp  = bk.compliance_pct          != null ? bk.compliance_pct.toFixed(1)          + "%" : "—";
-    const wComp = bk.batch_window_compliance  != null ? bk.batch_window_compliance.toFixed(1) + "%" : "—";
+    const _wcRaw = (bk.window_day_compliance_pct != null) ? bk.window_day_compliance_pct : bk.batch_window_compliance;
+    const wComp = _wcRaw != null ? Number(_wcRaw).toFixed(1) + "%" : "—";
     const breach   = bk.jobs_breach  ?? "—";
     const atRisk   = bk.jobs_at_risk ?? "—";
     const slaSource = ad.slaCeilings ? "Customer XLSX" : "PE defaults";
+    // Gap 4: wall-clock deadline compliance (single canonical source)
+    const dl       = bk.deadline_compliance || {};
+    const dlHas    = !!dl.has_deadlines;
+    const dlPct    = dl.compliance_pct;
+    const dlComp   = (dlHas && dlPct != null) ? Number(dlPct).toFixed(1) + "%" : "—";
+    const dlBreach = dl.breach_days || 0;
+    const dlColor  = !dlHas ? "#6b7db3" : (dlPct >= 95 ? "#10d96e" : dlPct >= 75 ? "#f59e0b" : "#f43f5e");
+    const dlSub    = !dlHas ? "no clock SLA" : (dlBreach > 0 ? `${dlBreach} day(s) late` : "on time");
+    const dlSubColor = !dlHas ? "#6b7db3" : (dlBreach > 0 ? "#f43f5e" : "#10d96e");
     sec2.innerHTML = `
       <div class="flex items-center gap-2 mb-3">
         <span class="text-xs font-semibold text-Cwhite">Data Source</span>
@@ -8678,14 +8696,19 @@ function renderPeReviewSections(findingsResp, smartVerdictData) {
         <span class="text-xs" style="color:#6b7db3">Batch Review + SLA Matrix</span>
         <span class="font-semibold px-1.5 py-0.5 rounded" style="font-size:9px;background:#3b82f622;color:#3b82f6">${_esc(slaSource)}</span>
       </div>
-      ${coverage.batch ? `<div class="grid grid-cols-4 gap-2 mb-3">
-        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+      ${coverage.batch ? `<div class="grid grid-cols-5 gap-2 mb-3">
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060" title="Job-level SLA compliance: each job's peak runtime vs its own SLA ceiling.">
           <div class="text-xs" style="color:#6b7db3">Job Compliance</div>
           <div class="text-sm font-bold" style="color:${comp === '—' ? '#6b7db3' : parseFloat(comp) === 100 ? '#10d96e' : parseFloat(comp) >= 90 ? '#f59e0b' : '#f43f5e'}">${comp}</div>
         </div>
-        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060" title="Window (day-level) compliance: % of calendar days on which every in-scope sub-app finished within its window. Canonical sign-off metric, consistent with the Executive Dashboard and PE Findings.">
           <div class="text-xs" style="color:#6b7db3">Window Compliance</div>
           <div class="text-sm font-bold" style="color:${wComp === '—' ? '#6b7db3' : parseFloat(wComp) >= 95 ? '#10d96e' : '#f43f5e'}">${wComp}</div>
+        </div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060" title="Wall-clock deadline compliance: did batches FINISH before their contracted clock ceiling (e.g. 06:00 EST)? Distinct from duration — a batch within its hour budget can still miss the absolute deadline.">
+          <div class="text-xs" style="color:#6b7db3">Deadline Compliance</div>
+          <div class="text-sm font-bold" style="color:${dlColor}">${dlComp}</div>
+          <div class="text-[9px]" style="color:${dlSubColor}">${dlSub}</div>
         </div>
         <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
           <div class="text-xs" style="color:#6b7db3">Breaches</div>
@@ -9528,6 +9551,18 @@ function renderPeNarrative(data) {
 
   // Model badge
   setText("pe-narr-model", (data.model || "deterministic").replace("models/", ""));
+
+  // Cited verdict reason — same evidence facts as Final Judgment & Findings table,
+  // so the BLOCKED/CONDITIONAL/APPROVED call always traces to specific numbers.
+  const vrEl = document.getElementById("pe-narr-verdict-reason");
+  if (vrEl) {
+    if (data.verdict_reason) {
+      vrEl.textContent = data.verdict_reason;
+      vrEl.classList.remove("hidden");
+    } else {
+      vrEl.classList.add("hidden");
+    }
+  }
 
   // Summary paragraph
   setText("pe-narr-summary", data.summary || "—");
@@ -15289,8 +15324,12 @@ function _renderSlaMatrix(data) {
   document.getElementById("sla-empty")?.classList.add("hidden");
   document.getElementById("sla-kpi-row")?.classList.remove("hidden");
 
-  // Use window compliance as headline when available (matches Executive Dashboard)
-  const headlineComp = data.compliance_pct;
+  // Use DAY-LEVEL window compliance as the headline — the canonical PE sign-off
+  // metric, identical to the Executive Dashboard and PE Findings. It is the % of
+  // calendar days on which every in-scope sub-app finished within its window.
+  const headlineComp = (data.window_day_compliance_pct != null)
+    ? data.window_day_compliance_pct
+    : data.compliance_pct;
   const compColor = headlineComp >= 95 ? "text-Cgreen" :
                     headlineComp >= 80 ? "text-Camber" : "text-Cred";
   const compEl = document.getElementById("slak-compliance");
@@ -15299,27 +15338,27 @@ function _renderSlaMatrix(data) {
     compEl.className = `text-2xl font-bold ${compColor}`;
 
   // ── Tooltip: explain exactly what the headline percentage measures ──
-  // The headline IS window-pair compliance: (sub_app × day) windows within SLA.
-  // Do NOT show the job-run formula here — that's a different metric entirely.
+  // The headline IS DAY-LEVEL window compliance: calendar days on which EVERY
+  // in-scope sub-app finished within its window ÷ total days. Pair-level
+  // ((sub_app × day) windows) is shown as a secondary detail line. Job-run
+  // compliance is a different metric entirely and is labelled as such.
   const wPairs  = data.window_total_pairs;   // total (sub_app × day) pairs
   const wBPairs = data.window_breach_pairs;  // breaching pairs
   const wDays   = data.window_total_days;    // calendar days
   const wBDays  = data.window_breach_days || 0;
 
   const tipLines = [];
-  if (wPairs != null) {
-    const okPairs = wPairs - (wBPairs || 0);
-    tipLines.push(
-      `Window compliance: ${okPairs}/${wPairs} (sub-app × day) batch windows within SLA`
-    );
-  } else if (wDays != null) {
-    tipLines.push(`Window compliance: sub-app batch windows within SLA ÷ total windows`);
-  }
   if (wDays != null) {
     const passDays = wDays - wBDays;
     tipLines.push(
-      `${passDays}/${wDays} calendar days ALL sub-apps clean`
+      `Window compliance (headline): ${passDays}/${wDays} calendar days ALL sub-apps finished within SLA`
         + (wBDays > 0 ? ` · ${wBDays} day(s) had ≥1 sub-app breach` : "")
+    );
+  }
+  if (wPairs != null) {
+    const okPairs = wPairs - (wBPairs || 0);
+    tipLines.push(
+      `Pair detail (secondary): ${okPairs}/${wPairs} (sub-app × day) batch windows within SLA`
     );
   }
   // Job-run compliance is a separate, distinct metric — show it clearly labelled
@@ -15335,8 +15374,8 @@ function _renderSlaMatrix(data) {
   compEl.title = tipLines.join("\n");
   }
 
-  // Sub-label: show the pair-level denominator (matches the headline %) and
-  // a clearly-labelled day-level stat. If pairs unavailable, fall back to days.
+  // Sub-label: lead with the DAY-LEVEL fraction (matches the headline %), then a
+  // clearly-labelled pair-level secondary. If pairs unavailable, show days only.
   const compSubEl = document.getElementById("slak-compliance-sub");
   if (compSubEl && data.window_total_days != null) {
   const wPairs  = data.window_total_pairs;
@@ -15347,7 +15386,7 @@ function _renderSlaMatrix(data) {
   let subText;
   if (wPairs != null) {
     const okPairs = wPairs - wBPairs;
-    subText = `${okPairs}/${wPairs} windows · ${passDays}/${wDays} days all-pass`;
+    subText = `${passDays}/${wDays} days all-pass · ${okPairs}/${wPairs} windows`;
   } else {
     subText = `${passDays}/${wDays} days pass · Window`;
   }
@@ -15473,6 +15512,11 @@ function _renderSlaMatrix(data) {
     window.appData.batch.kpis.batch_window_compliance = data.window_compliance_pct;
     window.appData.batch.kpis.window_breach_days = data.window_breach_days || 0;
     window.appData.batch.kpis.window_total_days  = data.window_total_days || 0;
+    // Day-level window compliance is the canonical headline — keep it in sync with
+    // the SLA Matrix so it reconciles exactly with the breach/total days written above.
+    if (data.window_day_compliance_pct != null) {
+      window.appData.batch.kpis.window_day_compliance_pct = data.window_day_compliance_pct;
+    }
     // Also update SLA ceiling if the matrix provides it; sync global SLA_DAILY_HRS (FIX 6.1)
     if (data.sla_hrs > 0) {
       window.appData.batch.kpis.sla_ceiling = data.sla_hrs;
@@ -16509,7 +16553,7 @@ function _renderBenchmark(data) {
     } else {
       passEl.textContent = "N/A";
       passEl.className = "text-2xl font-bold text-Cmuted";
-      if (passSub) passSub.textContent = "no baseline";
+      if (passSub) passSub.textContent = "no prior baseline";
     }
   }
 
@@ -17046,46 +17090,93 @@ function _renderBatchPerfSummary(data) {
 
   // Suspect near-instant collapses — surfaced explicitly so they're never silently
   // banked as "improvements". These need PE review (likely no-data / early-exit).
+  // Gap 1: each collapse now carries a CAUSE classification so a PE reviewer can
+  // triage at a glance instead of re-opening the raw data for every row.
   const susp = bps.top_suspect || [];
   if (susp.length) {
+    const reasonBadge = (e) => {
+      const rc = String(e.reason || "").toUpperCase();
+      if (rc === "DATA_VOLUME_SUSPECT")
+        return `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-Cred/15 text-Cred border border-Cred/40" title="Data-heavy load/extract job (HIST_TRANSFER, EXTRACT_SKU…, IO_SRE) collapsing to seconds — almost certainly a TEST data-volume artifact (empty / stub data), not a tuning win.">DATA-VOLUME</span>`;
+      if (rc === "NEEDS_VERIFICATION")
+        return `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-Camber/15 text-Camber border border-Camber/40" title="Near-total (≥99%) runtime drop on a non-data job — suspicious; verify before crediting as a genuine improvement.">VERIFY</span>`;
+      return `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-Cmuted/10 text-Cmuted border border-Cborder" title="Tripped the collapse gate but is not a known data-heavy class — treat cautiously, may be genuine.">REVIEW</span>`;
+    };
+    const suspHead = `<thead><tr class="border-b border-Cborder">
+      <th class="text-left py-1.5 pr-3 text-Cmuted text-[10px] font-semibold">Job</th>
+      <th class="text-right py-1.5 pr-3 text-Cmuted text-[10px] font-semibold">Before (s)</th>
+      <th class="text-right py-1.5 pr-3 text-Cmuted text-[10px] font-semibold">After (s)</th>
+      <th class="text-right py-1.5 pr-3 text-Cmuted text-[10px] font-semibold">Δ %</th>
+      <th class="text-right py-1.5 text-Cmuted text-[10px] font-semibold">Likely cause</th>
+    </tr></thead>`;
+    const suspRow = (e) => {
+      const pct = _n(e.delta_pct);
+      return `<tr class="border-b border-Cborder/30 hover:bg-Ccard/40">
+        <td class="py-1.5 pr-3 text-Cwhite text-xs font-semibold truncate max-w-[180px]" title="${_esc(e.job)}">${_esc(e.job)}</td>
+        <td class="py-1.5 pr-3 text-right text-Cmuted font-mono text-xs tabular-nums">${_n(e.old_secs).toFixed(0)}s</td>
+        <td class="py-1.5 pr-3 text-right font-mono text-xs tabular-nums text-Cgreen">${_n(e.new_secs).toFixed(0)}s</td>
+        <td class="py-1.5 pr-3 text-right font-mono text-xs font-bold tabular-nums text-Cgreen">${pct > 0 ? "+" : ""}${pct.toFixed(0)}%</td>
+        <td class="py-1.5 text-right">${reasonBadge(e)}</td>
+      </tr>`;
+    };
+    const sc = susp.reduce((a, e) => { const k = String(e.reason || "POSSIBLE_GENUINE"); a[k] = (a[k] || 0) + 1; return a; }, {});
+    const chip = (lbl, n, cls) => n > 0 ? `<span class="px-1.5 py-0.5 rounded ${cls} text-[9px] font-bold">${n} ${lbl}</span>` : "";
+    const rollup = [
+      chip("data-volume", sc["DATA_VOLUME_SUSPECT"], "bg-Cred/15 text-Cred border border-Cred/40"),
+      chip("verify",      sc["NEEDS_VERIFICATION"],  "bg-Camber/15 text-Camber border border-Camber/40"),
+      chip("review",      sc["POSSIBLE_GENUINE"],    "bg-Cmuted/10 text-Cmuted border border-Cborder"),
+    ].filter(Boolean).join(" ");
     html += `<div class="mb-5 rounded-xl border border-Camber/40 bg-Camber/5 p-3">
-      <div class="text-xs font-bold text-Camber uppercase tracking-wider mb-1">⚠ Suspect Collapses <span class="font-normal text-Cmuted normal-case">(${suspect} total — excluded from improvements & net savings)</span></div>
-      <div class="text-[10px] text-Cmuted mb-2">Multi-minute jobs that now finish in seconds — most likely processed no data / exited early in the new environment, not a genuine tuning win. Verify before crediting as improvement.</div>
-      <div class="overflow-x-auto"><table class="w-full text-xs">${colHead}<tbody>
-        ${susp.map(e => bpRow(e, false)).join("")}
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div class="text-xs font-bold text-Camber uppercase tracking-wider">⚠ Suspect Collapses <span class="font-normal text-Cmuted normal-case">(${suspect} total — excluded from improvements & net savings)</span></div>
+        ${rollup ? `<div class="flex items-center gap-1.5">${rollup}</div>` : ""}
+      </div>
+      <div class="text-[10px] text-Cmuted mb-2">Multi-minute jobs that now finish in seconds. <span class="text-Cred font-semibold">DATA-VOLUME</span> = data-heavy load/extract job that almost certainly ran on empty/stub TEST data (not a real win). <span class="text-Camber font-semibold">VERIFY</span> = near-total drop on another job class. <span class="text-Cmuted font-semibold">REVIEW</span> = collapsed but may be genuine. Verify before crediting as improvement.</div>
+      <div class="overflow-x-auto"><table class="w-full text-xs">${suspHead}<tbody>
+        ${susp.map(suspRow).join("")}
       </tbody></table></div>
     </div>`;
   }
 
-  // Per-batch-window category breakdown (e.g. Monthly / Daily / SEQ Daily / Weekly Run 1 / Weekly Run 2)
-  const cats = (data.categories || []).filter(c => c.total > 0);
-  if (cats.length > 1) {
+  // ── Gap 6: per-batch-type breakdown (Monthly / Daily / SEQ Daily / Weekly …) ──
+  // A single flat regression count hides that a Monthly-batch regression carries
+  // far more PE weight than a SEQ-optimizer one. Sourced from
+  // batch_perf_summary.by_batch_type so every per-type count reconciles exactly
+  // with the headline buckets above (same bucketing logic, server-side).
+  const byType = bps.by_batch_type || [];
+  if (byType.length > 1) {
     html += `<div class="border-t border-Cborder pt-5">
-      <div class="text-xs font-bold text-Cwhite uppercase tracking-wider mb-3">By Batch Window</div>
+      <div class="text-xs font-bold text-Cwhite uppercase tracking-wider mb-3">By Batch Type <span class="font-normal text-Cmuted normal-case">— per-window regression breakdown (highest PE impact first)</span></div>
       <div class="overflow-x-auto">
         <table class="w-full text-xs">
           <thead><tr class="border-b border-Cborder">
-            <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Window</th>
+            <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Batch Type</th>
             <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Jobs</th>
             <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Regressions</th>
             <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Improvements</th>
-            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Pass Rate</th>
-            <th class="text-right py-2 text-Cmuted font-semibold">Avg Δ</th>
+            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Suspect</th>
+            <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Regr Rate</th>
+            <th class="text-right py-2 text-Cmuted font-semibold">Net Runtime</th>
           </tr></thead>
           <tbody>
-            ${cats.map(c => {
-              const pct = c.total > 0 ? Math.round(c.passed / c.total * 100) : 0;
-              const pctCol = c.degraded > 0 ? "text-Cred" : c.failed > 0 ? "text-Camber" : "text-Cgreen";
-              const regCol = (c.degraded || 0) > 0 ? "text-Cred font-bold" : "text-Cmuted";
-              const imprCol = (c.passed || 0) > 0 && (c.avg_delta || 0) < 0 ? "text-Cgreen" : "text-Cmuted";
-              const deltaCol = (c.avg_delta || 0) > 0 ? "text-Camber" : "text-Cgreen";
+            ${byType.map(c => {
+              const reg = _n(c.regressions);
+              const regCol = reg > 0 ? "text-Cred font-bold" : "text-Cmuted";
+              const imprCol = _n(c.improvements) > 0 ? "text-Cgreen" : "text-Cmuted";
+              const suspCol = _n(c.suspect) > 0 ? "text-Camber" : "text-Cmuted";
+              const rate = _n(c.regression_rate);
+              const rateCol = rate >= 25 ? "text-Cred" : rate > 0 ? "text-Camber" : "text-Cgreen";
+              const net = _n(c.net_delta_secs);
+              const netMinT = Math.abs(net / 60).toFixed(1);
+              const netCol = net >= 0 ? "text-Cgreen" : "text-Cred";
               return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
-                <td class="py-2 pr-4 text-Cwhite font-semibold">${_esc(c.name)}</td>
-                <td class="py-2 pr-4 text-right font-mono tabular-nums text-Cmuted">${c.total}</td>
-                <td class="py-2 pr-4 text-right font-mono tabular-nums ${regCol}">${c.degraded || 0}</td>
-                <td class="py-2 pr-4 text-right font-mono tabular-nums ${imprCol}">${c.passed || 0}</td>
-                <td class="py-2 pr-4 text-right font-mono tabular-nums ${pctCol}">${pct}%</td>
-                <td class="py-2 text-right font-mono tabular-nums ${deltaCol}">${(_n(c.avg_delta) > 0 ? "+" : "") + _n(c.avg_delta).toFixed(1)}%</td>
+                <td class="py-2 pr-4 text-Cwhite font-semibold">${_esc(c.batch_type)}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums text-Cmuted">${_n(c.total_jobs)}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${regCol}">${reg}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${imprCol}">${_n(c.improvements)}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${suspCol}">${_n(c.suspect)}</td>
+                <td class="py-2 pr-4 text-right font-mono tabular-nums ${rateCol}">${rate.toFixed(0)}%</td>
+                <td class="py-2 text-right font-mono tabular-nums ${netCol}">${net >= 0 ? "−" : "+"}${netMinT}m</td>
               </tr>`;
             }).join("")}
           </tbody>
@@ -17629,6 +17720,8 @@ async function clearSessionData() {
       if (peNarrSummary) peNarrSummary.textContent = "—";
       const peNarrVerdict = document.getElementById("pe-narr-verdict");
       if (peNarrVerdict) peNarrVerdict.textContent = "—";
+      const peNarrReason = document.getElementById("pe-narr-verdict-reason");
+      if (peNarrReason) { peNarrReason.textContent = ""; peNarrReason.classList.add("hidden"); }
     }
     // Reset filter buttons back to default state
     document.querySelectorAll(".findings-filter-btn").forEach(btn => btn.classList.remove("active-filter"));
@@ -17651,7 +17744,13 @@ async function clearSessionData() {
     ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
 
     // ── 9. Benchmark tab ─────────────────────────────────────────────────
-    document.getElementById("bench-empty")?.classList.remove("hidden");
+    // Gap 3: restore the GUIDED empty state (what to upload + Go-to-Upload),
+    // never a blank panel. Hide the loaded KPI strip / chip so a stale "N/A —
+    // no baseline" Pass-Rate tile can't linger and read like an error after reset.
+    document.getElementById("bench-no-data-prompt")?.classList.remove("hidden");
+    document.getElementById("bench-empty")?.classList.add("hidden");
+    document.getElementById("bench-kpi-row")?.classList.add("hidden");
+    document.getElementById("bench-loaded-chip")?.classList.add("hidden");
     ["bench-result-section","bench-loaded"
     ].forEach(id => document.getElementById(id)?.classList.add("hidden"));
     ["bench-batch-badge","bench-ui-badge","bench-batch-status","bench-ui-status"

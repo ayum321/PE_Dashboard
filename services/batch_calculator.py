@@ -23,7 +23,7 @@ import io
 import logging
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -1951,7 +1951,80 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         window_agg["sla_hrs"] = window_agg.apply(_sub_sla, axis=1)
         window_agg["breach"]  = window_agg["elapsed_hrs"] > window_agg["sla_hrs"]
 
-        # ── Canonical ceiling map via shared compliance_engine ───────────────
+        # ── Gap 4: Wall-clock SLA deadline breach (parallel to duration breach) ──
+        # Duration breach (above) answers "did the batch run LONGER than its
+        # window?".  Deadline breach answers a distinct, contractually-binding
+        # question: "did the batch FINISH past its absolute clock-time ceiling
+        # (e.g. 06:00 EST)?" — a failure mode duration math cannot see.  A daily
+        # batch that starts at 00:00 and ends 09:13 only used 9.2h of elapsed
+        # time, but if its contracted ceiling is 06:00 it breached by 3.2h.
+        #
+        # The absolute deadline (sla_end) is sourced from the SAME resolved
+        # contracts the rest of the pipeline uses: job_sla_map carries
+        # 'sla_end_time' per 'Sub_App|Job'.  A window is only deadline-assessable
+        # when its sub_app has a contracted sla_end — otherwise it is excluded
+        # from the deadline denominator (never silently passed or failed).
+        from datetime import time as _dl_time
+        _deadline_map: Dict[str, "_dl_time"] = {}
+        for _dk_raw, _dv_raw in job_sla_map.items():
+            _end_iso = (_dv_raw or {}).get("sla_end_time")
+            if not _end_iso:
+                continue
+            _sa_part = str(_dk_raw).split("|", 1)[0].upper().strip()
+            if not _sa_part or _sa_part in _deadline_map:
+                continue
+            try:
+                _deadline_map[_sa_part] = _dl_time.fromisoformat(str(_end_iso))
+            except Exception:
+                continue
+
+        def _resolve_deadline(sub_app: str) -> Optional["_dl_time"]:
+            sa = str(sub_app).upper().strip()
+            if sa in _deadline_map:
+                return _deadline_map[sa]
+            # Workflow-tier deadline keyed by env-stripped substring (PROD_/TEST_…)
+            for _dk, _dv in _deadline_map.items():
+                if _dk and (_dk in sa or sa in _dk):
+                    return _dv
+            return None
+
+        def _deadline_eval(r) -> "pd.Series":
+            dl = _resolve_deadline(r["Sub_Application"])
+            le = r.get("last_end")
+            fs = r.get("first_start")
+            if dl is None or pd.isna(le) or pd.isna(fs):
+                return pd.Series({
+                    "deadline_dt":          pd.NaT,
+                    "deadline_breach":      False,
+                    "deadline_overrun_hrs": 0.0,
+                    "deadline_known":       dl is not None,
+                })
+            # Anchor the deadline to the batch START date, rolling to the next
+            # calendar day when the deadline hour had already elapsed before the
+            # batch began (overnight batch whose 06:00 ceiling lands the
+            # following morning).  This mirrors the midnight-wrap intent of
+            # sla_engine.compare_actual but uses the REAL last_end timestamp.
+            anchor = (pd.Timestamp(fs).normalize()
+                      + pd.Timedelta(hours=dl.hour, minutes=dl.minute, seconds=dl.second))
+            if anchor < fs:
+                anchor = anchor + pd.Timedelta(days=1)
+            overrun = (pd.Timestamp(le) - anchor).total_seconds() / 3600.0
+            return pd.Series({
+                "deadline_dt":          anchor,
+                "deadline_breach":      bool(overrun > 0),
+                "deadline_overrun_hrs": round(max(overrun, 0.0), 3),
+                "deadline_known":       True,
+            })
+
+        if not window_agg.empty:
+            _dl_eval_df = window_agg.apply(_deadline_eval, axis=1)
+            for _dc in ("deadline_dt", "deadline_breach", "deadline_overrun_hrs", "deadline_known"):
+                window_agg[_dc] = _dl_eval_df[_dc]
+        else:
+            window_agg["deadline_dt"]          = pd.NaT
+            window_agg["deadline_breach"]      = False
+            window_agg["deadline_overrun_hrs"] = 0.0
+            window_agg["deadline_known"]       = False
         # build_ceiling_map() is the SINGLE source of truth used by both
         # Batch Review and SLA Matrix — guarantees identical numbers on both tabs.
         # Per-row sla_hrs (from _sub_sla above) already encodes XLSX Priority 0;
@@ -1980,6 +2053,14 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 "schedule_type": _cs_win(str(_r["Sub_Application"])),
                 "sla_ceil":      float(_r["sla_hrs"]),
                 "suspect_flag":  str(_r.get("suspect_flag", "OK")),
+                # Gap 4: wall-clock deadline dimension (parallel to duration breach)
+                "last_end_clock":       (pd.Timestamp(_r["last_end"]).isoformat()
+                                         if pd.notna(_r.get("last_end")) else None),
+                "sla_deadline_clock":   (pd.Timestamp(_r["deadline_dt"]).isoformat()
+                                         if pd.notna(_r.get("deadline_dt")) else None),
+                "deadline_breach":      bool(_r.get("deadline_breach", False)),
+                "deadline_overrun_hrs": float(_r.get("deadline_overrun_hrs", 0.0) or 0.0),
+                "deadline_known":       bool(_r.get("deadline_known", False)),
             })
 
         # Legacy compatibility payload only. The daily buffer now uses the
@@ -2320,6 +2401,45 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         conf -= 10
     conf = max(0.0, round(conf, 1))
 
+    # ── Gap 4: Wall-clock deadline compliance summary (single source of truth) ──
+    # Roll the per-(sub_app, date) deadline flags on _win_records up into one
+    # canonical summary every screen reads — Batch Review, SLA Matrix and
+    # Findings must cite the SAME breach-day count and worst overrun, never
+    # recompute their own.  "Assessable" = windows that carry a contracted
+    # wall-clock deadline (deadline_known); windows without one are excluded
+    # from the denominator so we neither pass nor fail them silently.
+    _dl_assessable = [w for w in _win_records if w.get("deadline_known")]
+    _dl_breaches   = [w for w in _dl_assessable if w.get("deadline_breach")]
+    _dl_breach_days = sorted({str(w["run_date"]) for w in _dl_breaches})
+    _dl_breach_rows = sorted(
+        _dl_breaches, key=lambda w: w.get("deadline_overrun_hrs", 0.0), reverse=True
+    )
+    deadline_compliance = {
+        "has_deadlines":       len(_dl_assessable) > 0,
+        "assessable_windows":  len(_dl_assessable),
+        "breach_windows":      len(_dl_breaches),
+        "breach_days":         len(_dl_breach_days),
+        "breach_day_list":     _dl_breach_days,
+        "compliance_pct": (
+            round((1.0 - len(_dl_breaches) / len(_dl_assessable)) * 100.0, 1)
+            if _dl_assessable else None
+        ),
+        "worst_overrun_hrs": round(
+            max((w.get("deadline_overrun_hrs", 0.0) for w in _dl_assessable), default=0.0), 3
+        ),
+        "breaches": [
+            {
+                "sub_app":          w.get("sub_app"),
+                "run_date":         w.get("run_date"),
+                "last_end_clock":   w.get("last_end_clock"),
+                "sla_deadline_clock": w.get("sla_deadline_clock"),
+                "overrun_hrs":      round(float(w.get("deadline_overrun_hrs", 0.0) or 0.0), 3),
+                "schedule_type":    w.get("schedule_type"),
+            }
+            for w in _dl_breach_rows[:15]
+        ],
+    }
+
     return {
         "daily":            daily,
         "monthly":          monthly,
@@ -2329,12 +2449,22 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "batch_window_compliance": float(round(batch_window_comp, 1)),
         "window_breach_days":      window_breach_days,
         "window_total_days":       n_window_days,
+        # Canonical DAY-LEVEL window compliance (the PE sign-off headline): the
+        # share of calendar days the batch finished within its window. Reconciles
+        # exactly with the "{breach}/{total} day(s)" fraction shown beside it.
+        # Distinct from batch_window_compliance, which is per-(sub_app × day) PAIR.
+        "window_day_compliance_pct": (
+            float(round((n_window_days - window_breach_days) / n_window_days * 100, 1))
+            if n_window_days else None
+        ),
         # Pair-level counts (actual denominator for batch_window_compliance %)
         "window_total_pairs":      int(window_compliance.get("total_windows") or 0) or None,
         "window_breach_pairs":     int(window_compliance.get("breach_count") or 0) if int(window_compliance.get("total_windows") or 0) else None,
         "window_date_count":       len(unique_dates),
         # Canonical (sub_app, date)-granular window compliance from the shared engine
         "window_compliance":       window_compliance,
+        # Gap 4: parallel wall-clock deadline compliance (absolute clock ceilings)
+        "deadline_compliance":     deadline_compliance,
         "total_jobs":       t_jobs,
         "jobs_ok":          int(j_ok),
         "jobs_breach":      int(j_breach),
@@ -2788,11 +2918,23 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "batch_window_compliance":     m["batch_window_compliance"],
             "window_breach_days":      m["window_breach_days"],
             "window_total_days":       m["window_total_days"],
+            # Day-level headline (canonical for PE sign-off): % of calendar days the
+            # batch made its window. Pair-level window_compliance_pct stays available
+            # as a labeled secondary detail — never the headline.
+            "window_day_compliance_pct":   m.get("window_day_compliance_pct"),
             "window_total_pairs":      m.get("window_total_pairs"),
             "window_breach_pairs":     m.get("window_breach_pairs"),
             # Canonical (sub_app, date)-granular window compliance (shared engine).
             # Both Batch Review and SLA Matrix read the same definition.
             "window_compliance":           m.get("window_compliance"),
+            # Gap 4: wall-clock deadline compliance — distinct from duration above.
+            # Flattened headline fields plus the full breakdown object so every
+            # screen cites the SAME breach-day count and worst overrun.
+            "deadline_compliance":         m.get("deadline_compliance"),
+            "deadline_compliance_pct":     (m.get("deadline_compliance") or {}).get("compliance_pct"),
+            "deadline_breach_days":        (m.get("deadline_compliance") or {}).get("breach_days", 0),
+            "deadline_has_data":           bool((m.get("deadline_compliance") or {}).get("has_deadlines")),
+            "worst_deadline_overrun_hrs":  (m.get("deadline_compliance") or {}).get("worst_overrun_hrs", 0.0),
             "total_runs":         m["total_runs"],
             "total_jobs":         m["total_jobs"],
             "total_hrs":          m["total_hrs"],

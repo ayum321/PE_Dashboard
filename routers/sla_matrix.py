@@ -82,6 +82,9 @@ class SlaMatrixResponse(BaseModel):
     ai_narrative:      Optional[str] = None
     ai_model:          Optional[str] = None
     window_compliance_pct: Optional[float] = None
+    # Day-level window compliance — the canonical headline (% of calendar days every
+    # in-scope sub-app finished within its window). compliance_pct mirrors this value.
+    window_day_compliance_pct: Optional[float] = None
     window_total_days:     Optional[int]   = None
     window_breach_days:    Optional[int]   = None
     # Pair-level counts — the ACTUAL denominator used for compliance_pct
@@ -1140,9 +1143,20 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
     except Exception:
         pass
 
-    # When window compliance is available, use it as the headline compliance
-    # to match the Executive Dashboard — prevents contradictory stories.
-    headline_compliance = window_comp_pct if window_comp_pct is not None else compliance
+    # When window compliance is available, use the DAY-LEVEL figure as the headline —
+    # the canonical PE sign-off metric, consistent with the Executive Dashboard and PE
+    # Findings. It is DERIVED from the breach/total days so it reconciles exactly with
+    # the "{pass}/{total} days" sub-label. Pair-level stays in window_compliance_pct as
+    # a clearly-labeled secondary.
+    window_day_comp_pct = None
+    if w_total_days is not None and w_total_days > 0 and w_breach_days is not None:
+        window_day_comp_pct = round((w_total_days - w_breach_days) / w_total_days * 100, 1)
+    if window_day_comp_pct is not None:
+        headline_compliance = window_day_comp_pct
+    elif window_comp_pct is not None:
+        headline_compliance = window_comp_pct
+    else:
+        headline_compliance = compliance
 
     # Detect aggregated format — when all job names are blank/NO_JOBNAME/Sub_Application totals
     _named_jobs = [
@@ -1163,6 +1177,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         breaches=[SlaBreach(**{k: r[k] for k in SlaBreach.model_fields if k in r}) for r in detail],
         job_summary=job_summary,
         window_compliance_pct=window_comp_pct,
+        window_day_compliance_pct=window_day_comp_pct,
         window_total_days=w_total_days,
         window_breach_days=w_breach_days,
         window_total_pairs=w_total_pairs,
@@ -1220,6 +1235,8 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         session_cache.ac_set("sla_matrix_kpis", {
             "compliance_pct":          mx_dict.get("compliance_pct"),
             "run_sla_compliance_pct":  mx_dict.get("compliance_pct"),
+            "window_day_compliance_pct": mx_dict.get("window_day_compliance_pct"),
+            "window_compliance_pct":   mx_dict.get("window_compliance_pct"),
             "breaching_runs":          mx_dict.get("breaching_runs"),
             "at_risk_runs":            mx_dict.get("at_risk_runs"),
             "long_job_runs":           mx_dict.get("long_job_runs"),

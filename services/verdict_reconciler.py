@@ -38,7 +38,7 @@ class ReconciliationResult:
     __slots__ = (
         "final_grade", "final_score", "final_decision",
         "final_risks", "final_next_actions",
-        "source", "mismatches", "overrides",
+        "source", "mismatches", "overrides", "verdict_reason",
     )
 
     def __init__(self):
@@ -50,6 +50,7 @@ class ReconciliationResult:
         self.source:            str = "deterministic"   # deterministic | llm | reconciled
         self.mismatches:        list[dict[str, Any]] = []
         self.overrides:         list[str] = []
+        self.verdict_reason:    str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +62,7 @@ class ReconciliationResult:
             "source":            self.source,
             "mismatches":        self.mismatches,
             "overrides":         self.overrides,
+            "verdict_reason":    self.verdict_reason,
         }
 
 
@@ -77,6 +79,7 @@ def reconcile_verdict(
     llm_actions:  Optional[list[str]] = None,
     llm_narrative: Optional[str] = None,
     kpi_evidence: Optional[dict[str, Any]] = None,
+    det_verdict_reason: Optional[str] = None,
 ) -> ReconciliationResult:
     """Compare deterministic and LLM verdicts, force the more accurate one.
 
@@ -118,8 +121,17 @@ def reconcile_verdict(
             r.source = "reconciled"
         else:
             r.final_decision = det_decision
+
     else:
         r.final_decision = det_decision
+
+    kpi = kpi_evidence or {}
+    r.verdict_reason = _build_verdict_reason(
+        r.final_decision,
+        kpi,
+        det_verdict_reason=det_verdict_reason,
+        source="reconciled" if r.source == "reconciled" else "deterministic",
+    )
 
     # ── Grade sanity check ───────────────────────────────────────
     if llm_grade and llm_grade.upper() in _GRADE_RANK:
@@ -139,7 +151,6 @@ def reconcile_verdict(
             r.source = "reconciled"
 
     # ── Risk list reconciliation ─────────────────────────────────
-    kpi = kpi_evidence or {}
     det_risk_set = set(det_risks)
     validated_llm_risks: list[str] = []
 
@@ -187,6 +198,132 @@ def reconcile_verdict(
 
 
 # ── Evidence validation helpers ──────────────────────────────────────────────
+
+def _fmt_pct(v) -> Optional[str]:
+    n = _safe_float(v)
+    return None if n is None else f"{n:.1f}%"
+
+
+def _fmt_hrs(v) -> Optional[str]:
+    n = _safe_float(v)
+    return None if n is None else f"{n:.2f}h"
+
+
+def _deadline_reason(kpi: dict) -> Optional[str]:
+    dc = (kpi.get("batch", {}) or {}).get("deadline_compliance") or {}
+    if not isinstance(dc, dict) or not dc.get("has_deadlines"):
+        return None
+    comp = _fmt_pct(dc.get("compliance_pct")) or "NA"
+    breach_days = _safe_int(dc.get("breach_days") or dc.get("breach_windows"))
+    worst = _fmt_hrs(dc.get("worst_overrun_hrs")) or "NA"
+    if breach_days and breach_days > 0:
+        return f"wall-clock deadline compliance {comp} ({breach_days} breach days, worst overrun {worst})"
+    return f"wall-clock deadline compliance {comp} (0 breach days)"
+
+
+def _resource_context(kpi: dict) -> Optional[str]:
+    res = kpi.get("resource", {}) or {}
+    bits: list[str] = []
+    n_critical = _safe_int(res.get("n_critical")) or 0
+    peak_mem = _safe_float(res.get("peak_mem_pct"))
+    avg_cpu = _safe_float(res.get("avg_cpu"))
+    grade = res.get("fleet_grade")
+    score = _safe_float(res.get("fleet_score"))
+    if n_critical > 0 or (score is not None and score < 70):
+        return None
+    if peak_mem is not None:
+        bits.append(f"DB mem peak {peak_mem:.1f}%")
+    if avg_cpu is not None:
+        bits.append(f"avg CPU {avg_cpu:.1f}%")
+    if grade:
+        bits.append(f"fleet grade {grade}" + (f" ({score:.1f})" if score is not None else ""))
+    return ", ".join(bits) if bits else None
+
+
+def _build_verdict_reason(
+    decision: str,
+    kpi: dict,
+    *,
+    det_verdict_reason: Optional[str] = None,
+    source: str = "deterministic",
+) -> str:
+    """Return the canonical cited reason attached to reconciled verdicts."""
+    decision_txt = (decision or "INSUFFICIENT_DATA").upper()
+    facts: list[str] = []
+    has_det_reason = False
+
+    if det_verdict_reason:
+        cleaned = det_verdict_reason.strip()
+        for prefix in ("BLOCKED — driven by ", "HOLD — driven by ", "GO — driven by ",
+                       "GO_WITH_NOTES — driven by ", "REMEDIATE — driven by "):
+            if cleaned.upper().startswith(prefix.upper()):
+                cleaned = cleaned[len(prefix):]
+                break
+        facts.append(cleaned)
+        has_det_reason = True
+
+    batch = kpi.get("batch", {}) or {}
+    window_comp = _safe_float(batch.get("window_compliance_pct"))
+    window_breach_days = _safe_int(batch.get("window_breach_days"))
+    window_total_days = _safe_int(batch.get("window_total_days"))
+    if not has_det_reason and window_comp is not None and window_comp < 50:
+        # window_comp is the DAY-LEVEL figure, so the clean/total day fraction
+        # reconciles with it (e.g. 2/28 days == 7.1%).
+        if window_breach_days is not None and window_total_days:
+            clean_days = window_total_days - window_breach_days
+            fact = (
+                f"batch finished within its SLA window on only "
+                f"{clean_days}/{window_total_days} day(s) ({window_comp:.1f}%, < 50% floor)"
+            )
+        else:
+            fact = f"batch-window SLA compliance {window_comp:.1f}% (< 50% floor)"
+        facts.append(fact)
+
+    job_comp = _safe_float(batch.get("job_sla_compliance_pct") or batch.get("compliance_pct"))
+    if not has_det_reason and job_comp is not None and job_comp < 90:
+        facts.append(f"job-level SLA compliance {job_comp:.1f}% (< 90% floor)")
+
+    deadline = _deadline_reason(kpi)
+    if not has_det_reason and deadline and "0 breach days" not in deadline:
+        facts.append(deadline)
+
+    findings_crit = (
+        _safe_int((kpi.get("findings", {}) or {}).get("critical"))
+        or _safe_int((kpi.get("redflags", {}) or {}).get("CRITICAL"))
+        or _safe_int((kpi.get("redflags", {}) or {}).get("critical"))
+        or 0
+    )
+    if findings_crit > 0:
+        facts.append(f"{findings_crit} critical finding(s)")
+
+    reg_count = _safe_int(batch.get("regression_count"))
+    net_delta = _safe_float(batch.get("net_runtime_delta"))
+    if reg_count and reg_count > 0:
+        reg = f"{reg_count} runtime regression(s)"
+        if net_delta is not None:
+            reg += f" (net runtime delta {net_delta:.1f})"
+        facts.append(reg)
+
+    if not facts:
+        if decision_txt in ("GO", "APPROVED"):
+            facts.append("all validated KPI evidence remains within approval thresholds")
+        elif decision_txt in ("INSUFFICIENT_DATA", "PENDING"):
+            facts.append("insufficient pillar evidence loaded")
+        else:
+            facts.append("stricter reconciled verdict selected from deterministic and LLM outputs")
+
+    deduped: list[str] = []
+    for fact in facts:
+        if fact and fact not in deduped:
+            deduped.append(fact)
+
+    suffix = ""
+    resource = _resource_context(kpi)
+    if resource and decision_txt not in ("GO", "APPROVED") and not any("despite" in f for f in deduped):
+        suffix = f", despite healthy resource metrics ({resource})"
+
+    source_note = " after reconciliation" if source == "reconciled" else ""
+    return f"{decision_txt} — driven by {' and '.join(deduped)}{suffix}{source_note}"
 
 def _check_risk_contradiction(risk_text: str, kpi: dict) -> Optional[str]:
     """If the LLM risk text makes a numerical claim that contradicts
