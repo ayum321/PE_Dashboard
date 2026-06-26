@@ -17668,10 +17668,7 @@ async function clearSessionData() {
     // ── 10. SOW tab ───────────────────────────────────────────────────────
     ["sow-dfu-baseline","sow-dfu-actual","sow-sku-baseline","sow-sku-actual",
      "sow-orders-baseline","sow-orders-actual","sow-batchjobs-baseline","sow-batchjobs-actual",
-     "sow-users-baseline","sow-users-actual","sow-cpu-baseline","sow-cpu-actual",
-     "sow-mem-baseline","sow-mem-actual","sow-disk-baseline","sow-disk-actual",
-     "sow-sla-daily","sow-sla-weekly","sow-sla-monthly",
-     "sow-m-customer","sow-m-contract-years","sow-m-annual-fee"].forEach(id => {
+     "sow-users-baseline","sow-users-actual"].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.value = "";
     });
@@ -18349,14 +18346,11 @@ function _renderSowIntakeCard(data, filename) {
 //  SOW CONTRACT INTELLIGENCE TAB
 // ═══════════════════════════════════════════════════════════════
 const _SOW_FIELDS = [
-  { key: "daily_dfu",          baseId: "sow-dfu",       label: "Daily DFU" },
-  { key: "daily_sku",          baseId: "sow-sku",       label: "Daily SKU Count" },
-  { key: "daily_orders",       baseId: "sow-orders",    label: "Daily Orders" },
-  { key: "batch_jobs",         baseId: "sow-batchjobs", label: "Batch Jobs / Day" },
-  { key: "peak_users",         baseId: "sow-users",     label: "Peak Concurrent Users" },
-  { key: "cpu_baseline_pct",   baseId: "sow-cpu",       label: "CPU Utilisation %" },
-  { key: "mem_baseline_pct",   baseId: "sow-mem",       label: "Memory Utilisation %" },
-  { key: "disk_baseline_pct",  baseId: "sow-disk",      label: "Disk Utilisation %" },
+  { key: "daily_dfu",    baseId: "sow-dfu",       label: "Daily DFU" },
+  { key: "daily_sku",    baseId: "sow-sku",       label: "Daily SKU Count" },
+  { key: "daily_orders", baseId: "sow-orders",    label: "Daily Orders" },
+  { key: "batch_jobs",   baseId: "sow-batchjobs", label: "Batch Jobs / Day" },
+  { key: "peak_users",   baseId: "sow-users",     label: "Peak Concurrent Users" },
 ];
 
 // ── Open the standalone manual SOW entry panel ───────────────────────────
@@ -18373,13 +18367,12 @@ function openSowManualEntry() {
 async function clearSowManual() {
   ["sow-dfu-baseline","sow-dfu-actual","sow-sku-baseline","sow-sku-actual",
    "sow-orders-baseline","sow-orders-actual","sow-batchjobs-baseline","sow-batchjobs-actual",
-   "sow-users-baseline","sow-users-actual","sow-cpu-baseline","sow-cpu-actual",
-   "sow-mem-baseline","sow-mem-actual","sow-disk-baseline","sow-disk-actual",
-   "sow-sla-daily","sow-sla-weekly","sow-sla-monthly",
-   "sow-m-customer","sow-m-contract-years","sow-m-annual-fee"].forEach(id => {
+   "sow-users-baseline","sow-users-actual"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = "";
   });
+  ["dfu","sku","orders","batchjobs","users"].forEach(m => _updateSowMetricCard(m));
+  _updateSowTargetCount();
   try { await fetch("/api/sow/baseline", { method: "DELETE" }); } catch (_) {}
   window.appData = window.appData || {};
   window.appData.sowCompare = null;
@@ -18547,7 +18540,7 @@ function _bindSowManualInputs() {
   if (_sowManualBound) return;
   _sowManualBound = true;
 
-  const bindNum = (id, key) => {
+  const bindNum = (id, key, metricId) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", () => {
@@ -18559,6 +18552,8 @@ function _bindSowManualInputs() {
       } else {
         delete window.appData.sowContract[key];
       }
+      if (metricId) _updateSowMetricCard(metricId);
+      _updateSowTargetCount();
       _renderSowVolumeComparison();
       _syncSowCompareFromManual();
       window._execCacheHash = null;
@@ -18570,58 +18565,18 @@ function _bindSowManualInputs() {
       }, 600);
     });
   };
-  const bindStr = (id, key) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener("input", () => {
-      window.appData = window.appData || {};
-      window.appData.sowContract = window.appData.sowContract || {};
-      if (el.value.trim()) {
-        window.appData.sowContract[key] = el.value.trim();
-      } else {
-        delete window.appData.sowContract[key];
-      }
-      window._execCacheHash = null;
-    });
-  };
 
-  // Volume targets
-  bindNum("sow-dfu-baseline",      "manual_dfu_baseline");
-  bindNum("sow-dfu-actual",        "manual_dfu_actual");
-  bindNum("sow-sku-baseline",      "manual_sku_baseline");
-  bindNum("sow-sku-actual",        "manual_sku_actual");
-  bindNum("sow-orders-baseline",   "manual_orders_baseline");
-  bindNum("sow-orders-actual",     "manual_orders_actual");
-  bindNum("sow-batchjobs-baseline","manual_batchjobs_baseline");
-  bindNum("sow-batchjobs-actual",  "manual_batchjobs_actual");
-  bindNum("sow-users-baseline",    "manual_users_baseline");
-  bindNum("sow-users-actual",      "manual_users_actual");
-  // Resource baselines
-  bindNum("sow-cpu-baseline",      "manual_cpu_baseline");
-  bindNum("sow-cpu-actual",        "manual_cpu_actual");
-  bindNum("sow-mem-baseline",      "manual_mem_baseline");
-  bindNum("sow-mem-actual",        "manual_mem_actual");
-  bindNum("sow-disk-baseline",     "manual_disk_baseline");
-  bindNum("sow-disk-actual",       "manual_disk_actual");
-  // SLA windows (no actual — save as SLA window ceilings)
-  const bindSla = (id) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener("input", () => {
-      if (_sowSaveDebounce) clearTimeout(_sowSaveDebounce);
-      _sowSaveDebounce = setTimeout(() => {
-        _persistSowBaseline();
-        triggerGenerateFindings().catch(() => {});
-      }, 600);
-    });
-  };
-  bindSla("sow-sla-daily");
-  bindSla("sow-sla-weekly");
-  bindSla("sow-sla-monthly");
-  // Identity fields
-  bindStr("sow-m-customer",       "customer_name");
-  bindStr("sow-m-contract-years", "contract_years");
-  bindStr("sow-m-annual-fee",     "annual_fee");
+  // Volume targets only
+  bindNum("sow-dfu-baseline",      "manual_dfu_baseline",      "dfu");
+  bindNum("sow-dfu-actual",        "manual_dfu_actual",        "dfu");
+  bindNum("sow-sku-baseline",      "manual_sku_baseline",      "sku");
+  bindNum("sow-sku-actual",        "manual_sku_actual",        "sku");
+  bindNum("sow-orders-baseline",   "manual_orders_baseline",   "orders");
+  bindNum("sow-orders-actual",     "manual_orders_actual",     "orders");
+  bindNum("sow-batchjobs-baseline","manual_batchjobs_baseline","batchjobs");
+  bindNum("sow-batchjobs-actual",  "manual_batchjobs_actual",  "batchjobs");
+  bindNum("sow-users-baseline",    "manual_users_baseline",    "users");
+  bindNum("sow-users-actual",      "manual_users_actual",      "users");
 }
 
 // ── Sync sowCompare from all manual inputs ────────────────────────────────
@@ -18882,11 +18837,6 @@ async function loadSowBaseline() {
           window.appData.sowContract = synth;
         }
         _renderSowContractPanel(window.appData.sowContract);
-        // Restore SLA window inputs in manual form
-        const sw = synth.sla_windows || {};
-        if (sw.DAILY?.limit_hours)   { const el = document.getElementById("sow-sla-daily");   if (el && !el.value) el.value = sw.DAILY.limit_hours; }
-        if (sw.WEEKLY?.limit_hours)  { const el = document.getElementById("sow-sla-weekly");  if (el && !el.value) el.value = sw.WEEKLY.limit_hours; }
-        if (sw.MONTHLY?.limit_hours) { const el = document.getElementById("sow-sla-monthly"); if (el && !el.value) el.value = sw.MONTHLY.limit_hours; }
       }
     }
     // Restore baseline form values — always override so stored values are always visible
@@ -18900,11 +18850,16 @@ async function loadSowBaseline() {
           if (el) { el.value = data[key]; restored++; }
         }
       });
-      // If values were restored and no PDF is loaded, surface the manual panel
-      if (restored > 0 && !window.appData?.sowContract?.customer_name) {
-        document.getElementById("sow-empty")?.classList.add("hidden");
-        document.getElementById("sow-manual-panel")?.classList.remove("hidden");
-        _bindSowManualInputs();
+      if (restored > 0) {
+        // Refresh all metric cards after restoring stored values
+        ["dfu","sku","orders","batchjobs","users"].forEach(m => _updateSowMetricCard(m));
+        _updateSowTargetCount();
+        // If no PDF is loaded, surface the manual panel
+        if (!window.appData?.sowContract?.customer_name) {
+          document.getElementById("sow-empty")?.classList.add("hidden");
+          document.getElementById("sow-manual-panel")?.classList.remove("hidden");
+          _bindSowManualInputs();
+        }
       }
     }
     _autoFillSowActuals();
@@ -18914,22 +18869,90 @@ async function loadSowBaseline() {
 }
 
 function _autoFillSowActuals() {
-  const servers = window.appData.servers || [];
-  if (servers.length > 0) {
-    const avgCpu = servers.reduce((s, v) => s + (parseFloat(v.cpu_used || v.cpu_pct || 0)), 0) / servers.length;
-    const avgMem = servers.reduce((s, v) => s + (parseFloat(v.mem_used || v.mem_pct || 0)), 0) / servers.length;
-    const cpuEl = document.getElementById("sow-cpu-actual");
-    const memEl = document.getElementById("sow-mem-actual");
-    if (cpuEl && !cpuEl.value) cpuEl.value = avgCpu.toFixed(1);
-    if (memEl && !memEl.value) memEl.value = avgMem.toFixed(1);
-  }
   const batch = window.appData.batch;
   if (batch) {
     const jobsEl = document.getElementById("sow-batchjobs-actual");
     if (jobsEl && !jobsEl.value && batch.kpis?.total_jobs) {
       jobsEl.value = batch.kpis.total_jobs;
+      _updateSowMetricCard("batchjobs");
     }
   }
+}
+
+// ── Update a single volume metric card's progress bar, % label, and badge ──
+function _updateSowMetricCard(metricId) {
+  const base = parseFloat(document.getElementById(`sow-${metricId}-baseline`)?.value) || 0;
+  const act  = parseFloat(document.getElementById(`sow-${metricId}-actual`)?.value)   || 0;
+  const barEl   = document.getElementById(`sow-bar-${metricId}`);
+  const pctEl   = document.getElementById(`sow-pct-${metricId}`);
+  const badgeEl = document.getElementById(`sow-badge-${metricId}`);
+  const cardEl  = document.getElementById(`sow-card-${metricId}`);
+
+  if (!base) {
+    if (barEl)   { barEl.style.width = "0%"; barEl.style.background = "rgba(71,85,105,0.4)"; }
+    if (pctEl)   { pctEl.textContent = "—"; pctEl.style.color = "#475569"; }
+    if (badgeEl) { badgeEl.classList.add("hidden"); }
+    if (cardEl)  { cardEl.style.borderColor = "rgba(59,130,246,0.16)"; }
+    return;
+  }
+  if (!act) {
+    if (barEl)   { barEl.style.width = "0%"; barEl.style.background = "rgba(71,85,105,0.4)"; }
+    if (pctEl)   { pctEl.textContent = "—"; pctEl.style.color = "#475569"; }
+    if (badgeEl) {
+      badgeEl.textContent = "AWAITING";
+      badgeEl.style.color = "#60a5fa";
+      badgeEl.style.background = "rgba(59,130,246,0.1)";
+      badgeEl.style.borderColor = "rgba(59,130,246,0.22)";
+      badgeEl.classList.remove("hidden");
+    }
+    if (cardEl) { cardEl.style.borderColor = "rgba(59,130,246,0.28)"; }
+    return;
+  }
+
+  const pct = (act / base) * 100;
+  let color, gradStart, gradEnd, label;
+  if (pct >= 100) {
+    color = "#10b981"; gradStart = "rgba(16,185,129,0.55)"; gradEnd = "rgba(16,185,129,0.9)";
+    label = "ON TARGET";
+    if (cardEl) { cardEl.style.borderColor = "rgba(16,185,129,0.32)"; }
+  } else if (pct >= 80) {
+    color = "#f59e0b"; gradStart = "rgba(245,158,11,0.55)"; gradEnd = "rgba(245,158,11,0.9)";
+    label = "NEAR TARGET";
+    if (cardEl) { cardEl.style.borderColor = "rgba(245,158,11,0.32)"; }
+  } else {
+    color = "#f87171"; gradStart = "rgba(248,113,113,0.55)"; gradEnd = "rgba(248,113,113,0.9)";
+    label = "UNDER";
+    if (cardEl) { cardEl.style.borderColor = "rgba(248,113,113,0.32)"; }
+  }
+
+  if (barEl) {
+    barEl.style.width = `${Math.min(pct, 100).toFixed(1)}%`;
+    barEl.style.background = `linear-gradient(90deg,${gradStart},${gradEnd})`;
+  }
+  if (pctEl) {
+    pctEl.textContent = `${pct.toFixed(1)}%`;
+    pctEl.style.color = color;
+  }
+  if (badgeEl) {
+    badgeEl.textContent = label;
+    badgeEl.style.color = color;
+    badgeEl.style.background = `${color}18`;
+    badgeEl.style.borderColor = `${color}40`;
+    badgeEl.classList.remove("hidden");
+  }
+}
+
+// ── Update the "N of 5 set" count badge in the SOW panel header ─────────────
+function _updateSowTargetCount() {
+  const set = ["dfu","sku","orders","batchjobs","users"].filter(m => {
+    const v = parseFloat(document.getElementById(`sow-${m}-baseline`)?.value);
+    return !isNaN(v) && v > 0;
+  }).length;
+  const el = document.getElementById("sow-target-count");
+  if (!el) return;
+  if (set === 0) { el.classList.add("hidden"); return; }
+  el.textContent = `${set} of 5 set`;
+  el.classList.remove("hidden");
 }
 
 async function saveSowBaseline() {
@@ -18942,49 +18965,16 @@ async function saveSowBaseline() {
     if (!isNaN(aVal) && aVal > 0) actuals[key]  = aVal;
   });
 
-  // Also save SLA windows if set
-  const _n = (id) => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? null : v; };
-  const slaWindows = {};
-  const daily   = _n("sow-sla-daily");
-  const weekly  = _n("sow-sla-weekly");
-  const monthly = _n("sow-sla-monthly");
-  if (daily   != null && daily   > 0) slaWindows.DAILY   = { limit_hours: daily };
-  if (weekly  != null && weekly  > 0) slaWindows.WEEKLY  = { limit_hours: weekly };
-  if (monthly != null && monthly > 0) slaWindows.MONTHLY = { limit_hours: monthly };
-
-  // Identity fields feed sowContract for the grid
-  const customer = document.getElementById("sow-m-customer")?.value?.trim();
-  const years    = _n("sow-m-contract-years");
-  const fee      = _n("sow-m-annual-fee");
-
-  if (Object.keys(baseline).length === 0 && Object.keys(slaWindows).length === 0) {
+  if (Object.keys(baseline).length === 0) {
     toast("error", "No targets set", "Enter at least one SOW target value before comparing.");
     return;
   }
   const msgEl = document.getElementById("sow-save-msg");
   try {
-    if (Object.keys(baseline).length) {
-      await fetch("/api/sow/baseline", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(baseline),
-      });
-    }
-    if (Object.keys(slaWindows).length) {
-      await fetch("/api/sow/sla-windows/manual", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ windows: slaWindows }),
-      });
-    }
-    // Populate sowContract with identity + SLA windows so the contract grid shows
-    window.appData = window.appData || {};
-    window.appData.sowContract = window.appData.sowContract || {};
-    if (customer) window.appData.sowContract.customer_name = customer;
-    if (years)    window.appData.sowContract.contract_years = years;
-    if (fee)      window.appData.sowContract.annual_fee = fee;
-    if (Object.keys(slaWindows).length) window.appData.sowContract.sla_windows = slaWindows;
-    if (customer || Object.keys(slaWindows).length) {
-      _renderSowContractPanel(window.appData.sowContract);
-    }
+    await fetch("/api/sow/baseline", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(baseline),
+    });
     const res  = await fetch("/api/sow/compare", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ actuals }),
@@ -18992,15 +18982,16 @@ async function saveSowBaseline() {
     const data = await res.json();
     window.appData = window.appData || {};
     window.appData.sowCompare = data;
-    window._execCacheHash = null;  // invalidate exec dashboard cache
-    _markSessionActive();  // track session boundary
+    window._execCacheHash = null;
+    _markSessionActive();
     refreshDataStatus();
     _renderSowComparison(data);
     triggerGenerateFindings().catch(() => {});
-    triggerPeNarrative().catch(() => {});   // keep Data Volume in sync
+    triggerPeNarrative().catch(() => {});
     if (msgEl) {
       msgEl.textContent = "✅ Saved and compared";
-      msgEl.className   = "text-[11px] text-Cgreen";
+      msgEl.className   = "text-[11px] font-semibold";
+      msgEl.style.color = "#10b981";
       msgEl.classList.remove("hidden");
       setTimeout(() => msgEl.classList.add("hidden"), 3000);
     }
