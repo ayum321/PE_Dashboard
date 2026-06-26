@@ -116,6 +116,10 @@ class BatchResponse(BaseModel):
     # + breach days). Drives the Executive at-risk panels from the binding
     # window metric instead of peak-vs-window-ceiling.
     window_sub_app: Optional[List[Dict[str, Any]]] = None
+    # Gap A: Sub_Application × run_date execution-failure density grid
+    # (ENDED NOT OK / FAILED counts per sub-app per day). Drives the PE
+    # Findings failure-density heatmap.
+    failure_grid: Optional[Dict[str, Any]] = None
 
 
 class BatchJsonRequest(BaseModel):
@@ -224,6 +228,7 @@ def _payload_to_response(
         customer_name=customer_name,
         daily_jobs=payload.get("daily_jobs"),
         window_sub_app=payload.get("window_sub_app", []),
+        failure_grid=payload.get("failure_grid"),
     )
 
     # Cache the full batch response so the agent tools can query it
@@ -245,6 +250,7 @@ def _payload_to_response(
         session_cache.ac_set("job_summary",     resp_dict.get("top_jobs") or [])   # canonical merged slot
         session_cache.ac_set("daily_window_series", resp_dict.get("window") or [])
         session_cache.ac_set("regression_df",   resp_dict.get("anomalies") or [])
+        session_cache.ac_set("failure_grid",     resp_dict.get("failure_grid") or {})
         if customer_name:
             session_cache.ac_set("customer_name", customer_name)
         # sla_matrix slots written by _compute_sla_matrix call (see below)

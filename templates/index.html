@@ -2409,6 +2409,23 @@
             </div>
           </div>
 
+          <!-- ── Execution Failure Density (Sub-App × Day) — Gap A ── -->
+          <div id="findings-failure-grid-card"
+               class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel overflow-hidden">
+            <div class="px-5 py-3 border-b border-Cborder/40 flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-2.5">
+                <h2 class="text-sm font-bold text-Cwhite tracking-tight">Execution Failure Density</h2>
+                <span id="ffg-subtitle" class="text-[10px] font-mono text-Cmuted"></span>
+              </div>
+              <div class="flex items-center gap-3 text-[9px] text-Cmuted uppercase tracking-wider">
+                <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-sm" style="background:#0f172a;border:1px solid rgba(255,255,255,.08)"></span>No fail</span>
+                <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-sm" style="background:rgba(245,158,11,.6)"></span>1 job</span>
+                <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-sm" style="background:rgba(244,63,94,.85)"></span>2+ jobs</span>
+              </div>
+            </div>
+            <div id="findings-failure-grid" class="p-4 overflow-x-auto"></div>
+          </div>
+
           <!-- ── Findings Table ── -->
           <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel overflow-hidden" id="findings-table-card">
             <!-- Toolbar -->

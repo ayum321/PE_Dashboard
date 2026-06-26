@@ -153,6 +153,10 @@ class FindingsResponse(BaseModel):
     penalty_score:        float = 0.0   # 0-100 unified grade input
     findings_grade:       str   = ""    # A/B/C/D/F
     findings_grade_label: str   = ""    # human label
+    # Gap A: Sub_Application × run_date failure-density pivot for the PE Findings
+    # heatmap card. Computed once in batch_calculator and read from the audit
+    # context here so the frontend renders from the findings response directly.
+    failure_grid:         Optional[Dict[str, Any]] = None
 
 
 def _fmt_hrs(v: float) -> str:
@@ -2585,6 +2589,12 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 })
 
             matched_impacts = []
+            # Gap B: regressions whose token-matched Ctrl-M job diverges from the
+            # benchmark baseline by more than _proj_max_ratio×. These are excluded
+            # from the SLA projection (the % would be meaningless), but the
+            # exclusion is itself an audit event — surfaced as an explicit INFO
+            # finding below rather than silently dropped.
+            unresolvable_mismatches: list[dict] = []
             for reg_job in regr_jobs:
                 best = None
                 best_overlap = 0.0
@@ -2616,6 +2626,14 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 if bench_base_secs > 0 and prod_peak_secs > 0:
                     _ratio = max(bench_base_secs, prod_peak_secs) / min(bench_base_secs, prod_peak_secs)
                     if _ratio > _proj_max_ratio:
+                        unresolvable_mismatches.append({
+                            "job_name":        j_name,
+                            "bench_old_secs":  bench_base_secs,
+                            "bench_new_secs":  _f(reg_job.get("new_secs")),
+                            "prod_peak_secs":  prod_peak_secs,
+                            "prod_peak_hrs":   prod_peak_hrs,
+                            "ratio":           _ratio,
+                        })
                         continue
 
                 prod_sla_hrs = _f(get_sla_hrs(detect_batch_type(j_name), sla_ceil))
@@ -2693,6 +2711,36 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                                        "production SLA breach is projected from current runtime regressions.",
                         **common_kwargs,
                     )
+
+            # Gap B: surface intentionally-excluded regressions so the PE reviewer
+            # sees the silent data exclusion instead of it vanishing.
+            if unresolvable_mismatches:
+                unresolvable_mismatches.sort(key=lambda m: -m["ratio"])
+                _um_worst = unresolvable_mismatches[0]
+                _um_n     = len(unresolvable_mismatches)
+                _um_names = ", ".join(m["job_name"] for m in unresolvable_mismatches[:3])
+                add(
+                    "info",
+                    "🔍",
+                    f"{_um_n} regression(s) excluded from production-SLA projection — "
+                    f"unresolvable baseline mismatch ({_um_worst['ratio']:.0f}× divergence)",
+                    f"Worst: {_um_worst['job_name']} — benchmark baseline "
+                    f"{_fmt_hrs(_um_worst['bench_old_secs'] / 3600.0)}h "
+                    f"(new {_fmt_hrs(_um_worst['bench_new_secs'] / 3600.0)}h) vs Ctrl-M production peak "
+                    f"{_fmt_hrs(_um_worst['prod_peak_hrs'])}h = {_um_worst['ratio']:.1f}× apart. "
+                    "The benchmark job and the token-matched Ctrl-M job differ too much to be the "
+                    "same workload, so the % release projection is not applied to them"
+                    f"{' (' + _um_names + ')' if _um_n > 1 else ''}.",
+                    source="benchmark",
+                    evidence_class="measured",
+                    impact="Intentionally left out of the production-SLA impact projection — neither "
+                           "cleared nor breaching, the benchmark↔Ctrl-M mapping is ambiguous.",
+                    recommendation="Reconcile job naming between the benchmark workbook and the Ctrl-M "
+                                   "export (or confirm they are genuinely different jobs). Once a "
+                                   "comparable production job is matched, the release-impact projection "
+                                   "will include them.",
+                    root_cause="UNRESOLVABLE_MISMATCH",
+                )
 
     # ═══════════════════════════════════════════════════════════════
     # SOW COMPARE RULES
@@ -3510,6 +3558,21 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
         log.debug("findings: penalty score cache failed: %s", _e)
     # ── end grade ─────────────────────────────────────────────────────────────
 
+    # ── Gap A: failure-density grid (Sub_Application × run_date) ──────────────
+    # Computed once in batch_calculator.build_batch_payload and cached by the
+    # batch router. Read it here so the PE Findings page renders the heatmap
+    # straight from the findings response. Fall back to a request-supplied grid.
+    _failure_grid = None
+    try:
+        if _session_cache:
+            _failure_grid = _session_cache.ac_get("failure_grid") or None
+    except Exception as _e:
+        log.debug("findings: failure_grid cache read failed: %s", _e)
+    if not _failure_grid:
+        _fg_body = getattr(body, "failure_grid", None)
+        if isinstance(_fg_body, dict) and _fg_body.get("has_data"):
+            _failure_grid = _fg_body
+
     # Patch J: include penalty_score fields in response
     resp = FindingsResponse(
         findings             = findings,
@@ -3519,6 +3582,7 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
         penalty_score        = round(penalty_score, 1),
         findings_grade       = _grade,
         findings_grade_label = _glabel,
+        failure_grid         = _failure_grid,
     )
     # Cache so agent tools can list/read findings without recomputing.
     try:

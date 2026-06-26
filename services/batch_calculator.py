@@ -2700,6 +2700,102 @@ def _build_hourly_counts(df: pd.DataFrame) -> Dict[str, Dict[int, int]]:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Failure-density grid — Sub_Application × run_date (Gap A)
+# ─────────────────────────────────────────────────────────────────
+def _build_failure_grid(df: pd.DataFrame, max_days: int = 30) -> Dict[str, Any]:
+    """Sub_Application × run_date execution-failure pivot for the PE Findings heatmap.
+
+    Rows   = Sub_Application (only those with ≥1 failure, worst-first, capped)
+    Cols   = run_date (most recent `max_days` calendar days in the in-scope frame)
+    Value  = count of FAILED job executions that (sub_app, day)
+
+    Reuses the FAILED classification already applied upstream (ENDED NOT OK /
+    ABENDED / TERMINATED → "FAILED"), so this is a plain groupby — no new
+    computation. A PE reviewer can read straight down a column to see whether a
+    sub-application failed on multiple consecutive days (the Bug-2 / repeat-offender
+    question) rather than inferring it from a single last-status flag.
+
+    Returns:
+        {
+          sub_apps: [...], dates: [...],
+          cells: [{sub_app, date, fail_count, severity}, ...],   # failures only
+          row_totals: {sub_app: total_failed_jobs},
+          max_fail: int, total_failed_jobs: int, has_data: bool,
+        }
+    """
+    empty = {
+        "sub_apps": [], "dates": [], "cells": [], "row_totals": {},
+        "max_fail": 0, "total_failed_jobs": 0, "has_data": False,
+    }
+    if df is None or df.empty:
+        return empty
+    if "Status" not in df.columns or "run_date" not in df.columns:
+        return empty
+
+    sub_col = ("Sub_Application" if "Sub_Application" in df.columns else
+               "Folder" if "Folder" in df.columns else None)
+    if sub_col is None:
+        return empty
+
+    # Date axis = most recent `max_days` calendar days across the WHOLE frame, so
+    # clean days still render (an all-green column is meaningful evidence too).
+    recent_dates = sorted(df["run_date"].dropna().astype(str).unique())[-max_days:]
+    if not recent_dates:
+        return empty
+
+    fails = df[df["Status"] == "FAILED"].copy()
+    if fails.empty:
+        # No failures at all — still report the date axis so the card can show an
+        # explicit all-clear strip instead of silently disappearing.
+        return {**empty, "dates": recent_dates, "has_data": True}
+
+    fails = fails.dropna(subset=["run_date"])
+    fails[sub_col] = fails[sub_col].fillna("UNKNOWN").astype(str)
+    fails["run_date"] = fails["run_date"].astype(str)
+    fails = fails[fails["run_date"].isin(recent_dates)]
+    if fails.empty:
+        return {**empty, "dates": recent_dates, "has_data": True}
+
+    pivot = (fails.groupby([sub_col, "run_date"]).size()
+                  .reset_index(name="fail_count"))
+
+    # Row ordering: worst offenders first; cap rows to keep the card compact.
+    row_totals_series = (pivot.groupby(sub_col)["fail_count"].sum()
+                              .sort_values(ascending=False))
+    sub_apps = [str(s) for s in row_totals_series.index.tolist()][:25]
+    _sub_set = set(sub_apps)
+    row_totals = {str(k): int(v) for k, v in row_totals_series.items()
+                  if str(k) in _sub_set}
+
+    def _sev(n: int) -> str:
+        if n <= 0:
+            return "ok"
+        if n == 1:
+            return "warn"
+        return "crit"   # 2+ failed jobs in one day for one sub-app = systemic
+
+    cells = []
+    for _, r in pivot[pivot[sub_col].astype(str).isin(_sub_set)].iterrows():
+        n = int(r["fail_count"])
+        cells.append({
+            "sub_app":    str(r[sub_col]),
+            "date":       str(r["run_date"]),
+            "fail_count": n,
+            "severity":   _sev(n),
+        })
+
+    return {
+        "sub_apps":          sub_apps,
+        "dates":             recent_dates,
+        "cells":             cells,
+        "row_totals":        row_totals,
+        "max_fail":          int(pivot["fail_count"].max()),
+        "total_failed_jobs": int(pivot["fail_count"].sum()),
+        "has_data":          True,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────
 # build_batch_payload — JSON-ready envelope for the frontend
 # ─────────────────────────────────────────────────────────────────
 def _build_worst_job(m: dict, top_jobs_df: "pd.DataFrame") -> dict:
@@ -2762,6 +2858,8 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "hourly_counts": {"hourly_jobs": {}, "hourly_fails": {}},
             "sla_heatmap":   {"jobs": [], "dates": [], "cells": [], "limit": pe_config.SLA_DAILY_HRS},
             "hour_heatmap":  {"sub_apps": [], "hours": list(range(24)), "cells": []},
+            "failure_grid":  {"sub_apps": [], "dates": [], "cells": [], "row_totals": {},
+                              "max_fail": 0, "total_failed_jobs": 0, "has_data": False},
         }
 
     m = compute_metrics(df)
@@ -3034,6 +3132,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "hourly_counts": _build_hourly_counts(_df_payload_scope),
         "sla_heatmap":  _build_sla_heatmap(m["daily"], ceiling=m.get("sla_ceiling")),
         "hour_heatmap": _build_hour_heatmap(_df_payload_scope),
+        "failure_grid": _build_failure_grid(_df_payload_scope),
         "daily_jobs":   _build_daily_jobs(_df_payload_scope),
     }
 

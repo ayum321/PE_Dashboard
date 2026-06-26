@@ -44,6 +44,36 @@ def _mode_hrs(mode: str) -> float:
     return pe_config.SLA_MONTHLY_HRS
 
 
+def _anchor_job_mask(jnames_upper: "pd.Series", anchor: str) -> "pd.Series":
+    """Boolean mask selecting rows whose (upper-cased) Job_Name matches `anchor`.
+
+    Match priority — most precise first:
+      1. Exact case-folded equality.
+      2. Underscore-insensitive exact equality. Closes the customer-portability
+         edge case where the SLA XLSX stores an anchor with underscores stripped
+         (e.g. ``DRESTARTAPP1DAILY``) while the Ctrl-M export logs the same job
+         with underscores (``D_RESTART_APP1_Daily``). Both sides are compared in
+         their punctuation-free form for *exact* equality, so the anchor lands on
+         the right job instead of falling through to the full min/max window — and
+         because it is equality (not containment) it never pulls in an unrelated
+         job the way a substring match could.
+      3. Substring containment — last-resort fallback for genuine partial names.
+
+    Deliberately local to anchor narrowing: it does NOT touch ``_norm`` or the
+    token-split workflow matcher (both rely on underscores as token delimiters),
+    so global SLA resolution behaviour is unchanged.
+    """
+    _exact = jnames_upper == anchor
+    if _exact.any():
+        return _exact
+    _us_anchor = anchor.replace("_", "")
+    if _us_anchor:
+        _exact_us = jnames_upper.str.replace("_", "", regex=False) == _us_anchor
+        if _exact_us.any():
+            return _exact_us
+    return jnames_upper.str.contains(anchor, na=False, regex=False)
+
+
 # ── Models ───────────────────────────────────────────────────────────────────
 
 class SlaBreach(BaseModel):
@@ -695,24 +725,19 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 rg_starts = rg["_start"].dropna()
                 rg_ends   = rg["_end"].dropna()
 
-                # Anchor narrowing — try EXACT match first, then substring fallback.
-                # str.contains() was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc.,
-                # pulling in unrelated jobs and inflating the elapsed window.
+                # Anchor narrowing — exact → underscore-insensitive exact → substring.
+                # _anchor_job_mask keeps the precise EXACT-first ordering (str.contains
+                # was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc., inflating the
+                # window) while also catching XLSX-vs-Ctrl-M underscore mismatches.
                 if _first_anchor and "Job_Name" in rg.columns:
                     _jnames = rg["Job_Name"].str.upper()
-                    _exact_first = _jnames == _first_anchor
-                    _fm = _exact_first if _exact_first.any() else _jnames.str.contains(
-                        _first_anchor, na=False, regex=False
-                    )
+                    _fm = _anchor_job_mask(_jnames, _first_anchor)
                     if _fm.any():
                         rg_starts = rg.loc[_fm, "_start"].dropna()
 
                 if _last_anchor and "Job_Name" in rg.columns:
                     _jnames = rg["Job_Name"].str.upper()
-                    _exact_last = _jnames == _last_anchor
-                    _lm = _exact_last if _exact_last.any() else _jnames.str.contains(
-                        _last_anchor, na=False, regex=False
-                    )
+                    _lm = _anchor_job_mask(_jnames, _last_anchor)
                     if _lm.any():
                         rg_ends = rg.loc[_lm, "_end"].dropna()
 

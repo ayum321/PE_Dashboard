@@ -8071,6 +8071,8 @@ async function triggerGenerateFindings({ force = false } = {}) {
     const findings = Array.isArray(data.findings) ? data.findings : [];
 
     window.appData.findings = { findings, summary: data.summary };
+    window._lastFailureGrid = data.failure_grid
+      || (window.appData.batch && window.appData.batch.failure_grid) || null;
     // Invalidate downstream caches so exec dashboard re-reads fresh data
     window._execCache = null;
     window._findingsLastHash = null;
@@ -8553,6 +8555,82 @@ function renderFindings(findings) {
   _renderFindingsColPicker();
   _updateFindingsFilterCounts();
   _applyFindingsSort();
+
+  // Gap A: Sub-App × Day execution-failure heatmap (above the findings table).
+  try { renderFailureGrid(window._lastFailureGrid); } catch (_) {}
+}
+
+// ── Gap A: Sub-Application × Day execution-failure density heatmap ──────────
+// Dynamic columns (one per run_date present), worst-offender rows first.
+// Green (no fail) → amber (1 job) → red (2+ jobs), intensity scaled by count.
+function renderFailureGrid(grid) {
+  const card = document.getElementById("findings-failure-grid-card");
+  const host = document.getElementById("findings-failure-grid");
+  const subt = document.getElementById("ffg-subtitle");
+  if (!card || !host) return;
+
+  // Fallback to the batch payload when the findings response didn't carry it.
+  if (!grid && window.appData && window.appData.batch) grid = window.appData.batch.failure_grid;
+
+  if (!grid || !grid.has_data) { card.classList.add("hidden"); host.innerHTML = ""; return; }
+
+  const dates   = Array.isArray(grid.dates)    ? grid.dates    : [];
+  const subApps = Array.isArray(grid.sub_apps) ? grid.sub_apps : [];
+  const cells   = Array.isArray(grid.cells)    ? grid.cells    : [];
+  const maxFail = Math.max(1, Number(grid.max_fail) || 1);
+  const rowTot  = grid.row_totals || {};
+
+  card.classList.remove("hidden");
+
+  // All-clear: the failure axis exists but nothing failed in-window.
+  if (!subApps.length) {
+    if (subt) subt.textContent = `0 failures · ${dates.length} day(s)`;
+    host.innerHTML = `<div class="flex items-center gap-2 text-xs py-2" style="color:${THEME.green}">
+        <span class="inline-block w-2 h-2 rounded-full" style="background:${THEME.green}"></span>
+        No execution failures recorded across ${dates.length} day(s) — every sub-application ended OK.
+      </div>`;
+    return;
+  }
+
+  if (subt) subt.textContent =
+    `${grid.total_failed_jobs} failed job-run(s) · ${subApps.length} sub-app(s) · ${dates.length} day(s)`;
+
+  const cmap = {};
+  for (const c of cells) cmap[`${c.sub_app}|${c.date}`] = c;
+
+  const _short = (d) => {
+    const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? `${m[2]}/${m[3]}` : String(d).slice(-5);
+  };
+  const _cellStyle = (c) => {
+    if (!c || !c.fail_count) return "background:#0f172a;border:1px solid rgba(255,255,255,.05)";
+    const intensity = 0.35 + 0.6 * Math.min(1, c.fail_count / maxFail);
+    const base = c.severity === "crit" ? "244,63,94" : "245,158,11";
+    return `background:rgba(${base},${intensity.toFixed(2)});border:1px solid rgba(${base},.9)`;
+  };
+
+  let html = `<table class="border-separate" style="border-spacing:3px"><thead><tr>`;
+  html += `<th class="sticky left-0 z-10 text-left text-[10px] font-semibold text-Cmuted pr-3 pb-1" style="background:${THEME.card}">Sub-Application</th>`;
+  for (const d of dates) {
+    html += `<th class="text-[9px] font-mono text-Cmuted/80 pb-1 text-center" style="min-width:30px" title="${escapeHtml(String(d))}">${_short(d)}</th>`;
+  }
+  html += `<th class="text-[9px] font-semibold text-Cmuted pl-2 pb-1 text-center">&Sigma;</th></tr></thead><tbody>`;
+
+  for (const sa of subApps) {
+    const saShort = sa.length > 28 ? sa.slice(0, 27) + "\u2026" : sa;
+    html += `<tr><td class="sticky left-0 z-10 text-[11px] font-medium text-Cwhite/90 pr-3 whitespace-nowrap" style="background:${THEME.card}" title="${escapeHtml(sa)}">${escapeHtml(saShort)}</td>`;
+    for (const d of dates) {
+      const c = cmap[`${sa}|${d}`];
+      const label = c && c.fail_count ? c.fail_count : "";
+      const tip = c && c.fail_count
+        ? `${sa} — ${d}: ${c.fail_count} failed job(s)`
+        : `${sa} — ${d}: no failures`;
+      html += `<td class="text-center align-middle rounded-sm" style="width:30px;height:24px;${_cellStyle(c)}" title="${escapeHtml(tip)}"><span class="text-[10px] font-bold" style="color:#fff">${label}</span></td>`;
+    }
+    html += `<td class="text-center text-[10px] font-mono font-bold text-Cwhite/80 pl-2">${rowTot[sa] || 0}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+  host.innerHTML = html;
 }
 
 /**
