@@ -38,7 +38,29 @@ PE_Dashboard_Release*.zip
 *.docx
 *.pdf
 
-# IDE
+# IDE / editor
 .vscode/
 .claude/
+.mcp.json
+
+# Old versions / release bundles
 0.0.9/
+0.0.9
+
+# Diag / audit text outputs
+_audit_*.txt
+_audit_result*.txt
+
+# OS junk
+desktop.ini
+Thumbs.db
+
+# Machine-specific helpers
+CLAUDE.md
+_dev_server.py
+launch_server.bat
+start_debug.bat
+
+# Test output / scratch
+.cache/
+tests/
