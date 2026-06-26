@@ -267,6 +267,38 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         disk_available = not image_only and disk > 0
         cpu_available  = not image_only and (cpu > 0 or cpu_avg > 0)
 
+    # ── DB memory expected band — role-specific status override ─────────────
+    # Oracle/SQL DB servers pre-allocate 80–92% of RAM to SGA/PGA by design.
+    # The base health score (get_health_score) restores up to 20 pts of leniency
+    # but does not always push the score above the 80-pt Healthy boundary when
+    # CPU or disk metrics also contribute. Explicitly override Warning → Healthy
+    # when the DB server's ONLY issue is memory inside the expected band.
+    _db_mem_expected = (
+        server_type == "DB"
+        and mem_available
+        and 80.0 <= mem <= 92.0
+        and not image_only
+    )
+    if _db_mem_expected and status == "Warning":
+        _cpu_ok   = effective_cpu < role_thresh["ok"]
+        _disk_ok  = not disk_available or disk < DISK_OK
+        if _cpu_ok and _disk_ok:
+            status = "Healthy"
+
+    # mem_status: memory-specific classification for frontend tooltip/colour
+    # "DB_NORMAL"  — DB in expected SGA/PGA band (8–20% available); do not alarm
+    # "DB_HIGH"    — DB above expected band (> 92% used / < 8% available); flag
+    # None         — use standard thresholds
+    if server_type == "DB" and mem_available and not image_only:
+        if mem <= 92.0 and mem >= 80.0:
+            mem_status: Optional[str] = "DB_NORMAL"
+        elif mem > 92.0:
+            mem_status = "DB_HIGH"
+        else:
+            mem_status = None
+    else:
+        mem_status = None
+
     return {
         "host":           host,
         "server":         host.split(".")[0],
@@ -282,6 +314,7 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         "image_only":     image_only,
         "health_score":   round(float(score), 1) if score >= 0 else None,
         "status":         status,
+        "mem_status":     mem_status,
         "source_env":     s.get("_source_file") or s.get("source_env") or "",
         # Intelligence flags
         "agg_trap":       agg_trap,

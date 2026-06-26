@@ -22,10 +22,11 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,8 +34,6 @@ from services import config_store
 from services.azure_monitor import (
     AzureConfigError,
     AzureFetchError,
-    _browser_credential,
-    _browser_credential_info,
     _build_credential,
     browser_login,
     clear_browser_credential,
@@ -42,6 +41,7 @@ from services.azure_monitor import (
     discover_vms,
     fetch_vm_metrics,
     fetch_vm_timeseries,
+    get_browser_credential,
     get_browser_credential_info,
     get_vm_prewarm_state,
     prewarm_vm_inventory,
@@ -49,6 +49,28 @@ from services.azure_monitor import (
 )
 from services.resource_calculator import build_resource_payload
 router = APIRouter()
+
+# ── Per-session identity ──────────────────────────────────────────────────────
+# Azure credentials are scoped per browser session (see azure_monitor.py). The
+# session id rides in a first-party HttpOnly cookie so concurrent analysts on one
+# server process never share or overwrite each other's Azure identity/token.
+_PE_SID_COOKIE = "pe_sid"
+_PE_SID_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+
+
+def _session_id(request: Request, response: Optional[Response] = None) -> str:
+    """Read the caller's session id from the pe_sid cookie, minting one if absent.
+    When a Response is supplied the cookie is (re)set so the same browser reuses
+    the same id across requests and restarts."""
+    sid = (request.cookies.get(_PE_SID_COOKIE) or "").strip()
+    if not sid:
+        sid = uuid.uuid4().hex
+    if response is not None:
+        response.set_cookie(
+            _PE_SID_COOKIE, sid,
+            max_age=_PE_SID_MAX_AGE, httponly=True, samesite="lax", path="/",
+        )
+    return sid
 
 # ── Timeseries result cache ──────────────────────────────────────────────────
 # Caches the full processed response for (vm_ids, window) combinations so that
@@ -103,7 +125,7 @@ def _reset_sub_cache() -> None:
         pass
 
 
-def _populate_sub_cache() -> None:
+def _populate_sub_cache(session_id=None) -> None:
     """Background worker: fetch all subscriptions and store in _sub_cache.
 
     Order of preference:
@@ -115,7 +137,7 @@ def _populate_sub_cache() -> None:
 
     # ── 1. Browser credential via SDK (preferred — guaranteed fresh after login)
     try:
-        from services.azure_monitor import _browser_credential as _bc
+        _bc = get_browser_credential(session_id)
         if _bc is not None:
             from azure.mgmt.subscription import SubscriptionClient
             client = SubscriptionClient(_bc)
@@ -157,11 +179,11 @@ def _populate_sub_cache() -> None:
         _sub_cache["fetching"] = False
 
 
-def _subscriptions_via_sdk() -> list[Dict[str, Any]]:
+def _subscriptions_via_sdk(session_id=None) -> list[Dict[str, Any]]:
     """Subscription discovery using cached browser credential or DefaultAzureCredential."""
     from azure.mgmt.subscription import SubscriptionClient
 
-    cred = _build_credential({})
+    cred = _build_credential({}, session_id)
     client = SubscriptionClient(cred)
     rows: list[Dict[str, Any]] = []
     for sub in client.subscriptions.list():
@@ -180,11 +202,11 @@ def _subscriptions_via_sdk() -> list[Dict[str, Any]]:
     return rows
 
 
-def _resource_groups_via_sdk(subscription_id: str) -> list[Dict[str, Any]]:
+def _resource_groups_via_sdk(subscription_id: str, session_id=None) -> list[Dict[str, Any]]:
     """RG discovery using cached browser credential or DefaultAzureCredential."""
     from azure.mgmt.resource import ResourceManagementClient
 
-    cred = _build_credential({})
+    cred = _build_credential({}, session_id)
     client = ResourceManagementClient(cred, subscription_id)
     groups: list[Dict[str, Any]] = []
     for g in client.resource_groups.list():
@@ -242,13 +264,14 @@ def azure_status() -> Dict[str, Any]:
 
 
 @router.get("/azure/whoami")
-def azure_whoami() -> Dict[str, Any]:
+def azure_whoami(request: Request, response: Response) -> Dict[str, Any]:
     """Return the Azure AD identity from the current session.
 
     Priority: 1) cached browser credential  2) az CLI  3) DefaultAzureCredential
     """
+    sid = _session_id(request, response)
     # ── Check cached browser credential first (no external call) ──
-    browser_info = get_browser_credential_info()
+    browser_info = get_browser_credential_info(sid)
     if browser_info.get("logged_in"):
         return {
             "logged_in": True,
@@ -288,15 +311,16 @@ def azure_whoami() -> Dict[str, Any]:
 
 
 @router.post("/azure/browser-login")
-def azure_browser_login() -> Dict[str, Any]:
+def azure_browser_login(request: Request, response: Response) -> Dict[str, Any]:
     """Launch interactive browser login (Microsoft 'Pick an account' page).
 
     Opens the user's default browser for Azure AD authentication.
-    The credential is cached in-process for subsequent API calls.
-    Returns identity info + available subscriptions.
+    The credential is cached in-process (scoped to this session) for subsequent
+    API calls. Returns identity info + available subscriptions.
     """
+    sid = _session_id(request, response)
     try:
-        info = browser_login()
+        info = browser_login(sid)
     except AzureConfigError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -315,11 +339,11 @@ def azure_browser_login() -> Dict[str, Any]:
     # ── Post-login pre-warm: kick off subscription list + VM inventory in parallel
     # so they are cached and ready before the user types a VM name.
     # Both run as daemon threads — login endpoint returns immediately.
-    threading.Thread(target=_populate_sub_cache, daemon=True).start()
+    threading.Thread(target=_populate_sub_cache, args=(sid,), daemon=True).start()
     # Pre-warm VM inventory for the saved subscription (if any)
     def _prewarm_after_login():
         try:
-            from services.azure_monitor import _browser_credential as _bc
+            _bc = get_browser_credential(sid)
             if _bc is None:
                 return
             from services import config_store as _cs
@@ -335,7 +359,7 @@ def azure_browser_login() -> Dict[str, Any]:
                         sub_id = subs[0].get("id", "")
                         break
             if sub_id:
-                prewarm_vm_inventory(_bc, sub_id)
+                prewarm_vm_inventory(_bc, sub_id, session_id=sid)
         except Exception:
             pass
     threading.Thread(target=_prewarm_after_login, daemon=True).start()
@@ -361,15 +385,16 @@ def azure_vm_cache_status() -> Dict[str, Any]:
 
 
 @router.post("/azure/browser-logout")
-def azure_browser_logout() -> Dict[str, Any]:
-    """Clear cached browser credential."""
-    clear_browser_credential()
+def azure_browser_logout(request: Request, response: Response) -> Dict[str, Any]:
+    """Clear cached browser credential for this session."""
+    sid = _session_id(request, response)
+    clear_browser_credential(sid)
     _reset_sub_cache()
     return {"ok": True, "message": "Browser credential cleared."}
 
 
 @router.get("/azure/auth-status")
-def azure_auth_status() -> Dict[str, Any]:
+def azure_auth_status(request: Request, response: Response) -> Dict[str, Any]:
     """Return which auth method is active — always instant (no network call).
 
     Checks in this order, all O(1)/disk-read only:
@@ -378,10 +403,11 @@ def azure_auth_status() -> Dict[str, Any]:
     The actual credential object is restored lazily in the background
     when it is first needed for a real API call.
     """
-    # 1. In-memory — instant
-    from services.azure_monitor import _browser_credential, _browser_credential_info, _load_credential_info
-    mem_info = dict(_browser_credential_info or {})
-    if _browser_credential is not None and mem_info.get("logged_in"):
+    sid = _session_id(request, response)
+    # 1. In-memory — instant (session-scoped, no network)
+    from services.azure_monitor import _get_cred, _get_info, _load_credential_info
+    mem_info = dict(_get_info(sid) or {})
+    if _get_cred(sid) is not None and mem_info.get("logged_in"):
         return {
             "method": "browser",
             "name": mem_info.get("name", ""),
@@ -390,7 +416,7 @@ def azure_auth_status() -> Dict[str, Any]:
         }
 
     # 2. Disk cache — instant (just reads a small JSON file, no Azure network call)
-    disk_info = _load_credential_info()
+    disk_info = _load_credential_info(sid)
     if disk_info.get("logged_in"):
         return {
             "method": "browser",
@@ -403,8 +429,9 @@ def azure_auth_status() -> Dict[str, Any]:
 
 
 @router.get("/azure/subscriptions")
-def azure_subscriptions() -> Dict[str, Any]:
+def azure_subscriptions(request: Request, response: Response) -> Dict[str, Any]:
     """Return subscription list — instant from cache; populates cache in background on first call."""
+    sid = _session_id(request, response)
     with _sub_cache_lock:
         cache_fresh = (
             _sub_cache["subs"] is not None
@@ -420,7 +447,7 @@ def azure_subscriptions() -> Dict[str, Any]:
     if not already_fetching:
         with _sub_cache_lock:
             _sub_cache["fetching"] = True
-        threading.Thread(target=_populate_sub_cache, daemon=True).start()
+        threading.Thread(target=_populate_sub_cache, args=(sid,), daemon=True).start()
 
     # ── Return config-saved subscription immediately (never hangs) ──────────
     cfg = config_store.get_all()
@@ -437,8 +464,9 @@ def azure_subscriptions() -> Dict[str, Any]:
 
 
 @router.get("/azure/resource-groups")
-def azure_resource_groups(subscription_id: str = "") -> Dict[str, Any]:
+def azure_resource_groups(request: Request, response: Response, subscription_id: str = "") -> Dict[str, Any]:
     """List RGs using az CLI first, then SDK fallback."""
+    sid = _session_id(request, response)
     sub_id = subscription_id.strip()
     if not sub_id:
         cfg = config_store.get_all()
@@ -468,10 +496,9 @@ def azure_resource_groups(subscription_id: str = "") -> Dict[str, Any]:
         pass
 
     # SDK fallback — only when browser credential is active (prevents hanging).
-    from services.azure_monitor import _browser_credential
-    if _browser_credential is not None:
+    if get_browser_credential(sid) is not None:
         try:
-            return {"ok": True, "resource_groups": _resource_groups_via_sdk(sub_id)}
+            return {"ok": True, "resource_groups": _resource_groups_via_sdk(sub_id, sid)}
         except ImportError:
             return {
                 "ok": False,
@@ -485,12 +512,13 @@ def azure_resource_groups(subscription_id: str = "") -> Dict[str, Any]:
 
 
 @router.post("/azure/validate")
-def validate_azure(body: AzureValidateRequest) -> Dict[str, Any]:
+def validate_azure(body: AzureValidateRequest, request: Request, response: Response) -> Dict[str, Any]:
     """
     Validate Azure connection using the user's az login identity.
     Attempts a lightweight VM list call to confirm auth + RBAC.
     Returns { valid: bool, vm_count_sample?: int, error?: str }
     """
+    sid = _session_id(request, response)
     try:
         from azure.mgmt.compute import ComputeManagementClient
     except ImportError:
@@ -500,7 +528,7 @@ def validate_azure(body: AzureValidateRequest) -> Dict[str, Any]:
         }
 
     try:
-        cred = _build_credential({})
+        cred = _build_credential({}, sid)
         compute = ComputeManagementClient(cred, body.subscription_id.strip())
         # list_all() is lazy; just pull one page to confirm auth works
         vm_iter = compute.virtual_machines.list_all()
@@ -524,18 +552,19 @@ def validate_azure(body: AzureValidateRequest) -> Dict[str, Any]:
 
 
 @router.post("/azure/discover-vms")
-def azure_discover_vms(body: AzureDiscoverRequest) -> Dict[str, Any]:
+def azure_discover_vms(body: AzureDiscoverRequest, request: Request, response: Response) -> Dict[str, Any]:
     """
     Discover VMs in a subscription, classify them as APP/DB/SRE,
     and return the list for user selection before fetching metrics.
     """
+    sid = _session_id(request, response)
     cfg = dict(config_store.get_all())
     if body.subscription_id:
         cfg["azure_subscription_id"] = body.subscription_id.strip()
     rg = (body.resource_group or "").strip() or None
 
     try:
-        vms = discover_vms(cfg, resource_group=rg)
+        vms = discover_vms(cfg, resource_group=rg, session_id=sid)
     except AzureConfigError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=str(exc)) from exc
@@ -557,19 +586,20 @@ def azure_discover_vms(body: AzureDiscoverRequest) -> Dict[str, Any]:
 
 
 @router.post("/azure/search-vms")
-def azure_search_vms(body: AzureSearchRequest) -> Dict[str, Any]:
+def azure_search_vms(body: AzureSearchRequest, request: Request, response: Response) -> Dict[str, Any]:
     """
     Search for VMs across all subscriptions using Azure Resource Graph.
     Matches VM name, resource group, or any tag value (CustomerName,
     Application, Environment_Type, etc.).
     """
+    sid = _session_id(request, response)
     q = (body.query or "").strip()
     if not q:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Search query is required.")
 
     try:
-        credential = _build_credential({})
+        credential = _build_credential({}, sid)
     except AzureConfigError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail=str(exc)) from exc
@@ -598,12 +628,13 @@ def azure_search_vms(body: AzureSearchRequest) -> Dict[str, Any]:
 
 
 @router.post("/azure/fetch-resources")
-def fetch_azure_resources(body: AzureFetchRequest) -> Dict[str, Any]:
+def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: Response) -> Dict[str, Any]:
     """
     Fetch VM metrics from Azure Monitor using the user's az login identity,
     then run them through resource_calculator to produce the standard
     Resource Review payload.
     """
+    sid = _session_id(request, response)
     cfg = config_store.get_all()
 
     # Allow per-request resource group override
@@ -613,7 +644,7 @@ def fetch_azure_resources(body: AzureFetchRequest) -> Dict[str, Any]:
 
     try:
         servers = fetch_vm_metrics(cfg, hours_back=body.hours_back,
-                                   vm_ids=body.vm_ids)
+                                   vm_ids=body.vm_ids, session_id=sid)
     except AzureConfigError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=str(exc)) from exc
@@ -643,7 +674,7 @@ def fetch_azure_resources(body: AzureFetchRequest) -> Dict[str, Any]:
 # ── SSE streaming endpoint for large VM fetches ─────────────────────────────
 
 @router.post("/azure/fetch-resources-stream")
-async def fetch_azure_resources_stream(body: AzureFetchRequest):
+async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request):
     """
     Same as /azure/fetch-resources but streams SSE progress events.
     
@@ -655,6 +686,7 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest):
     import asyncio
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    sid = _session_id(request)
     cfg = config_store.get_all()
     if body.resource_group:
         cfg = dict(cfg)
@@ -676,7 +708,7 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest):
                 _list_vms, _vm_total_memory_bytes,
             )
             _require_sdk()
-            credential = _bc(cfg)
+            credential = _bc(cfg, sid)
 
             if body.vm_ids:
                 # FAST PATH: use pre-fetched metadata if available
@@ -815,19 +847,20 @@ class TimeseriesRequest(BaseModel):
 
 
 @router.post("/azure/timeseries")
-def azure_timeseries(body: TimeseriesRequest) -> Dict[str, Any]:
+def azure_timeseries(body: TimeseriesRequest, request: Request, response: Response) -> Dict[str, Any]:
     """
     Fetch time-series data + automatic spike detection for selected VMs.
     Returns only critical/significant findings — filters out normal and moderate.
     Includes pattern detection (recurring times, cross-VM correlation).
     Result is cached for 5 minutes so spike drill-down clicks are instant.
     """
+    sid = _session_id(request, response)
     cache_key = _ts_cache_key(body.vm_ids, body.hours_back, body.start_utc, body.end_utc)
     cached = _ts_cache_get(cache_key)
     if cached is not None:
         return cached
 
-    credential = _build_credential({})
+    credential = _build_credential({}, sid)
 
     start_dt: Optional[datetime] = None
     end_dt: Optional[datetime] = None

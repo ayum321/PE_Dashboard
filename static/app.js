@@ -3814,6 +3814,27 @@ function _rewriteWaveformForDb(wf, role, memUsed, thresholds) {
   };
 }
 
+// ── DB-expected memory: one shared cross-panel semantic ──────────
+// A DB server pre-allocating 80–92% RAM to SGA/PGA (8–20% available) is working
+// as designed — not under pressure. We render that state in DB-identity purple
+// (the same hue as the DB role badges) so the status badge, heatmap memory bar,
+// table memory column, and anomaly cards all agree, instead of one panel saying
+// "expected" while another screams amber/red.
+const DB_EXPECTED_COLOR = THEME.purple;            // #a855f7 — matches DB role badges
+const DB_EXPECTED_GRAD  = ["#7c3aed", "#a855f7"];  // deep→bright violet (bar/gauge fill)
+
+// Authoritative display status for a resource row. The backend is the source of
+// truth for Warning/Critical — it already flips a DB server's memory-only
+// Warning to Healthy when CPU and disk are fine. So we only PROMOTE an
+// already-cleared (Healthy) DB server in the expected band to a distinct
+// "DB Normal" badge; we never downgrade a real Warning/Critical, which would
+// hide a genuine CPU or disk problem.
+function _resourceDisplayStatus(s) {
+  if (!s) return "Unknown";
+  const dbNormal = (s.mem_status === "DB_NORMAL") || _isDbMemExpected(s.type, s.mem_pct);
+  return (dbNormal && s.status === "Healthy") ? "DB Normal" : (s.status || "Unknown");
+}
+
 const GRADE_COLORS = {
   A: THEME.green,
   B: THEME.cyan,
@@ -3826,6 +3847,7 @@ const STATUS_COLORS = {
   Critical: THEME.red,
   Warning:  THEME.amber,
   Healthy:  THEME.green,
+  "DB Normal": DB_EXPECTED_COLOR,   // DB in expected SGA/PGA band — cleared by backend
   Unknown:  THEME.muted,
 };
 
@@ -4407,7 +4429,7 @@ function renderResourceKpis(k) {
     const loAvail = 100 - (t.db_mem_band_high || 92);  // 8% available
     const hiAvail = 100 - (t.db_mem_band_low || 80);    // 20% available
     if (avgMemAvail >= loAvail && avgMemAvail <= hiAvail) {
-      memSubEl.innerHTML = `<span style="color:${THEME.cyan}">DB expected: ${loAvail}–${hiAvail}% avail</span> · <span class="text-Cmuted">SGA/PGA steady</span>`;
+      memSubEl.innerHTML = `<span style="color:${DB_EXPECTED_COLOR}">DB expected: ${loAvail}–${hiAvail}% avail</span> · <span class="text-Cmuted">SGA/PGA steady</span>`;
     } else if (avgMemAvail < loAvail) {
       memSubEl.innerHTML = `<span style="color:${THEME.amber}">Below DB band (<${loAvail}% avail)</span>`;
     } else {
@@ -4644,10 +4666,28 @@ function renderResourceAnomalies(anomalies) {
   card.classList.remove("hidden");
   list.innerHTML = "";
 
+  // Server lookup (by short host) so a memory anomaly on a DB server in its
+  // expected SGA/PGA band reads as "DB Normal", not WARNING.
+  const _srvByHost = {};
+  for (const s of (window.appData?.resource?.servers || [])) {
+    const h = (s.host || s.server || "").split(".")[0];
+    if (h && !_srvByHost[h]) _srvByHost[h] = s;
+  }
+  const _anomalyDbExpected = (a) => {
+    if ((a.metric || "").toLowerCase() !== "memory") return false;
+    const srv = _srvByHost[(a.host || "?").split(".")[0]];
+    if (!srv || (srv.type || "").toUpperCase() !== "DB") return false;
+    // anomaly Memory value is USED % — same convention _isDbMemExpected expects
+    return srv.mem_status === "DB_NORMAL" || _isDbMemExpected(srv.type, a.value ?? srv.mem_pct);
+  };
+
   // Group anomalies by host for server-centric cards
   const byHost = {};
   for (const a of anomalies) {
     const host = (a.host || "?").split(".")[0];
+    const srv = _srvByHost[host];
+    if (srv && !a.role) a.role = (srv.type || "").toUpperCase();
+    a._dbExpected = _anomalyDbExpected(a);
     if (!byHost[host]) byHost[host] = { host, items: [], maxZ: 0 };
     byHost[host].items.push(a);
     byHost[host].maxZ = Math.max(byHost[host].maxZ, Math.abs(a.z || 0));
@@ -4663,28 +4703,41 @@ function renderResourceAnomalies(anomalies) {
   };
 
   for (const hg of hostArr) {
-    const { label: sevLabel, color: sev } = _sevFromZ(hg.maxZ);
+    // If EVERY flagged metric on this host is DB-expected memory, the host is
+    // not under pressure → render "DB NORMAL" (purple), not WARNING. A real
+    // CPU/disk anomaly on the same host keeps severity styling so it's never masked.
+    const allDbExpected = hg.items.length > 0 && hg.items.every(i => i._dbExpected);
+    let sevLabel, sev;
+    if (allDbExpected) {
+      sevLabel = "DB NORMAL"; sev = DB_EXPECTED_COLOR;
+    } else {
+      const _s = _sevFromZ(hg.maxZ); sevLabel = _s.label; sev = _s.color;
+    }
+    const borderColor = allDbExpected ? hexA(DB_EXPECTED_COLOR, 0.45) : hexA(sev, 0.3);
+    const bgColor     = allDbExpected ? hexA(DB_EXPECTED_COLOR, 0.07) : hexA(sev, 0.05);
 
     const metricChips = hg.items.map(a => {
       const mKey = (a.metric || "").toLowerCase();
-      const mc = mKey === "cpu" ? THEME.blue : mKey === "memory" ? THEME.cyan : THEME.purple;
+      const mc = a._dbExpected ? DB_EXPECTED_COLOR : (mKey === "cpu" ? THEME.blue : mKey === "memory" ? THEME.cyan : THEME.purple);
       const zVal = _n(a.z);
-      const zLabel = Math.abs(zVal) >= 4 ? "extreme" : Math.abs(zVal) >= 3 ? "significant" : "elevated";
+      const zLabel = a._dbExpected ? "expected" : (Math.abs(zVal) >= 4 ? "extreme" : Math.abs(zVal) >= 3 ? "significant" : "elevated");
       const roleTag = a.role && a.role !== "SERVER" ? ` <span class="text-[7px] opacity-60">[${a.role}]</span>` : "";
-      return `<span class="inline-flex items-center gap-1 text-[10px]"><span class="w-1.5 h-1.5 rounded-full inline-block" style="background:${mc}"></span><span class="font-semibold" style="color:${mc}">${(a.metric || "").toUpperCase()}</span>${roleTag} <span class="font-mono" style="color:${sev}">${_n(a.value).toFixed(0)}%</span> <span class="text-Cmuted text-[8px]" title="Statistical deviation: z=${zVal >= 0 ? '+' : ''}${zVal.toFixed(1)}">${zLabel}</span></span>`;
+      const valColor = a._dbExpected ? DB_EXPECTED_COLOR : sev;
+      return `<span class="inline-flex items-center gap-1 text-[10px]"><span class="w-1.5 h-1.5 rounded-full inline-block" style="background:${mc}"></span><span class="font-semibold" style="color:${mc}">${(a.metric || "").toUpperCase()}</span>${roleTag} <span class="font-mono" style="color:${valColor}">${_n(a.value).toFixed(0)}%</span> <span class="text-Cmuted text-[8px]" title="Statistical deviation: z=${zVal >= 0 ? '+' : ''}${zVal.toFixed(1)}">${zLabel}</span></span>`;
     }).join(" ");
 
     // "Why flagged?" drilldown formula
     const drillRows = hg.items.map(a => {
       const zVal = _n(a.z);
       const floorVal = a.floor || "—";
-      return `<div class="text-[9px] text-Cmuted"><span class="font-semibold text-Cwhite">${(a.metric||"").toUpperCase()}</span>: value=${_n(a.value).toFixed(1)}% · z-score=${zVal >= 0 ? '+' : ''}${zVal.toFixed(2)} (≥2.0 threshold) · floor=${floorVal}%${a.role ? ' · role=' + a.role : ''}</div>`;
+      const expNote = a._dbExpected ? ` · <span style="color:${DB_EXPECTED_COLOR}">DB SGA/PGA expected band — not pressure</span>` : "";
+      return `<div class="text-[9px] text-Cmuted"><span class="font-semibold text-Cwhite">${(a.metric||"").toUpperCase()}</span>: value=${_n(a.value).toFixed(1)}% · z-score=${zVal >= 0 ? '+' : ''}${zVal.toFixed(2)} (≥2.0 threshold) · floor=${floorVal}%${a.role ? ' · role=' + a.role : ''}${expNote}</div>`;
     }).join("");
 
     const item = document.createElement("div");
     item.className = "rounded-lg border p-2 transition cursor-pointer";
-    item.style.borderColor = hexA(sev, 0.3);
-    item.style.background = hexA(sev, 0.05);
+    item.style.borderColor = borderColor;
+    item.style.background = bgColor;
     item.innerHTML = `
       <div class="flex items-center justify-between">
         <span class="text-[13px] font-mono font-semibold" style="color:${sev}">${escapeHtml(hg.host)}</span>
@@ -4694,6 +4747,7 @@ function renderResourceAnomalies(anomalies) {
         </div>
       </div>
       <div class="flex flex-wrap gap-2 mt-0.5">${metricChips}</div>
+      ${allDbExpected ? `<div class="text-[9px] mt-1" style="color:${DB_EXPECTED_COLOR}">Memory above fleet mean is expected for DB (SGA/PGA pre-allocation) — not a pressure anomaly.</div>` : ""}
       <div class="anomaly-drill hidden mt-1.5 pt-1.5 border-t border-Cborder/30">${drillRows}</div>
     `;
     item.addEventListener("click", () => {
@@ -4734,9 +4788,9 @@ function renderResourceBarChart(servers) {
     data: {
       labels,
       datasets: [
-        { label: "CPU %",        data: top.map((s) => s.cpu_pct  || 0), backgroundColor: "rgba(59,130,246,0.8)",  borderColor: "#3b82f6",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
-        { label: "Mem Avail %",  data: top.map((s) => s.mem_pct != null ? 100 - s.mem_pct : 0), backgroundColor: "rgba(6,182,212,0.8)", borderColor: "#06b6d4",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
-        { label: "Disk %",       data: top.map((s) => s.disk_pct || 0), backgroundColor: "rgba(168,85,247,0.8)",  borderColor: "#a855f7",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "CPU %",       data: top.map((s) => s.cpu_pct  || 0), backgroundColor: "rgba(59,130,246,0.8)",  borderColor: "#3b82f6",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "Mem Used %", data: top.map((s) => s.mem_pct  || 0), backgroundColor: "rgba(245,158,11,0.7)",  borderColor: "#f59e0b",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "Disk %",     data: top.map((s) => s.disk_pct || 0), backgroundColor: "rgba(168,85,247,0.8)",  borderColor: "#a855f7",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
       ],
     },
     options: {
@@ -4761,7 +4815,16 @@ function renderResourceBarChart(servers) {
           padding: 10,
           cornerRadius: 6,
           callbacks: {
-            label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)}%`,
+            label: (ctx) => {
+              const srv = top[ctx.dataIndex];
+              let lbl = ` ${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)}%`;
+              // Annotate DB servers in expected SGA/PGA memory band
+              if (ctx.datasetIndex === 1 && srv?.type === "DB"
+                  && (srv.mem_pct || 0) >= 80 && (srv.mem_pct || 0) <= 92) {
+                lbl += " (DB expected — SGA/PGA)";
+              }
+              return lbl;
+            },
           },
         },
         zoom: _zoomConfig({ mode: "y" }),
@@ -4771,7 +4834,7 @@ function renderResourceBarChart(servers) {
           min: 0, max: 105,
           grid:   { color: "rgba(255,255,255,0.04)", drawBorder: false },
           ticks:  { color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" }, callback: (v) => `${v}%`, stepSize: 25 },
-          title:  { display: true, text: "Utilisation %", color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" } },
+          title:  { display: true, text: "Utilisation % (longer bar = more pressure)", color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" } },
         },
         y: {
           grid:  { display: false },
@@ -4847,6 +4910,10 @@ function renderResourceHeatmap(servers) {
 
   const barCell = (val, ok = 60, warn = 80, opts = {}) => {
     if (val == null || isNaN(Number(val)) || val < 0) {
+      if (opts.showGapWarning) {
+        return `<div class="metric-bar-track" title="No disk I/O telemetry collected for this server — monitoring gap, not idle"><div class="metric-bar-fill" style="width:0%;background:${hexA(THEME.amber,0.25)}"></div></div>
+              <div class="text-[9px] text-right mt-0.5 font-semibold whitespace-nowrap" style="color:${THEME.amber};min-width:3rem" title="No disk I/O telemetry collected — monitoring gap, not confirmed idle">⚠ monitoring gap</div>`;
+      }
       return `<div class="metric-bar-track" title="No data"><div class="metric-bar-fill" style="width:0%;background:#475569"></div></div>
               <div class="text-[10px] text-Cmuted text-right mt-0.5 font-mono" style="min-width:3rem">N/A</div>`;
     }
@@ -4863,7 +4930,14 @@ function renderResourceHeatmap(servers) {
       else                { color = "#10b981"; gradStart = "#059669"; gradEnd = "#34d399"; }
     }
     const threshold = opts.threshold ?? warn;
-    const pulseActive = opts.pulseAt != null && (opts.invertColor ? v <= opts.pulseAt : v >= opts.pulseAt);
+    // DB SGA/PGA expected band (80–92% used / 8–20% available) → purple.
+    // Intentional pre-allocation, not pressure: overrides the red/amber that the
+    // raw available% would otherwise produce, and silences the pressure pulse.
+    const _dbExpectedBand = _isDbMemExpected(opts.serverRole, opts.memUsedPct);
+    if (_dbExpectedBand) {
+      color = DB_EXPECTED_COLOR; gradStart = DB_EXPECTED_GRAD[0]; gradEnd = DB_EXPECTED_GRAD[1];
+    }
+    const pulseActive = !_dbExpectedBand && opts.pulseAt != null && (opts.invertColor ? v <= opts.pulseAt : v >= opts.pulseAt);
     const pulse = pulseActive
       ? `<span class="pulse-red" style="position:absolute;right:-3px;top:-3px;width:8px;height:8px;border-radius:50%;background:#ef4444"></span>`
       : "";
@@ -4872,7 +4946,10 @@ function renderResourceHeatmap(servers) {
     if (opts.segmented) {
       bar = `<div class="metric-bar-fill" style="width:${v}%;background:repeating-linear-gradient(90deg,${gradStart} 0 8px,${gradEnd} 8px 16px)"></div>`;
     }
-    return `<div class="metric-bar-track" title="${v.toFixed(1)}% (threshold ${threshold}%)">
+    const _barTitle = _dbExpectedBand
+      ? `${v.toFixed(1)}% available — DB expected SGA/PGA band (≈${100 - (RESOURCE_THRESHOLDS.db_mem_band_high ?? 92)}–${100 - (RESOURCE_THRESHOLDS.db_mem_band_low ?? 80)}% available is normal for DB)`
+      : `${v.toFixed(1)}% (threshold ${threshold}%)`;
+    return `<div class="metric-bar-track" title="${_barTitle}">
               ${bar}
               <div class="metric-bar-threshold" style="left:${threshold}%"></div>
               ${pulse}
@@ -4902,8 +4979,8 @@ function renderResourceHeatmap(servers) {
         <span class="text-[11px] font-mono text-Cwhite truncate font-medium" title="${escapeHtml(s.host || s.server || '')}">${escapeHtml(host)}</span>
       </div>
       <div>${barCell(s.cpu_pct,  RESOURCE_THRESHOLDS.cpu_ok, RESOURCE_THRESHOLDS.cpu_warn, { threshold: RESOURCE_THRESHOLDS.cpu_warn, trendArrow: cpuTrend })}${s.cpu_avg_pct != null && Math.abs((s.cpu_pct || 0) - s.cpu_avg_pct) > 5 ? `<div class="text-[7px] text-Cmuted mt-0.5" title="Recent snapshot: ${(s.cpu_pct||0).toFixed(1)}% · Period avg: ${s.cpu_avg_pct.toFixed(1)}%">avg ${s.cpu_avg_pct.toFixed(0)}%</div>` : ""}</div>
-      <div>${barCell(s.mem_pct != null ? 100 - s.mem_pct : null,  100 - RESOURCE_THRESHOLDS.mem_ok, 100 - RESOURCE_THRESHOLDS.mem_warn, { threshold: 100 - RESOURCE_THRESHOLDS.mem_warn, invertColor: true, pulseAt: 5, trendArrow: memTrend })}</div>
-      <div>${barCell(s.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn, { threshold: RESOURCE_THRESHOLDS.disk_warn, segmented: true, trendArrow: diskTrend })}</div>
+      <div>${barCell(s.mem_pct != null ? 100 - s.mem_pct : null,  100 - RESOURCE_THRESHOLDS.mem_ok, 100 - RESOURCE_THRESHOLDS.mem_warn, { threshold: 100 - RESOURCE_THRESHOLDS.mem_warn, invertColor: true, pulseAt: 5, trendArrow: memTrend, serverRole: s.type, memUsedPct: s.mem_pct })}</div>
+      <div>${barCell(s.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn, { threshold: RESOURCE_THRESHOLDS.disk_warn, segmented: true, trendArrow: diskTrend, showGapWarning: true })}</div>
     </div>`;
   }).join("");
 
@@ -4913,7 +4990,8 @@ function renderResourceHeatmap(servers) {
       <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,#059669,#34d399)"></span> OK</span>
       <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,#d97706,#fbbf24)"></span> Warning</span>
       <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,#dc2626,#f87171)"></span> Critical</span>
-      <span class="text-Cmuted/60 text-[8px]">| Memory = Available % (Azure native, lower = more pressure) · Disk = I/O BW consumed % (not storage space) · DB servers 8–20% mem available is expected SGA/PGA</span>
+      <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,${DB_EXPECTED_GRAD[0]},${DB_EXPECTED_GRAD[1]})"></span> DB expected</span>
+      <span class="text-Cmuted/60 text-[8px]">| Memory = Available % (Azure native, lower = more pressure) · Disk = I/O BW consumed % (not storage space) · DB servers 8–20% mem available is expected SGA/PGA (shown purple)</span>
     </div>
     <div class="grid items-center gap-4 pb-2 border-b border-Cborder/40 text-[10px] uppercase tracking-wider text-Cmuted font-bold px-1"
          style="grid-template-columns:minmax(140px,1.2fr) 1.5fr 1.5fr 1.5fr">
@@ -4921,8 +4999,8 @@ function renderResourceHeatmap(servers) {
       <div class="flex items-center gap-1">
         <span class="w-2 h-2 rounded-sm" style="background:${THEME.blue}"></span> CPU (threshold ${RESOURCE_THRESHOLDS.cpu_warn}%)
       </div>
-      <div class="flex items-center gap-1 cursor-help" title="Available Memory % (Azure native). DB servers typically show 8–20% available (SGA/PGA pre-allocation).">
-        <span class="w-2 h-2 rounded-sm" style="background:${THEME.cyan}"></span> Mem Available (< ${100 - RESOURCE_THRESHOLDS.mem_warn}% crit) <span class="text-[7px] opacity-50">ℹ</span>
+      <div class="flex items-center gap-1 cursor-help" title="Available Memory % (Azure native). Shorter bar = less free RAM = more memory pressure. DB servers normally show 8–20% available (SGA/PGA pre-allocation) and render in purple as expected.">
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.cyan}"></span> Mem avail % <span class="text-[8px] lowercase tracking-normal text-Cmuted/70">· shorter = more pressure</span> <span class="text-[7px] opacity-50">ℹ</span>
       </div>
       <div class="flex items-center gap-1" title="Azure OS/Data Disk Bandwidth Consumed % — NOT storage space. 0.3% = near-idle I/O. Warn at ${RESOURCE_THRESHOLDS.disk_warn}% of provisioned IOPS/BW quota.">
         <span class="w-2 h-2 rounded-sm" style="background:${THEME.purple}"></span> Disk I/O (threshold ${RESOURCE_THRESHOLDS.disk_warn}%) <span class="text-[7px] opacity-50">ℹ</span>
@@ -5069,7 +5147,8 @@ function renderResourceTable(servers) {
   for (const r of slice) {
     const tr = document.createElement("tr");
     tr.className = "transition-colors";
-    tr.style.background = statusRowTint(r.status);
+    const _dispStatus = _resourceDisplayStatus(r);
+    tr.style.background = statusRowTint(_dispStatus);
 
     // Role-specific CPU thresholds (from backend), fallback to global
     const cpuOk   = r.role_cpu_ok   ?? RESOURCE_THRESHOLDS.cpu_ok;
@@ -5102,7 +5181,7 @@ function renderResourceTable(servers) {
     const memAvailPct = memAvail ? 100 - r.mem_pct : 0;
     if (memAvail) {
       if (_isDbMemExpected(rType, r.mem_pct)) {
-        memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)}" title="DB expected allocation (SGA/PGA). ${(100 - RESOURCE_THRESHOLDS.db_mem_band_high)}–${(100 - RESOURCE_THRESHOLDS.db_mem_band_low)}% available is normal for DB servers.">DB expected</span>`;
+        memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${DB_EXPECTED_COLOR};background:${hexA(DB_EXPECTED_COLOR,0.12)}" title="DB expected allocation (SGA/PGA). ${(100 - RESOURCE_THRESHOLDS.db_mem_band_high)}–${(100 - RESOURCE_THRESHOLDS.db_mem_band_low)}% available is normal for DB servers.">DB expected</span>`;
       } else if (rType === "DB" && r.mem_pct > (RESOURCE_THRESHOLDS.db_mem_band_high || 92)) {
         memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.red};background:${hexA(THEME.red,0.1)}" title="DB server below expected available (<${(100 - (RESOURCE_THRESHOLDS.db_mem_band_high || 92))}%). Check for memory pressure.">DB high</span>`;
       } else if (rEnv === "TEST" && r.mem_pct >= 70) {
@@ -5111,6 +5190,14 @@ function renderResourceTable(servers) {
         memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.1)}" title="APP server critically low available memory. Check for memory leak or under-provisioning.">APP elevated</span>`;
       }
     }
+
+    // Role-aware memory column colour: DB expected band → purple (expected, DB identity), not red/amber
+    const _dbMemNormal = r.mem_status === "DB_NORMAL" || _isDbMemExpected(rType, r.mem_pct);
+    const memColor = !memAvail ? ""
+      : _dbMemNormal                                                     ? DB_EXPECTED_COLOR
+      : memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_warn)             ? THEME.red
+      : memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok)               ? THEME.amber
+      : THEME.green;
 
     // Environment badge
     const env = r.environment || "";
@@ -5123,12 +5210,13 @@ function renderResourceTable(servers) {
       <td class="py-2.5 pr-3">${envBadge}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!cpuAvail ? 'text-Cmuted' : ''}" style="color:${cpuColor}">${cpuAvail ? cpuVal + '%' + cpuExtra : '<span title="Data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${cpuAvgAvail ? r.cpu_avg_pct.toFixed(1) + '%' : '<span title="Insufficient data for period average">N/A</span>'}</td>
-      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memAvail ? (memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_warn) ? THEME.red : memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok) ? THEME.amber : THEME.green) : ''}">${memAvail ? memAvailPct.toFixed(1) + '%' + memContextTag : '<span title="Data unavailable">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memColor}">${memAvail ? memAvailPct.toFixed(1) + '%' + memContextTag : '<span title="Data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${memGbAvail ? r.mem_gb.toFixed(1) : '<span title="Memory capacity not available from source">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${r.disk_pct == null ? 'text-Cmuted' : ''}" style="color:${r.disk_pct != null ? metricColor(r.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn) : ''}">${r.disk_pct != null ? (r.disk_pct).toFixed(1) + '%' : '<span title="Disk data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3">
-        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border cursor-help" title="${_buildStatusTooltip(r)}" style="${statusPillStyle(r.status)}">${escapeHtml(r.status || "Unknown")}</span>
+        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border cursor-help" title="${_buildStatusTooltip(r)}" style="${statusPillStyle(_dispStatus)}">${escapeHtml(_dispStatus)}</span>
         ${(r.status === "Warning" || r.status === "Critical") ? `<div class="text-[8px] text-Cmuted mt-0.5 leading-tight">${_statusDrivenBy(r)}</div>` : ""}
+        ${_dispStatus === "DB Normal" ? `<div class="text-[8px] mt-0.5 leading-tight" style="color:${DB_EXPECTED_COLOR}">SGA/PGA steady — high memory by design</div>` : ""}
       </td>
       <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[180px]" title="${escapeHtml(r.source_env || "")}">${escapeHtml(truncate(r.source_env || "", 28))}</td>
     `;
@@ -5152,8 +5240,12 @@ function _statusDrivenBy(r) {
     candidates.push({ label: `CPU ${cpu.toFixed(0)}%`, score: (cpu - t.cpu_ok) / Math.max(1, 100 - t.cpu_ok) });
   }
   if (memAvail != null && memAvail <= (100 - t.mem_ok)) {
-    const floor = 100 - t.mem_ok;
-    candidates.push({ label: `Mem ${memAvail.toFixed(0)}% avail`, score: floor > 0 ? (floor - memAvail) / floor : 1 });
+    // Skip DB servers whose memory is within the expected SGA/PGA band —
+    // low available% is normal for DB workloads and should not appear as a driver.
+    if (!_isDbMemExpected(r.type, r.mem_pct)) {
+      const floor = 100 - t.mem_ok;
+      candidates.push({ label: `Mem ${memAvail.toFixed(0)}% avail`, score: floor > 0 ? (floor - memAvail) / floor : 1 });
+    }
   }
   if (disk != null && disk >= t.disk_ok) {
     candidates.push({ label: `Disk I/O ${disk.toFixed(0)}%`, score: (disk - t.disk_ok) / Math.max(1, 100 - t.disk_ok) });
@@ -5167,6 +5259,7 @@ function statusRowTint(status) {
     case "Critical": return hexA(THEME.red,    0.10);
     case "Warning":  return hexA(THEME.amber,  0.08);
     case "Healthy":  return hexA(THEME.green,  0.06);
+    case "DB Normal": return hexA(DB_EXPECTED_COLOR, 0.06);
     default:         return "transparent";
   }
 }
@@ -5190,10 +5283,17 @@ function _buildStatusTooltip(r) {
   const reasons = [];
   if (cpu != null && cpu >= cpuWarn)      reasons.push(`CPU ${cpu.toFixed(1)}% used ≥ ${cpuWarn}% threshold`);
   else if (cpu != null && cpu >= cpuOk)   reasons.push(`CPU ${cpu.toFixed(1)}% used ≥ ${cpuOk}% warn`);
-  if (memAvailPct != null && memAvailPct <= (100 - memWarn))
-    reasons.push(`Memory ${memAvailPct.toFixed(1)}% available ≤ ${(100 - memWarn).toFixed(0)}% floor`);
-  else if (memAvailPct != null && memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok))
-    reasons.push(`Memory ${memAvailPct.toFixed(1)}% available ≤ ${(100 - RESOURCE_THRESHOLDS.mem_ok).toFixed(0)}% warn`);
+  if (memAvailPct != null && memAvailPct <= (100 - memWarn)) {
+    if (!_isDbMemExpected(mem != null ? (r.type || "") : "", mem ?? 0))
+      reasons.push(`Memory ${memAvailPct.toFixed(1)}% available ≤ ${(100 - memWarn).toFixed(0)}% floor`);
+    else
+      reasons.push(`Memory ${memAvailPct.toFixed(1)}% available — within DB expected band (SGA/PGA)`);
+  } else if (memAvailPct != null && memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok)) {
+    if (!_isDbMemExpected(mem != null ? (r.type || "") : "", mem ?? 0))
+      reasons.push(`Memory ${memAvailPct.toFixed(1)}% available ≤ ${(100 - RESOURCE_THRESHOLDS.mem_ok).toFixed(0)}% warn`);
+    else
+      reasons.push(`Memory ${memAvailPct.toFixed(1)}% available — within DB expected band (SGA/PGA)`);
+  }
   if (disk != null && disk >= diskWarn)   reasons.push(`Disk ${disk.toFixed(1)}% used ≥ ${diskWarn}% threshold`);
   if (r.dual_pressure)                    reasons.push(`Dual pressure: CPU+Memory both critical`);
   if (r.agg_trap)                         reasons.push(`Aggregation trap: peak=${r.cpu_pct?.toFixed(1)}%, avg=${r.cpu_avg_pct?.toFixed(1)}%`);
@@ -6633,7 +6733,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
       // DB expected band rewrite badge
       const dbBandTag = (metric.includes("Memory") && dWf !== wf)
-        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)}">DB EXPECTED</span>`
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded" style="color:${DB_EXPECTED_COLOR};background:${hexA(DB_EXPECTED_COLOR,0.1)}">DB EXPECTED</span>`
         : "";
 
       // Confidence label with color coding
@@ -11064,6 +11164,19 @@ function _renderExecResourceHealth(servers, kpis) {
   const avgMem  = _avg(enriched.map(s => s.mem)),   peakMem  = _peak(enriched.map(s => s.memPeak));
   const avgDisk = _avg(enriched.map(s => s.disk)),  peakDisk = _peak(enriched.map(s => s.diskPeak));
 
+  // ── Role-adjusted memory alarm ────────────────────────────────────────────
+  // DB servers in the expected SGA/PGA band (80–92% used / 8–20% available)
+  // should not trigger a fleet-level CRITICAL colour. Compute an adjusted peak
+  // that excludes DB servers in the expected band from the colour decision.
+  // The actual avgMem number is still shown truthfully in the gauge.
+  const _inDbBand = s => s.type?.toUpperCase() === "DB" && s.memPeak >= 80 && s.memPeak <= 92;
+  const dbBandSvrs   = enriched.filter(_inDbBand);
+  const nonBandSvrs  = enriched.filter(s => !_inDbBand(s));
+  const adjPeakMem   = nonBandSvrs.length > 0 ? _peak(nonBandSvrs.map(s => s.memPeak)) : peakMem;
+  const dbBandNote   = dbBandSvrs.length > 0
+    ? `${dbBandSvrs.length} DB svr${dbBandSvrs.length > 1 ? "s" : ""} in SGA/PGA band — excluded from alarm`
+    : "";
+
   // ── Role-grouped averages for sub-breakdown chips ─────────────────────────
   const byRole = {};
   enriched.forEach(s => {
@@ -11102,69 +11215,83 @@ function _renderExecResourceHealth(servers, kpis) {
   const _col = (v, ok, warn) => v >= warn ? THEME.red : v >= ok ? THEME.amber : THEME.green;
   const _lbl = (v, ok, warn) => v >= warn ? "CRITICAL" : v >= ok ? "WARNING" : "OK";
 
-  // ── SVG arc gauge (no external lib) ──────────────────────────────────────
-  const _arc = (pct, col, sz = 46, sw = 5) => {
-    const r = (sz - sw) / 2, c = sz / 2, circ = 2 * Math.PI * r;
-    const d = (Math.min(Math.max(pct, 0), 100) / 100) * circ;
-    return `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" style="transform:rotate(-90deg);display:block;flex-shrink:0">
-      <circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="${sw}"/>
-      <circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="${sw - 1}"
-        stroke-dasharray="${d.toFixed(2)} ${circ.toFixed(2)}" stroke-linecap="round"/>
+  // ── Grafana-style radial ring gauge (SVG, no external lib) ───────────────
+  // Full-circle progress arc; the value label is an HTML overlay so the
+  // typography stays crisp and is controlled by the .rh-card__gauge-c CSS.
+  const _ring = (pct, col, size = 64) => {
+    const sw   = size <= 56 ? 6 : 7;
+    const r    = (size - sw) / 2 - 1;
+    const c    = size / 2;
+    const circ = 2 * Math.PI * r;
+    const p    = Math.min(Math.max(pct, 0), 100);
+    const filled = (p / 100) * circ;
+    const glow = p >= 75 ? `filter:drop-shadow(0 0 5px ${col}77)` : "";
+    return `<svg viewBox="0 0 ${size} ${size}" style="transform:rotate(-90deg);${glow}">
+      <circle cx="${c}" cy="${c}" r="${r.toFixed(1)}" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="${sw}"/>
+      <circle cx="${c}" cy="${c}" r="${r.toFixed(1)}" fill="none" stroke="${col}" stroke-width="${sw}"
+              stroke-linecap="round" stroke-dasharray="${filled.toFixed(1)} ${circ.toFixed(1)}"/>
     </svg>`;
   };
 
-  // ── Mini fill bar ─────────────────────────────────────────────────────────
-  const _bar = (v, col, h = "h-1.5") =>
+  // ── Horizontal severity bar ───────────────────────────────────────────────
+  const _bar = (v, col, h = "h-2.5") =>
     `<div class="${h} rounded-full bg-white/[0.06] overflow-hidden">
        <div class="${h} rounded-full transition-all" style="width:${Math.min(Math.max(v, 0), 100).toFixed(1)}%;background:${col}"></div>
      </div>`;
 
   // ── Role sub-breakdown chips ──────────────────────────────────────────────
-  const ROLE_INFO = { APP: { col: THEME.blue, bg: "rgba(59,130,246,0.1)" },
-                      DB:  { col: THEME.amber, bg: "rgba(245,158,11,0.1)" },
-                      SRE: { col: THEME.purple, bg: "rgba(168,85,247,0.1)" } };
+  const ROLE_INFO = { APP: { col: THEME.blue,   bg: "rgba(59,130,246,0.12)" },
+                      DB:  { col: THEME.amber,  bg: "rgba(245,158,11,0.12)" },
+                      SRE: { col: THEME.purple, bg: "rgba(168,85,247,0.12)" } };
   const _roleChips = (metric) =>
     ["APP", "DB", "SRE"].map(role => {
       const v = roleAvg(role, metric);
       if (v === null) return "";
       const ri = ROLE_INFO[role] || { col: THEME.muted, bg: "rgba(107,125,179,0.1)" };
-      return `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[8px] font-bold"
-                    style="color:${ri.col};background:${ri.bg};border:1px solid ${ri.col}33">${role} ${v.toFixed(0)}%</span>`;
+      return `<span class="rh-chip" style="color:${ri.col};background:${ri.bg};border:1px solid ${ri.col}44">${role} ${v.toFixed(0)}%</span>`;
     }).join("");
 
-  // ── Metric card builder ───────────────────────────────────────────────────
-  const _metricCard = (label, icon, avgV, peakV, metric, okT, warnT) => {
-    const col  = _col(peakV, okT, warnT);
-    const lbl  = _lbl(peakV, okT, warnT);
-    const pct_ = Math.min(Math.max(avgV, 0), 100);
+  // ── Grafana-style metric card — stable 4-zone contract ───────────────────
+  // Zones: head (icon+label+badge) · body (ring gauge + large readout) · bar
+  //        (peak severity) · chips (role breakdown). Compact & content-driven.
+  // alarmV: optional colour/label override (e.g. role-adjusted DB-band pressure)
+  // note:   optional cyan sub-text below chips (e.g. "3 DB svrs in SGA/PGA band")
+  const _metricCard = (label, icon, avgV, peakV, metric, okT, warnT, alarmV, note) => {
+    const _alarmPeak = alarmV !== undefined ? alarmV : peakV;
+    const col   = _col(_alarmPeak, okT, warnT);
+    const lbl   = _lbl(_alarmPeak, okT, warnT);
+    const sev   = lbl === "CRITICAL" ? "is-crit" : lbl === "WARNING" ? "is-warn" : "is-ok";
     const chips = _roleChips(metric);
+    const peakW = Math.min(Math.max(peakV, 0), 100).toFixed(1);
+    const cardStyle =
+      `--rh-accent:${col};--rh-border:${col}33;` +
+      `--rh-bg:linear-gradient(160deg,${col}10 0%,rgba(13,21,38,0.97) 70%);--rh-glow:${col}66`;
+    const badgeGlow = lbl === "CRITICAL" ? `text-shadow:0 0 8px ${col}99` : "";
     return `
-    <div class="rounded-xl p-3 flex flex-col gap-2 transition-all"
-         style="border:1px solid ${col}2e;background:linear-gradient(145deg,${col}08,rgba(255,255,255,0.01))">
-      <div class="flex items-center justify-between gap-1">
-        <div class="flex items-center gap-1.5">
-          <span class="text-base leading-none">${icon}</span>
-          <span class="text-[8px] uppercase tracking-widest font-bold text-Cmuted">${label}</span>
+    <div class="rh-card ${sev}" style="${cardStyle}">
+      <div class="rh-card__head">
+        <div class="rh-card__head-l">
+          <span class="rh-card__icon">${icon}</span>
+          <span class="rh-card__label">${label}</span>
         </div>
-        <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
-              style="color:${col};background:${col}1a">${lbl}</span>
+        <span class="rh-card__badge" style="color:${col};background:${col}1f;border:1px solid ${col}55;${badgeGlow}">${lbl}</span>
       </div>
-      <div class="flex items-center gap-2">
-        <div class="relative flex-shrink-0">
-          ${_arc(pct_, col, 46, 5)}
-          <div class="absolute inset-0 flex items-center justify-center">
-            <span class="text-[8px] font-extrabold leading-none" style="color:${col}">${avgV.toFixed(0)}</span>
+      <div class="rh-card__body">
+        <div class="rh-card__gauge">
+          ${_ring(avgV, col, 64)}
+          <div class="rh-card__gauge-c">
+            <b style="color:${col}">${Math.round(avgV)}%</b>
+            <span>${metricLbl}</span>
           </div>
         </div>
-        <div class="flex-1 min-w-0">
-          <div class="text-[18px] font-extrabold leading-none text-Cwhite tabular-nums">
-            ${avgV.toFixed(1)}<span class="text-[10px] text-Cmuted font-normal">%</span>
-          </div>
-          <div class="text-[8px] text-Cmuted mt-0.5">${metricLbl} &nbsp;·&nbsp; peak ${peakV.toFixed(0)}%</div>
-          ${_bar(pct_, col, "h-1.5")}
+        <div class="rh-card__readout">
+          <div class="rh-card__value" style="color:${col}">${avgV.toFixed(1)}<u>%</u></div>
+          <div class="rh-card__sub">peak <b style="color:${col}">${peakV.toFixed(0)}%</b> · ${total} svr</div>
         </div>
       </div>
-      ${chips ? `<div class="flex flex-wrap gap-1 pt-0.5">${chips}</div>` : ""}
+      <div class="rh-card__bar"><i style="width:${peakW}%;background:${col}"></i></div>
+      ${chips ? `<div class="rh-card__chips">${chips}</div>` : ""}
+      ${note ? `<div class="rh-card__note"><span>ℹ</span><span>${note}</span></div>` : ""}
     </div>`;
   };
 
@@ -11174,22 +11301,22 @@ function _renderExecResourceHealth(servers, kpis) {
     .sort(([a], [b]) => (a === "PROD" ? -1 : b === "PROD" ? 1 : a.localeCompare(b)))
     .map(([env, cnt]) => {
       const ec   = ENV_COL[env] || THEME.muted;
-      const hPct = cnt.total ? (cnt.ok  / cnt.total * 100) : 0;
+      const hPct = cnt.total ? (cnt.ok / cnt.total * 100) : 0;
       const tag  = cnt.crit > 0
-        ? `<span class="font-bold" style="color:${THEME.red}">${cnt.crit} CRIT</span>`
+        ? `<span class="text-[11px] font-bold" style="color:${THEME.red}">${cnt.crit} CRIT</span>`
         : cnt.warn > 0
-        ? `<span class="font-bold" style="color:${THEME.amber}">${cnt.warn} WARN</span>`
-        : `<span class="font-bold" style="color:${THEME.green}">All OK</span>`;
-      return `<div class="flex items-center gap-2 py-1 border-b border-white/[0.04] last:border-0">
-        <span class="flex-shrink-0 w-1.5 h-1.5 rounded-full" style="background:${ec}"></span>
-        <span class="text-[10px] font-bold w-9" style="color:${ec}">${env}</span>
-        <div class="flex-1">${_bar(hPct, THEME.green, "h-1")}</div>
-        <span class="text-[9px] text-Cmuted">${cnt.total}svr</span>
-        <div class="text-[9px] w-16 text-right">${tag}</div>
+        ? `<span class="text-[11px] font-bold" style="color:${THEME.amber}">${cnt.warn} WARN</span>`
+        : `<span class="text-[11px] font-bold" style="color:${THEME.green}">All OK</span>`;
+      return `<div class="flex items-center gap-3 py-2 border-b border-white/[0.05] last:border-0">
+        <span class="flex-shrink-0 w-2 h-2 rounded-full" style="background:${ec};box-shadow:0 0 4px ${ec}99"></span>
+        <span class="text-[12px] font-bold w-11 flex-shrink-0" style="color:${ec}">${env}</span>
+        <div class="flex-1">${_bar(hPct, THEME.green, "h-3")}</div>
+        <span class="text-[11px] text-Cmuted flex-shrink-0">${cnt.total}svr</span>
+        <div class="flex-shrink-0 w-16 text-right">${tag}</div>
       </div>`;
     }).join("");
 
-  // ── Worst servers (up to 5) ───────────────────────────────────────────────
+  // ── Worst servers ranked table (up to 5) ─────────────────────────────────
   const worst5 = enriched
     .map(s => ({ ...s, worst: Math.max(s.cpuPeak, s.memPeak, s.diskPeak) }))
     .sort((a, b) => b.worst - a.worst)
@@ -11202,15 +11329,16 @@ function _renderExecResourceHealth(servers, kpis) {
     const [mKey, mVal] = dom;
     const col  = _col(mVal, T.cpu_ok, T.cpu_warn);
     const ri   = ROLE_INFO[s.type] || { col: THEME.muted, bg: "rgba(107,125,179,0.1)" };
-    const name = s.host.length > 22 ? s.host.slice(0, 19) + "…" : s.host;
-    return `<div class="flex items-center gap-2 py-1 border-b border-white/[0.04] last:border-0">
-      <span class="flex-shrink-0 w-1.5 h-1.5 rounded-full" style="background:${col}"></span>
-      <span class="flex-1 text-[10px] text-Cwhite truncate" title="${_esc(s.host)}">${_esc(name)}</span>
-      <span class="flex-shrink-0 text-[7px] px-1.5 py-0.5 rounded font-bold"
-            style="color:${ri.col};background:${ri.bg}">${s.type || "APP"}</span>
-      <span class="flex-shrink-0 text-[8px] text-Cmuted w-7 text-right">${mKey}</span>
-      <div class="flex-shrink-0 w-20">${_bar(mVal, col, "h-1.5")}</div>
-      <span class="flex-shrink-0 text-[10px] font-bold font-mono tabular-nums w-9 text-right"
+    const name = s.host.length > 26 ? s.host.slice(0, 23) + "…" : s.host;
+    return `<div class="flex items-center gap-3 py-2 border-b border-white/[0.05] last:border-0">
+      <span class="flex-shrink-0 w-2 h-2 rounded-full"
+            style="background:${col};box-shadow:0 0 5px ${col}99"></span>
+      <span class="flex-1 text-[12px] font-medium text-Cwhite truncate" title="${_esc(s.host)}">${_esc(name)}</span>
+      <span class="flex-shrink-0 text-[9px] px-2 py-0.5 rounded font-bold"
+            style="color:${ri.col};background:${ri.bg};border:1px solid ${ri.col}44">${s.type || "APP"}</span>
+      <span class="flex-shrink-0 text-[10px] font-bold text-Cmuted w-9 text-right">${mKey}</span>
+      <div class="flex-shrink-0 w-24">${_bar(mVal, col, "h-2.5")}</div>
+      <span class="flex-shrink-0 text-[13px] font-extrabold font-mono tabular-nums w-10 text-right"
             style="color:${col}">${mVal.toFixed(0)}%</span>
     </div>`;
   }).join("");
@@ -11220,82 +11348,94 @@ function _renderExecResourceHealth(servers, kpis) {
 
   // ── Final HTML ────────────────────────────────────────────────────────────
   el.innerHTML = `
-  <!-- Header: grade + window badge -->
-  <div class="flex items-center justify-between pb-3 mb-1 border-b border-white/[0.05]">
+  <!-- Header: fleet grade badge + server count + observation window -->
+  <div class="flex items-center justify-between pb-4 mb-1 border-b border-white/[0.06]">
     <div class="flex items-center gap-3">
-      <div class="w-10 h-10 rounded-xl flex items-center justify-center font-extrabold text-2xl flex-shrink-0"
-           style="background:${gradeColor}18;border:1.5px solid ${gradeColor}44;color:${gradeColor}">${fleetGrade}</div>
+      <div class="w-12 h-12 rounded-xl flex items-center justify-center font-extrabold text-2xl flex-shrink-0"
+           style="background:${gradeColor}1c;border:2px solid ${gradeColor}55;color:${gradeColor};
+                  box-shadow:0 0 14px ${gradeColor}33">${fleetGrade}</div>
       <div>
-        <div class="text-[12px] font-bold text-Cwhite">${total} server${total !== 1 ? "s" : ""}</div>
-        <div class="text-[8px] text-Cmuted">${tsCount > 0 ? `${tsCount} with time-series · ` : ""}${isAzure ? "Azure Monitor" : "Document upload"}</div>
+        <div class="text-[15px] font-bold text-Cwhite leading-tight">
+          ${total} server${total !== 1 ? "s" : ""}
+        </div>
+        <div class="text-[11px] text-Cmuted mt-0.5">
+          ${tsCount > 0 ? `${tsCount} with time-series · ` : ""}${isAzure ? "Azure Monitor" : "Document upload"}
+        </div>
       </div>
     </div>
-    <div class="text-right">
-      <div class="inline-flex items-center gap-1 text-[9px] font-semibold px-2.5 py-1 rounded-full border"
-           style="color:${windowColor};border-color:${windowColor}44;background:${windowColor}10">${windowLabel}</div>
+    <div>
+      <div class="inline-flex items-center gap-1.5 text-[11px] font-semibold px-3 py-1.5 rounded-full border"
+           style="color:${windowColor};border-color:${windowColor}55;background:${windowColor}12">${windowLabel}</div>
     </div>
   </div>
 
-  <!-- Metric cards: CPU / Memory / Disk I/O -->
-  <div class="grid grid-cols-3 gap-2.5 mb-3">
+  <!-- Metric cards: CPU / Memory / Disk I/O (Grafana radial gauges) -->
+  <div class="rh-metric-grid mb-4">
     ${_metricCard("CPU",      "⚡", avgCpu,  peakCpu,  "cpu",  T.cpu_ok,  T.cpu_warn)}
-    ${_metricCard("MEMORY",   "🧠", avgMem,  peakMem,  "mem",  T.mem_ok,  T.mem_warn)}
+    ${_metricCard("MEMORY",   "🧠", avgMem,  peakMem,  "mem",  T.mem_ok,  T.mem_warn, adjPeakMem, dbBandNote)}
     ${_metricCard("DISK I/O", "💿", avgDisk, peakDisk, "disk", T.disk_ok, T.disk_warn)}
   </div>
 
-  <!-- Fleet topology donut + Environment breakdown -->
-  <div class="grid grid-cols-5 gap-2.5 mb-3">
-    <!-- Donut -->
-    <div class="col-span-2 rounded-xl border border-white/[0.06] bg-white/[0.015] p-3 flex flex-col items-center justify-center gap-2">
-      <div class="text-[7px] uppercase tracking-widest font-bold text-Cmuted">Fleet Health</div>
-      <div class="relative w-[80px] h-[80px]">
-        <canvas id="${cid}" width="80" height="80" style="display:block"></canvas>
+  <!-- Fleet health donut + Environment breakdown -->
+  <div class="grid grid-cols-5 gap-3 mb-4">
+    <!-- Fleet health donut -->
+    <div class="col-span-2 rounded-xl border border-white/[0.07] bg-white/[0.018] p-4
+                flex flex-col items-center justify-center gap-3">
+      <div class="text-[10px] uppercase tracking-widest font-bold text-Cmuted">Fleet Health</div>
+      <div class="relative w-[100px] h-[100px]">
+        <canvas id="${cid}" width="100" height="100" style="display:block"></canvas>
         <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <div class="text-[16px] font-extrabold leading-none text-Cwhite">${total}</div>
-          <div class="text-[7px] text-Cmuted">servers</div>
+          <div class="text-[22px] font-extrabold leading-none text-Cwhite">${total}</div>
+          <div class="text-[10px] text-Cmuted mt-0.5">servers</div>
         </div>
       </div>
-      <div class="flex items-center gap-2.5 text-[8px]">
-        <span class="flex items-center gap-0.5">
+      <div class="flex items-center gap-3 text-[10px]">
+        <span class="flex items-center gap-1">
           <span class="w-2 h-2 rounded-full" style="background:${THEME.red}"></span>
-          <span class="text-Cmuted">${bands.crit} crit</span></span>
-        <span class="flex items-center gap-0.5">
+          <span class="text-Cmuted">${bands.crit} crit</span>
+        </span>
+        <span class="flex items-center gap-1">
           <span class="w-2 h-2 rounded-full" style="background:${THEME.amber}"></span>
-          <span class="text-Cmuted">${bands.warn} warn</span></span>
-        <span class="flex items-center gap-0.5">
+          <span class="text-Cmuted">${bands.warn} warn</span>
+        </span>
+        <span class="flex items-center gap-1">
           <span class="w-2 h-2 rounded-full" style="background:${THEME.green}"></span>
-          <span class="text-Cmuted">${bands.ok} ok</span></span>
+          <span class="text-Cmuted">${bands.ok} ok</span>
+        </span>
       </div>
     </div>
     <!-- Environment breakdown -->
-    <div class="col-span-3 rounded-xl border border-white/[0.06] bg-white/[0.015] p-3">
-      <div class="text-[7px] uppercase tracking-widest font-bold text-Cmuted mb-2">By Environment</div>
-      ${envRows || '<div class="text-[9px] text-Cmuted py-1">No environment data</div>'}
+    <div class="col-span-3 rounded-xl border border-white/[0.07] bg-white/[0.018] p-4">
+      <div class="text-[10px] uppercase tracking-widest font-bold text-Cmuted mb-3">By Environment</div>
+      ${envRows || '<div class="text-[11px] text-Cmuted py-2">No environment data</div>'}
     </div>
   </div>
 
-  <!-- Worst servers risk table -->
-  <div class="rounded-xl border border-white/[0.06] bg-white/[0.015] p-3">
-    <div class="flex items-center justify-between mb-2">
-      <div class="text-[7px] uppercase tracking-widest font-bold text-Cmuted">Highest-Risk Servers</div>
-      <div class="text-[8px] text-Cmuted">worst metric · peak over window</div>
+  <!-- Highest-risk servers ranked table -->
+  <div class="rounded-xl border border-white/[0.07] bg-white/[0.018] p-4">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[10px] uppercase tracking-widest font-bold text-Cmuted">Highest-Risk Servers</div>
+      <div class="text-[10px] text-Cmuted">worst metric · peak over window</div>
     </div>
-    ${serverRows || '<div class="text-[9px] text-Cmuted py-1">No server data</div>'}
+    ${serverRows || '<div class="text-[11px] text-Cmuted py-2">No server data</div>'}
   </div>`;
 
   // ── Draw fleet health donut via Canvas 2D (no external lib) ──────────────
   requestAnimationFrame(() => {
     const canvas = document.getElementById(cid);
     if (!canvas) return;
-    const ctx  = canvas.getContext("2d");
-    const cx = 40, cy = 40, r = 28, sw = 9;
+    const ctx = canvas.getContext("2d");
+    const cx = 50, cy = 50, r = 34, sw = 11;
     // Background ring
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = sw; ctx.stroke();
-    // Data slices
+    // Coloured slices
     if (total > 0) {
-      const slices = [{ v: bands.crit, c: THEME.red }, { v: bands.warn, c: THEME.amber }, { v: bands.ok, c: THEME.green }]
-        .filter(s => s.v > 0);
+      const slices = [
+        { v: bands.crit, c: THEME.red },
+        { v: bands.warn, c: THEME.amber },
+        { v: bands.ok,   c: THEME.green },
+      ].filter(s => s.v > 0);
       let start = -Math.PI / 2;
       slices.forEach(sl => {
         const sweep = (sl.v / total) * Math.PI * 2;

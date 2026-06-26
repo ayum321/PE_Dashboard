@@ -436,6 +436,67 @@
       padding: 3px 10px;
       border-radius: 6px;
     }
+
+    /* ── Resource Health metric cards — stable component contract ─────────
+       4 zones (head · body · bar · chips) with a controlled gap rhythm.
+       Height is content-driven (no equal-row stretch), gauge sizing is
+       driven by --rh-gauge, and per-card accent colours come in via inline
+       custom properties (--rh-accent / --rh-border / --rh-bg / --rh-glow). */
+    .rh-metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 900px) { .rh-metric-grid { grid-template-columns: 1fr; } }
+
+    .rh-card {
+      --rh-gauge: 64px;
+      --rh-accent: #10d96e;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+      padding: 14px 15px 13px;
+      border-radius: 14px;
+      border: 1px solid var(--rh-border, #213060);
+      background: var(--rh-bg, #0d1526);
+      transition: border-color .2s ease, box-shadow .2s ease;
+    }
+    .rh-card.is-warn { box-shadow: 0 0 13px -3px var(--rh-glow, transparent); }
+    .rh-card.is-crit { box-shadow: 0 0 22px -3px var(--rh-glow, transparent); }
+
+    .rh-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .rh-card__head-l { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .rh-card__icon { font-size: 15px; line-height: 1; }
+    .rh-card__label { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #6b7db3; white-space: nowrap; }
+    .rh-card__badge { font-size: 10px; font-weight: 800; letter-spacing: .04em; padding: 2px 9px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+
+    .rh-card__body {
+      display: grid;
+      grid-template-columns: var(--rh-gauge) 1fr;
+      align-items: center;
+      gap: 14px;
+    }
+    .rh-card__gauge { position: relative; width: var(--rh-gauge); height: var(--rh-gauge); flex-shrink: 0; }
+    .rh-card__gauge svg { display: block; width: 100%; height: 100%; }
+    .rh-card__gauge-c { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+    .rh-card__gauge-c b { font-size: 14px; font-weight: 800; line-height: 1; font-family: 'JetBrains Mono', monospace; }
+    .rh-card__gauge-c span { font-size: 8px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #6b7db3; margin-top: 2px; }
+
+    .rh-card__readout { min-width: 0; }
+    .rh-card__value { font-size: 30px; line-height: 1; font-weight: 800; color: #f0f4ff; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+    .rh-card__value u { font-size: 14px; font-weight: 700; color: #6b7db3; text-decoration: none; margin-left: 1px; }
+    .rh-card__sub { font-size: 10.5px; color: #6b7db3; margin-top: 5px; white-space: nowrap; }
+    .rh-card__sub b { font-weight: 800; }
+
+    .rh-card__bar { height: 7px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
+    .rh-card__bar > i { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
+
+    .rh-card__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .rh-chip { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 6px; line-height: 1.5; white-space: nowrap; }
+
+    .rh-card__note { display: flex; gap: 5px; align-items: flex-start; font-size: 9.5px; line-height: 1.35; color: #a855f7; }
+    .rh-card__note > span:first-child { flex-shrink: 0; }
   </style>
 </head>
 
@@ -1996,12 +2057,12 @@
                 <div class="text-[9px] text-Cmuted mt-1">Threshold 80%</div>
               </div>
               <div class="rounded-xl bg-Ccard border border-Cborder shadow-kpi hover:shadow-kpiHov transition p-4 text-center">
-                <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted" style="letter-spacing:0.12em">Avg Memory</div>
+                <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted" style="letter-spacing:0.12em">Avg Mem Avail</div>
                 <div class="relative flex justify-center mt-1" style="height:64px">
                   <canvas id="rk-mem-ring" width="64" height="64"></canvas>
                   <div id="rk-mem" class="absolute inset-0 flex items-center justify-center text-base font-extrabold text-Cmuted">—</div>
                 </div>
-                <div class="text-[9px] text-Cmuted mt-1">Threshold 80%</div>
+                <div class="text-[9px] text-Cmuted mt-1">Available · higher = better</div>
               </div>
               <div class="rounded-xl bg-Ccard border border-Cborder shadow-kpi hover:shadow-kpiHov transition p-4 text-center">
                 <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted" style="letter-spacing:0.12em">Avg Disk</div>

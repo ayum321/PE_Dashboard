@@ -944,8 +944,17 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     recommendation="Monitor these hosts during the next batch window; set alerts at 85% sustained CPU",
                     root_cause="CPU_PRESSURE")
 
-        # Memory pressure — >= 80%
-        mem_hot = [s for s in servers if _f(s.get("mem_pct")) >= 80]
+        # Memory pressure — >= 80%, but exclude DB servers in expected SGA/PGA band
+        # (80–92% used = 8–20% available is normal for Oracle/SQL DB workloads).
+        # DB servers above 92% used (< 8% available) are still flagged.
+        mem_hot = [
+            s for s in servers
+            if _f(s.get("mem_pct")) >= 80
+            and not (
+                (s.get("type") or "APP").upper() == "DB"
+                and _f(s.get("mem_pct")) <= 92.0
+            )
+        ]
         if mem_hot and not all_zero:
             names = ", ".join(s.get("host", "?") for s in mem_hot[:3])
             add("warning", "💾",
@@ -956,6 +965,27 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 recommendation="Tune JVM heap / process memory limits; review in-memory caching strategies for batch jobs",
                 root_cause="MEMORY_PRESSURE")
 
+        # DB memory band alert — DB servers above expected range (> 92% used / < 8% available)
+        db_mem_high = [
+            s for s in servers
+            if (s.get("type") or "APP").upper() == "DB"
+            and _f(s.get("mem_pct")) > 92.0
+        ]
+        if db_mem_high and not all_zero:
+            names = ", ".join(
+                f"{s.get('host','?').split('.')[0]} ({_f(s.get('mem_pct')):.0f}% used)"
+                for s in db_mem_high[:3]
+            )
+            add("critical", "💾",
+                f"{len(db_mem_high)} DB server(s) above expected memory band (> 92% used / < 8% available)",
+                f"Hosts: {names}{'…' if len(db_mem_high) > 3 else ''}. "
+                f"DB expected band is 80–92% used (SGA/PGA allocation). "
+                f"Above 92% indicates possible memory leak, PGA over-allocation, or VM under-provisioning.",
+                source="resource", evidence_class=res_evidence_class,
+                impact="DB server RAM exhausted beyond SGA/PGA expected range — risk of paging, OOM, and batch job failure",
+                recommendation="Review PGA_AGGREGATE_LIMIT, check for memory leaks; consider VM right-sizing",
+                root_cause="DB_MEM_OVERRUN")
+
         # Disk usage — >= 85%
         disk_hot = [s for s in servers if _f(s.get("disk_used_max")) >= 85]
         if disk_hot and not all_zero:
@@ -964,6 +994,29 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 f"{len(disk_hot)} server(s) with critical disk usage (≥ 85%)",
                 f"Hosts: {names}{'…' if len(disk_hot) > 3 else ''} — batch spool jobs may fail",
                 source="resource", evidence_class=res_evidence_class)
+
+        # ── Disk monitoring gap ───────────────────────────────────────────────
+        # Servers with no disk I/O metric at all cannot be assessed for disk
+        # health. Flag as a DATA_GAP finding so the PE audit is not silent.
+        disk_gap = [
+            s for s in servers
+            if not s.get("disk_available") and not s.get("image_only")
+        ]
+        if disk_gap and not all_zero:
+            gap_names = ", ".join(s.get("host", "?").split(".")[0] for s in disk_gap[:3])
+            gap_more  = f" +{len(disk_gap) - 3} more" if len(disk_gap) > 3 else ""
+            add("warning", "💿",
+                f"Disk I/O data missing for {len(disk_gap)} server(s) — disk health cannot be assessed",
+                f"Servers: {gap_names}{gap_more}. "
+                f"Azure Monitor is not collecting 'OS Disk Bandwidth Consumed Percentage' for these hosts.",
+                source="resource", evidence_class=res_evidence_class,
+                impact=f"{len(disk_gap)} server(s) cannot be audited for disk pressure — PE assessment is incomplete for the disk pillar",
+                recommendation=(
+                    "Configure Azure Monitor to collect 'OS Disk Bandwidth Consumed Percentage' "
+                    "for all in-scope servers. In Azure Portal: Monitor → Metrics → select VM → "
+                    "OS Disk Bandwidth Consumed Percentage."
+                ),
+                root_cause="DISK_MONITORING_GAP")
 
         # Infrastructure anomalies
         for ia in (r_anoms or [])[:2]:

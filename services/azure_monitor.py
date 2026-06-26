@@ -69,7 +69,9 @@ except Exception:
     pass
 # ─────────────────────────────────────────────────────────────────────────────
 
+import hashlib as _hashlib
 import logging
+import threading as _threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -130,52 +132,105 @@ def _require_sdk() -> None:
         )
 
 
-# ── Cached browser credential (module-level) ──────────────────────────────────
-_browser_credential = None          # set by browser_login()
-_browser_credential_info: dict = {} # identity info from browser login
+# ── Per-session browser credentials (thread-safe registry) ────────────────────
+# Credentials are scoped by session id (supplied by the HTTP layer from a
+# first-party cookie) so concurrent analysts sharing one server process never
+# overwrite or read each other's Azure identity/token. The "_default" bucket
+# preserves the original single-user / az-login workflow when no session id is
+# supplied (e.g. internal callers). All access is guarded by a re-entrant lock.
+_cred_lock = _threading.RLock()
+_cred_sessions: dict = {}   # sid -> {"cred": <credential|None>, "info": {...}}
+_DEFAULT_SID = "_default"
 
-# Persistent credential cache — survives server restarts
+# Persistent credential cache — survives server restarts. Files are namespaced
+# per session so a restart restores only the identity that owns each session,
+# never a blanket "last person to log in" for everyone. The default bucket keeps
+# the original unsuffixed filenames for backward compatibility.
 _CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
-_AUTH_RECORD_FILE = _CACHE_DIR / "auth_record.json"
-_CREDENTIAL_INFO_FILE = _CACHE_DIR / "credential_info.json"
 
 
-def _save_credential_info(info: dict):
-    """Persist credential identity info to disk."""
+def _sid_norm(session_id=None) -> str:
+    sid = (session_id or "").strip()
+    return sid or _DEFAULT_SID
+
+
+def _sid_tag(session_id=None) -> str:
+    """Filesystem-safe per-session suffix. Default bucket → '' (legacy names)."""
+    sid = _sid_norm(session_id)
+    if sid == _DEFAULT_SID:
+        return ""
+    return "_" + _hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+
+
+def _auth_record_file(session_id=None) -> Path:
+    return _CACHE_DIR / f"auth_record{_sid_tag(session_id)}.json"
+
+
+def _credential_info_file(session_id=None) -> Path:
+    return _CACHE_DIR / f"credential_info{_sid_tag(session_id)}.json"
+
+
+# ── Thread-safe registry accessors (no network — pure in-memory state) ────────
+def _get_cred(session_id=None):
+    with _cred_lock:
+        e = _cred_sessions.get(_sid_norm(session_id))
+        return e.get("cred") if e else None
+
+
+def _get_info(session_id=None) -> dict:
+    with _cred_lock:
+        e = _cred_sessions.get(_sid_norm(session_id))
+        return dict(e.get("info") or {}) if e else {}
+
+
+def _set_session(session_id, cred, info) -> None:
+    with _cred_lock:
+        _cred_sessions[_sid_norm(session_id)] = {"cred": cred, "info": dict(info or {})}
+
+
+def _clear_session(session_id=None) -> None:
+    with _cred_lock:
+        _cred_sessions.pop(_sid_norm(session_id), None)
+
+
+def _save_credential_info(info: dict, session_id=None):
+    """Persist credential identity info to this session's disk file."""
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         import json as _json
-        _CREDENTIAL_INFO_FILE.write_text(_json.dumps(info), encoding="utf-8")
+        _credential_info_file(session_id).write_text(_json.dumps(info), encoding="utf-8")
     except Exception:
         pass
 
 
-def _load_credential_info() -> dict:
-    """Load persisted credential identity info from disk."""
+def _load_credential_info(session_id=None) -> dict:
+    """Load persisted credential identity info for this session from disk."""
     try:
-        if _CREDENTIAL_INFO_FILE.exists():
+        f = _credential_info_file(session_id)
+        if f.exists():
             import json as _json
-            return _json.loads(_CREDENTIAL_INFO_FILE.read_text(encoding="utf-8"))
+            return _json.loads(f.read_text(encoding="utf-8"))
     except Exception:
         pass
     return {}
 
 
-def _save_auth_record(record):
-    """Persist AuthenticationRecord to disk."""
+def _save_auth_record(record, session_id=None):
+    """Persist AuthenticationRecord to this session's disk file."""
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _AUTH_RECORD_FILE.write_text(record.serialize(), encoding="utf-8")
+        _auth_record_file(session_id).write_text(record.serialize(), encoding="utf-8")
     except Exception as exc:
         logger.warning("Failed to persist auth record: %s", exc)
 
 
-def _load_auth_record():
-    """Load AuthenticationRecord from disk, or None."""
+def _load_auth_record(session_id=None):
+    """Load this session's AuthenticationRecord from disk, or None."""
     try:
-        if _AUTH_RECORD_FILE.exists():
+        f = _auth_record_file(session_id)
+        if f.exists():
             from azure.identity import AuthenticationRecord
-            return AuthenticationRecord.deserialize(_AUTH_RECORD_FILE.read_text(encoding="utf-8"))
+            return AuthenticationRecord.deserialize(f.read_text(encoding="utf-8"))
     except Exception:
         pass
     return None
@@ -193,18 +248,19 @@ def _token_cache_options():
         return None
 
 
-def _restore_browser_credential() -> bool:
-    """Try to restore browser credential from persistent AuthenticationRecord.
-    Uses silent auth (no browser popup). Returns True if restored."""
-    global _browser_credential, _browser_credential_info
-    if _browser_credential is not None:
+def _restore_browser_credential(session_id=None) -> bool:
+    """Try to restore this session's browser credential from its persistent
+    AuthenticationRecord. Uses silent auth (no browser popup). Returns True if
+    restored. Each session restores only its OWN identity file — never another
+    session's."""
+    if _get_cred(session_id) is not None:
         return True
 
-    info = _load_credential_info()
+    info = _load_credential_info(session_id)
     if not info.get("logged_in"):
         return False
 
-    record = _load_auth_record()
+    record = _load_auth_record(session_id)
     if record is None:
         return False
 
@@ -218,8 +274,7 @@ def _restore_browser_credential() -> bool:
         # Silently acquire a token (should use cached refresh token)
         token = cred.get_token("https://management.azure.com/.default")
         if token and token.token:
-            _browser_credential = cred
-            _browser_credential_info = info
+            _set_session(session_id, cred, info)
             logger.info("Restored browser credential from cache: %s", info.get("name", "?"))
             return True
     except Exception as exc:
@@ -228,13 +283,12 @@ def _restore_browser_credential() -> bool:
     return False
 
 
-def _clear_persistent_cache():
-    """Remove persistent cache files."""
+def _clear_persistent_cache(session_id=None):
+    """Remove this session's persistent cache files."""
     try:
-        if _AUTH_RECORD_FILE.exists():
-            _AUTH_RECORD_FILE.unlink()
-        if _CREDENTIAL_INFO_FILE.exists():
-            _CREDENTIAL_INFO_FILE.unlink()
+        for f in (_auth_record_file(session_id), _credential_info_file(session_id)):
+            if f.exists():
+                f.unlink()
     except Exception:
         pass
 
@@ -259,17 +313,17 @@ def _preflight_auth_network(timeout: float = 6.0) -> None:
         ) from exc
 
 
-def browser_login() -> dict:
-    """Launch interactive browser login and cache the credential.
+def browser_login(session_id=None) -> dict:
+    """Launch interactive browser login and cache the credential for THIS session.
 
     Opens the Microsoft "Pick an account" page in the user's default
     browser.  After successful sign-in the credential is cached both
-    in-process AND on disk (via AuthenticationRecord) so it survives
-    server restarts without re-prompting.
+    in-process (under this session id) AND on disk (per-session
+    AuthenticationRecord) so it survives server restarts without re-prompting —
+    and without overwriting any other session's identity.
 
     Returns a dict with identity info (name, tenant, etc.).
     """
-    global _browser_credential, _browser_credential_info
     _require_sdk()
     from azure.identity import InteractiveBrowserCredential
     import json as _json, base64
@@ -286,7 +340,7 @@ def browser_login() -> dict:
         cred = InteractiveBrowserCredential(**kwargs)
         # authenticate() opens browser AND returns an AuthenticationRecord
         record = cred.authenticate(scopes=["https://management.azure.com/.default"])
-        _save_auth_record(record)   # must save AFTER authenticate() returns the record
+        _save_auth_record(record, session_id)   # save AFTER authenticate() returns the record
         # Now get a token (will be silent — cached from authenticate())
         token = cred.get_token("https://management.azure.com/.default")
     except Exception as exc:
@@ -309,43 +363,54 @@ def browser_login() -> dict:
     except Exception:
         info = {"logged_in": True, "name": "unknown", "method": "browser"}
 
-    _browser_credential = cred
-    _browser_credential_info = info
-    _save_credential_info(info)
+    _set_session(session_id, cred, info)
+    _save_credential_info(info, session_id)
 
     logger.info("Browser login succeeded: %s", info.get("name", "?"))
     return info
 
 
-def get_browser_credential_info() -> dict:
-    """Return cached browser credential identity, or empty dict.
-    Also tries restoring from disk cache on first call."""
-    if not _browser_credential_info:
-        _restore_browser_credential()
-    return dict(_browser_credential_info)
+def get_browser_credential_info(session_id=None) -> dict:
+    """Return this session's cached browser credential identity, or empty dict.
+    Also tries restoring from this session's disk cache on first call."""
+    if not _get_info(session_id):
+        _restore_browser_credential(session_id)
+    return _get_info(session_id)
 
 
-def clear_browser_credential() -> None:
-    """Clear the cached browser credential (sign-out) — both in-process and on disk."""
-    global _browser_credential, _browser_credential_info
-    _browser_credential = None
-    _browser_credential_info = {}
-    _clear_persistent_cache()
+def get_browser_credential(session_id=None):
+    """Return this session's browser credential object (restoring from this
+    session's disk cache if needed), or None. Used by background workers that
+    need the credential without rebuilding it."""
+    cred = _get_cred(session_id)
+    if cred is not None:
+        return cred
+    if _restore_browser_credential(session_id):
+        return _get_cred(session_id)
+    return None
 
 
-def _build_credential(cfg: dict):
-    """Build Azure credential — prefers cached browser credential (including
-    restored from disk), then falls back to DefaultAzureCredential.
+def clear_browser_credential(session_id=None) -> None:
+    """Clear this session's cached browser credential (sign-out) — both
+    in-process and on disk. Other sessions are unaffected."""
+    _clear_session(session_id)
+    _clear_persistent_cache(session_id)
+
+
+def _build_credential(cfg: dict, session_id=None):
+    """Build Azure credential for this session — prefers the session's cached
+    browser credential (including restored from disk), then falls back to
+    DefaultAzureCredential (the server's ambient az-login / managed identity).
     """
-    global _browser_credential
-    # Try in-memory first
-    if _browser_credential is not None:
+    # Try this session's in-memory credential first
+    cred = _get_cred(session_id)
+    if cred is not None:
         logger.info("Azure auth: reusing cached browser credential")
-        return _browser_credential
-    # Try restoring from persistent cache
-    if _restore_browser_credential():
+        return cred
+    # Try restoring this session's credential from its persistent cache
+    if _restore_browser_credential(session_id):
         logger.info("Azure auth: restored browser credential from disk cache")
-        return _browser_credential
+        return _get_cred(session_id)
 
     from azure.identity import DefaultAzureCredential
     import logging as _logging
@@ -599,6 +664,73 @@ def _query_single_vm_timeseries(client, rid, start_time, end_time, granularity):
     return (rid, series, true_extremes)
 
 
+def _percentile(values: list, pct: float) -> float:
+    """Linear-interpolated percentile (numpy 'linear' / R-7 method).
+
+    Replaces the crude ``sorted_v[int(n * pct)]`` index lookup, which for small
+    samples collapses to the maximum (e.g. n=10, p95 → index 9 → the max value,
+    mislabelled as a percentile). Interpolation gives a true percentile at any n.
+    """
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    if n == 1:
+        return float(s[0])
+    rank = (pct / 100.0) * (n - 1)
+    lo = int(rank)
+    if lo + 1 >= n:
+        return float(s[-1])
+    frac = rank - lo
+    return float(s[lo] + frac * (s[lo + 1] - s[lo]))
+
+
+def _metric_elevation(metric_label: str) -> dict:
+    """Single source of truth for 'is this metric elevated' bands.
+
+    Reads the canonical CPU/MEM/DISK warn/crit thresholds from ``pe_config``
+    (live — picks up Settings overrides after ``pe_config.reload()``), so the
+    spike detector, per-VM hot-hours, and fleet hot-hours can no longer drift
+    apart with parallel hardcoded tables.
+
+    Returns warn/crit in USED-% terms (higher = worse). ``invert`` marks metrics
+    whose RAW samples are 'available %' (memory) — callers working in that space
+    convert via ``100 - used``.
+    """
+    from services import pe_config
+    name = (metric_label or "").lower()
+    if "cpu" in name:
+        return {"metric": "cpu", "warn": float(pe_config.CPU_WARN),
+                "crit": float(pe_config.CPU_CRIT), "invert": False}
+    if "mem" in name:
+        return {"metric": "mem", "warn": float(pe_config.MEM_WARN),
+                "crit": float(pe_config.MEM_CRIT), "invert": True}
+    if "disk" in name:
+        return {"metric": "disk", "warn": float(pe_config.DISK_WARN),
+                "crit": float(pe_config.DISK_CRIT), "invert": False}
+    return {"metric": "other", "warn": 80.0, "crit": 90.0, "invert": False}
+
+
+def _abs_breach_cfg(metric_name: str) -> dict | None:
+    """Absolute-breach thresholds for the spike detector, derived from the same
+    canonical ``pe_config`` bands as ``_metric_elevation`` (single source).
+
+    Memory is detected in 'available %' space (lower = worse), so used→available
+    is converted as ``100 - used``. ``min_minutes`` is the spike-duration gate and
+    stays metric-specific (orthogonal to the elevation threshold).
+    """
+    band = _metric_elevation(metric_name)
+    m = band["metric"]
+    if m == "cpu":
+        return {"critical": band["crit"], "warning": band["warn"], "min_minutes": 30}
+    if m == "mem":
+        return {"critical": 100.0 - band["crit"], "warning": 100.0 - band["warn"],
+                "min_minutes": 30, "invert": True}
+    if m == "disk":
+        return {"critical": band["crit"], "warning": band["warn"], "min_minutes": 15}
+    return None
+
+
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                    metric_name: str = "") -> list:
     """Detect spikes in a time-series using DUAL classifiers:
@@ -640,22 +772,11 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     else:
         z_critical = 3.0
 
-    # Absolute thresholds (Classifier 2) — chronic breach detection
-    # These fire regardless of z-score when a metric is in a dangerous zone
-    ABS_THRESHOLDS = {
-        "cpu":  {"critical": 90, "warning": 80, "min_minutes": 30},
-        "mem":  {"critical": 20, "warning": 30, "min_minutes": 30, "invert": True},
-        # For memory: "available" below 20% = critical (i.e., used > 80%)
-        "disk": {"critical": 80, "warning": 60, "min_minutes": 15},
-    }
-
-    abs_cfg = None
-    if "cpu" in mn:
-        abs_cfg = ABS_THRESHOLDS["cpu"]
-    elif "memory" in mn or "mem" in mn:
-        abs_cfg = ABS_THRESHOLDS["mem"]
-    elif "disk" in mn:
-        abs_cfg = ABS_THRESHOLDS["disk"]
+    # Absolute thresholds (Classifier 2) — chronic breach detection.
+    # Sourced from the canonical pe_config bands via _abs_breach_cfg, so the
+    # spike detector, per-VM hot-hours, and fleet hot-hours all read ONE shared
+    # threshold set instead of three parallel hardcoded tables.
+    abs_cfg = _abs_breach_cfg(metric_name)
 
     spikes = []
 
@@ -922,7 +1043,12 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
 
     if len(all_spike_events) >= 2:
         all_spike_events.sort(key=lambda e: e["ts"])
-        # Sliding window: group spikes within 15min of each other
+        # Chain clustering: group spikes where each is within 15 min of the
+        # PREVIOUS clustered event (not the anchor). Anchor-relative windows
+        # truncate slow-rolling incidents — e.g. A→B→C spiking 10 min apart
+        # span 20 min end-to-end, so C would fall outside a 15-min window from
+        # anchor A even though it is only 10 min from B. Chaining follows the
+        # rolling edge; the distinct-VM gate below still requires ≥2 VMs.
         clusters = []
         used = set()
         for i, ev in enumerate(all_spike_events):
@@ -930,15 +1056,17 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
                 continue
             cluster = [ev]
             used.add(i)
+            last_ts = ev["ts"]
             for j in range(i + 1, len(all_spike_events)):
                 if j in used:
                     continue
-                delta = (all_spike_events[j]["ts"] - ev["ts"]).total_seconds()
-                if delta <= 900:  # 15 min
-                    if all_spike_events[j]["vm"] != ev["vm"]:
-                        cluster.append(all_spike_events[j])
-                        used.add(j)
-                elif delta > 900:
+                delta = (all_spike_events[j]["ts"] - last_ts).total_seconds()
+                if delta <= 900:  # within 15 min of the previous clustered event
+                    cluster.append(all_spike_events[j])
+                    used.add(j)
+                    last_ts = all_spike_events[j]["ts"]
+                else:
+                    # events are time-sorted → every later one is even farther
                     break
             if len(cluster) >= 2:
                 vms_in_cluster = list({c["vm"] for c in cluster})
@@ -1252,8 +1380,7 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
                 mean = sum(vals) / n
                 variance = sum((v - mean) ** 2 for v in vals) / n
                 std = variance ** 0.5
-                sorted_v = sorted(vals)
-                p95 = sorted_v[int(n * 0.95)] if n > 1 else sorted_v[0]
+                p95 = _percentile(vals, 95.0)
                 daily_stats.append({
                     "date": date_str,
                     "mean": round(mean, 2),
@@ -1276,7 +1403,7 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
 
             # ── Hot hours: consistently above threshold across multiple days ──
             hot_hours = []
-            threshold = 80 if "CPU" in display_name else 75
+            threshold = _metric_elevation(display_name)["warn"]
             for hour in range(24):
                 vals = by_hour.get(hour, [])
                 if len(vals) >= max(2, int(days_observed * 0.3)):
@@ -1304,10 +1431,22 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
             divergence = round(abs(weekday_avg - weekend_avg), 2)
 
             # ── Trend acceleration: compare first half vs second half ──
+            # Split by CLOCK-TIME midpoint, not list-index midpoint. Index
+            # splitting assumes uniform sampling density; a real-world telemetry
+            # gap (VM created mid-window, missing hours) shifts the index midpoint
+            # away from the true time midpoint and makes "first vs second half" an
+            # unfair comparison. Fall back to index split only for a degenerate
+            # (zero-width) window where a time split leaves one side empty.
             all_vals = [pp["v"] for pp in parsed]
-            mid = len(all_vals) // 2
-            first_half = all_vals[:mid] if mid > 0 else all_vals
-            second_half = all_vals[mid:] if mid > 0 else all_vals
+            _times = [pp["t"] for pp in parsed]
+            _t_start, _t_end = min(_times), max(_times)
+            _t_mid = _t_start + (_t_end - _t_start) / 2
+            first_half = [pp["v"] for pp in parsed if pp["t"] < _t_mid]
+            second_half = [pp["v"] for pp in parsed if pp["t"] >= _t_mid]
+            if not first_half or not second_half:
+                mid = len(all_vals) // 2
+                first_half = all_vals[:mid] if mid > 0 else all_vals
+                second_half = all_vals[mid:] if mid > 0 else all_vals
             first_avg = sum(first_half) / len(first_half) if first_half else 0
             second_avg = sum(second_half) / len(second_half) if second_half else 0
             trend_delta = round(second_avg - first_avg, 2)
@@ -1370,7 +1509,7 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
                 "chronic_pressure_days": chronic_windows,
                 "recurring_spikes": recurring_spikes,
                 "overall_mean": round(sum(all_vals) / len(all_vals), 2),
-                "overall_p95": round(sorted(all_vals)[int(len(all_vals) * 0.95)], 2) if all_vals else 0,
+                "overall_p95": round(_percentile(all_vals, 95.0), 2) if all_vals else 0,
                 "overall_max": round(max(all_vals), 2) if all_vals else 0,
             }
 
@@ -1399,9 +1538,10 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
         for hour, vals in fleet_daily_profiles.get(metric_name, {}).items():
             fleet_hourly[hour] = round(sum(vals) / len(vals), 2) if vals else 0
 
+        _fleet_warn = _metric_elevation(metric_name)["warn"]
         fleet_hot_hours = [
             h for h in range(24)
-            if fleet_hourly.get(h, 0) >= 70
+            if fleet_hourly.get(h, 0) >= _fleet_warn
         ]
 
         fleet_summary[metric_name] = {
@@ -1497,7 +1637,8 @@ def _infer_server_type(name: str, tags: Optional[dict] = None, rg: str = "") -> 
     return "APP"
 
 
-def discover_vms(cfg: dict, resource_group: Optional[str] = None) -> List[Dict[str, Any]]:
+def discover_vms(cfg: dict, resource_group: Optional[str] = None,
+                 session_id=None) -> List[Dict[str, Any]]:
     """
     Discover all VMs in a subscription, classify them as APP/DB/SRE,
     and return a list for the user to select from before fetching metrics.
@@ -1511,7 +1652,7 @@ def discover_vms(cfg: dict, resource_group: Optional[str] = None) -> List[Dict[s
         )
 
     rg = (resource_group or cfg.get("azure_resource_group") or "").strip() or None
-    credential = _build_credential(cfg)
+    credential = _build_credential(cfg, session_id)
 
     vms = _list_vms(credential, sub_id, rg)
 
@@ -1619,7 +1760,8 @@ def search_vms(credential, query: str,
 
 
 def fetch_vm_metrics(cfg: dict, hours_back: int = 24,
-                     vm_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+                     vm_ids: Optional[List[str]] = None,
+                     session_id=None) -> List[Dict[str, Any]]:
     """
     Main entry point. Fetches VM metrics from Azure Monitor.
 
@@ -1638,7 +1780,7 @@ def fetch_vm_metrics(cfg: dict, hours_back: int = 24,
         cpu_pct, mem_pct, disk_pct, source
     """
     _require_sdk()
-    credential = _build_credential(cfg)
+    credential = _build_credential(cfg, session_id)
 
     # ── When explicit VM IDs are given, get each VM directly (fast + parallel) ──
     if vm_ids:
@@ -1868,7 +2010,8 @@ def get_vm_prewarm_state() -> Dict[str, Any]:
 
 
 def prewarm_vm_inventory(credential, subscription_id: str,
-                         resource_group: Optional[str] = None) -> None:
+                         resource_group: Optional[str] = None,
+                         session_id=None) -> None:
     """Background: discover all VMs and cache them so search is instantaneous.
 
     Runs discover_vms() once and stores the result in _vm_inventory_cache.
@@ -1884,7 +2027,7 @@ def prewarm_vm_inventory(credential, subscription_id: str,
             _vm_prewarm_state = {"status": "warming", "vm_count": 0, "ts": __import__("time").time(), "error": None}
         try:
             cfg = {"credential": credential, "subscription_id": subscription_id}
-            vms = discover_vms(cfg, resource_group=resource_group)
+            vms = discover_vms(cfg, resource_group=resource_group, session_id=session_id)
             with _vm_prewarm_lock:
                 _vm_inventory_cache.clear()
                 _vm_inventory_cache[subscription_id] = vms
