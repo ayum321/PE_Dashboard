@@ -460,6 +460,14 @@ def azure_subscriptions(request: Request, response: Response) -> Dict[str, Any]:
             "_cache_warming": True,   # hint to client: full list loading in background
         }
 
+    # Signed in but no saved subscription yet — the background worker is still
+    # enumerating. Tell the client to keep polling instead of reporting a false
+    # "not signed in" (which would make the dropdown give up prematurely).
+    from services.azure_monitor import _get_cred as _az_get_cred, _load_credential_info as _az_disk
+    signed_in = (_az_get_cred(sid) is not None) or bool(_az_disk(sid).get("logged_in"))
+    if signed_in:
+        return {"ok": True, "subscriptions": [], "_cache_warming": True}
+
     return {"ok": False, "error": "Not signed in — use Sign in with Browser first.", "subscriptions": []}
 
 

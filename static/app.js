@@ -14134,11 +14134,30 @@ async function azureModalSignIn() {
   const btn   = document.getElementById("azure-modal-signin-btn");
   const label = document.getElementById("azure-modal-auth-label");
   const dot   = document.getElementById("azure-modal-auth-dot");
+
+  // Fail fast if the server isn't reachable — avoids a frozen "Waiting…" state.
+  try {
+    const ping = await fetch("/api/health", { method: "GET", signal: AbortSignal.timeout(2000) });
+    if (!ping.ok) throw new Error("unhealthy");
+  } catch {
+    if (label) { label.textContent = "❌ Server not reachable — start the server, then retry."; label.className = "text-red-400 text-xs"; }
+    toast("error", "Server offline", "Start the PE Dashboard server, then try again.");
+    return;
+  }
+
   if (btn) { btn.disabled = true; btn.textContent = "Opening browser…"; }
   if (label) { label.textContent = "Waiting for browser sign-in…"; label.className = "text-Cmuted text-xs"; }
   if (dot) { dot.className = "w-2 h-2 rounded-full bg-Cmuted animate-pulse inline-block"; }
+
+  // Progressive hints so a stalled loopback redirect doesn't look like a freeze.
+  const hint1 = setTimeout(() => { if (label) { label.textContent = "Still waiting — complete sign-in in the Microsoft tab that opened."; label.className = "text-amber-400 text-xs"; } }, 30000);
+  const hint2 = setTimeout(() => { if (label) { label.textContent = 'If the tab says "connection refused" after sign-in, click Sign in again (a new port is used).'; label.className = "text-amber-400 text-xs"; } }, 90000);
+
+  // Hard ceiling so the modal can NEVER hang forever (mirrors the Settings login).
+  const ctl = new AbortController();
+  const tm  = setTimeout(() => ctl.abort(), 300000);
   try {
-    const res = await fetch("/api/azure/browser-login", { method: "POST" });
+    const res = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
     const data = await res.json();
     if (!res.ok) {
       if (label) { label.textContent = `❌ ${data.detail || "Login failed"}`; label.className = "text-red-400 text-xs"; }
@@ -14161,12 +14180,16 @@ async function azureModalSignIn() {
     }
     const logoutBtn = document.getElementById("az-browser-logout-btn");
     if (logoutBtn) logoutBtn.classList.remove("hidden");
-    // Refresh the modal auth bar
+    // Refresh the modal auth bar — flips to "Signed in as…" and loads subscriptions
     _refreshModalAuthBar();
   } catch (err) {
-    if (label) { label.textContent = `❌ ${err.message}`; label.className = "text-red-400 text-xs"; }
-    toast("error", "Browser login error", err.message);
+    const msg = (err && err.name === "AbortError")
+      ? "Timed out waiting for sign-in. Click Sign in again and complete login in your browser."
+      : (err?.message || String(err));
+    if (label) { label.textContent = `❌ ${msg}`; label.className = "text-red-400 text-xs"; }
+    toast("error", "Browser login error", msg);
   } finally {
+    clearTimeout(tm); clearTimeout(hint1); clearTimeout(hint2);
     if (btn) { btn.disabled = false; btn.innerHTML = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg> Sign in with Browser'; }
   }
 }
@@ -14186,32 +14209,59 @@ async function azureModalSignOut() {
 async function _loadModalSubscriptions() {
   const sel = document.getElementById("azure-modal-sub");
   if (!sel) return;
-  try {
-    // Try browser login subscriptions first (from auth status)
-    const r = await fetch("/api/azure/subscriptions");
-    const d = await r.json();
-    const subs = d.subscriptions || [];
-    sel.innerHTML = "";
-    if (!subs.length) {
-      sel.innerHTML = '<option value="">No subscriptions found</option>';
-      return;
-    }
-    // Check if there's a configured subscription to pre-select
-    let cfgSub = "";
-    try { const c = await fetch("/api/azure/status"); const cs = await c.json(); cfgSub = cs.azure_subscription_id_value || ""; } catch {}
 
+  // Resolve the configured subscription once so we can pre-select it.
+  let cfgSub = "";
+  try { const c = await fetch("/api/azure/status"); const cs = await c.json(); cfgSub = cs.azure_subscription_id_value || ""; } catch {}
+
+  const renderSubs = (subs) => {
+    sel.innerHTML = "";
     for (const s of subs) {
       const opt = document.createElement("option");
       opt.value = s.id;
-      opt.textContent = `${s.name} (${s.id.slice(0,8)}…)`;
+      const nm = (s.name && s.name !== s.id) ? s.name : s.id;
+      opt.textContent = `${nm} (${String(s.id).slice(0, 8)}…)`;
       if (s.id === cfgSub || s.is_default) opt.selected = true;
       sel.appendChild(opt);
     }
-    // Auto-load RGs for selected subscription
     azureLoadRGs();
-  } catch (e) {
-    sel.innerHTML = '<option value="">Failed to load</option>';
+  };
+
+  // The subscription list is filled by a background worker AFTER sign-in, so the
+  // first call almost always returns `_cache_warming`. Poll briefly instead of
+  // giving up — otherwise the dropdown sticks on its placeholder or wrongly
+  // reports "No subscriptions found".
+  const MAX_TRIES = 12, DELAY_MS = 2000;
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+    let d;
+    try {
+      const r = await fetch("/api/azure/subscriptions");
+      d = await r.json();
+    } catch {
+      sel.innerHTML = '<option value="">Failed to load — reopen to retry</option>';
+      return;
+    }
+    const subs = d.subscriptions || [];
+    if (d.ok === false && !subs.length) {        // genuinely not signed in
+      sel.innerHTML = '<option value="">Sign in to load subscriptions</option>';
+      return;
+    }
+    if (subs.length && !d._cache_warming) {      // full list ready
+      renderSubs(subs);
+      return;
+    }
+    sel.innerHTML = '<option value="">Loading subscriptions…</option>';
+    await new Promise(res => setTimeout(res, DELAY_MS));
   }
+
+  // Warmed too slowly — render whatever we have (e.g. the saved sub) or say so.
+  try {
+    const r = await fetch("/api/azure/subscriptions");
+    const d = await r.json();
+    const subs = d.subscriptions || [];
+    if (subs.length) { renderSubs(subs); return; }
+  } catch {}
+  sel.innerHTML = '<option value="">No subscriptions found — check your Azure RBAC access</option>';
 }
 
 /* ── Load resource groups when subscription changes ── */

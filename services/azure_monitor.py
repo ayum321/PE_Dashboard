@@ -142,6 +142,12 @@ _cred_lock = _threading.RLock()
 _cred_sessions: dict = {}   # sid -> {"cred": <credential|None>, "info": {...}}
 _DEFAULT_SID = "_default"
 
+# Seconds to wait for the user to finish the interactive browser sign-in before
+# giving up. The SDK default is 300s; we cap lower so a stalled loopback redirect
+# (corporate proxy / stale tab / wrong browser profile) fails fast with a clear,
+# retryable error instead of leaving the request — and the UI — hanging.
+_BROWSER_AUTH_TIMEOUT_S = 180
+
 # Persistent credential cache — survives server restarts. Files are namespaced
 # per session so a restart restores only the identity that owns each session,
 # never a blanket "last person to log in" for everyone. The default bucket keeps
@@ -334,7 +340,9 @@ def browser_login(session_id=None) -> dict:
     logger.info("Azure auth: launching interactive browser login…")
     try:
         cache_opts = _token_cache_options()
-        kwargs: dict = {}
+        # Bound the interactive wait so a stalled loopback redirect fails fast
+        # (clear, retryable error) instead of hanging on the SDK's 300s default.
+        kwargs: dict = {"timeout": _BROWSER_AUTH_TIMEOUT_S}
         if cache_opts is not None:
             kwargs["cache_persistence_options"] = cache_opts
         cred = InteractiveBrowserCredential(**kwargs)
