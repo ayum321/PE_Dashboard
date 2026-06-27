@@ -24,6 +24,11 @@ from pydantic import BaseModel, ConfigDict
 
 from services import pe_config
 from services.pe_utils import coerce_float as _f
+from services.resource_calculator import (
+    role_cpu_thresholds as _role_cpu_thr,
+    DB_MEM_EXPECTED_LO as _DB_MEM_LO,
+    DB_MEM_EXPECTED_HI as _DB_MEM_HI,
+)
 
 router = APIRouter()
 
@@ -71,34 +76,107 @@ def _tag(val: float, ok: float, warn: float, fmt: str = "{:.1f}%") -> str:
     return '<span class="tag tag-gray">N/A</span>'
 
 
+def _g(x: Any) -> str:
+    """Format a threshold compactly (drops a trailing .0)."""
+    try:
+        return f"{float(x):g}"
+    except (TypeError, ValueError):
+        return str(x)
+
+
+def _metric_cell(val: float, amber_at: float, red_at: float, sub: str) -> str:
+    """A coloured metric tag with a dim governing-threshold sub-line so the
+    reader can verify the grade against the exact ceiling that governed it
+    (instead of trusting a summary sentence). Monotone bands: green < amber_at,
+    amber in [amber_at, red_at), red >= red_at."""
+    if val <= 0:
+        return '<span class="tag tag-gray">N/A</span>'
+    cls = "tag-red" if val >= red_at else ("tag-amber" if val >= amber_at else "tag-green")
+    return (f'<span class="tag {cls}">{val:.1f}%</span>'
+            f'<div class="dim" style="margin-top:3px;font-size:10px">{sub}</div>')
+
+
+def _cpu_cell(cpu: float, stype: str) -> str:
+    """Role-aware CPU cell — APP 60/80, DB 85/95, SRE 90/100 (same ceilings the
+    live fleet grader applies). Governing pair shown inline."""
+    rt = _role_cpu_thr(stype)
+    ok, warn = rt["ok"], rt["warn"]
+    return _metric_cell(cpu, ok, warn, f"{stype} thr {_g(ok)}/{_g(warn)}")
+
+
+def _mem_cell(mem: float, stype: str, mem_status: str | None) -> str:
+    """Role-aware memory cell. DB servers pre-allocate the SGA/PGA band
+    (DB_MEM_EXPECTED_LO–HI) by design, so memory inside that band is EXPECTED,
+    not a warning — matching resource_calculator's grader. Other roles fall back
+    to the global MEM warn/crit thresholds."""
+    if mem <= 0:
+        return '<span class="tag tag-gray">N/A</span>'
+    if (stype or "").upper() == "DB":
+        live = (mem_status or "").upper()
+        if live == "DB_HIGH" or (not live and mem > _DB_MEM_HI):
+            cls, sub = "tag-red", f"&gt; {_g(_DB_MEM_HI)}% SGA ceiling"
+        else:
+            cls, sub = "tag-green", f"SGA band {_g(_DB_MEM_LO)}–{_g(_DB_MEM_HI)}%"
+        return (f'<span class="tag {cls}">{mem:.1f}%</span>'
+                f'<div class="dim" style="margin-top:3px;font-size:10px">{sub}</div>')
+    return _metric_cell(mem, MEM_OK, MEM_WARN, f"warn {_g(MEM_OK)}/{_g(MEM_WARN)}")
+
+
+def _health_badge(s: dict, cpu: float, mem: float, disk: float, stype: str) -> str:
+    """Overall server health. PREFER the live pre-computed role-aware `status`
+    (single source of truth — it already folds in the DB SGA band override and
+    aggregation-trap handling). Re-derive role-aware only when status is absent
+    so a legacy/partial payload still grades correctly (never with a flat number)."""
+    _map = {
+        "critical": '<span class="tag tag-red">CRITICAL</span>',
+        "warning":  '<span class="tag tag-amber">WARNING</span>',
+        "healthy":  '<span class="tag tag-green">HEALTHY</span>',
+        "unknown":  '<span class="tag tag-gray">UNKNOWN</span>',
+    }
+    live = (s.get("status") or "").strip().lower()
+    if live in _map:
+        return _map[live]
+    # Fallback: role-aware re-derivation (mirrors resource_calculator bands).
+    rt = _role_cpu_thr(stype)
+    is_db = (stype or "").upper() == "DB"
+    mem_red  = (mem > _DB_MEM_HI) if is_db else (mem >= MEM_WARN)
+    mem_amber = False if is_db else (mem >= MEM_OK)
+    if cpu >= rt["warn"] or disk >= DISK_WARN or mem_red:
+        return _map["critical"]
+    if cpu >= rt["ok"] or disk >= DISK_OK or mem_amber:
+        return _map["warning"]
+    return _map["healthy"]
+
+
 def _srv_rows(servers: List[dict]) -> str:
     if not servers:
         return ("<tr><td colspan='6' class='empty'>No server data captured "
                 "for this engagement.</td></tr>")
     rows = []
     for s in servers:
-        cpu  = _f(s.get("cpu_pct",  0) or s.get("cpu_used",  0))
+        # Prefer effective_cpu (aggregation-trap aware) — the value the live
+        # grader actually scored — falling back to raw cpu when absent.
+        _eff = s.get("effective_cpu")
+        cpu  = _f(_eff if _eff is not None else (s.get("cpu_pct", 0) or s.get("cpu_used", 0)))
         mem  = _f(s.get("mem_pct",  0) or s.get("mem_used",  0))
         disk = _f(s.get("disk_pct", 0) or s.get("disk_used_max", 0))
         ram  = _f(s.get("mem_gb", 0) or s.get("mem_total_gb", 0))
         host = _esc(s.get("host") or s.get("server") or "?")
-        stype = _esc(s.get("type", "APP"))
+        stype = (s.get("type") or "APP").upper()
+        stype_esc = _esc(stype)
         img_only = s.get("image_only", False)
         if img_only or (cpu == 0 and mem == 0 and disk == 0):
             status = '<span class="tag tag-gray">IMAGE ONLY</span>'
             cpu_td = mem_td = dsk_td = '<span class="dim">—</span>'
         else:
-            worst = max(cpu, mem, disk)
-            if worst >= 90:   status = '<span class="tag tag-red">CRITICAL</span>'
-            elif worst >= 75: status = '<span class="tag tag-amber">WARNING</span>'
-            else:             status = '<span class="tag tag-green">HEALTHY</span>'
-            cpu_td = _tag(cpu, CPU_OK, CPU_WARN)
-            mem_td = _tag(mem, MEM_OK, MEM_WARN)
-            dsk_td = _tag(disk, DISK_OK, DISK_WARN)
+            status = _health_badge(s, cpu, mem, disk, stype)
+            cpu_td = _cpu_cell(cpu, stype)
+            mem_td = _mem_cell(mem, stype, s.get("mem_status"))
+            dsk_td = _metric_cell(disk, DISK_OK, DISK_WARN, f"warn {_g(DISK_OK)}/{_g(DISK_WARN)}")
         sub = host if not ram else f"{host} &middot; {ram:.0f} GB RAM"
         rows.append(f"""<tr>
           <td class="host-cell"><b>{host.split(".")[0]}</b><br><span class="dim">{sub}</span></td>
-          <td><span class="tag tag-blue">{stype}</span></td>
+          <td><span class="tag tag-blue">{stype_esc}</span></td>
           <td>{cpu_td}</td><td>{mem_td}</td><td>{dsk_td}</td>
           <td>{status}</td>
         </tr>""")
@@ -246,10 +324,16 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         warn_pct_w = round(n_warn_s  / _sv_tot * 100, 1)
         ok_pct_w   = round(n_healthy / _sv_tot * 100, 1)
         # Live thresholds for honest labels (read fresh so a Settings change shows).
-        _g = lambda x: f"{float(x):g}"
         cpu_ok_t, cpu_warn_t = _g(pe_config.CPU_WARN), _g(pe_config.CPU_CRIT)
         mem_ok_t, mem_warn_t = _g(pe_config.MEM_WARN), _g(pe_config.MEM_CRIT)
         disk_ok_t, disk_warn_t = _g(pe_config.DISK_WARN), _g(pe_config.DISK_CRIT)
+        # Role-aware CPU ceilings + DB SGA band — single-sourced from the live
+        # fleet grader so the subtitle states exactly what the table was graded on.
+        _appt, _dbt, _sret = _role_cpu_thr("APP"), _role_cpu_thr("DB"), _role_cpu_thr("SRE")
+        role_cpu_label = (f"APP {_g(_appt['ok'])}/{_g(_appt['warn'])} · "
+                          f"DB {_g(_dbt['ok'])}/{_g(_dbt['warn'])} · "
+                          f"SRE {_g(_sret['ok'])}/{_g(_sret['warn'])}")
+        db_mem_label = f"{_g(_DB_MEM_LO)}–{_g(_DB_MEM_HI)}%"
 
         ctx = dict(
             customer=customer, env=env, gen_date=gen_date,
@@ -278,6 +362,7 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             cpu_ok_t=cpu_ok_t, cpu_warn_t=cpu_warn_t,
             mem_ok_t=mem_ok_t, mem_warn_t=mem_warn_t,
             disk_ok_t=disk_ok_t, disk_warn_t=disk_warn_t,
+            role_cpu_label=role_cpu_label, db_mem_label=db_mem_label,
         )
 
         html = templates.get_template("report_export.html").render(**ctx)

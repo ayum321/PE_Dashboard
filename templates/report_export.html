@@ -428,7 +428,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">🖥️</div>
       <div>
         <div class="panel__t">Infrastructure Utilisation</div>
-        <div class="panel__s">CPU OK ≤{{ cpu_ok_t }}% · Warn ≤{{ cpu_warn_t }}% &nbsp;·&nbsp; Mem OK ≤{{ mem_ok_t }}% · Warn ≤{{ mem_warn_t }}% &nbsp;·&nbsp; cell colour reflects configured thresholds</div>
+        <div class="panel__s">Role-aware grading — CPU ceilings {{ role_cpu_label }} (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band {{ db_mem_label }} &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
       </div>
       <div class="panel__count">{{ n_srv }} servers</div>
     </div>
@@ -517,8 +517,8 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     <div>PE Audit Dashboard · self-contained report · generated {{ gen_date }}</div>
     <div>
       Thresholds —
-      CPU <code>OK ≤{{ cpu_ok_t }}% · Warn ≤{{ cpu_warn_t }}%</code>
-      Mem <code>OK ≤{{ mem_ok_t }}% · Warn ≤{{ mem_warn_t }}%</code>
+      CPU <code>{{ role_cpu_label }}</code> (role ok/crit)
+      Mem <code>≤{{ mem_ok_t }}% warn · ≤{{ mem_warn_t }}% crit · DB SGA {{ db_mem_label }}</code>
       Disk <code>OK ≤{{ disk_ok_t }}% · Warn ≤{{ disk_warn_t }}%</code>
     </div>
   </footer>
