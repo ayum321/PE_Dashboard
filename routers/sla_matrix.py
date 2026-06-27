@@ -1099,6 +1099,34 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 .dropna(subset=["first_start", "last_end"])
             )
 
+            # Point-2: block-based effective window (mirror Batch Review). The
+            # first→last span over-breaches spread / sequenced batches (mostly
+            # idle gap); the SLA-binding measure is the longest CONTIGUOUS run.
+            # Compute per-group busy + largest-block from the raw runs and merge
+            # into wgrp so the SLA Matrix tab and Batch Review judge the SAME
+            # duration against the SAME ceiling and can never diverge.
+            try:
+                from services.batch_calculator import _busy_and_blocks_for_day as _bb_slm
+                from services import pe_config as _pc_blk
+                _blk_gap = float(getattr(_pc_blk, "BATCH_BLOCK_GAP_HRS", 1.0))
+                _blk_rows = []
+                for _gk, _gg in wdf.dropna(subset=["run_date"]).groupby(_grp_keys):
+                    _bz, _bk = _bb_slm(list(_gg["Start_Time"]), list(_gg["End_Time"]), _blk_gap)
+                    _row = {
+                        "active_busy_hrs":   _bz,
+                        "largest_block_hrs": round(max((b["span_hrs"] for b in _bk), default=0.0), 3),
+                    }
+                    if isinstance(_gk, tuple):
+                        for _i, _kname in enumerate(_grp_keys):
+                            _row[_kname] = _gk[_i]
+                    else:
+                        _row[_grp_keys[0]] = _gk
+                    _blk_rows.append(_row)
+                if _blk_rows:
+                    wgrp = wgrp.merge(pd.DataFrame(_blk_rows), on=_grp_keys, how="left")
+            except Exception:
+                pass
+
             # Resolve per-row schedule type for exclusion of cyclic/outbound etc.
             def _slm_sched(_sa: str) -> str:
                 try:
@@ -1119,7 +1147,17 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 else:
                     wgrp["sla_hrs"] = global_sla_hrs
                     wgrp["schedule_type"] = ""
-                wgrp["breach"] = wgrp["elapsed_hrs"] > wgrp["sla_hrs"]
+                if "largest_block_hrs" not in wgrp.columns:
+                    wgrp["largest_block_hrs"] = 0.0
+                wgrp["largest_block_hrs"] = pd.to_numeric(
+                    wgrp["largest_block_hrs"], errors="coerce"
+                ).fillna(0.0)
+                # effective_hrs = SLA-binding contiguous-block window (fall back
+                # to the elapsed span only when no block was decomposed).
+                wgrp["effective_hrs"] = wgrp["largest_block_hrs"].where(
+                    wgrp["largest_block_hrs"] > 0, wgrp["elapsed_hrs"]
+                ).round(3)
+                wgrp["breach"] = wgrp["effective_hrs"] > wgrp["sla_hrs"]
 
             if not wgrp.empty:
                 w_total_days = int(wgrp["run_date"].nunique())
@@ -1131,8 +1169,11 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     {"run_date": str(r["run_date"]),
                      "sub_app": str(r["Sub_Application"]) if _has_sub else "",
                      "elapsed_hrs": round(float(r["elapsed_hrs"]), 3),
+                     "effective_hrs": round(float(r.get("effective_hrs", r["elapsed_hrs"]) or 0.0), 3),
+                     "active_busy_hrs": round(float(r.get("active_busy_hrs", 0.0) or 0.0), 3),
                      "job_count": int(r.get("job_count", 0)),
                      "breach": bool(r["breach"]),
+                     "breach_basis": "largest_block",
                      "schedule_type": str(r.get("schedule_type", "")),
                      "sla_ceil": float(r.get("sla_hrs", global_sla_hrs)),
                      "sla_hrs": float(r.get("sla_hrs", global_sla_hrs))}

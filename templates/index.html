@@ -1732,11 +1732,11 @@
                           bg-gradient-to-br from-Ccard to-Ccard2 p-4 min-h-[100px] shadow-kpi
                           hover:-translate-y-0.5 hover:shadow-kpiHov hover:border-Cpurple/60
                           transition-all duration-200 kpi-explain"
-                   data-explain="Wall-clock time from first job start to last job end per day. Requires End_Time column. This is the TRUE batch window duration — preferred over summed runtime for compliance."
-                   title="Wall-clock time from first job start to last job end per day. Requires End_Time column.">
+                   data-explain="Effective batch window = the longest contiguous run per day (idle gaps between separate runs excluded). This is the SLA-binding wall-clock duration used for window compliance — breach is judged on this. The full first→last elapsed span is shown as context on the sub-line."
+                   title="Effective batch window — longest contiguous run per day (idle gaps excluded). The SLA-binding measure.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cpurple/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Elapsed Window</div>
+                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Effective Window</div>
                 <div id="bk-elapsed" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Cpurple">—</div>
                 <div id="bk-elapsed-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
               </div>
@@ -1746,7 +1746,7 @@
                           bg-gradient-to-br from-Ccard to-Ccard2 p-4 min-h-[100px] shadow-kpi
                           hover:-translate-y-0.5 hover:shadow-kpiHov hover:border-Cblue/60
                           transition-all duration-200 kpi-explain"
-                   data-explain="Sum of all individual job Run_Sec values per day. NOT wall-clock elapsed time. If jobs run in parallel, summed can be less than elapsed. Always compare with Elapsed Window."
+                   data-explain="Sum of all individual job Run_Sec values per day. NOT wall-clock elapsed time. If jobs run in parallel, summed can be less than the effective window. Always compare with Effective Window."
                    title="Sum of all individual job Run_Sec values per day. NOT wall-clock elapsed time.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cblue/60 to-transparent"></div>
@@ -1774,7 +1774,7 @@
                           bg-gradient-to-br from-Ccard to-Ccard2 p-4 min-h-[100px] shadow-kpi
                           hover:-translate-y-0.5 hover:shadow-kpiHov hover:border-Cgreen/60
                           transition-all duration-200 kpi-explain"
-                   data-explain="% of individual job peaks that stay within SLA. Based on each job's worst-case run time vs daily SLA limit. Does NOT measure aggregate daily batch window — check Elapsed Window for that."
+                   data-explain="% of individual job peaks that stay within SLA. Based on each job's worst-case run time vs daily SLA limit. Does NOT measure aggregate daily batch window — check Effective Window for that."
                    title="Percentage of individual job peaks within SLA. Does NOT measure aggregate daily batch window.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cgreen/60 to-transparent"></div>
@@ -1789,7 +1789,7 @@
                           hover:-translate-y-0.5 hover:shadow-kpiHov hover:border-Camber/60
                           transition-all duration-200 kpi-explain cursor-pointer"
                    onclick="_toggleKpiDrill('window-sla-drill')"
-                   data-explain="Window compliance = % of batch-run DAYS where the elapsed window (first job start → last job end) completed within the SLA ceiling. This is DIFFERENT from job-level SLA: individual jobs may all pass their own SLA, yet the batch window can breach if jobs queue sequentially or start late. A divergence signals schedule gaps — late starts, queue delays, or jobs that could be parallelized."
+                   data-explain="Window compliance = % of batch-run DAYS where the effective window (longest contiguous run, idle gaps excluded) completed within the SLA ceiling. This is DIFFERENT from job-level SLA: individual jobs may all pass their own SLA, yet the batch window can breach if jobs queue sequentially or start late. A divergence signals schedule gaps — late starts, queue delays, or jobs that could be parallelized."
                    title="Batch Window SLA Rate — how many run-days completed within the SLA window. ≠ Job SLA Rate.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Camber/60 to-transparent"></div>

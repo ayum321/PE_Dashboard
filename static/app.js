@@ -1964,7 +1964,8 @@ function renderBatchReview(data) {
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
           <span class="text-[10px] font-bold uppercase tracking-wider text-Cmuted">Excluded Jobs</span>
-          <span class="text-[9px] font-mono px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">${excludedJobs.length} excluded from analysis</span>
+          <span class="text-[9px] font-mono px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}"
+                title="Removed from ALL batch metrics — utility/cyclic patterns (e.g. _export, housekeeping) plus any jobs you toggled off here. Distinct from 'excluded from compliance' below, where jobs stay in the data but aren't scored.">${excludedJobs.length} excluded from analysis <span class="opacity-70">· all metrics</span></span>
         </div>
         <div class="flex items-center gap-2">
           <span class="text-[8px] text-Cmuted">Click job to include/exclude · Use ⊘ in table below to exclude any job</span>
@@ -2526,12 +2527,32 @@ function renderBatchLayerCards(data) {
   const wj  = data.worst_job || {};
   const sla = data.sla_source || {};
 
-  // ── Elapsed Window ──
+  // ── Effective Window (SLA-binding: longest contiguous block) ──
+  // The headline batch-window number is the EFFECTIVE window (longest contiguous
+  // run), NOT the first→last elapsed span (mostly idle gaps on spread batches).
+  // Breach is judged on this measure, so the KPI must show it to reconcile with
+  // the Window SLA tile + Breach Calendar. Elapsed span is kept as context.
   const ewEl = document.getElementById("bk-elapsed");
   if (ewEl) {
-    if (ew.available && ew.worst_day) {
+    const winArr = Array.isArray(data.window) ? data.window : [];
+    const effRows = winArr.map(w => ({
+      d: w.run_date,
+      eff: Number(w.effective_hrs ?? w.elapsed_hrs ?? w.total_hrs ?? 0),
+      span: Number(w.elapsed_hrs ?? 0),
+      breach: !!w.breach,
+    })).filter(r => r.d && r.eff > 0);
+    if (effRows.length) {
+      const worst  = effRows.slice().sort((a, b) => b.eff - a.eff)[0];
+      const avgEff = effRows.reduce((s, r) => s + r.eff, 0) / effRows.length;
+      ewEl.textContent = `${worst.eff.toFixed(1)}h`;
+      // Colour by the canonical breach flag of the worst-effective day — NOT a
+      // raw hrs>ceiling compare (which would ignore each sub-app's own ceiling).
+      ewEl.style.color = worst.breach ? THEME.red : THEME.purple;
+      const spanTxt = worst.span > worst.eff + 0.05 ? ` · span ${worst.span.toFixed(1)}h` : "";
+      setText("bk-elapsed-sub", `Worst day: ${worst.d} · Avg ${avgEff.toFixed(1)}h${spanTxt}`);
+    } else if (ew.available && ew.worst_day) {
       ewEl.textContent = `${_n(ew.worst_day.elapsed_hrs).toFixed(1)}h`;
-      ewEl.style.color = ew.worst_day.elapsed_hrs > (data.kpis?.daily_limit_hrs || 6) ? THEME.red : THEME.purple;
+      ewEl.style.color = THEME.purple;
       setText("bk-elapsed-sub", `Worst day: ${ew.worst_day.run_date} · Avg ${(ew.avg_elapsed_hrs || 0).toFixed(1)}h`);
     } else {
       ewEl.textContent = "N/A";
@@ -2808,7 +2829,8 @@ function renderExcludedJobsPanel(dataCoverage) {
 
   panel.innerHTML = `<div class="rounded-lg border border-Cborder/20 px-3 py-2 mt-1 text-[11px]"
                          style="background:${hexA(THEME.cyan,0.04)}">
-    <span class="text-Cmuted font-semibold mr-2">⊘ ${excluded.length} job(s) excluded from compliance:</span>
+    <span class="text-Cmuted font-semibold mr-2"
+          title="Kept in the dataset and the run tables, but NOT scored in the SLA compliance % — too few runs (INSUFFICIENT, <3), zero/near-zero duration (SHORT_JOB), or cyclic with no SLA baseline. Distinct from 'excluded from analysis', which removes jobs from every metric.">⊘ ${excluded.length} job(s) excluded from compliance <span class="font-normal opacity-70">· kept in data, not scored</span>:</span>
     ${rows}
     ${excluded.length > 20 ? `<span class="text-Cmuted text-[10px]">…and ${excluded.length - 20} more</span>` : ""}
   </div>`;
@@ -2841,9 +2863,26 @@ function _buildBatchNarrative(winData, k) {
   if (!days.length) return null;
 
   const rec = days.map(w => {
-    const elapsed = +(w.elapsed_hrs || w.total_hrs || 0);
-    const bufPct  = ceiling > 0 ? ((ceiling - elapsed) / ceiling) * 100 : 0;
-    return { date: w.run_date, elapsed, bufPct, breach: !!w.breach, top: w.top_job || "" };
+    // effective_hrs = longest contiguous batch run (the SLA-binding wall-clock),
+    // NOT first-start→last-end span (mostly idle gap on spread/sequenced batches).
+    const elapsed = +(w.effective_hrs ?? w.elapsed_hrs ?? w.total_hrs ?? 0);
+    // Buffer % relative to the BINDING (tightest) sub-app's OWN ceiling when the
+    // backend supplies it (DAILY=6h, TUESDAY=6h, WEEKLY=9h …); else global daily.
+    const bufPct = (w.min_buffer_pct != null && isFinite(+w.min_buffer_pct))
+      ? +w.min_buffer_pct
+      : (ceiling > 0 ? ((ceiling - elapsed) / ceiling) * 100 : 0);
+    const overrun = (w.breach_overrun_hrs != null && isFinite(+w.breach_overrun_hrs))
+      ? +w.breach_overrun_hrs : null;
+    return {
+      date: w.run_date, elapsed, bufPct, breach: !!w.breach, top: w.top_job || "",
+      overrun,
+      breachSub:  w.breach_sub_app || "",
+      breachEff:  (w.breach_sub_effective != null) ? +w.breach_sub_effective : elapsed,
+      breachCeil: (w.breach_sub_ceil != null) ? +w.breach_sub_ceil : ceiling,
+      tightSub:   w.tight_sub_app || (w.top_job || ""),
+      tightEff:   (w.tight_effective != null) ? +w.tight_effective : elapsed,
+      tightCeil:  (w.tight_ceil != null) ? +w.tight_ceil : ceiling,
+    };
   });
 
   const total      = rec.length;
@@ -2858,7 +2897,10 @@ function _buildBatchNarrative(winData, k) {
                        .sort((a, b) => a.bufPct - b.bufPct);
   const nonBreach = rec.filter(r => !r.breach).sort((a, b) => a.bufPct - b.bufPct);
   const tightest  = nonBreach.length ? nonBreach[0] : null;
-  const breaches  = rec.filter(r => r.breach).sort((a, b) => b.elapsed - a.elapsed);
+  // Worst breach = largest overrun vs the BINDING sub-app's own ceiling (not the
+  // longest span, which would just pick the day with the most idle gap).
+  const breaches  = rec.filter(r => r.breach)
+                       .sort((a, b) => (b.overrun ?? (b.elapsed - ceiling)) - (a.overrun ?? (a.elapsed - ceiling)));
   const worstBreach = breaches.length ? breaches[0] : null;
 
   // Minutes-of-buffer equivalent of the at-risk band (same %, in minutes).
@@ -2928,17 +2970,24 @@ function renderBatchStory(data, k) {
   // how close it got (early-warning) or confirm comfortable headroom.
   const callouts = [];
   if (nar.worstBreach) {
-    const over = nar.worstBreach.elapsed - nar.ceiling;
-    let s = `Worst breach: ${nar.worstBreach.date} ran ${_fmtHrs(nar.worstBreach.elapsed)} (+${_fmtHrs(over)} over the ceiling)`;
-    s += nar.worstBreach.top ? `, longest job ${_esc(nar.worstBreach.top)}.` : ".";
+    const wb = nar.worstBreach;
+    const over = (wb.overrun != null) ? wb.overrun : (wb.elapsed - nar.ceiling);
+    let s;
+    if (wb.breachSub) {
+      s = `Worst breach: ${wb.date} — ${_esc(wb.breachSub)} ran ${_fmtHrs(wb.breachEff)}, +${_fmtHrs(over)} over its ${_fmtHrs(wb.breachCeil)} ceiling`;
+    } else {
+      s = `Worst breach: ${wb.date} ran ${_fmtHrs(wb.elapsed)} (+${_fmtHrs(over)} over the ceiling)`;
+    }
+    s += wb.top ? `; longest job ${_esc(wb.top)}.` : ".";
     callouts.push({ tone: "critical", text: s });
   }
   if (nar.breachDays === 0 && nar.tight.length) {
-    let s = `${nar.tight.length} of ${nar.total} day(s) ran within ${SLA_ATRISK_PCT}% of the ${_fmtHrs(nar.ceiling)} ceiling (≤ ${nar.atRiskMins} min of buffer left)`;
+    let s = `${nar.tight.length} of ${nar.total} day(s) ran within ${SLA_ATRISK_PCT}% of their SLA ceiling`;
     if (nar.tightest) {
-      const mins = Math.round((nar.ceiling - nar.tightest.elapsed) * 60);
-      s += ` — tightest was ${nar.tightest.date} at ${_fmtHrs(nar.tightest.elapsed)} (${mins} min to spare`;
-      s += nar.tightest.top ? `, driven by ${_esc(nar.tightest.top)})` : ")";
+      const tc   = nar.tightest.tightCeil || nar.ceiling;
+      const mins = Math.round((tc - nar.tightest.tightEff) * 60);
+      s += ` — tightest was ${nar.tightest.date} at ${_fmtHrs(nar.tightest.tightEff)} vs its ${_fmtHrs(tc)} ceiling (${mins} min to spare`;
+      s += nar.tightest.tightSub ? `, ${_esc(nar.tightest.tightSub)})` : ")";
     }
     callouts.push({ tone: "warning", text: s });
   }
@@ -3168,10 +3217,21 @@ function renderWindowTrendChart(winData, topJobsData) {
   const topJobs  = winData.map((w) => w.top_job || "");
   const rawSums  = winData.map((w) => +(w.total_hrs  || 0));
   const rawElaps = winData.map((w) => +(w.elapsed_hrs || 0));
+  const rawEff   = winData.map((w) => +(w.effective_hrs || 0));
 
-  // Prefer elapsed_hrs (wall-clock first_start→last_end) over summed runtime
+  // Point-2: the BAR is the SLA-binding effective window — the longest
+  // CONTIGUOUS batch run (largest_block) — NOT the first→last elapsed span.
+  // The span is mostly idle gap for spread / sequenced batches (a 2-phase
+  // daily reads as ~20h) and plotting it made almost every bar look red against
+  // the ceiling even when no batch actually ran long. effective_hrs reconciles
+  // the bar height + colour with the (block-based) breach verdict. Falls back to
+  // elapsed span, then summed runtime, for legacy payloads without block data.
+  const hasEff     = rawEff.some(v => v > 0);
   const hasElapsed = rawElaps.some(v => v > 0);
-  const values  = winData.map((_, i) => hasElapsed && rawElaps[i] > 0 ? rawElaps[i] : rawSums[i]);
+  const values  = winData.map((_, i) =>
+    hasEff && rawEff[i] > 0 ? rawEff[i]
+    : hasElapsed && rawElaps[i] > 0 ? rawElaps[i]
+    : rawSums[i]);
 
   // ── Spike detection: statistical z-score on window values ───
   const vMean = values.reduce((s, v) => s + v, 0) / values.length;
@@ -3217,7 +3277,9 @@ function renderWindowTrendChart(winData, topJobsData) {
   // Update subtitle
   const metricTypeEl = document.getElementById("chart-window-metric-type");
   if (metricTypeEl) {
-    metricTypeEl.textContent = hasElapsed
+    metricTypeEl.textContent = hasEff
+      ? "Bar = effective batch window (longest contiguous run — the SLA-binding duration) · bar colour = SLA buffer band · teal line = active busy time (real compute) · elapsed span shown on hover"
+      : hasElapsed
       ? "Bar height = elapsed span (first start → last end) · bar colour = SLA buffer band · teal line = active busy time (real compute)"
       : "Summed runtime (all jobs — may overcount parallel runs)";
     metricTypeEl.className = hasElapsed
@@ -3337,7 +3399,7 @@ function renderWindowTrendChart(winData, topJobsData) {
     data: {
       labels,
       datasets: [{
-        label: hasElapsed ? "Elapsed Window (h)" : "Daily Total (h)",
+        label: hasEff ? "Effective batch window (h)" : hasElapsed ? "Elapsed Window (h)" : "Daily Total (h)",
         data: values,
         backgroundColor: bgColors,
         borderColor: bdrColors,
@@ -3410,7 +3472,15 @@ function renderWindowTrendChart(winData, topJobsData) {
               const rawNames = Array.isArray(winData[i]?.raw_job_names) ? winData[i].raw_job_names : [];
               const excludedNames = rawNames.filter(n => excludedNameSet.has(n));
               if (hasElapsed) {
-                lines.push(`Elapsed window: ${rawElaps[i].toFixed(2)}h  (first start → last end)`);
+                const effH = +(w.effective_hrs || 0);
+                const ceilH = +(w.breach_sub_ceil || w.sla_hrs || w.sla_ceil || SLA_DAILY_HRS || 0);
+                if (effH > 0) {
+                  const verdict = w.breach
+                    ? `BREACH — ${w.breach_sub_app || "a sub-app"} +${(+(w.breach_overrun_hrs ?? (effH - ceilH))).toFixed(1)}h over its ${ceilH ? ceilH.toFixed(1) : "?"}h ceiling`
+                    : "within window";
+                  lines.push(`Effective batch window: ${effH.toFixed(2)}h  (longest contiguous run — judged vs SLA → ${verdict})`);
+                }
+                lines.push(`Elapsed span: ${rawElaps[i].toFixed(2)}h  (first start → last end — includes idle gaps)`);
                 // Busy-time decomposition: the elapsed span overstates real work
                 // when jobs run in separated clusters. Show the active compute time
                 // (interval union) + idle gap so buffer is read against real load.
@@ -3419,7 +3489,7 @@ function renderWindowTrendChart(winData, topJobsData) {
                 const idlePct = +(w.idle_pct || 0);
                 if (busy > 0) {
                   lines.push(`Active busy time: ${busy.toFixed(2)}h  (real compute — overlaps counted once)`);
-                  lines.push(`Idle inside window: ${idle.toFixed(2)}h  (${idlePct.toFixed(0)}% of the span is gaps)`);
+                  lines.push(`Idle inside span: ${idle.toFixed(2)}h  (${idlePct.toFixed(0)}% of the span is gaps)`);
                 }
                 if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h  (all runs added up)`);
                 // Batch blocks: morning/evening clusters split by idle gaps.
@@ -3458,7 +3528,12 @@ function renderWindowTrendChart(winData, topJobsData) {
                 lines.push("Excluded jobs: none in this day's data");
               }
               if (topJobs[i]) lines.push(`Longest job: ${topJobs[i]}`);
-              if (winData[i]?.breach) lines.push(`⚠ SLA BREACH  +${(values[i] - SLA_DAILY_HRS).toFixed(1)}h over limit`);
+              if (winData[i]?.breach) {
+                const ov  = (w.breach_overrun_hrs != null) ? +w.breach_overrun_hrs : (values[i] - SLA_DAILY_HRS);
+                const sub = w.breach_sub_app ? `${w.breach_sub_app} ` : "";
+                const cl  = (w.breach_sub_ceil != null) ? ` ${(+w.breach_sub_ceil).toFixed(1)}h ceiling` : " limit";
+                lines.push(`⚠ SLA BREACH  ${sub}+${ov.toFixed(1)}h over${cl}`);
+              }
               return lines;
             },
           },
@@ -3482,7 +3557,7 @@ function renderWindowTrendChart(winData, topJobsData) {
           beginAtZero: true,
           title: {
             display: true,
-            text: hasElapsed ? "Elapsed hrs (wall-clock)" : "Hours (summed)",
+            text: hasEff ? "Effective window hrs (contiguous run)" : hasElapsed ? "Elapsed hrs (wall-clock)" : "Hours (summed)",
             color: THEME.muted,
             font: { family: "Sora", size: 10 },
           },
@@ -12459,8 +12534,16 @@ function _renderExecHotSpots(data) {
   //    accounts for each sub-app's own ceiling.
   const win = window.appData?.batch?.window || [];
   const sla = data?.kpis?.sla_daily_hrs || 6;
-  const _whrs = (w) => { const e = Number(w.elapsed_hrs ?? 0); return e > 0 ? e : Number(w.total_hrs ?? 0); };
-  const totalOverrun = win.reduce((s, w) => s + (w.breach ? Math.max(0, _whrs(w) - sla) : 0), 0);
+  // Effective (longest contiguous block) is the SLA-binding wall-clock; the
+  // elapsed span includes idle gaps and overstates the overrun. Prefer the
+  // backend's per-day binding overrun (vs each sub-app's OWN ceiling) when present.
+  const _whrs = (w) => { const e = Number(w.effective_hrs ?? 0); if (e > 0) return e; const el = Number(w.elapsed_hrs ?? 0); return el > 0 ? el : Number(w.total_hrs ?? 0); };
+  const totalOverrun = win.reduce((s, w) => {
+    if (!w.breach) return s;
+    const ov = (w.breach_overrun_hrs != null && isFinite(+w.breach_overrun_hrs))
+      ? +w.breach_overrun_hrs : Math.max(0, _whrs(w) - sla);
+    return s + ov;
+  }, 0);
   const breachDays = win.filter(w => w.breach).length;
   if (win.length) {
     const col = totalOverrun > 10 ? "#f43f5e" : totalOverrun > 0 ? "#f59e0b" : "#10d96e";
@@ -12613,7 +12696,7 @@ function _renderExecForecast(windowData, slaHrs) {
   const el = document.getElementById("exec-forecast");
   if (!el) return;
   windowData = (Array.isArray(windowData) ? windowData : [])
-    .filter(w => w && w.run_date && Number.isFinite(Number(w.elapsed_hrs ?? w.total_hrs)));
+    .filter(w => w && w.run_date && Number.isFinite(Number(w.effective_hrs ?? w.elapsed_hrs ?? w.total_hrs)));
 
   if (windowData.length < 2) {
     el.innerHTML = `<div class="h-full flex flex-col items-center justify-center text-center px-6">
@@ -12626,7 +12709,9 @@ function _renderExecForecast(windowData, slaHrs) {
   // Sort by date
   windowData = windowData.slice().sort((a, b) => new Date(a.run_date) - new Date(b.run_date));
   const dates = windowData.map(w => new Date(w.run_date));
-  const ys = windowData.map(w => Number(w.elapsed_hrs > 0 ? w.elapsed_hrs : w.total_hrs));
+  // Forecast the SLA-binding effective window (longest contiguous block), not the
+  // elapsed span (idle gaps), so the projected crossing of slaHrs is meaningful.
+  const ys = windowData.map(w => Number(w.effective_hrs > 0 ? w.effective_hrs : (w.elapsed_hrs > 0 ? w.elapsed_hrs : w.total_hrs)));
   const xs = dates.map((_, i) => i);
 
   // Simple linear regression: y = a + b*x

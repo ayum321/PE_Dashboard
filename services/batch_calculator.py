@@ -1831,6 +1831,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # engine. Populated only when wall-clock windows can be measured.
     _win_records: list = []
     _win_ceiling_map: dict = {}
+    # Per-day binding rollup (breach overrun vs the binding sub-app's OWN ceiling
+    # + the tightest in-scope buffer) so the narrative + chart breach labels use
+    # the correct ceiling instead of the global daily default.  Populated from
+    # window_agg below; merged into the per-day `window` frame for serialization.
+    _perday_bind_df = None
 
     if has_end_time and "Sub_Application" in df_analysis.columns:
         # ── Gap 1: Sentinel job map from BatchSLA XLSX ───────────────────────
@@ -1929,6 +1934,59 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             .dt.total_seconds() / 3600.0
         ).clip(lower=0).fillna(0.0)
 
+        # ── Point-2 fix: per-(sub_app, date) busy-time + contiguous-block ─────
+        # elapsed_hrs above is the first→last SPAN.  For spread / sequenced
+        # batches that span is mostly IDLE GAP (e.g. a 2-phase daily that runs a
+        # morning block, sits idle 13h, then an evening block reads as one ~20h
+        # window) — so breaching on the span is structurally guaranteed to fail
+        # almost every day even when no batch actually ran long.  The SLA-binding
+        # measure is largest_block_hrs: the longest CONTIGUOUS run (clusters
+        # split by idle gaps > BATCH_BLOCK_GAP_HRS), i.e. the real wall-clock the
+        # batch occupied in one go.  active_busy_hrs (interval union) + idle_pct
+        # are carried as context.  Breach (below) is judged on the block, not the
+        # span.
+        _blk_gap = float(getattr(pe_config, "BATCH_BLOCK_GAP_HRS", 1.0))
+        _sa_busy_rows = []
+        try:
+            for (_sa_b, _rd_b), _g_b in (
+                _df_win_for_agg.dropna(subset=["run_date"])
+                .groupby(["Sub_Application", "run_date"])
+            ):
+                _bz, _blks = _busy_and_blocks_for_day(
+                    list(_g_b["Start_Time"]), list(_g_b["End_Time"]), _blk_gap
+                )
+                _sa_busy_rows.append({
+                    "Sub_Application":   _sa_b,
+                    "run_date":          _rd_b,
+                    "active_busy_hrs":   _bz,
+                    "largest_block_hrs": round(max((b["span_hrs"] for b in _blks), default=0.0), 3),
+                    "block_count_sa":    len(_blks),
+                })
+        except Exception:
+            _sa_busy_rows = []
+        if _sa_busy_rows:
+            window_agg = window_agg.merge(
+                pd.DataFrame(_sa_busy_rows), on=["Sub_Application", "run_date"], how="left"
+            )
+        for _c, _d in (("active_busy_hrs", 0.0), ("largest_block_hrs", 0.0), ("block_count_sa", 0)):
+            if _c not in window_agg.columns:
+                window_agg[_c] = _d
+            window_agg[_c] = window_agg[_c].fillna(_d)
+        # effective_hrs = SLA-binding batch-window duration (longest contiguous
+        # run); fall back to the elapsed span only when block decomposition
+        # produced nothing (single-timestamp / degenerate rows).
+        window_agg["effective_hrs"] = window_agg["largest_block_hrs"].where(
+            window_agg["largest_block_hrs"] > 0, window_agg["elapsed_hrs"]
+        ).round(3)
+        window_agg["idle_gap_hrs"] = (
+            (window_agg["elapsed_hrs"] - window_agg["active_busy_hrs"]).clip(lower=0).round(3)
+        )
+        window_agg["idle_pct"] = np.where(
+            window_agg["elapsed_hrs"] > 0,
+            window_agg["idle_gap_hrs"] / window_agg["elapsed_hrs"] * 100.0,
+            0.0,
+        ).round(1)
+
         # ── Gap 5: Flag suspect windows using pe_config sentinel thresholds ──
         _max_sentinel_win = float(getattr(pe_config, "SENTINEL_MAX_WINDOW_HRS", 20.0))
         _min_sentinel_win = float(getattr(pe_config, "SENTINEL_MIN_WINDOW_HRS", 0.25))
@@ -2005,7 +2063,51 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             return global_ceil
 
         window_agg["sla_hrs"] = window_agg.apply(_sub_sla, axis=1)
-        window_agg["breach"]  = window_agg["elapsed_hrs"] > window_agg["sla_hrs"]
+        # Point-2 fix: breach on the SLA-binding effective window (longest
+        # contiguous batch run), NOT the first→last elapsed span.  The span is
+        # mostly idle gap for spread / sequenced batches and over-breaches ~every
+        # day; effective_hrs reflects the real wall-clock the batch occupied in
+        # one contiguous run.  breach_basis is stamped for provenance / audit.
+        window_agg["breach"]       = window_agg["effective_hrs"] > window_agg["sla_hrs"]
+        window_agg["breach_basis"] = "largest_block"
+
+        # Per-day binding rollup: a calendar day breaches because SOME sub-app ran
+        # past ITS OWN ceiling (e.g. DAILY at 6h), not the global daily default.
+        # Roll window_agg up per run_date → the worst overrun among breaching
+        # sub-apps (vs that sub-app's ceiling) + the tightest buffer among ALL
+        # in-scope sub-apps, so the day-level narrative/chart cite the real ceiling.
+        try:
+            _wa = window_agg.copy()
+            _wa["_over"]   = (_wa["effective_hrs"] - _wa["sla_hrs"]).round(3)
+            _wa["_bufpct"] = np.where(
+                _wa["sla_hrs"] > 0,
+                (_wa["sla_hrs"] - _wa["effective_hrs"]) / _wa["sla_hrs"] * 100.0,
+                100.0,
+            ).round(1)
+            _bind_rows = []
+            for _rd, _grp in _wa.groupby("run_date"):
+                _row = {"run_date": _rd}
+                _brc = _grp[_grp["breach"]]
+                if not _brc.empty:
+                    _w = _brc.loc[_brc["_over"].idxmax()]
+                    _row.update({
+                        "breach_sub_app":       str(_w["Sub_Application"]),
+                        "breach_sub_effective": float(_w["effective_hrs"]),
+                        "breach_sub_ceil":      float(_w["sla_hrs"]),
+                        "breach_overrun_hrs":   float(max(_w["_over"], 0.0)),
+                    })
+                _t = _grp.loc[_grp["_bufpct"].idxmin()]
+                _row.update({
+                    "tight_sub_app":   str(_t["Sub_Application"]),
+                    "min_buffer_pct":  float(_t["_bufpct"]),
+                    "tight_effective": float(_t["effective_hrs"]),
+                    "tight_ceil":      float(_t["sla_hrs"]),
+                })
+                _bind_rows.append(_row)
+            if _bind_rows:
+                _perday_bind_df = pd.DataFrame(_bind_rows)
+        except Exception:
+            _perday_bind_df = None
 
         # ── Gap 4: Wall-clock SLA deadline breach (parallel to duration breach) ──
         # Duration breach (above) answers "did the batch run LONGER than its
@@ -2106,6 +2208,16 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 "sub_app":       str(_r["Sub_Application"]),
                 "run_date":      str(_r["run_date"]),
                 "elapsed_hrs":   float(_r["elapsed_hrs"]),
+                # Point-2: effective (longest contiguous block) is the SLA-binding
+                # duration the compliance engine judges; elapsed span + busy/idle
+                # ride along as context.  breach is passed EXPLICITLY (block-based)
+                # so the engine does not re-derive it from the elapsed span.
+                "effective_hrs":     float(_r.get("effective_hrs", _r["elapsed_hrs"]) or 0.0),
+                "active_busy_hrs":   float(_r.get("active_busy_hrs", 0.0) or 0.0),
+                "largest_block_hrs": float(_r.get("largest_block_hrs", 0.0) or 0.0),
+                "idle_pct":          float(_r.get("idle_pct", 0.0) or 0.0),
+                "breach":            bool(_r.get("breach", False)),
+                "breach_basis":      str(_r.get("breach_basis", "largest_block")),
                 "schedule_type": _cs_win(str(_r["Sub_Application"])),
                 "sla_ceil":      float(_r["sla_hrs"]),
                 "suspect_flag":  str(_r.get("suspect_flag", "OK")),
@@ -2294,10 +2406,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                             list(_g["Start_Time"]), list(_g["End_Time"]), _block_gap
                         )
                         _busy_rows.append({
-                            "run_date":        _rd,
-                            "active_busy_hrs": _busy_h,
-                            "batch_blocks":    _blocks,
-                            "block_count":     len(_blocks),
+                            "run_date":          _rd,
+                            "active_busy_hrs":   _busy_h,
+                            "batch_blocks":      _blocks,
+                            "block_count":       len(_blocks),
+                            "largest_block_hrs": round(max((b["span_hrs"] for b in _blocks), default=0.0), 3),
                         })
                     if _busy_rows:
                         _busy_df = pd.DataFrame(_busy_rows)
@@ -2313,9 +2426,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         window["active_busy_hrs"] = 0.0
     if "block_count" not in window.columns:
         window["block_count"] = 0
+    if "largest_block_hrs" not in window.columns:
+        window["largest_block_hrs"] = 0.0
     if "batch_blocks" not in window.columns:
         window["batch_blocks"] = [[] for _ in range(len(window))]
     window["active_busy_hrs"] = pd.to_numeric(window["active_busy_hrs"], errors="coerce").fillna(0.0).round(3)
+    window["largest_block_hrs"] = pd.to_numeric(window["largest_block_hrs"], errors="coerce").fillna(0.0).round(3)
     window["block_count"]     = pd.to_numeric(window["block_count"], errors="coerce").fillna(0).astype(int)
     window["batch_blocks"]    = window["batch_blocks"].apply(
         lambda v: v if isinstance(v, list) else []
@@ -2326,6 +2442,19 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         window["idle_gap_hrs"] / window["elapsed_hrs"] * 100.0,
         0.0,
     ).round(1)
+
+    # Attach the per-day binding rollup so the narrative + chart breach labels use
+    # the binding sub-app's OWN ceiling (DAILY=6h) rather than the global daily.
+    if _perday_bind_df is not None and not _perday_bind_df.empty:
+        window = window.merge(_perday_bind_df, on="run_date", how="left")
+    for _bc in ("breach_overrun_hrs", "breach_sub_effective", "breach_sub_ceil",
+                "min_buffer_pct", "tight_effective", "tight_ceil"):
+        if _bc not in window.columns:
+            window[_bc] = np.nan
+    for _sc in ("breach_sub_app", "tight_sub_app"):
+        if _sc not in window.columns:
+            window[_sc] = ""
+        window[_sc] = window[_sc].fillna("")
 
     # ── Batch Window Compliance (canonical daily window vs resolved SLA) ──
     # The daily window records already carry the authoritative per-day breach
@@ -2547,6 +2676,29 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         ],
     }
 
+    # Days present in the file but absent from the in-scope daily-window set (e.g.
+    # a day that ran ONLY out-of-scope batch types such as MONTHLY).  Surfaced
+    # explicitly so a "missing" date on the daily chart / long-pole strip is
+    # EXPLAINED rather than silently dropped (the 2026-05-31 case).
+    _window_excluded_days = []
+    try:
+        _wdates = set(str(d) for d in window["run_date"].tolist()) if "run_date" in window.columns else set()
+        for _d in (str(x) for x in unique_dates):
+            if _d in _wdates:
+                continue
+            _day_df = df[df["run_date"].astype(str) == _d]
+            _subs = sorted(_day_df["Sub_Application"].astype(str).unique()) if "Sub_Application" in _day_df.columns else []
+            _oos = [s for s in _subs if s in _out_of_scope_subs]
+            _window_excluded_days.append({
+                "date":              _d,
+                "sub_apps":          _subs,
+                "run_count":         int(len(_day_df)),
+                "out_of_scope_subs": _oos,
+                "all_out_of_scope":  bool(_subs) and all(s in _out_of_scope_subs for s in _subs),
+            })
+    except Exception:
+        _window_excluded_days = []
+
     return {
         "daily":            daily,
         "monthly":          monthly,
@@ -2568,6 +2720,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "window_total_pairs":      int(window_compliance.get("total_windows") or 0) or None,
         "window_breach_pairs":     int(window_compliance.get("breach_count") or 0) if int(window_compliance.get("total_windows") or 0) else None,
         "window_date_count":       len(unique_dates),
+        "window_excluded_days":    _window_excluded_days,
         # Canonical (sub_app, date)-granular window compliance from the shared engine
         "window_compliance":       window_compliance,
         # Gap 4: parallel wall-clock deadline compliance (absolute clock ceilings)
@@ -3147,6 +3300,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # Serialize the daily time-series window
     window_records = []
     elapsed_avail_local = bool(m.get("elapsed_available"))
+    _n2 = lambda v: (round(float(v), 3) if pd.notna(v) else None)
     # Per-day failure count for chart overlay (failed ✕ marker)
     fail_by_date: dict = {}
     if "Status" in df.columns:
@@ -3156,6 +3310,12 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         date_str = str(r["run_date"])
         elapsed_hrs = round(float(r.get("elapsed_hrs", 0)), 3)
         total_hrs   = round(float(r["total_hrs"]), 3)
+        # Point-2: largest_block_hrs = longest contiguous batch run that day;
+        # effective_hrs is the SLA-binding duration (block, falling back to the
+        # elapsed span only when no block was decomposed).  The daily bar should
+        # plot effective_hrs, with the elapsed span shown as faint idle context.
+        largest_block_hrs = round(float(r.get("largest_block_hrs", 0) or 0), 3)
+        effective_hrs = largest_block_hrs if largest_block_hrs > 0 else elapsed_hrs
         # G14: use the pre-computed per-sub_app breach flag from compute_metrics()
         # (which uses window_agg's per-SLA ceiling) rather than recomputing with
         # the global ceiling here (which caused false breaches for WEEKLY sub-apps
@@ -3173,6 +3333,16 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "active_busy_hrs": round(float(r.get("active_busy_hrs", 0) or 0), 3),
             "idle_gap_hrs":    round(float(r.get("idle_gap_hrs", 0) or 0), 3),
             "idle_pct":        round(float(r.get("idle_pct", 0) or 0), 1),
+            "largest_block_hrs": largest_block_hrs,
+            "effective_hrs":     effective_hrs,
+            "breach_overrun_hrs":   _n2(r.get("breach_overrun_hrs")),
+            "breach_sub_app":       str(r.get("breach_sub_app") or ""),
+            "breach_sub_effective": _n2(r.get("breach_sub_effective")),
+            "breach_sub_ceil":      _n2(r.get("breach_sub_ceil")),
+            "min_buffer_pct":       _n2(r.get("min_buffer_pct")),
+            "tight_sub_app":        str(r.get("tight_sub_app") or ""),
+            "tight_effective":      _n2(r.get("tight_effective")),
+            "tight_ceil":           _n2(r.get("tight_ceil")),
             "batch_blocks":    list(r.get("batch_blocks", [])) if isinstance(r.get("batch_blocks", []), list) else [],
             "block_count":     int(r.get("block_count", 0) or 0),
             "job_count":    int(r["job_count"]),
@@ -3500,16 +3670,37 @@ def _build_data_warnings(m: dict) -> list:
     warnings = []
     window_days = int(m.get("window_total_days") or 0)
     file_days = int(m.get("window_date_count") or 0)
+    excl_days = m.get("window_excluded_days") or []
     if window_days and file_days and window_days != file_days:
+        # Name WHICH day(s) and WHY — a MONTHLY-only day legitimately has no daily
+        # window, so it is EXPECTED (info), not a denominator defect (warning).
+        _named = []
+        for _e in excl_days:
+            if _e.get("all_out_of_scope") and _e.get("out_of_scope_subs"):
+                _named.append(
+                    f"{_e['date']} (ran only {', '.join(_e['out_of_scope_subs'])} — "
+                    f"out of daily-window scope, {_e.get('run_count', 0)} run(s))"
+                )
+            else:
+                _named.append(f"{_e['date']} ({_e.get('run_count', 0)} run(s))")
+        _detail = "; ".join(_named)
+        _all_oos = bool(excl_days) and all(e.get("all_out_of_scope") for e in excl_days)
+        _txt = (
+            f"Window denominator: {file_days} unique date(s) in the file, "
+            f"{window_days} in the daily-window compliance rollup."
+        )
+        if _detail:
+            _txt += (
+                f" Excluded day(s): {_detail}."
+                + (" These are not defects — only out-of-scope batch types ran." if _all_oos else "")
+            )
         warnings.append({
             "code": "WINDOW_DENOMINATOR_MISMATCH",
-            "text": (
-                f"Window denominator mismatch: {file_days} unique date(s) in the file "
-                f"but {window_days} day(s) are being shown in the compliance rollup."
-            ),
-            "severity": "warning",
+            "text": _txt,
+            "severity": "info" if _all_oos else "warning",
             "expected_days": file_days,
             "used_days": window_days,
+            "excluded_days": excl_days,
         })
     if m.get("_worst_day_warning"):
         warnings.append({

@@ -168,7 +168,16 @@ def compute_window_compliance(
             excluded_windows += 1
             continue
 
-        elapsed = float(rec.get("elapsed_hrs") or rec.get("total_hrs") or 0.0)
+        # Point-2: prefer the SLA-binding effective window (longest contiguous
+        # batch run) when the caller provides it; fall back to the elapsed span
+        # (or summed total) for legacy callers.  An explicit None check preserves
+        # a genuine effective_hrs of 0.0 instead of skipping to elapsed_hrs.
+        _eff = rec.get("effective_hrs")
+        if _eff is None:
+            _eff = rec.get("elapsed_hrs")
+        if _eff is None:
+            _eff = rec.get("total_hrs")
+        elapsed = float(_eff or 0.0)
         sub_app = str(rec.get("sub_app") or rec.get("Sub_Application") or "").strip()
         ceil = rec.get("sla_ceil")
         if ceil is None:
