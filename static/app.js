@@ -16034,19 +16034,23 @@ function _renderSlaMatrix(data) {
   compSubEl.className = `text-[10px] ${wBDays > 0 ? "text-Cred" : "text-Cmuted"}`;
   }
 
-  // Explain the compliance vs breach distinction when they diverge
+  // Explain the day-level vs job-run distinction when they diverge — reconcile,
+  // don't contradict. The window breach basis is the longest CONTIGUOUS batch
+  // block (idle gaps excluded), the same SLA-binding window Batch Review uses.
   const compNote = document.getElementById("slak-compliance-note");
   if (compNote) {
     const breachCount = data.breaching_runs || 0;
     const wbDays      = data.window_breach_days || 0;
+    const wTot        = data.window_total_days || 0;
     const windowWarnings = data.window_warnings || [];
     let noteText = "";
     if (wbDays > 0 && breachCount === 0) {
-      // Classic "window failed but no single job breached" — explain why
-      noteText = `ℹ Window = total elapsed time (first job start → last job end). `
-        + `${wbDays} day(s) where the batch collectively ran late, even though no individual job `
-        + `exceeded its own SLA ceiling. Possible causes: late job start, queue delays, or too many `
-        + `jobs running sequentially without overlap.`;
+      // Job-run pass rate is ~100% yet some days breach the window: on those days
+      // the binding sub-app's longest contiguous run exceeded its OWN ceiling,
+      // even though every individual job ENDED OK. Same story as Batch Review.
+      noteText = `ℹ Every job individually ENDED OK, yet ${wbDays} of ${wTot} day(s) breached the window: `
+        + `on those days the binding sub-app's longest CONTIGUOUS run (idle gaps excluded) exceeded its own SLA ceiling. `
+        + `This is the same day-level story as the Batch Review tab — open it for the per-day breakdown of which sub-app drove each breach.`;
     }
     if (windowWarnings.length) {
       noteText = noteText ? `${noteText} · ${windowWarnings[0]}` : windowWarnings[0];
@@ -16060,10 +16064,41 @@ function _renderSlaMatrix(data) {
   }
   setText("slak-total",  String(data.total_runs));
 
-  const brEl = document.getElementById("slak-breach");
-  if (brEl) { brEl.textContent = String(data.breaching_runs); brEl.className = `text-2xl font-bold ${data.breaching_runs > 0 ? "text-Cred" : "text-Cgreen"}`; }
-  const arEl = document.getElementById("slak-atrisk");
-  if (arEl) { arEl.textContent = String(data.at_risk_runs); arEl.className = `text-2xl font-bold ${data.at_risk_runs > 0 ? "text-Camber" : "text-Cgreen"}`; }
+  // ── Story banner headline — reconciled day-level Window SLA (matches Batch Review) ──
+  const _bannerEl = document.getElementById("sla-banner-headline");
+  if (_bannerEl) {
+    _bannerEl.textContent = _n(headlineComp).toFixed(1) + "%";
+    _bannerEl.className = `text-4xl font-bold leading-none mt-1 ${compColor}`;
+  }
+  const _bannerSub = document.getElementById("sla-banner-sub");
+  if (_bannerSub) {
+    const _wd = data.window_total_days || 0;
+    const _wbd = data.window_breach_days || 0;
+    _bannerSub.textContent = _wd
+      ? `${_wd - _wbd}/${_wd} days all sub-apps within window · ${_wbd} breach day${_wbd === 1 ? "" : "s"}`
+      : "";
+  }
+
+  // ── Drifting Jobs — runs over their OWN learned baseline (z ≥ 2), still under global SLA ──
+  const driftN = (data.outliers || []).length;
+  const drEl = document.getElementById("slak-drift");
+  if (drEl) { drEl.textContent = String(driftN); drEl.className = `text-2xl font-bold ${driftN > 0 ? "text-Camber" : "text-Cgreen"}`; }
+
+  // ── Tightest Buffer — the single job closest to its SLA ceiling (job-level headroom) ──
+  const _bufs = (data.job_summary || [])
+    .map((j) => j.buffer_pct)
+    .filter((v) => v != null && !Number.isNaN(v));
+  const tbEl = document.getElementById("slak-tightbuf");
+  if (tbEl) {
+    if (_bufs.length) {
+      const _minBuf = Math.min(..._bufs);
+      tbEl.textContent = _minBuf.toFixed(1) + "%";
+      tbEl.className = `text-2xl font-bold ${_minBuf >= 40 ? "text-Cgreen" : _minBuf >= 15 ? "text-Camber" : "text-Cred"}`;
+    } else {
+      tbEl.textContent = "—";
+      tbEl.className = "text-2xl font-bold text-Cmuted";
+    }
+  }
   setText("slak-limit", _n(data.sla_limit_hrs).toFixed(2) + "h");
   // explicit_sla_matrix = true ONLY when per-job contract rows from an uploaded
   // SLA file were matched. Schedule-type ceilings alone do NOT qualify.
@@ -16125,18 +16160,8 @@ function _renderSlaMatrix(data) {
     wEl.title = data.worst_job ? `+${_n(data.worst_margin_hrs).toFixed(2)}h over SLA` : "";
   }
 
-  // Breach detail — show a CRUX, not 200 rows.
-  const detailWrap = document.getElementById("sla-detail-wrap");
-  const tbody      = document.getElementById("sla-breach-tbody");
-  const countLabel = document.getElementById("sla-breach-count-label");
-  if (detailWrap) {
-    detailWrap.querySelectorAll("[data-breach-crux],[data-breach-toggle]").forEach((n) => n.remove());
-  }
-  if (data.breaches?.length) {
-    _renderSlaBreachCrux(data, detailWrap, tbody, countLabel);
-  } else {
-    if (detailWrap) detailWrap.classList.add("hidden");
-  }
+  // Breach & At-Risk detail table was removed in the SLA-tab refocus (it duplicated
+  // Batch Review's top-breaching table). data.breaches still flows to PE Findings/export.
 
   // Store for findings engine
   window.appData.slaMatrix = data;
@@ -16183,16 +16208,13 @@ function _renderSlaMatrix(data) {
     try { await triggerPeNarrative();      } catch (e) {}
   })();
 
-  // ── SLA compliance donut + job buffer bars (graphical) ──
-  _renderSlaCharts(data);
-
   // ── SLA Triage panel ──
   _renderSlaTriage(data);
 
-  // Job summary
-  //   Rule 3: if 100% compliance with no breaches and no at-risk runs, the
-  //           per-job table is just noise — replace it with a single sentence.
-  //   Rule 2: otherwise show top 10 by peak runtime, with a "view all" toggle.
+  // Job Summary (All Jobs) table was removed in the SLA-tab refocus — it echoed
+  // Batch Review's per-job rollup. The block below is retained but inert: when
+  // #sla-job-wrap is absent (the common case now) the guard skips it entirely.
+  // data.job_summary is still stored on window.appData.slaMatrix for Findings/export.
   const jobWrap  = document.getElementById("sla-job-wrap");
   const jobTbody = document.getElementById("sla-job-tbody");
   // Clean any prior summary/toggle blocks so re-renders don't stack
@@ -16204,8 +16226,8 @@ function _renderSlaMatrix(data) {
     (data.breaching_runs || 0) === 0 &&
     (data.at_risk_runs   || 0) === 0;
 
-  if (data.job_summary?.length) {
-    if (jobWrap) jobWrap.classList.remove("hidden");
+  if (data.job_summary?.length && jobWrap) {
+    jobWrap.classList.remove("hidden");
     const tableEl = jobTbody?.closest("table");
 
     // Show SLA source column header only when per-job SLA file was used

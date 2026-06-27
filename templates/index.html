@@ -2794,11 +2794,21 @@
              ════════════════════════════════════════════════════ -->
         <section data-view-panel="slamatrix" class="hidden space-y-5">
 
-          <!-- ── SLA Matrix panel intro ── -->
-          <div class="px-1 pb-1 border-b border-Cborder/20 space-y-1">
-            <p class="text-[11px] text-Cwhite/75 leading-relaxed">The SLA Matrix shows how much of each batch's contracted time window actually got used. Every workflow gets a buffer % — the gap between actual runtime and the SLA ceiling. That number is what tells you how close you are to missing a delivery commitment.</p>
-            <p class="text-[11px] text-Cmuted leading-relaxed">Below 15% buffer means one slow night tips you into breach territory. LONG_JOB (15–40%) is worth watching. AT_RISK is a red flag. BREACH means the contracted window was already missed — that requires a fix or a signed waiver before PE sign-off.</p>
-            <p class="text-[11px] text-Cmuted leading-relaxed">Healthy looks like: all workflows above 40% buffer, runtime flat across days, no workflow repeating BREACH. If the same workflow shows BREACH or AT_RISK twice in a row, it's a systemic problem, not a one-off.</p>
+          <!-- ── SLA Matrix story banner — names the unique question + reconciles the headline with Batch Review ── -->
+          <div class="rounded-2xl border border-Cpurple/30 bg-gradient-to-br from-Cpurple/10 via-Ccard to-Ccard2 shadow-panel p-5">
+            <div class="flex items-start justify-between gap-5 flex-wrap">
+              <div class="space-y-1.5 min-w-0 flex-1">
+                <span class="text-[10px] font-bold uppercase tracking-widest text-Cpurple">Contract Conformance &amp; Drift</span>
+                <h2 class="text-base font-bold text-Cwhite leading-snug">Is every job measured against the right contract — and which jobs are drifting toward a breach before they ever show red?</h2>
+                <p class="text-[11px] text-Cwhite/70 leading-relaxed">Batch Review answers <em class="not-italic font-semibold text-Cwhite/85">“are we meeting the window, and which days &amp; jobs drive the risk.”</em> This tab answers what comes next: where each SLA ceiling actually comes from (Tier&nbsp;1&nbsp;→&nbsp;2&nbsp;→&nbsp;3 resolution), and which jobs are quietly creeping up against their own history — caught by a per-job baseline a flat ceiling would miss.</p>
+              </div>
+              <div class="shrink-0 text-right sm:border-l border-Cborder/30 sm:pl-5">
+                <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold">Window SLA · day-level</div>
+                <div id="sla-banner-headline" class="text-4xl font-bold text-Cwhite leading-none mt-1">—</div>
+                <div id="sla-banner-sub" class="text-[10px] text-Cmuted mt-1"></div>
+                <button onclick="setActiveView('batch')" class="mt-1.5 text-[10px] font-semibold text-Cpurple hover:underline">↔ reconciles with Batch Review</button>
+              </div>
+            </div>
           </div>
 
           <!-- ── SLA Intelligence Detail (full analysis — moved from upload page) ── -->
@@ -3013,13 +3023,17 @@
               <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Total Runs</div>
               <div id="slak-total" class="text-2xl font-bold text-Cwhite">—</div>
             </div>
-            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Breaches</div>
-              <div id="slak-breach" class="text-2xl font-bold text-Cred">—</div>
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center kpi-explain"
+                 data-explain="Drifting Jobs = runs that exceeded their OWN learned baseline (z ≥ 2 vs the job's p95/σ history) while still under the global SLA. These are early-warning regressions a flat ceiling never catches — listed in the Job Outliers table below. 0 = no job is running abnormally for itself.">
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Drifting Jobs</div>
+              <div id="slak-drift" class="text-2xl font-bold text-Cgreen">—</div>
+              <div class="text-[9px] text-Cmuted mt-0.5">vs own baseline</div>
             </div>
-            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
-              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">At Risk</div>
-              <div id="slak-atrisk" class="text-2xl font-bold text-Camber">—</div>
+            <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center kpi-explain"
+                 data-explain="Tightest Buffer = the single job sitting closest to its SLA ceiling: lowest (SLA−peak)/SLA across all jobs. This is job-level headroom only — the day-level window risk is the headline above. A high value here next to a lower Window SLA means no single job is near its limit; the risk is cumulative across the window, not any one job.">
+              <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">Tightest Buffer</div>
+              <div id="slak-tightbuf" class="text-2xl font-bold text-Cwhite">—</div>
+              <div class="text-[9px] text-Cmuted mt-0.5">job-level headroom</div>
             </div>
             <div class="rounded-xl border border-Cborder bg-Ccard shadow-kpi p-4 text-center">
               <div class="text-[10px] text-Cmuted uppercase tracking-widest font-semibold mb-1">SLA Limit</div>
@@ -3051,43 +3065,7 @@
             </div>
           </div>
 
-          <!-- SLA compliance charts -->
-          <div id="sla-charts-wrap" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <!-- Compliance Breakdown — horizontal bar breakdown (replaces useless donut) -->
-            <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-              <div class="flex items-center justify-between mb-3">
-                <h3 class="text-xs font-bold text-Cmuted uppercase tracking-wider">Compliance Breakdown</h3>
-                <span id="sla-breakdown-total" class="text-[10px] text-Cmuted"></span>
-              </div>
-              <div id="sla-breakdown-bars" class="space-y-2.5"></div>
-              <!-- Drill-through: jobs for the selected status -->
-              <div id="sla-breakdown-drill" class="hidden mt-4 rounded-xl border border-Cborder bg-Cbg/60 p-3">
-                <div class="flex items-center justify-between mb-2">
-                  <span id="sla-drill-title" class="text-[11px] font-bold text-Cwhite"></span>
-                  <button onclick="document.getElementById('sla-breakdown-drill').classList.add('hidden')" class="text-[10px] text-Cmuted hover:text-Cwhite">✕ Close</button>
-                </div>
-                <div class="overflow-x-auto">
-                  <table class="w-full text-[10px]">
-                    <thead><tr class="border-b border-Cborder/40 text-Cmuted uppercase tracking-wider text-[9px]">
-                      <th class="text-left py-1 px-2">Job</th>
-                      <th class="text-right py-1 px-2">Runtime</th>
-                      <th class="text-right py-1 px-2">SLA</th>
-                      <th class="text-right py-1 px-2">Buffer %</th>
-                      <th class="text-left py-1 px-2">Date</th>
-                      <th class="text-left py-1 px-2">Reason</th>
-                    </tr></thead>
-                    <tbody id="sla-drill-tbody"></tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-            <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-              <h3 class="text-xs font-bold text-Cmuted uppercase tracking-wider mb-3">Job SLA Buffer</h3>
-              <div style="height:280px;">
-                <canvas id="sla-buffer-bars"></canvas>
-              </div>
-            </div>
-          </div>
+          <!-- (Compliance Breakdown + Job SLA Buffer removed in refocus — job-run-level echoes of Batch Review; the day-level window story is the banner headline above, per-job drift is in Job Outliers below) -->
 
           <!-- ── SLA Triage Panel: Low-Buffer + Unexplained Breaches ── -->
           <div id="sla-triage-panel" class="hidden rounded-2xl border border-Camber/30 bg-gradient-to-br from-Camber/5 via-Ccard to-Ccard2 shadow-panel p-5 space-y-4">
@@ -3160,54 +3138,7 @@
             </div>
           </div>
 
-          <!-- Breach detail table -->
-          <div id="sla-detail-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="text-sm font-bold text-Cwhite">Breach &amp; At-Risk Jobs</h3>
-              <span id="sla-breach-count-label" class="text-xs text-Cmuted"></span>
-            </div>
-            <div class="overflow-x-auto">
-              <table class="w-full text-xs">
-                <thead>
-                  <tr class="border-b border-Cborder">
-                    <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Job</th>
-                    <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Sub-App</th>
-                    <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Date</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Start</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">End</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Run (h)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">SLA (h)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Margin</th>
-                    <th class="text-center py-2 text-Cmuted font-semibold">Status</th>
-                  </tr>
-                </thead>
-                <tbody id="sla-breach-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- Per-job rollup table -->
-          <div id="sla-job-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-            <h3 class="text-sm font-bold text-Cwhite mb-3">Job Summary (All Jobs)</h3>
-            <div class="overflow-x-auto">
-              <table class="w-full text-xs">
-                <thead>
-                  <tr class="border-b border-Cborder">
-                    <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Job Name</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Runs</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Peak (h)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Avg (h)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold">SLA (h)</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold" title="(SLA_h − peak_h) / SLA_h × 100  |  null = SLA_MISSING or FAILED">Buffer %</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold" title="# runs where peak exceeded SLA ceiling">Breaches</th>
-                    <th class="text-right py-2 pr-4 text-Cmuted font-semibold" title="breach_runs / runs × 100">Breach %</th>
-                    <th id="sla-src-col-hdr" class="text-right py-2 text-Cmuted font-semibold" title="Where the SLA value came from: SLA File · XLSX T1 · SOW T2 · Assumed · Global">SLA Source</th>
-                  </tr>
-                </thead>
-                <tbody id="sla-job-tbody"></tbody>
-              </table>
-            </div>
-          </div>
+          <!-- (Breach & At-Risk Jobs + Job Summary (All Jobs) removed in refocus — these duplicated Batch Review's top-breaching table and per-job rollup. Per-job contract source now lives in the Active SLA Commitments panel; the full job_summary data is still computed and feeds PE Findings + export.) -->
 
           <!-- ── Adaptive per-job baselines (computed from the file itself) ── -->
           <div id="sla-baseline-wrap" class="hidden rounded-2xl border border-Cpurple/40 bg-gradient-to-br from-Cpurple/8 via-Ccard to-Ccard2 shadow-panel p-5">
