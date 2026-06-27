@@ -44,6 +44,14 @@ _ROLE_CPU = {
     "SRE": {"ok": 90.0, "warn": 100.0},
 }
 
+# ── Role-specific memory governing band ────────────────────────
+# DB servers pre-allocate 80–92% of RAM to SGA/PGA by design, so memory inside
+# this band is EXPECTED behaviour, not a warning. Other roles fall back to the
+# global MEM_WARN / MEM_CRIT thresholds from pe_config. Centralised here so the
+# narrative layer surfaces the SAME governing ceiling the grader actually used.
+DB_MEM_EXPECTED_LO = 80.0
+DB_MEM_EXPECTED_HI = 92.0
+
 # ── Aggregation trap detection thresholds ──────────────────────
 # When Max CPU is very high but Avg CPU is very low, the spike is a
 # visual aggregation artifact (e.g., one 99% sample across a week),
@@ -106,6 +114,17 @@ def detect_dual_pressure(cpu: float, mem: float) -> bool:
 def role_cpu_thresholds(server_type: str) -> Dict[str, float]:
     """Return the (ok, warn) CPU thresholds for a given server role."""
     return _ROLE_CPU.get(server_type.upper(), _ROLE_CPU["APP"])
+
+
+def mem_threshold(server_type: str) -> float:
+    """Governing memory ceiling per role: above this, memory is flagged.
+
+    DB servers tolerate the SGA/PGA band up to DB_MEM_EXPECTED_HI; every other
+    role uses the global MEM_CRIT threshold (single-sourced from pe_config). The
+    narrative layer reads this so the threshold it prints next to a peak is the
+    exact one the fleet grader applied — no flat invented number."""
+    from services.pe_config import MEM_CRIT
+    return DB_MEM_EXPECTED_HI if (server_type or "").upper() == "DB" else MEM_CRIT
 
 
 # ── F8 — Fleet Health (verbatim port) ───────────────────────────
@@ -276,7 +295,7 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     _db_mem_expected = (
         server_type == "DB"
         and mem_available
-        and 80.0 <= mem <= 92.0
+        and DB_MEM_EXPECTED_LO <= mem <= DB_MEM_EXPECTED_HI
         and not image_only
     )
     if _db_mem_expected and status == "Warning":
@@ -290,9 +309,9 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     # "DB_HIGH"    — DB above expected band (> 92% used / < 8% available); flag
     # None         — use standard thresholds
     if server_type == "DB" and mem_available and not image_only:
-        if mem <= 92.0 and mem >= 80.0:
+        if DB_MEM_EXPECTED_LO <= mem <= DB_MEM_EXPECTED_HI:
             mem_status: Optional[str] = "DB_NORMAL"
-        elif mem > 92.0:
+        elif mem > DB_MEM_EXPECTED_HI:
             mem_status = "DB_HIGH"
         else:
             mem_status = None

@@ -9675,6 +9675,31 @@ function _batchVerdictPanelHtml(panel) {
   return bannerHtml + kpiHtml + explainerHtml + directionHtml;
 }
 
+// Provenance badge — tells the reviewer at a glance whether a section's numbers
+// are contract-derived (parsed from an uploaded SOW PDF, higher trust) or manual
+// (typed in, unverified). Surfaces the deterministic `provenance` field the
+// narrative attaches to the Data Volume section so manual figures are visibly
+// flagged before sign-off instead of sitting in the same styling as measured data.
+function _provenanceBadgeHtml(prov) {
+  if (!prov || !prov.source) return "";
+  const tone = prov.tone || "muted";
+  const hex  = tone === "ok"   ? THEME.green
+             : tone === "warn" ? THEME.amber
+             : THEME.muted;
+  const icon = tone === "ok" ? "✓" : tone === "warn" ? "⚠" : "•";
+  return `
+    <div class="px-4 py-2 flex items-start gap-2.5 border-b border-Cborder/30"
+         style="background:${hexA(hex, 0.07)}">
+      <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border whitespace-nowrap mt-0.5"
+            style="color:${hex};border-color:${hexA(hex, 0.45)};background:${hexA(hex, 0.12)}">
+        ${icon} ${_esc(prov.label || "")}
+      </span>
+      ${prov.note
+        ? `<span class="text-[12px] text-Cwhite/65 leading-snug">${_esc(prov.note)}</span>`
+        : ""}
+    </div>`;
+}
+
 function renderPeNarrative(data) {
   if (!data) return;
   const card = document.getElementById("pe-narrative-card");
@@ -9746,6 +9771,9 @@ function renderPeNarrative(data) {
     // Conclusive verdict panel (batch_sla) — rendered above the evidence table.
     const panelHtml = _batchVerdictPanelHtml(sec.panel);
 
+    // Provenance badge (data_volume) — manual-vs-contractual data source flag.
+    const provHtml = _provenanceBadgeHtml(sec.provenance);
+
     // Caption that tells the reader WHAT the table below is (e.g. "Breach days,
     // worst overrun first" vs "Longest jobs — reference only, all within SLA").
     const captionHtml = sec.table_caption
@@ -9777,7 +9805,7 @@ function renderPeNarrative(data) {
          </div>`
       : "";
 
-    block.innerHTML = headHtml + panelHtml + proseHtml + captionHtml + tableHtml;
+    block.innerHTML = headHtml + provHtml + panelHtml + proseHtml + captionHtml + tableHtml;
     wrap.appendChild(block);
   });
 }

@@ -67,12 +67,13 @@ _SECTIONS = [
         "id":    "infrastructure",
         "title": "Infrastructure Utilisation & Resource Health",
         "guide": (
-            "Average + peak CPU / memory / disk per server role. "
-            "Highlight any host >75% utilisation."
+            "Average + peak CPU / memory / disk per server role, each shown against "
+            "the role-aware governing threshold (APP/DB/SRE differ; DB memory 80-92% "
+            "is the expected SGA/PGA band). Flag any host whose peak exceeds its role ceiling."
         ),
         "default_table": {
-            "headers": ["Resource Type", "Avg Utilisation", "Peak Utilisation"],
-            "rows":    [["NA", "NA", "NA"]],
+            "headers": ["Resource Type", "Avg", "Peak", "Governing Threshold", "Status"],
+            "rows":    [["NA", "NA", "NA", "NA", "NA"]],
         },
     },
     {
@@ -733,9 +734,41 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             "Upload SOW PDF or enter DFU/SKU values in the Volume Ramp panel to populate this section."
         )
 
+    # Provenance flag — is the SOW/volume data parsed from an uploaded contract
+    # PDF (contractual, higher trust) or typed in by hand (manual, unverified)?
+    # Surfaced as a visible badge so a reviewer knows at a glance which numbers to
+    # trust before sign-off — a manual figure can carry a units error or a rounded
+    # placeholder typed over a precise value. Mirrors the evidence_class provenance
+    # concept the findings engine already uses, applied to the Data Volume panel.
+    if sow_c:
+        _dv_prov = {
+            "source": "sow_pdf",
+            "label": "SOW PDF — contractual",
+            "tone": "ok",
+            "note": ("Volume targets parsed from the uploaded SOW contract — "
+                     "contractual and traceable to the source document."),
+        }
+    elif sw:
+        _dv_prov = {
+            "source": "manual",
+            "label": "Manual input — unverified",
+            "tone": "warn",
+            "note": ("Volume targets were entered by hand, not parsed from a source "
+                     "document. Confirm against the signed SOW before sign-off — a "
+                     "manual value can carry a units or typo error."),
+        }
+    else:
+        _dv_prov = {
+            "source": "none",
+            "label": "Not loaded",
+            "tone": "muted",
+            "note": "No SOW contract or manual volume figures loaded yet.",
+        }
+
     sections.append({
         "id": "data_volume", "title": "Data Volume Analysis",
         "prose": dv_prose,
+        "provenance": _dv_prov,
         "table": {"headers": ["Dimension", "SOW Target", "Actual", "Status"], "rows": dv_rows},
     })
 
@@ -1039,6 +1072,32 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         stype = (s.get("type") or s.get("server_type") or "APP").upper()
         type_buckets.setdefault(stype, []).append(s)
 
+    from services.resource_calculator import (
+        role_cpu_thresholds, mem_threshold,
+        DB_MEM_EXPECTED_LO, DB_MEM_EXPECTED_HI,
+    )
+    from services.pe_config import MEM_WARN, MEM_CRIT
+
+    def _cpu_status(peak: float, ok: float, warn: float) -> str:
+        if peak <= ok:   return "OK"
+        if peak <= warn: return "WATCH"
+        return "HIGH"
+
+    def _mem_status(stype: str, peak: float) -> str:
+        if stype == "DB":
+            return "OK (SGA band)" if peak <= DB_MEM_EXPECTED_HI else "HIGH"
+        if peak <= MEM_WARN: return "OK"
+        if peak <= MEM_CRIT: return "WATCH"
+        return "HIGH"
+
+    def _cpu_thresh_label(ok: float, warn: float) -> str:
+        return f"role ceil {ok:.0f}% / warn {warn:.0f}%"
+
+    def _mem_thresh_label(stype: str) -> str:
+        if stype == "DB":
+            return f"{DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% expected (SGA/PGA)"
+        return f"warn {MEM_WARN:.0f}% / crit {MEM_CRIT:.0f}%"
+
     for stype, items in type_buckets.items():
         def _pick(srv, *fields):
             for f in fields:
@@ -1054,11 +1113,18 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         mem_avg  = sum(mem_vals) / len(mem_vals) if mem_vals else 0
         mem_peak = max(mem_vals, default=0)
         label    = {"APP": "Application", "DB": "Database", "SRE": "SRE/Batch"}.get(stype, stype)
-        inf_rows.append([f"{label} CPU",    f"{cpu_avg:.1f}%",  f"{cpu_peak:.1f}%"])
-        inf_rows.append([f"{label} Memory", f"{mem_avg:.1f}%",  f"{mem_peak:.1f}%"])
+        _rct     = role_cpu_thresholds(stype)
+        _c_ok, _c_warn = _rct["ok"], _rct["warn"]
+        # Each row now carries the governing threshold the grader actually applied
+        # for this role + a peak-vs-threshold status, so a reviewer can verify the
+        # math in-place instead of trusting a summary sentence that may disagree.
+        inf_rows.append([f"{label} CPU",    f"{cpu_avg:.1f}%", f"{cpu_peak:.1f}%",
+                         _cpu_thresh_label(_c_ok, _c_warn), _cpu_status(cpu_peak, _c_ok, _c_warn)])
+        inf_rows.append([f"{label} Memory", f"{mem_avg:.1f}%", f"{mem_peak:.1f}%",
+                         _mem_thresh_label(stype), _mem_status(stype, mem_peak)])
 
     if not inf_rows:
-        inf_rows = [["NA", "NA", "NA"]]
+        inf_rows = [["NA", "NA", "NA", "NA", "NA"]]
 
     fleet_avg_cpu = _res_cpu(rk) or 0.0
     fleet_avg_mem = _res_mem(rk) or 0.0
@@ -1067,22 +1133,33 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     n_crit        = _int(rk.get("n_critical") or rk.get("critical_count"))
     n_warn        = _int(rk.get("n_warning") or rk.get("warning_count"))
     n_dual        = _int(rk.get("n_dual_pressure"))
-    cpu_thresh    = 75.0
-    hot_hosts     = [
-        s.get("host") or s.get("server") or "?"
-        for s in servers
-        if _num(s.get("cpu_pct") or s.get("cpu_utilisation") or 0) > cpu_thresh
-    ]
+    # Role-aware hot-host detection — a host is "above ceiling" if its peak CPU
+    # exceeds its ROLE ceiling OR its memory exceeds its role governing ceiling.
+    # This replaces a flat CPU-only 75% check that ignored memory entirely and
+    # made a DB memory peak of 91.7% invisible to the prose.
+    role_hot = []
+    for s in servers:
+        _st = (s.get("type") or s.get("server_type") or "APP").upper()
+        _c  = _num(s.get("cpu_pct") or s.get("cpu_utilisation") or s.get("cpu_usage") or 0) or 0.0
+        _m  = _num(s.get("mem_pct") or s.get("mem_utilisation") or s.get("memory_pct") or 0) or 0.0
+        if _c > role_cpu_thresholds(_st)["ok"] or _m > mem_threshold(_st):
+            role_hot.append(s.get("host") or s.get("server") or "?")
 
     if servers:
+        _app_ok = role_cpu_thresholds("APP")["ok"]
+        _db_ok  = role_cpu_thresholds("DB")["ok"]
+        _sre_ok = role_cpu_thresholds("SRE")["ok"]
         prose_i = (
-            f"Average CPU utilisation across the fleet is {fleet_avg_cpu:.1f}% "
-            f"and memory is {fleet_avg_mem:.1f}%, with "
-            + (f"{len(hot_hosts)} host(s) exceeding the {cpu_thresh:.0f}% threshold "
-               f"({', '.join(hot_hosts[:3])})."
-               if hot_hosts
-               else f"no host exceeding the {cpu_thresh:.0f}% utilisation threshold.")
-            + f" Fleet has {n_crit} critical and {n_warn} warning server(s)."
+            f"Average CPU across the fleet is {fleet_avg_cpu:.1f}% and memory {fleet_avg_mem:.1f}%. "
+            "Thresholds are role-aware, not a single flat number — "
+            f"APP CPU {_app_ok:.0f}%, DB CPU {_db_ok:.0f}%, SRE CPU {_sre_ok:.0f}%; "
+            f"DB memory {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% is the expected "
+            "SGA/PGA band and is not alarmed. "
+            + (f"{len(role_hot)} host(s) read above their role ceiling on peak "
+               f"({', '.join(role_hot[:3])}); "
+               if role_hot
+               else "No host reads above its role-specific ceiling on peak; ")
+            + f"under fleet health scoring this fleet has {n_crit} critical and {n_warn} warning server(s)."
             + (f" {n_dual} host(s) show simultaneous CPU + memory pressure." if n_dual else "")
             + (f" Fleet grade: {fleet_grade} (score: {fleet_score:.1f})." if fleet_grade != "N/A" else "")
             + (
@@ -1099,16 +1176,23 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 )
             )
         )
+        inf_caption = (
+            f"Role-aware thresholds — APP CPU {_app_ok:.0f}% / DB CPU {_db_ok:.0f}% / "
+            f"SRE CPU {_sre_ok:.0f}%; DB memory {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% "
+            f"expected (SGA/PGA), other memory crit {MEM_CRIT:.0f}%. Peak = worst single host in the role."
+        )
     else:
         prose_i = (
             "Resource utilisation data is not loaded — upload resource report "
             "(DOCX/PDF) for infrastructure health analysis."
         )
+        inf_caption = ""
 
     sections.append({
         "id": "infrastructure", "title": "Infrastructure Utilisation & Resource Health",
         "prose": prose_i,
-        "table": {"headers": ["Resource Type", "Avg Utilisation", "Peak Utilisation"], "rows": inf_rows},
+        **({"table_caption": inf_caption} if inf_caption else {}),
+        "table": {"headers": ["Resource Type", "Avg", "Peak", "Governing Threshold", "Status"], "rows": inf_rows},
     })
 
     # -- 4. UAT ------------------------------------------------------------
@@ -1468,9 +1552,11 @@ def _validate_and_merge(ai_payload: Any, fallback: Dict[str, Any],
                 "table": {"headers": headers, "rows": rows},
                 # Deterministic, single-source extras the AI must NOT override or drop:
                 # the verdict panel + table caption always come from the fallback so the
-                # batch conclusion can never be reworded into a contradiction by the LLM.
+                # batch conclusion can never be reworded into a contradiction by the LLM,
+                # and the provenance badge always reflects the real data source.
                 **({"panel": fb_sec["panel"]} if (fb_sec and fb_sec.get("panel")) else {}),
                 **({"table_caption": fb_sec["table_caption"]} if (fb_sec and fb_sec.get("table_caption")) else {}),
+                **({"provenance": fb_sec["provenance"]} if (fb_sec and fb_sec.get("provenance")) else {}),
             })
         elif fb_sec:
             merged.append(fb_sec)
