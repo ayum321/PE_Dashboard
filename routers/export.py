@@ -68,12 +68,13 @@ def _tag(val: float, ok: float, warn: float, fmt: str = "{:.1f}%") -> str:
         return f'<span class="tag tag-amber">{v}</span>'
     if val > 0:
         return f'<span class="tag tag-green">{v}</span>'
-    return '<span class="tag tag-muted">N/A</span>'
+    return '<span class="tag tag-gray">N/A</span>'
 
 
 def _srv_rows(servers: List[dict]) -> str:
     if not servers:
-        return "<tr><td colspan='8' class='dim' style='text-align:center;padding:20px'>No server data</td></tr>"
+        return ("<tr><td colspan='6' class='empty'>No server data captured "
+                "for this engagement.</td></tr>")
     rows = []
     for s in servers:
         cpu  = _f(s.get("cpu_pct",  0) or s.get("cpu_used",  0))
@@ -84,7 +85,7 @@ def _srv_rows(servers: List[dict]) -> str:
         stype = _esc(s.get("type", "APP"))
         img_only = s.get("image_only", False)
         if img_only or (cpu == 0 and mem == 0 and disk == 0):
-            status = '<span class="tag tag-muted">IMAGE ONLY</span>'
+            status = '<span class="tag tag-gray">IMAGE ONLY</span>'
             cpu_td = mem_td = dsk_td = '<span class="dim">—</span>'
         else:
             worst = max(cpu, mem, disk)
@@ -94,19 +95,11 @@ def _srv_rows(servers: List[dict]) -> str:
             cpu_td = _tag(cpu, CPU_OK, CPU_WARN)
             mem_td = _tag(mem, MEM_OK, MEM_WARN)
             dsk_td = _tag(disk, DISK_OK, DISK_WARN)
-        ram_disp = f"{ram:.1f} GB" if ram else "—"
-        disks = s.get("disks") or {}
-        mounts_html = " ".join(
-            f'<span class="mtag">{_esc(k)}: {_f(v):.0f}%</span>'
-            for k, v in list(disks.items())[:4]
-        ) or '<span class="dim">—</span>'
+        sub = host if not ram else f"{host} &middot; {ram:.0f} GB RAM"
         rows.append(f"""<tr>
-          <td class="host-cell"><b>{host.split(".")[0]}</b><br><span class="dim">{host}</span></td>
+          <td class="host-cell"><b>{host.split(".")[0]}</b><br><span class="dim">{sub}</span></td>
           <td><span class="tag tag-blue">{stype}</span></td>
-          <td>{cpu_td}</td><td>{mem_td}</td>
-          <td class="dim">{ram_disp}</td>
-          <td>{dsk_td}</td>
-          <td style="font-size:10px">{mounts_html}</td>
+          <td>{cpu_td}</td><td>{mem_td}</td><td>{dsk_td}</td>
           <td>{status}</td>
         </tr>""")
     return "".join(rows)
@@ -114,21 +107,19 @@ def _srv_rows(servers: List[dict]) -> str:
 
 def _iss_rows(issues: List[dict]) -> str:
     if not issues:
-        return "<tr><td colspan='8' class='dim' style='text-align:center;padding:20px'>No issues logged</td></tr>"
+        return ("<tr><td colspan='6' class='empty'>No open issues recorded.</td></tr>")
     sev_map = {"Critical": "tag-red", "High": "tag-amber", "Medium": "tag-amber",
                "Low": "tag-green", "Informational": "tag-blue"}
     rows = []
     for i in issues:
-        sc = sev_map.get(i.get("Severity", ""), "tag-muted")
+        sc = sev_map.get(i.get("Severity", ""), "tag-gray")
         rows.append(f"""<tr>
           <td><b>{_esc(i.get('ID',''))}</b></td>
           <td><span class="tag {sc}">{_esc(i.get('Severity',''))}</span></td>
           <td>{_esc(i.get('Type',''))}</td>
           <td>{_esc(i.get('Status',''))}</td>
           <td>{_esc(i.get('Description',''))}</td>
-          <td class="dim">{_esc(i.get('Mitigation',''))}</td>
-          <td class="dim">{_esc(i.get('Owner',''))}</td>
-          <td class="dim">{_esc(i.get('ETA',''))}</td>
+          <td class="dim">{_esc(i.get('Owner','') or '—')}</td>
         </tr>""")
     return "".join(rows)
 
@@ -176,11 +167,11 @@ def _checklist_rows(checklist: dict) -> str:
     rows = []
     for key, label in labels.items():
         checked = bool(checklist.get(key, False))
-        icon  = "✅" if checked else "⬜"
-        color = "var(--green)" if checked else "var(--text-muted)"
+        cls  = "check--on" if checked else "check--off"
+        mark = "✓" if checked else ""
         rows.append(
-            f'<div style="padding:5px 0;font-size:12px;color:{color}">'
-            f'{icon} &nbsp;{_esc(label)}</div>'
+            f'<div class="check {cls}"><span class="check__mark">{mark}</span>'
+            f'<span>{_esc(label)}</span></div>'
         )
     return "".join(rows)
 
@@ -222,6 +213,8 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         gen_date   = datetime.now().strftime("%d %b %Y, %I:%M %p")
         sign_color = "#22c55e" if both_ok else "#f59e0b"
         sign_label = "✅ APPROVED" if both_ok else "⏳ PENDING"
+        sign_state = "approved" if both_ok else "pending"
+        sign_text  = "APPROVED" if both_ok else "PENDING"
         pe_tick    = "✅" if pe_approved   else "⏳"
         cu_tick    = "✅" if cust_approved else "⏳"
 
@@ -241,21 +234,39 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         n_srv    = int(resource_kpis.get("total_servers", len(servers)))
         n_crit   = int(resource_kpis.get("n_critical", 0))
         n_warn_s = int(resource_kpis.get("n_warning",  0))
+        n_healthy = max(0, n_srv - n_crit - n_warn_s)
+
+        # Gauge geometry — sweep angle (deg) for the conic-gradient rings so the
+        # ambient Grafana-style dials render server-side with no JS.
+        comp_deg  = max(0.0, min(100.0, comp_pct))      * 3.6
+        score_deg = max(0.0, min(100.0, fleet_score))   * 3.6
+        # Server severity distribution as % widths for the stacked health bar.
+        _sv_tot   = max(1, n_srv)
+        crit_pct_w = round(n_crit    / _sv_tot * 100, 1)
+        warn_pct_w = round(n_warn_s  / _sv_tot * 100, 1)
+        ok_pct_w   = round(n_healthy / _sv_tot * 100, 1)
+        # Live thresholds for honest labels (read fresh so a Settings change shows).
+        _g = lambda x: f"{float(x):g}"
+        cpu_ok_t, cpu_warn_t = _g(pe_config.CPU_WARN), _g(pe_config.CPU_CRIT)
+        mem_ok_t, mem_warn_t = _g(pe_config.MEM_WARN), _g(pe_config.MEM_CRIT)
+        disk_ok_t, disk_warn_t = _g(pe_config.DISK_WARN), _g(pe_config.DISK_CRIT)
 
         ctx = dict(
             customer=customer, env=env, gen_date=gen_date,
             sign_color=sign_color, sign_label=sign_label,
+            sign_state=sign_state, sign_text=sign_text,
             pe_name=pe_name, cust_name=cust_name,
             pe_tick=pe_tick, cu_tick=cu_tick,
             pe_approved=pe_approved, cust_approved=cust_approved,
             pe_date=pe_date, cust_date=cust_date,
             notes=_esc(notes),
-            comp_pct=comp_pct, comp_col=comp_col,
+            comp_pct=comp_pct, comp_col=comp_col, comp_deg=comp_deg,
             n_breach=n_breach, n_ok_jobs=n_ok_jobs,
             n_jobs=n_jobs, total_hrs=total_hrs, total_runs=total_runs,
-            fleet_grade=fleet_grade, fleet_score=fleet_score,
+            fleet_grade=fleet_grade, fleet_score=fleet_score, score_deg=score_deg,
             grade_color=grade_color,
-            n_srv=n_srv, n_crit=n_crit, n_warn_s=n_warn_s,
+            n_srv=n_srv, n_crit=n_crit, n_warn_s=n_warn_s, n_healthy=n_healthy,
+            crit_pct_w=crit_pct_w, warn_pct_w=warn_pct_w, ok_pct_w=ok_pct_w,
             n_issues=len(issues),
             srv_rows=_srv_rows(servers),
             top_rows=_top_rows(top_jobs_data),
@@ -263,6 +274,10 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             checklist_rows=_checklist_rows(checklist),
             daily_limit=DAILY_LIMIT_HRS,
             monthly_limit=MONTHLY_LIMIT_HRS,
+            capture_days=pe_config.RESOURCE_CAPTURE_DAYS,
+            cpu_ok_t=cpu_ok_t, cpu_warn_t=cpu_warn_t,
+            mem_ok_t=mem_ok_t, mem_warn_t=mem_warn_t,
+            disk_ok_t=disk_ok_t, disk_warn_t=disk_warn_t,
         )
 
         html = templates.get_template("report_export.html").render(**ctx)

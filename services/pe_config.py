@@ -48,6 +48,12 @@ MEM_CRIT:  float = 80.0
 DISK_WARN: float = 70.0
 DISK_CRIT: float = 85.0
 
+# ── Resource capture window (days) ────────────────────────────────────────────
+# How many days of resource-utilisation history a PE review is expected to cover.
+# Surfaced in the export checklist label and kept here so the frontend, export,
+# and any future capture logic read one number. Override: resource_capture_days.
+RESOURCE_CAPTURE_DAYS: int = 15
+
 # ── Batch quality thresholds ──────────────────────────────────────────────────
 BATCH_FAIL_RATE:  float = 5.0    # % failure rate above which rule R4 fires
 ZERO_DUR_FLAG:    bool  = True   # Flag zero-duration jobs in findings
@@ -330,7 +336,7 @@ def reload() -> None:
             return default
 
     global CPU_WARN, CPU_CRIT, MEM_WARN, MEM_CRIT, DISK_WARN, DISK_CRIT
-    global BATCH_FAIL_RATE, ZERO_DUR_FLAG
+    global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT
     global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
@@ -356,6 +362,10 @@ def reload() -> None:
     DISK_CRIT         = _f("disk_critical",     85.0)
     BATCH_FAIL_RATE   = _f("batch_fail_rate",   5.0)
     ZERO_DUR_FLAG     = bool (_cfg("zero_dur_flag",     True))
+    try:
+        RESOURCE_CAPTURE_DAYS = int(_cfg("resource_capture_days", 15))
+    except (TypeError, ValueError):
+        RESOURCE_CAPTURE_DAYS = 15
     SLA_DAILY_HRS     = _f("daily_sla_hrs",     SLA_DEFAULTS["daily"])
     SLA_WEEKLY_HRS    = _f("weekly_sla_hrs",    SLA_DEFAULTS["weekly"])
     SLA_BIWEEKLY_HRS  = _f("biweekly_sla_hrs",  SLA_DEFAULTS["biweekly"])

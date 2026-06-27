@@ -1,389 +1,535 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>PE Audit Report — {{ customer }} {{ env }}</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PE Audit Report — {{ customer }}</title>
 <style>
-/* ─── CSS VARIABLES — C_dict colors from app_v2.py ─────────────────── */
-:root, [data-theme="dark"] {
-  --bg-page:      #060914;
-  --bg-card:      #0d1526;
-  --bg-card2:     #111d36;
-  --bg-table-hd:  #1e2540;
-  --bg-table-r:   #0d1526;
-  --bg-table-rh:  #111d36;
-  --border:       #213060;
-  --text-primary: #f0f4ff;
-  --text-muted:   #6b7db3;
-  --text-head:    #a8b4d0;
-  --green:        #10d96e;
-  --amber:        #f59e0b;
-  --red:          #f43f5e;
-  --blue:         #3b82f6;
-  --purple:       #a855f7;
-  --cyan:         #22d3ee;
-  --header-bg1:   #06091a;
-  --header-bg2:   #14296a;
+/* ============================================================
+   PE Audit Report — Grafana / Prometheus observability styling
+   100% self-contained (no CDN, no JS frameworks). Pure CSS +
+   inline SVG so it can be emailed, archived, and printed.
+   ============================================================ */
+:root[data-theme="dark"]{
+  --bg-page:#070b18; --bg-deep:#04060f;
+  --panel:#0e1627; --panel-2:#101a2e; --panel-top:#13203a;
+  --border:#1e2c4f; --border-soft:#16223d;
+  --ink:#eef3ff; --ink-2:#aab8d4; --ink-3:#6b7a9c;
+  --grid:#16213b;
+  --green:#10d96e; --amber:#f59e0b; --red:#f43f5e;
+  --blue:#3b82f6; --purple:#a855f7; --cyan:#22d3ee;
+  --track:rgba(255,255,255,.06);
+  --shadow:0 18px 48px -22px rgba(0,0,0,.85);
+  --glow:0 0 0 1px rgba(59,130,246,.12), 0 8px 30px -12px rgba(7,11,24,.9);
 }
-[data-theme="light"] {
-  --bg-page:      #f0f4fb;
-  --bg-card:      #ffffff;
-  --bg-card2:     #f3f7ff;
-  --bg-table-hd:  #e8edf8;
-  --bg-table-r:   #ffffff;
-  --bg-table-rh:  #f0f4ff;
-  --border:       #c9d4ee;
-  --text-primary: #1e293b;
-  --text-muted:   #64748b;
-  --text-head:    #334155;
-  --green:        #16a34a;
-  --amber:        #d97706;
-  --red:          #dc2626;
-  --blue:         #2563eb;
-  --purple:       #7c3aed;
-  --cyan:         #0891b2;
-  --header-bg1:   #1e3a5f;
-  --header-bg2:   #2d5a9e;
+:root[data-theme="light"]{
+  --bg-page:#eef2f9; --bg-deep:#e3e9f4;
+  --panel:#ffffff; --panel-2:#f7f9fd; --panel-top:#eef3fb;
+  --border:#d4ddee; --border-soft:#e3e9f4;
+  --ink:#0d1730; --ink-2:#41506e; --ink-3:#7888a6;
+  --grid:#e7ecf6;
+  --green:#0a9b54; --amber:#c2790a; --red:#d4304b;
+  --blue:#2563eb; --purple:#8b3fd6; --cyan:#0e9cb8;
+  --track:rgba(13,23,48,.07);
+  --shadow:0 14px 38px -20px rgba(60,80,120,.35);
+  --glow:0 0 0 1px rgba(37,99,235,.10), 0 10px 28px -14px rgba(120,140,180,.4);
 }
-/* ─── RESET & BASE ──────────────────────────────────────────────────── */
-*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
-body {
-  font-family:'Segoe UI','Inter',Arial,sans-serif;
-  background:var(--bg-page); color:var(--text-primary);
-  font-size:13px; line-height:1.5;
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg-page); color:var(--ink);
+  font-size:15px; line-height:1.5; letter-spacing:.1px;
+  -webkit-font-smoothing:antialiased; position:relative;
 }
-.page { max-width:1180px; margin:0 auto; padding:28px 24px; }
+/* Ambient observability glow field */
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(59,130,246,.18), transparent 60%),
+    radial-gradient(820px 520px at 96% 4%, rgba(168,85,247,.14), transparent 58%),
+    radial-gradient(1000px 700px at 50% 118%, rgba(34,211,238,.10), transparent 60%),
+    linear-gradient(180deg,var(--bg-page),var(--bg-deep));
+}
+.tabnum{font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1;}
+.page{position:relative; z-index:1; max-width:1180px; margin:0 auto; padding:30px 30px 60px;}
 
-/* ─── FIXED CONTROLS ────────────────────────────────────────────────── */
-.theme-btn {
-  position:fixed; top:18px; right:110px; z-index:999;
-  background:var(--bg-card2); border:1px solid var(--border);
-  border-radius:24px; padding:7px 16px; cursor:pointer;
-  font-size:12px; font-weight:600; color:var(--text-primary);
-  display:flex; align-items:center; gap:6px;
+/* ── Toolbar (screen only) ───────────────────────────────── */
+.toolbar{display:flex; gap:10px; justify-content:flex-end; margin-bottom:18px;}
+.tbtn{
+  appearance:none; cursor:pointer; font-size:12.5px; font-weight:600;
+  color:var(--ink-2); background:var(--panel); border:1px solid var(--border);
+  border-radius:9px; padding:8px 14px; letter-spacing:.3px;
+  transition:.15s; display:inline-flex; align-items:center; gap:7px;
 }
-.print-btn {
-  position:fixed; top:18px; right:20px; z-index:999;
-  background:linear-gradient(135deg,var(--blue),var(--purple));
-  color:#fff; border:none; border-radius:24px;
-  padding:8px 18px; font-size:12px; font-weight:600;
-  cursor:pointer; box-shadow:0 4px 16px rgba(59,130,246,.4);
-}
+.tbtn:hover{color:var(--ink); border-color:var(--blue); box-shadow:0 0 0 3px rgba(59,130,246,.12);}
 
-/* ─── HEADER ────────────────────────────────────────────────────────── */
-.report-header {
-  background:linear-gradient(135deg,var(--header-bg1),var(--header-bg2));
-  border:1px solid var(--border); border-radius:16px;
-  padding:28px 36px; margin-bottom:22px;
-  display:flex; justify-content:space-between; align-items:center;
-  position:relative; overflow:hidden;
+/* ── Header ──────────────────────────────────────────────── */
+.rhead{
+  position:relative; overflow:hidden; border:1px solid var(--border);
+  border-radius:18px; padding:26px 28px;
+  background:
+    radial-gradient(540px 220px at 88% -40%, rgba(59,130,246,.28), transparent 62%),
+    linear-gradient(135deg,var(--panel-top),var(--panel));
+  box-shadow:var(--shadow); margin-bottom:18px;
 }
-.report-header::before {
-  content:""; position:absolute; top:-40px; right:-40px;
-  width:220px; height:220px; border-radius:50%;
-  background:radial-gradient(circle,rgba(59,130,246,.15),transparent 70%);
+.rhead::after{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:5px;
+  background:linear-gradient(180deg,var(--blue),var(--purple),var(--cyan));
+  box-shadow:0 0 22px 2px rgba(59,130,246,.55);
 }
-.report-header h1 { font-size:22px; font-weight:800; color:#fff; margin-bottom:4px; }
-.rh-sub  { font-size:12px; color:#94a3b8; margin-bottom:6px; }
-.rh-date { font-size:11px; color:#64748b; }
-.customer-block { text-align:right; }
-.customer-name  { font-size:19px; font-weight:700; color:#fff; margin-bottom:6px; }
-.env-badge {
-  background:rgba(59,130,246,.15); color:#7cb9ff;
-  border:1px solid rgba(59,130,246,.35);
-  padding:4px 14px; border-radius:20px;
-  font-size:11px; font-weight:700; display:inline-block;
+.rhead__row{display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap;}
+.brand{display:flex; align-items:center; gap:13px;}
+.brand__mark{
+  width:46px; height:46px; border-radius:12px; flex:0 0 auto;
+  display:grid; place-items:center; font-size:22px;
+  background:linear-gradient(140deg,rgba(59,130,246,.25),rgba(168,85,247,.22));
+  border:1px solid rgba(99,140,230,.45); box-shadow:inset 0 0 18px rgba(59,130,246,.25);
 }
+.brand__eyebrow{font-size:11px; font-weight:700; letter-spacing:2.4px; color:var(--cyan); text-transform:uppercase;}
+.brand__title{font-size:25px; font-weight:800; letter-spacing:.2px; margin-top:2px; line-height:1.15;}
+.rhead__meta{text-align:right; display:flex; flex-direction:column; gap:9px; align-items:flex-end;}
+.cust-name{font-size:18px; font-weight:700; color:var(--ink);}
+.chips{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;}
+.chip{
+  font-size:12px; font-weight:600; letter-spacing:.4px; padding:5px 11px; border-radius:999px;
+  background:var(--panel-2); border:1px solid var(--border); color:var(--ink-2);
+  display:inline-flex; align-items:center; gap:6px;
+}
+.chip b{color:var(--ink); font-weight:700;}
+.chip .dot{width:7px; height:7px; border-radius:50%; background:var(--cyan); box-shadow:0 0 8px 1px currentColor;}
 
-/* ─── SIGN-OFF BANNER ───────────────────────────────────────────────── */
-.signoff-banner {
-  border-radius:14px; padding:20px 28px; margin-bottom:22px;
-  display:flex; justify-content:space-between; align-items:center;
-  background:{{ sign_color }}12; border:2px solid {{ sign_color }}44;
+/* ── Verdict banner ──────────────────────────────────────── */
+.banner{
+  position:relative; overflow:hidden; margin-bottom:20px;
+  border:1px solid var(--border); border-radius:16px; padding:20px 24px;
+  background:linear-gradient(135deg, color-mix(in srgb, {{ sign_color }} 16%, var(--panel)) 0%, var(--panel) 60%);
+  box-shadow:var(--shadow); display:flex; align-items:center; gap:20px; flex-wrap:wrap;
 }
-.signoff-verdict { font-size:22px; font-weight:800; color:{{ sign_color }}; }
-.signoff-meta   { font-size:12px; color:var(--text-muted); text-align:right; }
-.signoff-meta b { color:var(--text-primary); }
+.banner::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:6px;
+  background:{{ sign_color }}; box-shadow:0 0 26px 2px {{ sign_color }};
+}
+.banner__badge{
+  width:58px; height:58px; border-radius:14px; flex:0 0 auto; display:grid; place-items:center;
+  font-size:26px; color:{{ sign_color }};
+  background:color-mix(in srgb, {{ sign_color }} 18%, transparent);
+  border:1.5px solid color-mix(in srgb, {{ sign_color }} 55%, transparent);
+  box-shadow:inset 0 0 20px color-mix(in srgb, {{ sign_color }} 30%, transparent);
+}
+.banner__txt{flex:1 1 280px;}
+.banner__k{font-size:11px; font-weight:700; letter-spacing:2px; color:var(--ink-3); text-transform:uppercase;}
+.banner__v{font-size:23px; font-weight:800; color:{{ sign_color }}; margin-top:1px; letter-spacing:.3px;}
+.banner__date{text-align:right; color:var(--ink-3); font-size:12.5px; line-height:1.7;}
+.banner__date b{color:var(--ink-2); font-weight:600;}
 
-/* ─── KPI GRID ──────────────────────────────────────────────────────── */
-.kpi-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px; }
-.kpi-box  {
-  background:var(--bg-card); border:1px solid var(--border);
-  border-radius:14px; padding:20px 18px;
+/* ── Stat grid (KPI panels) ──────────────────────────────── */
+.grid{display:grid; gap:16px;}
+.stat-grid{grid-template-columns:repeat(4,1fr); margin-bottom:18px;}
+.stat{
+  position:relative; overflow:hidden; border:1px solid var(--border); border-radius:15px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel)); box-shadow:var(--glow);
+  padding:18px 18px 16px; min-height:148px; display:flex; flex-direction:column;
 }
-.kpi-label { font-size:10px; color:var(--text-muted); text-transform:uppercase;
-  letter-spacing:.1em; font-weight:700; margin-bottom:8px; }
-.kpi-value { font-size:30px; font-weight:900; line-height:1; margin-bottom:4px; }
-.kpi-sub   { font-size:10px; color:var(--text-muted); }
+.stat__top{height:3px; position:absolute; left:0; right:0; top:0; opacity:.95;}
+.stat__label{font-size:11.5px; font-weight:700; letter-spacing:1.4px; color:var(--ink-3); text-transform:uppercase;}
+.stat__body{display:flex; align-items:center; gap:16px; margin-top:auto; padding-top:10px;}
+.stat__value{font-size:42px; font-weight:800; line-height:1; letter-spacing:-.5px;}
+.stat__unit{font-size:18px; font-weight:700; color:var(--ink-3); margin-left:2px;}
+.stat__sub{font-size:12.5px; color:var(--ink-2); margin-top:8px; line-height:1.5;}
+.stat__sub .sep{color:var(--ink-3); margin:0 6px;}
 
-/* ─── SECTIONS ──────────────────────────────────────────────────────── */
-.section {
-  background:var(--bg-card); border:1px solid var(--border);
-  border-radius:14px; padding:22px 26px; margin-bottom:18px;
+/* Conic-gradient gauge ring (pure CSS) */
+.gauge{
+  --deg:0; --gc:var(--blue);
+  width:108px; height:108px; flex:0 0 auto; border-radius:50%; position:relative;
+  background:conic-gradient(var(--gc) calc(var(--deg)*1deg), var(--track) 0);
+  display:grid; place-items:center;
+  box-shadow:0 0 26px -6px var(--gc), inset 0 0 0 1px rgba(255,255,255,.04);
 }
-.section-header { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
-.section-icon { font-size:20px; }
-.section-header h2 { font-size:15px; font-weight:700; margin-bottom:2px; }
-.section-header .sub { font-size:11px; color:var(--text-muted); }
-.two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-.two-col .section { margin-bottom:0; }
+.gauge::after{
+  content:""; position:absolute; inset:11px; border-radius:50%;
+  background:radial-gradient(circle at 50% 38%, var(--panel-2), var(--panel));
+  border:1px solid var(--border-soft);
+}
+.gauge__in{position:relative; z-index:1; text-align:center;}
+.gauge__big{font-size:27px; font-weight:800; line-height:1;}
+.gauge__cap{font-size:10.5px; font-weight:700; letter-spacing:.8px; color:var(--ink-3); margin-top:3px; text-transform:uppercase;}
 
-/* ─── TABLES ────────────────────────────────────────────────────────── */
-table { width:100%; border-collapse:collapse; font-size:12px; }
-thead tr { background:var(--bg-table-hd); }
-th {
-  padding:10px 12px; text-align:left; font-size:10px;
-  color:var(--text-head); font-weight:700; text-transform:uppercase;
-  letter-spacing:.06em; border-bottom:2px solid var(--border); white-space:nowrap;
+/* ── Section panel ───────────────────────────────────────── */
+.panel{
+  position:relative; border:1px solid var(--border); border-radius:16px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));
+  box-shadow:var(--shadow); margin-bottom:18px; overflow:hidden;
 }
-td { padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
-tbody tr { background:var(--bg-table-r); }
-tbody tr:hover { background:var(--bg-table-rh); }
-.host-cell { font-size:11px; }
-.dim { color:var(--text-muted); font-size:11px; }
+.panel__head{
+  display:flex; align-items:center; gap:13px; padding:16px 20px;
+  border-bottom:1px solid var(--border-soft);
+  background:linear-gradient(90deg, color-mix(in srgb,var(--accent,#3b82f6) 10%, transparent), transparent 55%);
+}
+.panel__icon{
+  width:38px; height:38px; border-radius:11px; flex:0 0 auto; display:grid; place-items:center; font-size:19px;
+  background:color-mix(in srgb,var(--accent,#3b82f6) 16%, transparent);
+  border:1px solid color-mix(in srgb,var(--accent,#3b82f6) 45%, transparent);
+  color:var(--accent,#3b82f6); box-shadow:inset 0 0 16px color-mix(in srgb,var(--accent,#3b82f6) 22%, transparent);
+}
+.panel__t{font-size:16.5px; font-weight:700; letter-spacing:.2px;}
+.panel__s{font-size:12px; color:var(--ink-3); margin-top:2px;}
+.panel__count{margin-left:auto; font-size:12px; font-weight:700; color:var(--ink-2);
+  background:var(--panel); border:1px solid var(--border); border-radius:999px; padding:5px 12px;}
+.panel__body{padding:18px 20px;}
 
-/* ─── TAGS ──────────────────────────────────────────────────────────── */
-.tag {
-  display:inline-block; padding:2px 9px; border-radius:20px;
-  font-size:10px; font-weight:700; white-space:nowrap; border:1px solid transparent;
-}
-.tag-green  { background:rgba(16,217,110,.12); color:var(--green); border-color:rgba(16,217,110,.3); }
-.tag-amber  { background:rgba(245,158,11,.12); color:var(--amber); border-color:rgba(245,158,11,.3); }
-.tag-red    { background:rgba(244,63,94,.12);  color:var(--red);   border-color:rgba(244,63,94,.3); }
-.tag-blue   { background:rgba(59,130,246,.12); color:var(--blue);  border-color:rgba(59,130,246,.3); }
-.tag-muted  { background:var(--border); color:var(--text-muted); }
-.mtag {
-  display:inline-block; background:var(--bg-card2);
-  color:var(--text-muted); padding:1px 6px; border-radius:4px;
-  font-size:9px; margin:1px;
-}
+/* ── Health distribution bar ─────────────────────────────── */
+.hbar{height:30px; border-radius:9px; overflow:hidden; display:flex; background:var(--track);
+  border:1px solid var(--border-soft); box-shadow:inset 0 1px 4px rgba(0,0,0,.3);}
+.hbar__seg{height:100%; display:flex; align-items:center; justify-content:center;
+  font-size:12px; font-weight:800; color:#04060f; letter-spacing:.3px; transition:width .3s; min-width:0;}
+.seg-crit{background:linear-gradient(180deg,#ff5c78,var(--red)); box-shadow:0 0 18px -2px var(--red);}
+.seg-warn{background:linear-gradient(180deg,#ffc34d,var(--amber)); box-shadow:0 0 18px -2px var(--amber);}
+.seg-ok{background:linear-gradient(180deg,#3df59a,var(--green)); box-shadow:0 0 18px -2px var(--green);}
+.legend{display:flex; gap:20px; flex-wrap:wrap; margin-top:14px;}
+.legend__i{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--ink-2);}
+.legend__i b{color:var(--ink); font-weight:800; font-size:15px;}
+.legend .dot{width:11px; height:11px; border-radius:3px; box-shadow:0 0 9px 1px currentColor;}
+.dot-crit{background:var(--red); color:var(--red);}
+.dot-warn{background:var(--amber); color:var(--amber);}
+.dot-ok{background:var(--green); color:var(--green);}
 
-/* ─── APPROVAL ──────────────────────────────────────────────────────── */
-.approval-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
-.appr-box {
-  background:var(--bg-card2); border:1px solid var(--border);
-  border-radius:10px; padding:16px 18px;
+/* ── Tables ──────────────────────────────────────────────── */
+table{width:100%; border-collapse:separate; border-spacing:0; font-size:13.5px;}
+thead th{
+  text-align:left; font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+  color:var(--ink-3); padding:11px 14px; border-bottom:1px solid var(--border);
+  background:var(--panel-top); position:sticky; top:0;
 }
-.appr-box h3 {
-  font-size:11px; font-weight:700; color:var(--text-muted);
-  text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px;
-}
-.appr-box p { font-size:12px; margin-bottom:4px; }
-.info-box {
-  background:var(--bg-card2); border:1px solid var(--border);
-  border-radius:10px; padding:14px 18px; font-size:12px;
-  color:var(--text-muted); line-height:1.7;
-}
+tbody td{padding:12px 14px; border-bottom:1px solid var(--border-soft); color:var(--ink-2); vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr{transition:background .12s;}
+tbody tr:hover td{background:color-mix(in srgb,var(--blue) 7%, transparent);}
+td b, .host-cell b{color:var(--ink); font-weight:700;}
+.host-cell{line-height:1.35;}
+.dim{color:var(--ink-3); font-size:11.5px;}
+.num{font-variant-numeric:tabular-nums; font-weight:700; color:var(--ink);}
 
-/* ─── FOOTER ────────────────────────────────────────────────────────── */
-.report-footer {
-  text-align:center; padding:20px 0 8px;
-  font-size:11px; color:var(--text-muted);
-  border-top:1px solid var(--border); margin-top:24px;
-}
+/* Tags / severity pills */
+.tag{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:700;
+  letter-spacing:.3px; padding:4px 10px; border-radius:999px; white-space:nowrap;
+  border:1px solid transparent;}
+.tag::before{content:""; width:6px; height:6px; border-radius:50%; background:currentColor; box-shadow:0 0 7px 1px currentColor;}
+.tag-green{color:var(--green); background:color-mix(in srgb,var(--green) 15%, transparent); border-color:color-mix(in srgb,var(--green) 40%, transparent);}
+.tag-amber{color:var(--amber); background:color-mix(in srgb,var(--amber) 15%, transparent); border-color:color-mix(in srgb,var(--amber) 40%, transparent);}
+.tag-red{color:var(--red); background:color-mix(in srgb,var(--red) 16%, transparent); border-color:color-mix(in srgb,var(--red) 42%, transparent);}
+.tag-blue{color:var(--blue); background:color-mix(in srgb,var(--blue) 15%, transparent); border-color:color-mix(in srgb,var(--blue) 40%, transparent);}
+.tag-cyan{color:var(--cyan); background:color-mix(in srgb,var(--cyan) 15%, transparent); border-color:color-mix(in srgb,var(--cyan) 40%, transparent);}
+.tag-gray{color:var(--ink-3); background:var(--track); border-color:var(--border);}
+.tag::before{display:inline-block;}
+.tag-gray::before{box-shadow:none;}
 
-/* ─── PRINT ─────────────────────────────────────────────────────────── */
-@media print {
-  .print-btn,.theme-btn { display:none!important; }
-  .kpi-grid { grid-template-columns:repeat(4,1fr)!important; }
-  .two-col  { grid-template-columns:1fr 1fr!important; }
-  body { font-size:11px; }
+.empty{padding:26px; text-align:center; color:var(--ink-3); font-size:13.5px;}
+
+/* ── Checklist ───────────────────────────────────────────── */
+.check-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:11px;}
+.check{display:flex; align-items:center; gap:11px; padding:12px 15px; border-radius:11px;
+  background:var(--panel); border:1px solid var(--border-soft); font-size:13.5px; color:var(--ink-2);}
+.check__mark{width:22px; height:22px; border-radius:50%; flex:0 0 auto; display:grid; place-items:center;
+  font-size:12px; font-weight:800;}
+.check--on .check__mark{color:var(--green); background:color-mix(in srgb,var(--green) 18%, transparent);
+  border:1px solid color-mix(in srgb,var(--green) 45%, transparent); box-shadow:0 0 10px -2px var(--green);}
+.check--off .check__mark{color:var(--ink-3); background:var(--track); border:1px solid var(--border);}
+.check--on{color:var(--ink);}
+
+/* ── Approval ────────────────────────────────────────────── */
+.appr-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+.appr{border:1px solid var(--border); border-radius:14px; padding:18px 20px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));}
+.appr__role{font-size:11px; font-weight:700; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink-3);}
+.appr__name{font-size:18px; font-weight:700; margin-top:7px; color:var(--ink);}
+.appr__status{margin-top:14px; display:flex; align-items:center; gap:9px; font-size:13.5px; font-weight:700;}
+.appr__line{margin-top:16px; border-top:1px dashed var(--border); padding-top:9px;
+  font-size:12px; color:var(--ink-3);}
+.notes{margin-top:16px; border:1px solid var(--border); border-radius:12px; padding:15px 18px;
+  background:var(--panel); font-size:13.5px; color:var(--ink-2); line-height:1.6;}
+.notes b{color:var(--cyan); font-weight:700; letter-spacing:.4px;}
+
+/* ── Footer ──────────────────────────────────────────────── */
+.foot{margin-top:26px; padding-top:18px; border-top:1px solid var(--border);
+  display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap;
+  font-size:11.5px; color:var(--ink-3);}
+.foot code{color:var(--ink-2); background:var(--panel); border:1px solid var(--border-soft);
+  border-radius:5px; padding:2px 7px; font-size:11px;}
+
+@media (max-width:880px){
+  .stat-grid{grid-template-columns:repeat(2,1fr);}
+  .check-grid,.appr-grid{grid-template-columns:1fr;}
 }
-@page { size:A4; margin:10mm; }
+/* ── Print / PDF ─────────────────────────────────────────── */
+@page{size:A4; margin:14mm;}
+@media print{
+  body{background:#fff; color:#0d1730; font-size:11.5px;}
+  body::before{display:none;}
+  .toolbar{display:none !important;}
+  .page{max-width:none; padding:0;}
+  .rhead,.banner,.stat,.panel,.appr{box-shadow:none; break-inside:avoid;}
+  .panel,.stat-grid,.appr-grid{break-inside:avoid;}
+  thead th{position:static;}
+}
 </style>
 </head>
 <body>
-
-<!-- Controls -->
-<button class="theme-btn" onclick="toggleTheme()">🌓 Theme</button>
-<button class="print-btn" onclick="window.print()">🖨️ Print / PDF</button>
-<script>
-function toggleTheme(){
-  var h=document.documentElement;
-  h.dataset.theme=h.dataset.theme==='dark'?'light':'dark';
-}
-</script>
-
 <div class="page">
 
-<!-- ─── HEADER ──────────────────────────────────────────────────────── -->
-<div class="report-header">
-  <div>
-    <div style="font-size:10px;color:var(--blue);font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:6px">
-      ✦ PERFORMANCE ENGINEERING
+  <div class="toolbar">
+    <button class="tbtn" onclick="toggleTheme()">◐ Theme</button>
+    <button class="tbtn" onclick="window.print()">⎙ Print / PDF</button>
+  </div>
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header class="rhead">
+    <div class="rhead__row">
+      <div class="brand">
+        <div class="brand__mark">📊</div>
+        <div>
+          <div class="brand__eyebrow">Performance Engineering</div>
+          <div class="brand__title">Audit &amp; Sign-off Report</div>
+        </div>
+      </div>
+      <div class="rhead__meta">
+        <div class="cust-name">{{ customer }}</div>
+        <div class="chips">
+          <span class="chip"><span class="dot"></span>{{ env }}</span>
+          <span class="chip">Generated <b>{{ gen_date }}</b></span>
+        </div>
+      </div>
     </div>
-    <h1>PE Audit Control Tower</h1>
-    <div class="rh-sub">Performance Engineering Audit Report · v5.0</div>
-    <div class="rh-date">Generated: {{ gen_date }}</div>
-  </div>
-  <div class="customer-block">
-    <div class="customer-name">{{ customer }}</div>
-    <span class="env-badge">{{ env if env else "Production" }}</span>
-  </div>
-</div>
+  </header>
 
-<!-- ─── SIGN-OFF BANNER ──────────────────────────────────────────────── -->
-<div class="signoff-banner">
-  <div>
-    <div class="signoff-verdict">{{ sign_label }}</div>
-    <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Go-Live Sign-Off Status</div>
-  </div>
-  <div class="signoff-meta">
-    <p>PE Engineer: <b>{{ pe_name }}</b> {{ pe_tick }}</p>
-    <p style="margin-top:4px">Customer Rep: <b>{{ cust_name }}</b> {{ cu_tick }}</p>
-    <p style="margin-top:4px">{{ customer }} · {{ env }}</p>
-  </div>
-</div>
+  <!-- ── Verdict banner ─────────────────────────────────── -->
+  <section class="banner">
+    <div class="banner__badge">{% if sign_state == 'approved' %}✓{% else %}◷{% endif %}</div>
+    <div class="banner__txt">
+      <div class="banner__k">Overall Sign-off Verdict</div>
+      <div class="banner__v">{{ sign_text }}</div>
+    </div>
+    <div class="banner__date">
+      <div><b>Customer:</b> {{ customer }}</div>
+      <div><b>Environment:</b> {{ env }}</div>
+      <div><b>Report date:</b> {{ gen_date }}</div>
+    </div>
+  </section>
 
-<!-- ─── KPI CARDS ────────────────────────────────────────────────────── -->
-<div class="kpi-grid">
-  <div class="kpi-box" style="border-top:3px solid {{ comp_col }}">
-    <div class="kpi-label">SLA Compliance</div>
-    <div class="kpi-value" style="color:{{ comp_col }}">{{ "%.1f"|format(comp_pct) }}%</div>
-    <div class="kpi-sub">{{ n_breach }} breach · {{ n_ok_jobs }} OK of {{ n_jobs }} jobs</div>
-  </div>
-  <div class="kpi-box" style="border-top:3px solid var(--blue)">
-    <div class="kpi-label">Total Batch Jobs</div>
-    <div class="kpi-value" style="color:var(--blue)">{{ n_jobs }}</div>
-    <div class="kpi-sub">{{ total_runs }} runs · {{ "%.1f"|format(total_hrs) }}h runtime</div>
-  </div>
-  <div class="kpi-box" style="border-top:3px solid {{ grade_color }}">
-    <div class="kpi-label">Fleet Grade</div>
-    <div class="kpi-value" style="color:{{ grade_color }}">{{ fleet_grade }}</div>
-    <div class="kpi-sub">Score {{ "%.0f"|format(fleet_score) }}/100 · {{ n_crit }}C {{ n_warn_s }}W of {{ n_srv }} servers</div>
-  </div>
-  <div class="kpi-box" style="border-top:3px solid {{ '#ef4444' if n_breach else '#10d96e' }}">
-    <div class="kpi-label">Issues Logged</div>
-    <div class="kpi-value" style="color:{{ '#ef4444' if n_issues else '#10d96e' }}">{{ n_issues }}</div>
-    <div class="kpi-sub">SLA daily {{ daily_limit }}h · monthly {{ monthly_limit }}h</div>
-  </div>
-</div>
+  <!-- ── KPI stat panels ────────────────────────────────── -->
+  <div class="grid stat-grid">
 
-<!-- ─── BATCH PERFORMANCE TABLE ──────────────────────────────────────── -->
-<div class="section">
-  <div class="section-header">
-    <span class="section-icon">⏱️</span>
+    <div class="stat">
+      <div class="stat__top" style="background:{{ comp_col }};box-shadow:0 0 16px {{ comp_col }};"></div>
+      <div class="stat__label">Batch SLA Compliance</div>
+      <div class="stat__body">
+        <div class="gauge" style="--deg:{{ comp_deg }};--gc:{{ comp_col }};">
+          <div class="gauge__in">
+            <div class="gauge__big tabnum" style="color:{{ comp_col }};">{{ comp_pct }}%</div>
+            <div class="gauge__cap">Window</div>
+          </div>
+        </div>
+        <div>
+          <div class="stat__sub"><span class="num">{{ n_ok_jobs }}</span> jobs on-time</div>
+          <div class="stat__sub"><span class="num" style="color:{{ '#f43f5e' if n_breach else '#10d96e' }};">{{ n_breach }}</span> breaching</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:var(--blue);box-shadow:0 0 16px var(--blue);"></div>
+      <div class="stat__label">Batch Workload</div>
+      <div class="stat__body">
+        <div>
+          <span class="stat__value tabnum">{{ n_jobs }}</span><span class="stat__unit">jobs</span>
+          <div class="stat__sub"><span class="num">{{ total_runs }}</span> runs<span class="sep">•</span><span class="num">{{ total_hrs }}</span> h runtime</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:{{ grade_color }};box-shadow:0 0 16px {{ grade_color }};"></div>
+      <div class="stat__label">Fleet Health</div>
+      <div class="stat__body">
+        <div class="gauge" style="--deg:{{ score_deg }};--gc:{{ grade_color }};">
+          <div class="gauge__in">
+            <div class="gauge__big" style="color:{{ grade_color }};">{{ fleet_grade }}</div>
+            <div class="gauge__cap tabnum">{{ fleet_score }}/100</div>
+          </div>
+        </div>
+        <div>
+          <div class="stat__sub"><span class="num">{{ n_srv }}</span> servers</div>
+          <div class="stat__sub">over {{ capture_days }}-day window</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:{{ '#f43f5e' if n_issues else '#10d96e' }};box-shadow:0 0 16px {{ '#f43f5e' if n_issues else '#10d96e' }};"></div>
+      <div class="stat__label">Open Issues</div>
+      <div class="stat__body">
+        <div>
+          <span class="stat__value tabnum" style="color:{{ '#f43f5e' if n_issues else '#10d96e' }};">{{ n_issues }}</span>
+          <div class="stat__sub">{% if n_issues %}registered for review{% else %}none outstanding{% endif %}</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Fleet severity distribution ────────────────────── -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">🩺</div>
+      <div>
+        <div class="panel__t">Fleet Severity Distribution</div>
+        <div class="panel__s">{{ n_srv }} server(s) graded over the last {{ capture_days }} days</div>
+      </div>
+      <div class="panel__count">Grade {{ fleet_grade }} · {{ fleet_score }}/100</div>
+    </div>
+    <div class="panel__body">
+      <div class="hbar">
+        {% if crit_pct_w > 0 %}<div class="hbar__seg seg-crit" style="width:{{ crit_pct_w }}%;">{% if crit_pct_w >= 8 %}{{ n_crit }}{% endif %}</div>{% endif %}
+        {% if warn_pct_w > 0 %}<div class="hbar__seg seg-warn" style="width:{{ warn_pct_w }}%;">{% if warn_pct_w >= 8 %}{{ n_warn_s }}{% endif %}</div>{% endif %}
+        {% if ok_pct_w > 0 %}<div class="hbar__seg seg-ok" style="width:{{ ok_pct_w }}%;">{% if ok_pct_w >= 8 %}{{ n_healthy }}{% endif %}</div>{% endif %}
+      </div>
+      <div class="legend">
+        <span class="legend__i"><span class="dot dot-crit"></span>Critical <b>{{ n_crit }}</b></span>
+        <span class="legend__i"><span class="dot dot-warn"></span>Warning <b>{{ n_warn_s }}</b></span>
+        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>{{ n_healthy }}</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Batch performance ──────────────────────────────── -->
+  <section class="panel" style="--accent:#3b82f6;">
+    <div class="panel__head">
+      <div class="panel__icon">⚙️</div>
+      <div>
+        <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
+        <div class="panel__s">Daily ceiling {{ daily_limit }}h · monthly ceiling {{ monthly_limit }}h · buffer = (SLA − runtime) ÷ SLA</div>
+      </div>
+      <div class="panel__count">{{ n_jobs }} jobs</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <table>
+        <thead><tr>
+          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>Buffer</th><th>Status</th>
+        </tr></thead>
+        <tbody>{{ top_rows|safe }}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Infrastructure ─────────────────────────────────── -->
+  <section class="panel" style="--accent:#a855f7;">
+    <div class="panel__head">
+      <div class="panel__icon">🖥️</div>
+      <div>
+        <div class="panel__t">Infrastructure Utilisation</div>
+        <div class="panel__s">CPU OK ≤{{ cpu_ok_t }}% · Warn ≤{{ cpu_warn_t }}% &nbsp;·&nbsp; Mem OK ≤{{ mem_ok_t }}% · Warn ≤{{ mem_warn_t }}% &nbsp;·&nbsp; cell colour reflects configured thresholds</div>
+      </div>
+      <div class="panel__count">{{ n_srv }} servers</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <table>
+        <thead><tr>
+          <th>Host</th><th>Role</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Health</th>
+        </tr></thead>
+        <tbody>{{ srv_rows|safe }}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Issues register ────────────────────────────────── -->
+  <section class="panel" style="--accent:#f43f5e;">
+    <div class="panel__head">
+      <div class="panel__icon">🚩</div>
+      <div>
+        <div class="panel__t">Issues Register</div>
+        <div class="panel__s">Open items raised during the audit window</div>
+      </div>
+      <div class="panel__count">{{ n_issues }} open</div>
+    </div>
+    <div class="panel__body" style="padding:{{ '0' if n_issues else '18px 20px' }};">
+      {% if n_issues %}
+      <table>
+        <thead><tr><th>ID</th><th>Severity</th><th>Type</th><th>Status</th><th>Description</th><th>Owner</th></tr></thead>
+        <tbody>{{ iss_rows|safe }}</tbody>
+      </table>
+      {% else %}
+      <div class="empty">✓ No open issues recorded for this engagement.</div>
+      {% endif %}
+    </div>
+  </section>
+
+  <!-- ── Audit checklist ────────────────────────────────── -->
+  <section class="panel" style="--accent:#10d96e;">
+    <div class="panel__head">
+      <div class="panel__icon">✓</div>
+      <div>
+        <div class="panel__t">PE Audit Coverage Checklist</div>
+        <div class="panel__s">Verification steps completed for this sign-off</div>
+      </div>
+    </div>
+    <div class="panel__body">
+      <div class="check-grid">{{ checklist_rows|safe }}</div>
+    </div>
+  </section>
+
+  <!-- ── Approval / sign-off ────────────────────────────── -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">✍️</div>
+      <div>
+        <div class="panel__t">Approval &amp; Sign-off</div>
+        <div class="panel__s">Performance Engineering and customer acceptance</div>
+      </div>
+    </div>
+    <div class="panel__body">
+      <div class="appr-grid">
+        <div class="appr">
+          <div class="appr__role">Performance Engineer</div>
+          <div class="appr__name">{{ pe_name or '—' }}</div>
+          <div class="appr__status" style="color:{{ '#10d96e' if pe_approved else '#6b7a9c' }};">
+            {{ pe_tick }} {{ 'Approved' if pe_approved else 'Pending' }}
+          </div>
+          <div class="appr__line">Signed: {{ pe_date or '—' }}</div>
+        </div>
+        <div class="appr">
+          <div class="appr__role">Customer</div>
+          <div class="appr__name">{{ cust_name or '—' }}</div>
+          <div class="appr__status" style="color:{{ '#10d96e' if cust_approved else '#6b7a9c' }};">
+            {{ cu_tick }} {{ 'Approved' if cust_approved else 'Pending' }}
+          </div>
+          <div class="appr__line">Signed: {{ cust_date or '—' }}</div>
+        </div>
+      </div>
+      {% if notes %}
+      <div class="notes"><b>NOTES</b><br>{{ notes }}</div>
+      {% endif %}
+    </div>
+  </section>
+
+  <!-- ── Footer ─────────────────────────────────────────── -->
+  <footer class="foot">
+    <div>PE Audit Dashboard · self-contained report · generated {{ gen_date }}</div>
     <div>
-      <h2>Batch Performance Detail</h2>
-      <p class="sub">Top 20 jobs by peak runtime · Buffer % = headroom before SLA breach</p>
+      Thresholds —
+      CPU <code>OK ≤{{ cpu_ok_t }}% · Warn ≤{{ cpu_warn_t }}%</code>
+      Mem <code>OK ≤{{ mem_ok_t }}% · Warn ≤{{ mem_warn_t }}%</code>
+      Disk <code>OK ≤{{ disk_ok_t }}% · Warn ≤{{ disk_warn_t }}%</code>
     </div>
-  </div>
-  <table>
-    <thead><tr>
-      <th>Job Name</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Buffer %</th><th>Status</th>
-    </tr></thead>
-    <tbody>{{ top_rows }}</tbody>
-  </table>
+  </footer>
+
 </div>
 
-<!-- ─── INFRASTRUCTURE TABLE ─────────────────────────────────────────── -->
-<div class="section">
-  <div class="section-header">
-    <span class="section-icon">🖥️</span>
-    <div>
-      <h2>Infrastructure Resource Utilisation</h2>
-      <p class="sub">CPU / Memory / Disk — OK ≤75% · Warn ≤90% · Critical &gt;90%</p>
-    </div>
-  </div>
-  <table>
-    <thead><tr>
-      <th>Host</th><th>Type</th><th>CPU %</th><th>Memory %</th><th>RAM</th><th>Max Disk %</th><th>Mounts</th><th>Health</th>
-    </tr></thead>
-    <tbody>{{ srv_rows }}</tbody>
-  </table>
-</div>
-
-<!-- ─── ISSUES & WAIVERS ──────────────────────────────────────────────── -->
-<div class="section">
-  <div class="section-header">
-    <span class="section-icon">⚠️</span>
-    <div>
-      <h2>Issues &amp; Waivers Register</h2>
-      <p class="sub">{{ n_issues }} item(s) logged</p>
-    </div>
-  </div>
-  <table>
-    <thead><tr>
-      <th>ID</th><th>Severity</th><th>Type</th><th>Status</th>
-      <th>Description</th><th>Mitigation</th><th>Owner</th><th>ETA</th>
-    </tr></thead>
-    <tbody>{{ iss_rows }}</tbody>
-  </table>
-</div>
-
-<!-- ─── PE VALIDATION CHECKLIST ──────────────────────────────────────── -->
-<div class="section">
-  <div class="section-header">
-    <span class="section-icon">📋</span>
-    <div>
-      <h2>PE Validation Checklist</h2>
-      <p class="sub">All items must be checked before dual sign-off</p>
-    </div>
-  </div>
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px 24px">
-    {{ checklist_rows }}
-  </div>
-</div>
-
-<!-- ─── APPROVAL ──────────────────────────────────────────────────────── -->
-<div class="section" style="border-color:{{ sign_color }}55">
-  <div class="section-header">
-    <span class="section-icon">✍️</span>
-    <div>
-      <h2>Customer Approval Sign-Off</h2>
-      <p class="sub">Dual sign-off required for go-live clearance</p>
-    </div>
-  </div>
-  <div class="approval-grid">
-    <div class="appr-box">
-      <h3>Performance Engineering</h3>
-      <p><b>{{ pe_name }}</b></p>
-      <p style="margin-top:8px">
-        {{ pe_tick }}
-        {% if pe_approved %}
-          <span class="tag tag-green">Approved {{ pe_date }}</span>
-        {% else %}
-          <span class="tag tag-amber">Pending</span>
-        {% endif %}
-      </p>
-    </div>
-    <div class="appr-box">
-      <h3>Customer Representative</h3>
-      <p><b>{{ cust_name }}</b></p>
-      <p style="margin-top:8px">
-        {{ cu_tick }}
-        {% if cust_approved %}
-          <span class="tag tag-green">Approved {{ cust_date }}</span>
-        {% else %}
-          <span class="tag tag-amber">Pending</span>
-        {% endif %}
-      </p>
-    </div>
-  </div>
-  {% if notes %}
-  <div class="info-box" style="margin-top:14px">
-    <b>PE Notes:</b> {{ notes }}
-  </div>
-  {% endif %}
-  <div style="margin-top:14px;padding:14px 20px;border-radius:10px;text-align:center;
-              background:{{ sign_color }}15;border:1px solid {{ sign_color }}44">
-    <span style="font-size:16px;font-weight:800;color:{{ sign_color }}">
-      {{ sign_label }} — Overall Go-Live Status
-    </span>
-  </div>
-</div>
-
-<!-- ─── FOOTER ────────────────────────────────────────────────────────── -->
-<div class="report-footer">
-  <p><b>PE Control Tower v5.0</b> &nbsp;·&nbsp; Performance Engineering Team &nbsp;·&nbsp; {{ gen_date }}</p>
-  <p style="margin-top:4px">
-    Daily SLA: {{ daily_limit }}h &nbsp;|&nbsp; Monthly: {{ monthly_limit }}h &nbsp;|&nbsp;
-    CPU OK: ≤75% &nbsp;|&nbsp; CPU Warn: ≤90% &nbsp;|&nbsp;
-    Disk OK: ≤75% &nbsp;|&nbsp; Disk Warn: ≤90%
-  </p>
-</div>
-
-</div><!-- .page -->
+<script>
+function toggleTheme(){
+  var r = document.documentElement;
+  r.setAttribute('data-theme', r.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+}
+</script>
 </body>
 </html>
