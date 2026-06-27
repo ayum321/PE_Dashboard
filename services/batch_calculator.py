@@ -1618,6 +1618,62 @@ def detect_cyclic_subs(df: pd.DataFrame, threshold: int = 20) -> set:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Window decomposition — busy-time (interval union), idle gaps, and
+# batch-block detection.  The elapsed span (first-start → last-end)
+# overstates real workload when a day's jobs run in separated clusters
+# with long idle gaps between them.  These helpers recover the ACTIVE
+# compute time so buffer is measured honestly against the SLA window.
+# ─────────────────────────────────────────────────────────────────
+def _merge_intervals(pairs, gap_seconds: float = 0.0) -> list:
+    """Merge [start, end] timestamp pairs whose separation is <= gap_seconds.
+
+    gap_seconds=0 → strict union (overlap/touch) = real busy time.
+    gap_seconds=N → cluster intervals separated by <= N seconds into one block.
+    Returns a list of merged [start, end] pairs sorted by start.
+    """
+    cleaned = [(s, e) for s, e in pairs if pd.notna(s) and pd.notna(e) and e >= s]
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda p: p[0])
+    merged = [[cleaned[0][0], cleaned[0][1]]]
+    for s, e in cleaned[1:]:
+        if (s - merged[-1][1]).total_seconds() <= gap_seconds:
+            if e > merged[-1][1]:
+                merged[-1][1] = e
+        else:
+            merged.append([s, e])
+    return merged
+
+
+def _busy_and_blocks_for_day(starts, ends, block_gap_hrs: float):
+    """Return (busy_hrs, blocks) for one day's runs.
+
+    busy_hrs = total time covered by the UNION of all run intervals
+               (overlapping/parallel jobs counted once) — the REAL active
+               batch time, distinct from the first→last elapsed span.
+    blocks   = clusters of runs separated by idle gaps > block_gap_hrs,
+               each {start, end, span_hrs, runs}.  Lets morning/evening
+               batch phases be reported separately instead of being
+               stretched into one inflated window across the dead gap.
+    """
+    pairs = list(zip(starts, ends))
+    union = _merge_intervals(pairs, gap_seconds=0.0)
+    busy_hrs = sum((e - s).total_seconds() for s, e in union) / 3600.0
+    block_iv = _merge_intervals(pairs, gap_seconds=max(block_gap_hrs, 0.0) * 3600.0)
+    blocks = []
+    for s, e in block_iv:
+        span = (e - s).total_seconds() / 3600.0
+        runs = sum(1 for ps, _pe in pairs if pd.notna(ps) and s <= ps <= e)
+        blocks.append({
+            "start":    pd.Timestamp(s).strftime("%H:%M"),
+            "end":      pd.Timestamp(e).strftime("%H:%M"),
+            "span_hrs": round(span, 3),
+            "runs":     int(runs),
+        })
+    return round(busy_hrs, 3), blocks
+
+
+# ─────────────────────────────────────────────────────────────────
 # compute_metrics — extracted from app_v2.py:2314
 # ─────────────────────────────────────────────────────────────────
 def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
@@ -2138,9 +2194,10 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # ── Daily batch window time-series ───────────────────────────
     _raw_window_counts = (
         df.groupby("run_date", as_index=False)
-          .agg(raw_job_count=("Job_Name", "nunique"))
+          .agg(raw_job_count=("Job_Name", "nunique"),
+               raw_run_count=("Job_Name", "size"))
         if "Job_Name" in df.columns and "run_date" in df.columns
-        else pd.DataFrame(columns=["run_date", "raw_job_count"])
+        else pd.DataFrame(columns=["run_date", "raw_job_count", "raw_run_count"])
     )
     _raw_window_names = (
         df.groupby("run_date")["Job_Name"]
@@ -2152,20 +2209,28 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # job_count / total_hrs are IN-SCOPE (post-exclusion). raw_job_count is the
     # full per-day count (every sub_app), so excluded_job_count = raw − in-scope
     # now reflects ALL removed jobs (user-excluded + cyclic + MONTHLY/OUTBOUND),
-    # not just the user-excluded ones.
+    # not just the user-excluded ones.  job_count counts UNIQUE job names; the
+    # *_run_count columns count EXECUTIONS (rows) so the UI can show "207 unique
+    # jobs / 218 runs" and the analyst is never surprised by a repeat-run total.
     window = (df_scope.groupby("run_date", as_index=False)
                 .agg(total_hrs=("run_time_hrs", "sum"),
-                     job_count=("Job_Name", "nunique"))
+                     job_count=("Job_Name", "nunique"),
+                     scope_run_count=("Job_Name", "size"))
                 .sort_values("run_date"))
     if not _raw_window_counts.empty:
         window = window.merge(_raw_window_counts, on="run_date", how="left")
     else:
         window["raw_job_count"] = window["job_count"]
+        window["raw_run_count"] = window["scope_run_count"]
     if not _raw_window_names.empty:
         window = window.merge(_raw_window_names, on="run_date", how="left")
     else:
         window["raw_job_names"] = [[] for _ in range(len(window))]
     window["raw_job_count"] = window["raw_job_count"].fillna(window["job_count"]).astype(int)
+    if "raw_run_count" not in window.columns:
+        window["raw_run_count"] = window["scope_run_count"]
+    window["raw_run_count"]   = window["raw_run_count"].fillna(window["scope_run_count"]).astype(int)
+    window["scope_run_count"] = window["scope_run_count"].fillna(window["job_count"]).astype(int)
     window["excluded_job_count"] = (window["raw_job_count"] - window["job_count"]).clip(lower=0).astype(int)
     window["raw_job_names"] = window["raw_job_names"].apply(
         lambda v: [str(x) for x in v] if isinstance(v, list) else []
@@ -2215,10 +2280,52 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 worst_elapsed_date = str(
                     _daily_elapsed.loc[_daily_elapsed["elapsed_hrs"].idxmax(), "run_date"]
                 )
+                # ── Busy-time (interval union) + batch-block decomposition ──
+                # elapsed_hrs is the first→last SPAN; active_busy_hrs is the union
+                # of all run intervals (parallel jobs counted once) = real compute
+                # time.  idle_gap_hrs is the dead time inside the span.  blocks are
+                # the run clusters separated by gaps > BATCH_BLOCK_GAP_HRS so a
+                # morning + evening batch reads as two phases, not one 20h window.
+                try:
+                    _block_gap = float(getattr(pe_config, "BATCH_BLOCK_GAP_HRS", 1.0))
+                    _busy_rows = []
+                    for _rd, _g in _df_win_scoped.dropna(subset=["run_date"]).groupby("run_date"):
+                        _busy_h, _blocks = _busy_and_blocks_for_day(
+                            list(_g["Start_Time"]), list(_g["End_Time"]), _block_gap
+                        )
+                        _busy_rows.append({
+                            "run_date":        _rd,
+                            "active_busy_hrs": _busy_h,
+                            "batch_blocks":    _blocks,
+                            "block_count":     len(_blocks),
+                        })
+                    if _busy_rows:
+                        _busy_df = pd.DataFrame(_busy_rows)
+                        window = window.merge(_busy_df, on="run_date", how="left")
+                except Exception:
+                    pass
         except Exception:
             pass
     if not elapsed_available:
         window["elapsed_hrs"] = 0.0
+    # Busy/idle/blocks fallbacks so downstream serialization is always safe.
+    if "active_busy_hrs" not in window.columns:
+        window["active_busy_hrs"] = 0.0
+    if "block_count" not in window.columns:
+        window["block_count"] = 0
+    if "batch_blocks" not in window.columns:
+        window["batch_blocks"] = [[] for _ in range(len(window))]
+    window["active_busy_hrs"] = pd.to_numeric(window["active_busy_hrs"], errors="coerce").fillna(0.0).round(3)
+    window["block_count"]     = pd.to_numeric(window["block_count"], errors="coerce").fillna(0).astype(int)
+    window["batch_blocks"]    = window["batch_blocks"].apply(
+        lambda v: v if isinstance(v, list) else []
+    )
+    window["idle_gap_hrs"] = (window["elapsed_hrs"] - window["active_busy_hrs"]).clip(lower=0).round(3)
+    window["idle_pct"] = np.where(
+        window["elapsed_hrs"] > 0,
+        window["idle_gap_hrs"] / window["elapsed_hrs"] * 100.0,
+        0.0,
+    ).round(1)
 
     # ── Batch Window Compliance (canonical daily window vs resolved SLA) ──
     # The daily window records already carry the authoritative per-day breach
@@ -2796,6 +2903,97 @@ def _build_failure_grid(df: pd.DataFrame, max_days: int = 30) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Long-pole consistency heatmap — top-N longest jobs × run_date
+# ─────────────────────────────────────────────────────────────────
+def _build_longpole_matrix(df: pd.DataFrame, busy_ref_hrs: float = 0.0,
+                           top_n: int = 8, share_pct_flag: float = 25.0,
+                           max_days: int = 30) -> Dict[str, Any]:
+    """Top-N longest jobs × run_date runtime matrix (the long-pole heatmap).
+
+    Rows  = the ``top_n`` jobs with the highest MEAN single-run runtime (the
+            consistent long-runners), worst-first.
+    Cols  = the most recent ``max_days`` calendar days.
+    Cell  = the LONGEST single execution (minutes) of that job on that day —
+            max, because one slow run is the long-pole risk even when the
+            other runs that day were quick.  Absent cell = job didn't run.
+
+    Per row we also report avg/max/min minutes, run count, days present, a
+    stability read (max ÷ avg → steady vs spiky), the share of the typical
+    daily busy window the job consumes, and a long-pole flag when that share
+    crosses ``share_pct_flag``.  Answers: which specific jobs eat the window,
+    are they consistent, and on which days do they spike?
+    """
+    empty = {"jobs": [], "dates": [], "cells": [], "rows": [],
+             "busy_ref_hrs": round(float(busy_ref_hrs or 0), 2),
+             "max_minutes": 0.0, "share_pct_flag": share_pct_flag, "has_data": False}
+    if df is None or df.empty or "Job_Name" not in df.columns or "run_date" not in df.columns:
+        return empty
+    if "run_time_hrs" not in df.columns:
+        return empty
+
+    work = df.dropna(subset=["run_date"]).copy()
+    work["run_date"] = work["run_date"].astype(str)
+    work["Job_Name"] = work["Job_Name"].astype(str)
+    work["_min"] = pd.to_numeric(work["run_time_hrs"], errors="coerce") * 60.0
+    work = work.dropna(subset=["_min"])
+    if work.empty:
+        return empty
+
+    recent_dates = sorted(work["run_date"].unique())[-max_days:]
+    work = work[work["run_date"].isin(recent_dates)]
+    if work.empty:
+        return empty
+
+    # Rank jobs by mean single-run minutes → the consistent long-runners lead.
+    job_mean = work.groupby("Job_Name")["_min"].mean().sort_values(ascending=False)
+    top_jobs = [str(j) for j in job_mean.index.tolist()[:max(top_n, 1)]]
+    _set = set(top_jobs)
+    sub = work[work["Job_Name"].isin(_set)]
+    if sub.empty:
+        return empty
+
+    # Cell = max single-run minutes per (job, day).
+    cell_pivot = sub.groupby(["Job_Name", "run_date"])["_min"].max().reset_index(name="minutes")
+    cells = [{"job": str(r["Job_Name"]), "date": str(r["run_date"]),
+              "minutes": round(float(r["minutes"]), 1)}
+             for _, r in cell_pivot.iterrows()]
+
+    busy_ref_min = float(busy_ref_hrs or 0) * 60.0
+    rows = []
+    for j in top_jobs:
+        jr = sub[sub["Job_Name"] == j]["_min"]
+        avg_m = float(jr.mean()); max_m = float(jr.max()); min_m = float(jr.min())
+        runs = int(jr.count())
+        days_present = int(sub[sub["Job_Name"] == j]["run_date"].nunique())
+        spike = round(max_m / avg_m, 2) if avg_m > 0 else 1.0
+        share = round(avg_m / busy_ref_min * 100.0, 1) if busy_ref_min > 0 else 0.0
+        rows.append({
+            "job":              j,
+            "avg_min":          round(avg_m, 1),
+            "max_min":          round(max_m, 1),
+            "min_min":          round(min_m, 1),
+            "runs":             runs,
+            "days_present":     days_present,
+            "days_total":       len(recent_dates),
+            "spike_ratio":      spike,
+            "window_share_pct": share,
+            "is_longpole":      bool(share >= share_pct_flag) if busy_ref_min > 0 else bool(avg_m >= 20.0),
+            "stability":        "steady" if spike <= 1.5 else ("variable" if spike <= 2.5 else "spiky"),
+        })
+
+    return {
+        "jobs":           top_jobs,
+        "dates":          recent_dates,
+        "cells":          cells,
+        "rows":           rows,
+        "busy_ref_hrs":   round(float(busy_ref_hrs or 0), 2),
+        "max_minutes":    round(float(cell_pivot["minutes"].max()), 1),
+        "share_pct_flag": share_pct_flag,
+        "has_data":       True,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────
 # build_batch_payload — JSON-ready envelope for the frontend
 # ─────────────────────────────────────────────────────────────────
 def _build_worst_job(m: dict, top_jobs_df: "pd.DataFrame") -> dict:
@@ -2972,8 +3170,15 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "run_date":     date_str,
             "total_hrs":    total_hrs,
             "elapsed_hrs":  elapsed_hrs,
+            "active_busy_hrs": round(float(r.get("active_busy_hrs", 0) or 0), 3),
+            "idle_gap_hrs":    round(float(r.get("idle_gap_hrs", 0) or 0), 3),
+            "idle_pct":        round(float(r.get("idle_pct", 0) or 0), 1),
+            "batch_blocks":    list(r.get("batch_blocks", [])) if isinstance(r.get("batch_blocks", []), list) else [],
+            "block_count":     int(r.get("block_count", 0) or 0),
             "job_count":    int(r["job_count"]),
+            "scope_run_count": int(r.get("scope_run_count", r["job_count"])),
             "raw_job_count": int(r.get("raw_job_count", r["job_count"])),
+            "raw_run_count": int(r.get("raw_run_count", r.get("scope_run_count", r["job_count"]))),
             "excluded_job_count": int(r.get("excluded_job_count", max(int(r.get("raw_job_count", r["job_count"])) - int(r["job_count"]), 0))),
             "raw_job_names": list(r.get("raw_job_names", [])) if isinstance(r.get("raw_job_names", []), list) else [],
             "breach":       bool(is_breach),
@@ -3002,6 +3207,24 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         _sc_bbp.set("_last_ctrlm_df_columns", list(df.columns))
     except Exception:
         pass
+
+    # Long-pole heatmap: reference the TYPICAL daily busy window (median of the
+    # per-day interval-union busy time) so each long job's window-share is honest.
+    _busy_ref_hrs = 0.0
+    try:
+        if "active_busy_hrs" in window_df.columns:
+            _busy_pos = pd.to_numeric(window_df["active_busy_hrs"], errors="coerce")
+            _busy_pos = _busy_pos[_busy_pos > 0]
+            if not _busy_pos.empty:
+                _busy_ref_hrs = float(_busy_pos.median())
+    except Exception:
+        _busy_ref_hrs = 0.0
+    _longpole_matrix = _build_longpole_matrix(
+        _df_payload_scope,
+        busy_ref_hrs=_busy_ref_hrs,
+        top_n=int(getattr(pe_config, "LONGPOLE_TOP_N", 8)),
+        share_pct_flag=float(getattr(pe_config, "LONGPOLE_WINDOW_SHARE_PCT", 25.0)),
+    )
 
     return {
         "kpis": {
@@ -3133,6 +3356,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "sla_heatmap":  _build_sla_heatmap(m["daily"], ceiling=m.get("sla_ceiling")),
         "hour_heatmap": _build_hour_heatmap(_df_payload_scope),
         "failure_grid": _build_failure_grid(_df_payload_scope),
+        "longpole_matrix": _longpole_matrix,
         "daily_jobs":   _build_daily_jobs(_df_payload_scope),
     }
 

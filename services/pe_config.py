@@ -87,6 +87,17 @@ SLA_BUFFER_WARN:  float = 15.0   # % buffer below which job is AT_RISK (kept for
 SLA_ATRISK_PCT:   float = 15.0   # % buffer threshold → AT_RISK below this
 SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
 
+# ── Batch window decomposition (busy-time, idle gaps, blocks) ─────────────────
+# The "Daily Batch Window" elapsed span (first-start → last-end) overstates the
+# real workload when a day's jobs run in separated clusters (e.g. a morning
+# extract block and an evening outbound block with a long idle gap between).
+# These thresholds drive busy-time (interval union) + batch-block detection so
+# buffer is measured against ACTIVE compute time, not the inflated wall-clock span.
+# Override: batch_block_gap_hrs, longpole_top_n, longpole_window_share_pct.
+BATCH_BLOCK_GAP_HRS:        float = 1.0    # idle gap (hrs) that splits one block from the next
+LONGPOLE_TOP_N:            int   = 8      # how many longest jobs the consistency heatmap shows
+LONGPOLE_WINDOW_SHARE_PCT: float = 25.0   # a job using ≥ this % of the day's busy window is a long pole
+
 # ── Final-Judgment severity scoring (judgment_engine.py) ──────────────────────
 # The cross-pillar Final Judgment scores each pillar on its pass-rate, then
 # applies BOUNDED severity penalties so a catastrophic-but-rare event (a 10×
@@ -339,6 +350,7 @@ def reload() -> None:
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT
+    global BATCH_BLOCK_GAP_HRS, LONGPOLE_TOP_N, LONGPOLE_WINDOW_SHARE_PCT
     global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
     global FJ_PEN_WINDOW_CAP, FJ_PEN_FAILRATE_CAP, FJ_PEN_OVERRUN_CAP, FJ_PEN_REGRESSION_CAP
     global FJ_PEN_SLA_MAG_CAP, FJ_PEN_BENCH_MAG_CAP, FJ_PEN_RES_CRIT_CAP, FJ_PEN_RES_DUAL_CAP, FJ_PEN_SOW_MAG_CAP
@@ -374,6 +386,12 @@ def reload() -> None:
     SLA_BUFFER_WARN   = _f("sla_buffer_warn",   15.0)
     SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
     SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
+    BATCH_BLOCK_GAP_HRS = _f("batch_block_gap_hrs", 1.0)
+    try:
+        LONGPOLE_TOP_N = int(_cfg("longpole_top_n", 8))
+    except (TypeError, ValueError):
+        LONGPOLE_TOP_N = 8
+    LONGPOLE_WINDOW_SHARE_PCT = _f("longpole_window_share_pct", 25.0)
     # Final-Judgment severity scoring (per-customer switchable)
     _fj_mode = str(_cfg("fj_scoring_mode", "additive") or "additive").strip().lower()
     FJ_SCORING_MODE   = _fj_mode if _fj_mode in ("additive", "recompute") else "additive"

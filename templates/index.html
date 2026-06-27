@@ -1908,6 +1908,22 @@
               </div>
             </div>
 
+            <!-- ── Long-Pole Job Consistency heatmap (top jobs × day) ────── -->
+            <div id="batch-longpole-card" class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5 hidden">
+              <div class="mb-3 flex items-start justify-between">
+                <div>
+                  <div class="text-sm font-bold text-Cwhite">Long-Pole Job Consistency</div>
+                  <div class="text-[11px] text-Cmuted">
+                    Longest jobs by average runtime — read across a row to see if the same job is slow every day or only spikes.
+                  </div>
+                  <div id="batch-longpole-subtitle" class="text-[9px] text-Cmuted mt-0.5"></div>
+                </div>
+                <span id="batch-longpole-badge" class="hidden metric-badge"></span>
+              </div>
+              <div id="batch-longpole-host" class="overflow-auto"></div>
+              <div id="batch-longpole-legend" class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[10px] text-Cmuted"></div>
+            </div>
+
             <!-- ── Top breaching jobs table (full width) ────── -->
             <div class="grid grid-cols-1 gap-4">
 

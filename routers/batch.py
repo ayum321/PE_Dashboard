@@ -120,6 +120,10 @@ class BatchResponse(BaseModel):
     # (ENDED NOT OK / FAILED counts per sub-app per day). Drives the PE
     # Findings failure-density heatmap.
     failure_grid: Optional[Dict[str, Any]] = None
+    # Long-pole consistency heatmap: top-N longest jobs × run_date runtime
+    # matrix (longest single run per job per day) + per-job avg/max/window-share.
+    # Drives the "which jobs eat the window, consistently?" heatmap on Batch Review.
+    longpole_matrix: Optional[Dict[str, Any]] = None
 
 
 class BatchJsonRequest(BaseModel):
@@ -229,6 +233,7 @@ def _payload_to_response(
         daily_jobs=payload.get("daily_jobs"),
         window_sub_app=payload.get("window_sub_app", []),
         failure_grid=payload.get("failure_grid"),
+        longpole_matrix=payload.get("longpole_matrix"),
     )
 
     # Cache the full batch response so the agent tools can query it
@@ -251,6 +256,7 @@ def _payload_to_response(
         session_cache.ac_set("daily_window_series", resp_dict.get("window") or [])
         session_cache.ac_set("regression_df",   resp_dict.get("anomalies") or [])
         session_cache.ac_set("failure_grid",     resp_dict.get("failure_grid") or {})
+        session_cache.ac_set("longpole_matrix",  resp_dict.get("longpole_matrix") or {})
         if customer_name:
             session_cache.ac_set("customer_name", customer_name)
         # sla_matrix slots written by _compute_sla_matrix call (see below)

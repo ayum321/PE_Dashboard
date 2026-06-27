@@ -2061,6 +2061,8 @@ function renderBatchReview(data) {
   // empty if we pass filtered — the chart needs ALL jobs to know which ones are excluded)
   renderWindowTrendChart(filtered.window || [], data.top_jobs || []);
   renderTopJobsChart(_filteredJobs, _displayKpis);
+  // Long-pole consistency heatmap (top jobs × day) — complements the window chart
+  try { renderLongpoleHeatmap(data.longpole_matrix || null); } catch (_) {}
 
   // 3. Top 10 breaching jobs table
   renderTopBreachesTable(filtered.top_breaches || [], data.kpis);
@@ -3000,7 +3002,7 @@ function renderWindowTrendChart(winData, topJobsData) {
   const metricTypeEl = document.getElementById("chart-window-metric-type");
   if (metricTypeEl) {
     metricTypeEl.textContent = hasElapsed
-      ? "Elapsed window (first start → last end per day)"
+      ? "Bars = elapsed span (first start → last end) · teal line = active busy time (real compute)"
       : "Summed runtime (all jobs — may overcount parallel runs)";
     metricTypeEl.className = hasElapsed
       ? "text-[9px] text-Cteal font-semibold mt-0.5"
@@ -3008,7 +3010,7 @@ function renderWindowTrendChart(winData, topJobsData) {
   }
   const countNoteEl = document.getElementById("chart-window-count-note");
   if (countNoteEl) {
-    countNoteEl.textContent = "Bar labels show unique jobs in scope after exclusions. Hover a day to see excluded job names.";
+    countNoteEl.textContent = "Bar labels = unique jobs in scope. Hover for total runs (executions), busy vs idle time, and batch blocks.";
   }
 
   // Peak bar index
@@ -3111,6 +3113,9 @@ function renderWindowTrendChart(winData, topJobsData) {
   const nBars = winData.length;
   const barPct = nBars <= 10 ? 0.85 : nBars <= 20 ? 0.78 : 0.70;
 
+  const busyVals = winData.map((w) => +(w.active_busy_hrs || 0));
+  const hasBusy = hasElapsed && busyVals.some(v => v > 0);
+
   charts.windowTrend = new Chart(canvas, {
     type: "bar",
     data: {
@@ -3125,7 +3130,26 @@ function renderWindowTrendChart(winData, topJobsData) {
         borderSkipped: false,
         barPercentage: barPct,
         categoryPercentage: 0.85,
-      }],
+        order: 2,
+      },
+      ...(hasBusy ? [{
+        // Active busy time (interval union) overlaid as a line so the gap
+        // between the inflated elapsed span and real compute time is visible
+        // at a glance — the bar can be ~20h while busy time is only ~5h.
+        type: "line",
+        label: "Active busy time (h)",
+        data: busyVals,
+        borderColor: "rgba(45,212,191,0.95)",   // teal
+        backgroundColor: "rgba(45,212,191,0.12)",
+        borderWidth: 2,
+        pointRadius: 2.5,
+        pointBackgroundColor: "rgba(45,212,191,1)",
+        pointHoverRadius: 4,
+        fill: true,
+        tension: 0.25,
+        order: 1,
+      }] : []),
+      ],
     },
     options: {
       responsive: true,
@@ -3157,20 +3181,57 @@ function renderWindowTrendChart(winData, topJobsData) {
             },
             label: (ctx) => {
               const i = ctx.dataIndex;
+              // The teal "active busy time" line is dataset 1 — give it a one-line
+              // label and let the bar (dataset 0) carry the full breakdown.
+              if (ctx.datasetIndex && ctx.datasetIndex > 0) {
+                return `Active busy time: ${(+(ctx.parsed?.y || 0)).toFixed(2)}h`;
+              }
               const lines = [];
+              const w = winData[i] || {};
               const shown = counts[i] || 0;
               const raw = rawCounts[i] || shown;
               const excluded = excludedCounts[i] || Math.max(raw - shown, 0);
               const rawNames = Array.isArray(winData[i]?.raw_job_names) ? winData[i].raw_job_names : [];
               const excludedNames = rawNames.filter(n => excludedNameSet.has(n));
               if (hasElapsed) {
-                lines.push(`Elapsed window: ${rawElaps[i].toFixed(2)}h`);
-                if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h`);
+                lines.push(`Elapsed window: ${rawElaps[i].toFixed(2)}h  (first start → last end)`);
+                // Busy-time decomposition: the elapsed span overstates real work
+                // when jobs run in separated clusters. Show the active compute time
+                // (interval union) + idle gap so buffer is read against real load.
+                const busy = +(w.active_busy_hrs || 0);
+                const idle = +(w.idle_gap_hrs || 0);
+                const idlePct = +(w.idle_pct || 0);
+                if (busy > 0) {
+                  lines.push(`Active busy time: ${busy.toFixed(2)}h  (real compute — overlaps counted once)`);
+                  lines.push(`Idle inside window: ${idle.toFixed(2)}h  (${idlePct.toFixed(0)}% of the span is gaps)`);
+                }
+                if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h  (all runs added up)`);
+                // Batch blocks: morning/evening clusters split by idle gaps.
+                const blocks = Array.isArray(w.batch_blocks) ? w.batch_blocks : [];
+                if (blocks.length > 1) {
+                  lines.push(`Batch blocks: ${blocks.length} clusters separated by idle gaps —`);
+                  blocks.slice(0, 4).forEach(b => {
+                    lines.push(`   • ${b.start}–${b.end}  ·  ${(+b.span_hrs).toFixed(2)}h  ·  ${b.runs} runs`);
+                  });
+                  if (blocks.length > 4) lines.push(`   • … +${blocks.length - 4} more block(s)`);
+                } else if (blocks.length === 1) {
+                  lines.push(`Batch block: ${blocks[0].start}–${blocks[0].end} (single continuous cluster)`);
+                }
               } else {
                 lines.push(`Total (summed): ${rawSums[i].toFixed(2)}h`);
               }
               lines.push(`Unique jobs shown here: ${shown}`);
               lines.push(`Raw unique jobs in file: ${raw}`);
+              // Total executions (runs) — distinct from unique-job count. This is the
+              // number an analyst gets when counting CSV rows for the day (a job that
+              // ran 3× = 3 runs but 1 unique job). Surfacing it kills the runs-vs-jobs
+              // confusion (e.g. 218 runs on a day with 207 unique jobs).
+              const totRuns = +(w.raw_run_count || 0);
+              const scopeRuns = +(w.scope_run_count || 0);
+              if (totRuns > 0) {
+                const repeats = Math.max(totRuns - raw, 0);
+                lines.push(`Total executions (runs): ${totRuns}${repeats > 0 ? `  (${repeats} are repeat runs)` : ""}`);
+              }
               lines.push(`Unique jobs excluded from chart scope: ${excluded}`);
               if (excludedNames.length > 0) {
                 const preview = excludedNames.slice(0, 6).join(", ");
@@ -8631,6 +8692,106 @@ function renderFailureGrid(grid) {
   }
   html += `</tbody></table>`;
   host.innerHTML = html;
+}
+
+/**
+ * renderLongpoleHeatmap()
+ * Top-N longest jobs × run_date runtime matrix. Answers the analyst's
+ * question "which specific jobs eat the batch window, are they consistent
+ * day-to-day, and on which days do they spike?". Cell = longest single run
+ * (minutes) that day; row stats give avg/max and the share of the typical
+ * busy window the job consumes (▲ flag when it crosses the long-pole threshold).
+ */
+function renderLongpoleHeatmap(lp) {
+  const card   = document.getElementById("batch-longpole-card");
+  const host   = document.getElementById("batch-longpole-host");
+  const subt   = document.getElementById("batch-longpole-subtitle");
+  const badge  = document.getElementById("batch-longpole-badge");
+  const legend = document.getElementById("batch-longpole-legend");
+  if (!card || !host) return;
+
+  if (!lp && window.appData && window.appData.batch) lp = window.appData.batch.longpole_matrix;
+  if (!lp || !lp.has_data || !Array.isArray(lp.rows) || !lp.rows.length) {
+    card.classList.add("hidden"); host.innerHTML = ""; return;
+  }
+  card.classList.remove("hidden");
+
+  const dates   = Array.isArray(lp.dates) ? lp.dates : [];
+  const rows    = Array.isArray(lp.rows)  ? lp.rows  : [];
+  const cells   = Array.isArray(lp.cells) ? lp.cells : [];
+  const maxMin  = Math.max(1, Number(lp.max_minutes) || 1);
+  const busyRef = Number(lp.busy_ref_hrs) || 0;
+  const flagPct = Number(lp.share_pct_flag) || 25;
+  const longpoles = rows.filter(r => r.is_longpole).length;
+
+  if (subt) subt.textContent =
+    `${rows.length} longest jobs · ${dates.length} day(s) · typical busy window ${busyRef.toFixed(1)}h · cell = longest run that day (min)`;
+  if (badge) {
+    badge.classList.remove("hidden");
+    if (longpoles > 0) {
+      badge.className = "metric-badge metric-badge-amber";
+      badge.textContent = `${longpoles} long-pole (≥${flagPct}% of window)`;
+    } else {
+      badge.className = "metric-badge metric-badge-green";
+      badge.textContent = "No single dominating job";
+    }
+  }
+
+  const cmap = {};
+  for (const c of cells) cmap[`${c.job}|${c.date}`] = c;
+
+  const _short = (d) => {
+    const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? `${m[2]}/${m[3]}` : String(d).slice(-5);
+  };
+  // teal (short) → amber (longer) → red (longest run) by share of matrix max.
+  const _cellStyle = (mins) => {
+    if (!mins) return "background:#0f172a;border:1px solid rgba(255,255,255,.05)";
+    const t = Math.min(1, mins / maxMin);
+    const base = t < 0.5 ? "45,212,191" : t < 0.8 ? "245,158,11" : "244,63,94";
+    const intensity = 0.30 + 0.6 * t;
+    return `background:rgba(${base},${intensity.toFixed(2)});border:1px solid rgba(${base},.8)`;
+  };
+
+  let html = `<table class="border-separate" style="border-spacing:3px"><thead><tr>`;
+  html += `<th class="sticky left-0 z-10 text-left text-[10px] font-semibold text-Cmuted pr-3 pb-1" style="background:${THEME.card}">Job</th>`;
+  for (const d of dates) {
+    html += `<th class="text-[9px] font-mono text-Cmuted/80 pb-1 text-center" style="min-width:30px" title="${escapeHtml(String(d))}">${_short(d)}</th>`;
+  }
+  html += `<th class="text-[9px] font-semibold text-Cmuted pl-2 pb-1 text-center" title="Average single-run minutes">avg</th>`;
+  html += `<th class="text-[9px] font-semibold text-Cmuted pl-1 pb-1 text-center" title="Longest single run">max</th>`;
+  html += `<th class="text-[9px] font-semibold text-Cmuted pl-1 pb-1 text-center" title="Average runtime as % of the typical daily busy window">share</th></tr></thead><tbody>`;
+
+  for (const r of rows) {
+    const j = String(r.job || "");
+    const jShort = j.length > 30 ? j.slice(0, 29) + "\u2026" : j;
+    const flag = r.is_longpole ? `<span style="color:#f59e0b">\u25B2 </span>` : "";
+    const rowTip = `${j} — ${r.stability}, ${r.runs} run(s) over ${r.days_present}/${r.days_total} days`;
+    html += `<tr><td class="sticky left-0 z-10 text-[11px] font-medium text-Cwhite/90 pr-3 whitespace-nowrap" style="background:${THEME.card}" title="${escapeHtml(rowTip)}">${flag}${escapeHtml(jShort)}</td>`;
+    for (const d of dates) {
+      const c = cmap[`${j}|${d}`];
+      const mins = c ? Number(c.minutes) : 0;
+      const tip = c ? `${j} — ${d}: longest run ${mins.toFixed(0)} min` : `${j} — ${d}: did not run`;
+      const label = mins ? Math.round(mins) : "";
+      html += `<td class="text-center align-middle rounded-sm" style="width:30px;height:24px;${_cellStyle(mins)}" title="${escapeHtml(tip)}"><span class="text-[9px] font-bold" style="color:#fff">${label}</span></td>`;
+    }
+    const shareCol = r.is_longpole ? "#f59e0b" : "#8899bb";
+    const shareTxt = r.window_share_pct ? r.window_share_pct.toFixed(0) + "%" : "\u2014";
+    html += `<td class="text-center text-[10px] font-mono text-Cwhite/80 pl-2">${Number(r.avg_min).toFixed(0)}</td>`;
+    html += `<td class="text-center text-[10px] font-mono text-Cwhite/80 pl-1">${Number(r.max_min).toFixed(0)}</td>`;
+    html += `<td class="text-center text-[10px] font-mono font-bold pl-1" style="color:${shareCol}">${shareTxt}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+  host.innerHTML = html;
+
+  if (legend) {
+    legend.innerHTML = `
+      <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm" style="background:rgba(45,212,191,.7)"></span> shorter run</span>
+      <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm" style="background:rgba(245,158,11,.8)"></span> longer</span>
+      <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm" style="background:rgba(244,63,94,.85)"></span> longest run</span>
+      <span class="inline-flex items-center gap-1" style="color:#f59e0b">\u25B2 long-pole (avg \u2265 ${flagPct}% of the ${busyRef.toFixed(1)}h busy window)</span>
+      <span>cell = longest single run that day (min); blank = job didn't run</span>`;
+  }
 }
 
 /**
