@@ -60,6 +60,16 @@ def get_config() -> dict[str, Any]:
         data["nvidia_api_key_masked"] = nvkey[:8] + "••••" + nvkey[-4:]
     else:
         data["nvidia_api_key_masked"] = "(not set)"
+
+    # Expose the canonical buffer-band thresholds (single source: pe_config) so the
+    # frontend gauge, daily-bar colouring, legends and the batch narrative all share
+    # the SAME green/amber/red semantics instead of hardcoding 15/40 in three places.
+    try:
+        from services import pe_config
+        data.setdefault("sla_atrisk_pct",  float(pe_config.SLA_ATRISK_PCT))
+        data.setdefault("sla_longjob_pct", float(pe_config.SLA_LONGJOB_PCT))
+    except Exception:
+        pass
     return data
 
 

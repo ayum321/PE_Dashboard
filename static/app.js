@@ -96,6 +96,25 @@ function _computeGrade(nCrit, nWarn, nOk) {
 // Use `let` so loadConfig() can update it when the user changes settings.
 let SLA_DAILY_HRS = 6.0;
 
+// Canonical buffer-band thresholds (single source: services/pe_config.py).
+// Synced from /api/config in loadConfig(). Used by the SLA buffer gauge, the
+// daily-window bar colours, the shared legends and the batch narrative so every
+// panel reads green/amber/red against the SAME numbers (no hardcoded 15/40).
+//   buffer% > LONGJOB  → green (healthy headroom)
+//   ATRISK < buffer% ≤ LONGJOB → amber (tightening)
+//   buffer% ≤ ATRISK   → red (at risk / breach)
+let SLA_ATRISK_PCT  = 15.0;
+let SLA_LONGJOB_PCT = 40.0;
+
+/** Map a buffer % to a shared {tone, color, label} band token. */
+function _bufferBand(bufPct) {
+  if (bufPct == null || isNaN(bufPct)) return { tone: "muted",   color: THEME.muted, label: "—" };
+  if (bufPct <= 0)                     return { tone: "critical", color: THEME.red,   label: "Breach" };
+  if (bufPct <= SLA_ATRISK_PCT)        return { tone: "critical", color: THEME.red,   label: "At risk" };
+  if (bufPct <= SLA_LONGJOB_PCT)       return { tone: "warning",  color: THEME.amber, label: "Tight" };
+  return { tone: "ok", color: THEME.green, label: "Healthy" };
+}
+
 // Utility job exclusion — file watchers, exports, DB backups excluded by default.
 // Toggled by the user via the batch review panel toggle.
 let _batchExcludeUtility = true;
@@ -2042,6 +2061,9 @@ function renderBatchReview(data) {
   })();
 
   renderBatchKpis(_displayKpis);
+  // Story header + computed micro-narrative — reads the SAME window records the
+  // charts use (filtered set) so the plain-language verdict always reconciles.
+  try { renderBatchStory(filtered, _displayKpis); } catch (_) {}
   renderBatchLayerCards(data);
   renderBatchCoverageStrip(data.data_coverage || null);
   // FIX 6.2: merge data quality warnings from both coverage and kpis.dq_warnings
@@ -2794,11 +2816,165 @@ function renderExcludedJobsPanel(dataCoverage) {
 
 
 
+// ─────────────────────────────────────────────────────────────
+// Batch story header + computed micro-narrative
+// Answers "Are we meeting batch SLAs?" in plain language from the SAME
+// per-day window data the charts read — so the narrative can never disagree
+// with the bars/gauge. Buffer bands use the shared SLA_ATRISK_PCT/LONGJOB_PCT.
+// ─────────────────────────────────────────────────────────────
+
+/** Format hours compactly: 6 → "6h", 6.25 → "6.2h". */
+function _fmtHrs(h) {
+  const n = Number(h) || 0;
+  return (Math.abs(n % 1) < 0.05 ? n.toFixed(0) : n.toFixed(1)) + "h";
+}
+
+/**
+ * Compute a plain-language batch SLA story from the per-day window records.
+ * Pure function (no DOM). Every number is derived from the in-scope window df,
+ * the same source the charts use, so it always reconciles with the visuals.
+ */
+function _buildBatchNarrative(winData, k) {
+  k = k || {};
+  const ceiling = _n(k.daily_limit_hrs, SLA_DAILY_HRS) || SLA_DAILY_HRS;
+  const days = (Array.isArray(winData) ? winData : []).filter(w => w && w.run_date);
+  if (!days.length) return null;
+
+  const rec = days.map(w => {
+    const elapsed = +(w.elapsed_hrs || w.total_hrs || 0);
+    const bufPct  = ceiling > 0 ? ((ceiling - elapsed) / ceiling) * 100 : 0;
+    return { date: w.run_date, elapsed, bufPct, breach: !!w.breach, top: w.top_job || "" };
+  });
+
+  const total      = rec.length;
+  const breachDays = rec.filter(r => r.breach).length;
+  const cleanDays  = total - breachDays;
+  const compliance = (k.window_day_compliance_pct != null)
+    ? _n(k.window_day_compliance_pct)
+    : (total ? (cleanDays / total) * 100 : 0);
+
+  // "Tight" = not a breach but buffer within the at-risk band (≤ ATRISK%).
+  const tight     = rec.filter(r => !r.breach && r.bufPct <= SLA_ATRISK_PCT)
+                       .sort((a, b) => a.bufPct - b.bufPct);
+  const nonBreach = rec.filter(r => !r.breach).sort((a, b) => a.bufPct - b.bufPct);
+  const tightest  = nonBreach.length ? nonBreach[0] : null;
+  const breaches  = rec.filter(r => r.breach).sort((a, b) => b.elapsed - a.elapsed);
+  const worstBreach = breaches.length ? breaches[0] : null;
+
+  // Minutes-of-buffer equivalent of the at-risk band (same %, in minutes).
+  const atRiskMins = Math.round(ceiling * 60 * (SLA_ATRISK_PCT / 100));
+
+  // Within-window trend: is the batch window GROWING or SHRINKING over the
+  // period? Measured on mean elapsed hours per half (needs ≥6 days). A single
+  // upload has no prior 30-day period, so we report the honest within-window
+  // direction rather than fabricating a baseline. Hours read cleaner than the
+  // buffer %, which goes deeply negative on heavy-breach days.
+  let trend = null;
+  if (total >= 6) {
+    const mid  = Math.floor(total / 2);
+    const mean = (arr) => arr.reduce((s, r) => s + r.elapsed, 0) / (arr.length || 1);
+    const firstH = mean(rec.slice(0, mid));
+    const lastH  = mean(rec.slice(mid));
+    const deltaH = lastH - firstH;                 // + = window getting longer = worse
+    trend = { firstH, lastH, deltaH, dir: deltaH > 0.25 ? "down" : deltaH < -0.25 ? "up" : "flat" };
+  }
+
+  const tone = (breachDays === 0 && tight.length === 0)
+    ? "ok"
+    : (compliance >= 95 ? "ok" : compliance >= 80 ? "warning" : "critical");
+
+  return { ceiling, total, breachDays, cleanDays, compliance,
+           tight, tightest, worstBreach, atRiskMins, trend, tone };
+}
+
+/** Render the batch story banner + computed micro-narrative callouts. */
+function renderBatchStory(data, k) {
+  const host = document.getElementById("batch-story");
+  if (!host) return;
+  const winData = (data && Array.isArray(data.window)) ? data.window : [];
+  const nar = _buildBatchNarrative(winData, k);
+  if (!nar) { host.classList.add("hidden"); host.innerHTML = ""; return; }
+
+  // Window-size note shown above the charts row ("over the last N days").
+  const noteEl = document.getElementById("batch-buffer-window-note");
+  if (noteEl) noteEl.textContent = `over the last ${nar.total} day(s) · ${_fmtHrs(nar.ceiling)} SLA ceiling`;
+
+  const customer = (window.appData && window.appData.customerName) || (k && k.customer_name) || "";
+  const env  = ((k && (k.batch_env || k.env_type)) || "").toUpperCase();
+  const who  = [customer, env].filter(Boolean).join(" · ");
+  const toneHex = nar.tone === "ok" ? THEME.green : nar.tone === "warning" ? THEME.amber : THEME.red;
+
+  const ans = nar.breachDays === 0
+    ? `Yes — every one of the ${nar.total} day(s) finished inside the ${_fmtHrs(nar.ceiling)} window (${nar.compliance.toFixed(0)}% day compliance).`
+    : `${nar.cleanDays}/${nar.total} day(s) finished inside the ${_fmtHrs(nar.ceiling)} window — ${nar.compliance.toFixed(0)}% day compliance, ${nar.breachDays} breach${nar.breachDays > 1 ? "es" : ""}.`;
+
+  let trendChip = "";
+  if (nar.trend) {
+    const t = nar.trend;
+    // dir "down" = window getting LONGER (worse, red ▼); "up" = shorter (better, green ▲)
+    const arrow = t.dir === "down" ? "▼" : t.dir === "up" ? "▲" : "▬";
+    const col   = t.dir === "down" ? THEME.red : t.dir === "up" ? THEME.green : THEME.muted;
+    const word  = t.dir === "down" ? `+${_fmtHrs(Math.abs(t.deltaH))} longer`
+                : t.dir === "up"   ? `${_fmtHrs(Math.abs(t.deltaH))} shorter`
+                : "steady";
+    trendChip = `<span class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-md"
+        style="color:${col};background:${hexA(col,0.12)};border:1px solid ${hexA(col,0.3)}"
+        title="First half averaged a ${_fmtHrs(t.firstH)} window → second half ${_fmtHrs(t.lastH)} (vs ${_fmtHrs(nar.ceiling)} ceiling)">
+        ${arrow} Window ${word}</span>`;
+  }
+
+  // Callouts, prioritised: when there are breaches, lead with the worst (most
+  // actionable) and skip the marginal "tight" note; when there are none, surface
+  // how close it got (early-warning) or confirm comfortable headroom.
+  const callouts = [];
+  if (nar.worstBreach) {
+    const over = nar.worstBreach.elapsed - nar.ceiling;
+    let s = `Worst breach: ${nar.worstBreach.date} ran ${_fmtHrs(nar.worstBreach.elapsed)} (+${_fmtHrs(over)} over the ceiling)`;
+    s += nar.worstBreach.top ? `, longest job ${_esc(nar.worstBreach.top)}.` : ".";
+    callouts.push({ tone: "critical", text: s });
+  }
+  if (nar.breachDays === 0 && nar.tight.length) {
+    let s = `${nar.tight.length} of ${nar.total} day(s) ran within ${SLA_ATRISK_PCT}% of the ${_fmtHrs(nar.ceiling)} ceiling (≤ ${nar.atRiskMins} min of buffer left)`;
+    if (nar.tightest) {
+      const mins = Math.round((nar.ceiling - nar.tightest.elapsed) * 60);
+      s += ` — tightest was ${nar.tightest.date} at ${_fmtHrs(nar.tightest.elapsed)} (${mins} min to spare`;
+      s += nar.tightest.top ? `, driven by ${_esc(nar.tightest.top)})` : ")";
+    }
+    callouts.push({ tone: "warning", text: s });
+  }
+  if (nar.breachDays === 0 && !nar.tight.length) {
+    callouts.push({ tone: "ok",
+      text: `Every day cleared the window comfortably — no day came within ${nar.atRiskMins} min of the ${_fmtHrs(nar.ceiling)} ceiling, so there is real headroom if a job slows down.` });
+  }
+
+  const calloutHtml = callouts.map(c => {
+    const col = c.tone === "ok" ? THEME.green : c.tone === "warning" ? THEME.amber : THEME.red;
+    return `<div class="flex items-start gap-2 text-[11px] leading-snug" style="color:${THEME.white}">
+        <span class="mt-[3px] w-1.5 h-1.5 rounded-full shrink-0" style="background:${col}"></span>
+        <span>${c.text}</span></div>`;
+  }).join("");
+
+  host.classList.remove("hidden");
+  host.className = "rounded-2xl border px-5 py-4 shadow-panel";
+  host.style.cssText = `border-color:${hexA(toneHex,0.35)};background:linear-gradient(135deg, ${hexA(toneHex,0.07)}, ${hexA(THEME.card2,0.45)})`;
+  host.innerHTML = `
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <div class="text-[10px] font-bold uppercase tracking-widest text-Cmuted">Batch SLA — the headline question</div>
+        <div class="text-base md:text-lg font-extrabold text-Cwhite mt-0.5">Are we meeting batch SLAs${who ? ` for ${_esc(who)}` : ""}?</div>
+        <div class="text-[12px] md:text-[13px] font-semibold mt-1" style="color:${toneHex}">${ans}</div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">${trendChip}</div>
+    </div>
+    ${calloutHtml ? `<div class="mt-3 pt-3 border-t space-y-1.5" style="border-color:${hexA(THEME.border,0.6)}">${calloutHtml}</div>` : ""}
+  `;
+}
+
+
 function renderSlaBufferChart(k) {
   const canvas = document.getElementById("chart-sla-buffer");
   if (!canvas) return;
   destroyChart("slaBuffer");
-
   const buf = k.fleet_sla_buffer;
   const bufferPct = buf ? Math.max(0, Math.min(100, buf.buffer_pct)) : 0;
   const bufferColor =
@@ -2807,13 +2983,13 @@ function renderSlaBufferChart(k) {
     buf.status === "HEALTHY"   ? THEME.green :
     buf.status === "CAUTION"   ? THEME.amber : THEME.red;
 
-  // Speedometer zones from pe_config thresholds:
-  // 0–15% buffer = red (AT_RISK), 15–40% = amber (LONG_JOB), 40–100% = green
-  const atRisk  = 15, longJob = 40;
+  // Speedometer zones from the shared pe_config buffer thresholds (single source —
+  // identical bands drive the daily bars + legends + narrative).
+  const atRisk = SLA_ATRISK_PCT, longJob = SLA_LONGJOB_PCT;
   charts.slaBuffer = new Chart(canvas, {
     type: "doughnut",
     data: {
-      labels: ["At risk (≤15%)", "Caution (15–40%)", "Healthy (>40%)"],
+      labels: [`At risk (≤${atRisk}%)`, `Caution (${atRisk}–${longJob}%)`, `Healthy (>${longJob}%)`],
       datasets: [{
         data: [atRisk, longJob - atRisk, 100 - longJob],
         backgroundColor: [hexA(THEME.red, 0.75), hexA(THEME.amber, 0.75), hexA(THEME.green, 0.75)],
@@ -2830,15 +3006,7 @@ function renderSlaBufferChart(k) {
       circumference: 180,
       layout: { padding: { bottom: 20 } },
       plugins: {
-        legend: {
-          position: "bottom",
-          labels: {
-            color: THEME.muted,
-            font: { family: "Sora", size: 10, weight: "600" },
-            boxWidth: 10,
-            boxHeight: 10,
-          },
-        },
+        legend: { display: false },
         tooltip: {
           backgroundColor: THEME.card,
           borderColor: THEME.border,
@@ -2856,6 +3024,44 @@ function renderSlaBufferChart(k) {
       centerTextPlugin(buf ? `${_n(buf.buffer_pct).toFixed(0)}%` : "N/A", buf?.status || ""),
     ],
   });
+
+  // ── Interpretive subtitle: say what the % MEANS, not just the number ──
+  const subEl = document.getElementById("chart-sla-subtitle");
+  if (subEl) {
+    if (buf) {
+      const band = _bufferBand(buf.buffer_pct);
+      subEl.innerHTML = `Worst-job headroom before its SLA ceiling — <b style="color:${band.color}">`
+        + `${_n(buf.buffer_pct).toFixed(0)}% buffer (${band.label})</b>. `
+        + `How much a job's runtime can grow before it breaches.`;
+    } else {
+      subEl.textContent = "Headroom between worst-job peak and the daily SLA limit";
+    }
+  }
+
+  // ── Shared buffer-band legend (same green/amber/red as the daily bars) ──
+  const legEl = document.getElementById("chart-sla-buffer-legend");
+  if (legEl) {
+    legEl.className = "flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 px-1 text-[10px] text-Cmuted";
+    legEl.innerHTML = _bufferBandLegendHtml(k.daily_limit_hrs);
+  }
+}
+
+/**
+ * Shared buffer-band legend HTML — green/amber/red keyed to the SAME
+ * SLA_ATRISK_PCT/SLA_LONGJOB_PCT thresholds across the gauge and the daily bars,
+ * so identical colours mean identical things on every batch panel.
+ */
+function _bufferBandLegendHtml(ceiling) {
+  const C = Number(ceiling) || SLA_DAILY_HRS;
+  const atRiskMins = Math.round(C * 60 * (SLA_ATRISK_PCT / 100));
+  const chip = (col, label) =>
+    `<span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm" style="background:${col}"></span> ${label}</span>`;
+  return [
+    chip(THEME.green, `Healthy &middot; &gt;${SLA_LONGJOB_PCT}% buffer`),
+    chip(THEME.amber, `Tight &middot; ${SLA_ATRISK_PCT}–${SLA_LONGJOB_PCT}% buffer`),
+    chip(THEME.red,   `At risk / breach &middot; ≤${SLA_ATRISK_PCT}% (within ${atRiskMins} min of the ${_fmtHrs(C)} ceiling)`),
+    `<span class="inline-flex items-center gap-1" style="color:${THEME.amber}">⚡ unusually long day (statistical spike)</span>`,
+  ].join("");
 }
 
 // Chart.js plugin: speedometer needle over the half-doughnut
@@ -2982,27 +3188,37 @@ function renderWindowTrendChart(winData, topJobsData) {
   const breachGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
   breachGrad.addColorStop(0, "rgba(244,63,94,0.95)");
   breachGrad.addColorStop(1, "rgba(244,63,94,0.40)");
-  const spikeGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
-  spikeGrad.addColorStop(0, "rgba(251,146,60,0.95)");   // orange spike
-  spikeGrad.addColorStop(1, "rgba(251,146,60,0.40)");
-  const okGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
-  okGrad.addColorStop(0, "rgba(59,130,246,0.85)");
-  okGrad.addColorStop(1, "rgba(59,130,246,0.28)");
+  const amberGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
+  amberGrad.addColorStop(0, "rgba(245,158,11,0.92)");   // tight (15–40% buffer)
+  amberGrad.addColorStop(1, "rgba(245,158,11,0.34)");
+  const greenGrad = ctxCanvas.createLinearGradient(0, 0, 0, h);
+  greenGrad.addColorStop(0, "rgba(16,217,110,0.88)");   // healthy (>40% buffer)
+  greenGrad.addColorStop(1, "rgba(16,217,110,0.30)");
 
-  const bgColors  = winData.map((w, i) =>
-    w.breach        ? breachGrad :
-    spikeIdxs.has(i) ? spikeGrad :
-    okGrad);
-  const bdrColors = winData.map((w, i) =>
-    w.breach        ? "rgba(244,63,94,0.9)" :
-    spikeIdxs.has(i) ? "rgba(251,146,60,0.9)" :
-    "rgba(59,130,246,0.7)");
+  // ── Bars coloured by SLA BUFFER BAND — the SAME green/amber/red thresholds
+  // as the gauge (single source: SLA_ATRISK_PCT / SLA_LONGJOB_PCT). A bar's
+  // colour now means exactly what the gauge zone means, so the two panels agree.
+  // Statistical spikes are kept as a ⚡ overlay annotation (drawn separately),
+  // not as a base colour, so anomaly detection isn't lost.
+  const _dayBand = (w, i) => {
+    if (w.breach) return "red";
+    const bufPct = SLA_DAILY_HRS > 0 ? ((SLA_DAILY_HRS - values[i]) / SLA_DAILY_HRS) * 100 : 100;
+    return bufPct <= SLA_ATRISK_PCT ? "red" : bufPct <= SLA_LONGJOB_PCT ? "amber" : "green";
+  };
+  const bgColors  = winData.map((w, i) => {
+    const b = _dayBand(w, i);
+    return b === "red" ? breachGrad : b === "amber" ? amberGrad : greenGrad;
+  });
+  const bdrColors = winData.map((w, i) => {
+    const b = _dayBand(w, i);
+    return b === "red" ? "rgba(244,63,94,0.9)" : b === "amber" ? "rgba(245,158,11,0.9)" : "rgba(16,217,110,0.8)";
+  });
 
   // Update subtitle
   const metricTypeEl = document.getElementById("chart-window-metric-type");
   if (metricTypeEl) {
     metricTypeEl.textContent = hasElapsed
-      ? "Bars = elapsed span (first start → last end) · teal line = active busy time (real compute)"
+      ? "Bar height = elapsed span (first start → last end) · bar colour = SLA buffer band · teal line = active busy time (real compute)"
       : "Summed runtime (all jobs — may overcount parallel runs)";
     metricTypeEl.className = hasElapsed
       ? "text-[9px] text-Cteal font-semibold mt-0.5"
@@ -3281,6 +3497,11 @@ function renderWindowTrendChart(winData, topJobsData) {
     },
     plugins: [slaLinePlugin(SLA_DAILY_HRS), enrichPlugin, crosshairPlugin],
   });
+
+  // ── Shared buffer-band legend (identical semantics to the SLA Buffer gauge) ──
+  const winLeg = document.getElementById("chart-window-legend");
+  if (winLeg) winLeg.innerHTML = _bufferBandLegendHtml(SLA_DAILY_HRS)
+    + `<span class="inline-flex items-center gap-1"><span class="inline-block w-4 h-0 border-t-2" style="border-color:rgba(45,212,191,0.95)"></span> active busy time</span>`;
 
   // ── Render spike legend below chart ─────────────────────────
   _renderWindowSpikePanel(winData, spikeIdxs, values, counts);
@@ -8726,6 +8947,22 @@ function renderLongpoleHeatmap(lp) {
 
   if (subt) subt.textContent =
     `${rows.length} longest jobs · ${dates.length} day(s) · typical busy window ${busyRef.toFixed(1)}h · cell = longest run that day (min)`;
+
+  // ── Critical-path sentence: name WHY this panel matters + the top contributor.
+  const critEl = document.getElementById("batch-longpole-critpath");
+  if (critEl) {
+    const topRow = rows.reduce((a, b) =>
+      (Number(b.window_share_pct) || 0) > (Number(a.window_share_pct) || 0) ? b : a, rows[0] || {});
+    const topShare = Number(topRow.window_share_pct) || 0;
+    let lead = "These jobs define your effective batch critical path — any growth here eats directly into the window buffer.";
+    if (topShare > 0 && topRow.job) {
+      lead += ` Biggest single contributor: ${_esc(String(topRow.job))} at ${topShare.toFixed(0)}% of the ${busyRef.toFixed(1)}h busy window`;
+      lead += longpoles > 0
+        ? ` — ${longpoles} job(s) cross the ${flagPct}% long-pole line (▲), so trimming them frees the most headroom.`
+        : `; no single job dominates, so the risk is aggregate concurrency rather than one runaway job.`;
+    }
+    critEl.textContent = lead;
+  }
   if (badge) {
     badge.classList.remove("hidden");
     if (longpoles > 0) {
@@ -13188,6 +13425,10 @@ async function loadConfig() {
 
     // Keep the chart SLA line in sync with the user-configured threshold
     if (cfg.daily_sla_hrs) SLA_DAILY_HRS = Number(cfg.daily_sla_hrs) || 6.0;
+    // Keep the buffer-band thresholds (gauge / daily bars / legends / narrative)
+    // in sync with pe_config so all panels share one green/amber/red rule.
+    if (cfg.sla_atrisk_pct  != null) SLA_ATRISK_PCT  = Number(cfg.sla_atrisk_pct)  || SLA_ATRISK_PCT;
+    if (cfg.sla_longjob_pct != null) SLA_LONGJOB_PCT = Number(cfg.sla_longjob_pct) || SLA_LONGJOB_PCT;
 
     const keyEl = document.getElementById("settings-api-key");
     if (keyEl && cfg.gemini_api_key) keyEl.value = cfg.gemini_api_key;

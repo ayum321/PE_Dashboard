@@ -1706,6 +1706,11 @@
           <!-- Hidden before first dataset arrives -->
           <div id="batch-review-body" class="hidden space-y-6">
 
+            <!-- ── Story header — names the question this whole panel answers,
+                 then answers it in one tone-coloured line + a computed micro-narrative
+                 (rendered dynamically by renderBatchStory from the window data) ── -->
+            <div id="batch-story" class="hidden"></div>
+
             <!-- ── PE Audit Coverage Strip ────────────────── -->
             <div id="batch-coverage-strip" class="hidden rounded-xl border border-Cborder bg-Ccard/60 p-3 flex flex-wrap gap-3 items-center">
               <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted mr-1">PE Audit Coverage</div>
@@ -1864,6 +1869,10 @@
             </div>
 
             <!-- ── Charts row ───────────────────────────────── -->
+            <div class="flex items-center gap-2 mt-1 -mb-1">
+              <span class="text-[11px] font-bold uppercase tracking-widest text-Cmuted">How much buffer do we have?</span>
+              <span id="batch-buffer-window-note" class="text-[10px] text-Cmuted/80"></span>
+            </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
               <!-- Chart 1 — SLA Buffer Gauge (SVG arc speedometer) -->
@@ -1895,7 +1904,7 @@
                 <div class="mb-3">
                   <div class="text-sm font-bold text-Cwhite">Daily Batch Window</div>
                   <div class="text-[11px] text-Cmuted">
-                    Dashed line marks the
+                    Bar colour = SLA buffer that day · dashed line marks the
                     <span id="chart-sla-ceiling-tag" class="font-mono text-Camber">6 h</span> SLA ceiling
                   </div>
                   <div id="chart-window-metric-type" class="text-[9px] text-Cteal font-semibold mt-0.5"></div>
@@ -1905,10 +1914,15 @@
                 <div class="relative h-80">
                   <canvas id="chart-window-trend" style="display:block;width:100%;height:100%"></canvas>
                 </div>
+                <!-- Shared buffer-band legend (same green/amber/red as the gauge) -->
+                <div id="chart-window-legend" class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[10px] text-Cmuted"></div>
               </div>
             </div>
 
             <!-- ── Long-Pole Job Consistency heatmap (top jobs × day) ────── -->
+            <div class="flex items-center gap-2 mt-1 -mb-1">
+              <span class="text-[11px] font-bold uppercase tracking-widest text-Cmuted">Which jobs drive risk — and when?</span>
+            </div>
             <div id="batch-longpole-card" class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5 hidden">
               <div class="mb-3 flex items-start justify-between">
                 <div>
@@ -1916,6 +1930,7 @@
                   <div class="text-[11px] text-Cmuted">
                     Longest jobs by average runtime — read across a row to see if the same job is slow every day or only spikes.
                   </div>
+                  <div id="batch-longpole-critpath" class="text-[10px] text-Camber/90 mt-1"></div>
                   <div id="batch-longpole-subtitle" class="text-[9px] text-Cmuted mt-0.5"></div>
                 </div>
                 <span id="batch-longpole-badge" class="hidden metric-badge"></span>
@@ -1964,14 +1979,14 @@
             <div class="mb-4">
               <h3 class="text-sm font-bold text-Cwhite">SLA Compliance Heatmap</h3>
               <p class="text-[11px] text-Cmuted mt-0.5">
-                Job × Date — colour indicates runtime hours (green = within SLA · amber = near limit · red = breach)
+                Job × Date — colour = SLA buffer that run (green = healthy buffer · amber = within 15% of the SLA ceiling · red = breach)
               </p>
             </div>
-            <!-- Legend -->
+            <!-- Legend (same buffer-band semantics as the gauge & daily bars) -->
             <div class="flex items-center gap-4 mb-3 text-[10px]">
               <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-[#0f3d24]"></span><span class="text-Cmuted">No run</span></div>
-              <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-[#10d96e]"></span><span class="text-Cmuted">OK (&lt;6h)</span></div>
-              <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-[#f59e0b]"></span><span class="text-Cmuted">Near SLA</span></div>
+              <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-[#10d96e]"></span><span class="text-Cmuted">Healthy (&gt;15% buffer)</span></div>
+              <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-[#f59e0b]"></span><span class="text-Cmuted">Within 15% of SLA</span></div>
               <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-[#f43f5e]"></span><span class="text-Cmuted">BREACH</span></div>
             </div>
             <div id="sla-heatmap-container" class="overflow-auto">
