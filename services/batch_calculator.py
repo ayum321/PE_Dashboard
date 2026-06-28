@@ -1836,6 +1836,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # the correct ceiling instead of the global daily default.  Populated from
     # window_agg below; merged into the per-day `window` frame for serialization.
     _perday_bind_df = None
+    # Representative daily ceiling used for single-number LABELS only (headline
+    # window phrase, gauge legend, daily-window dashed line) — NEVER for the
+    # per-(sub_app, date) compliance math, which always uses each sub-app's own
+    # resolved ceiling. Defaults to the global ceiling; refined below to the
+    # volume-dominant resolved ceiling once the per-sub-app window map is built.
+    window_dominant_ceiling = float(global_ceil)
 
     if has_end_time and "Sub_Application" in df_analysis.columns:
         # ── Gap 1: Sentinel job map from BatchSLA XLSX ───────────────────────
@@ -2202,6 +2208,34 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 _sa_sla_series = window_agg.loc[window_agg["Sub_Application"] == _sa, "sla_hrs"]
                 _sa_vc = _sa_sla_series.value_counts()
                 _win_ceiling_map[str(_sa)] = float(_sa_vc.index[0]) if not _sa_vc.empty else global_ceil
+
+        # ── Representative (volume-dominant) binding ceiling for LABELS ──────────
+        # A customer matrix carries several daily-class windows (e.g. 6h BY_DAILY
+        # vs 7.5h BY SEQ DAILY); the schedule-type vote behind global_ceil can
+        # surface the looser one, so a lone "Daily Xh" label contradicts the
+        # per-(sub_app, date) compliance and the per-job tables. Weight each
+        # resolved ceiling by the in-scope RUN VOLUME it governs and pick the
+        # dominant — the ceiling of the batch type the headline mainly describes.
+        try:
+            _ceil_vol: Dict[float, int] = {}
+            for _sa_name, _sa_runs in (
+                df_scope["Sub_Application"].astype(str).value_counts().items()
+            ):
+                _sa_ceil = _win_ceiling_map.get(_sa_name)
+                if _sa_ceil is None:
+                    _sa_ceil = _win_ceiling_map.get(_sa_name.upper())
+                if _sa_ceil is None or float(_sa_ceil) <= 0:
+                    continue
+                _key = round(float(_sa_ceil), 2)
+                _ceil_vol[_key] = _ceil_vol.get(_key, 0) + int(_sa_runs)
+            if _ceil_vol:
+                # Highest governed run-volume wins; tie-break to the TIGHTER ceiling
+                # so a tie never loosens the displayed audit target.
+                window_dominant_ceiling = float(
+                    sorted(_ceil_vol.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+                )
+        except Exception:
+            pass
 
         for _, _r in window_agg.iterrows():
             _win_records.append({
@@ -2767,6 +2801,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "sla_source":       sla_src_type,
         "sla_daily_hrs":    global_ceil,
         "sla_ceiling":      global_ceil,   # canonical name for downstream callers
+        # Volume-dominant resolved ceiling for single-number LABELS (headline
+        # window phrase, gauge legend, daily-window dashed line). Reconciles the
+        # lone "Daily Xh" labels with the per-sub-app compliance + per-job tables;
+        # never feeds the compliance math (which uses per-sub-app ceilings).
+        "window_dominant_ceiling_hrs": round(float(window_dominant_ceiling), 3),
         "confidence":       conf,
         # ── Auto-detected SLA schedule mode (exposed for smart defaults) ────
         "sla_detected_mode": _detect_sla_mode(df),
@@ -3440,6 +3479,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                 if m.get("total_runs") else 0.0, 2,
             ),
             "daily_limit_hrs":    m["sla_ceiling"],
+            "window_dominant_ceiling_hrs": m.get("window_dominant_ceiling_hrs"),
             "monthly_limit_hrs":  pe_config.SLA_MONTHLY_HRS,
             "fleet_sla_buffer":   m["fleet_sla_buffer"],
             # Window-level SLA buffer (whole nightly batch window vs SLA ceiling).
@@ -3516,6 +3556,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         },
         "multi_app_folders":  _multi_app_folders,
         "excluded_sub_apps":  m.get("excluded_sub_apps", []),
+        # Exact sub-applications dropped from the window denominator (cyclic,
+        # OUTBOUND, MONTHLY, user-excluded …). Persisted so the SLA Matrix page
+        # can reuse the IDENTICAL window scope and publish one shared denominator.
+        "out_of_scope_subs":  sorted(str(s) for s in m.get("out_of_scope_subs", [])),
         "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,
@@ -3918,20 +3962,40 @@ def _build_sla_source_payload(m: dict) -> dict:
             + (f" ({assumed_jobs} using assumed defaults)" if assumed_jobs else "")
         )
     else:
-        base["schema_type"]    = "none"
-        base["detected_model"] = "Default system values"
-        base["contracts"]      = []
-        base["warnings"] = [{
-            "code":     "NO_SLA_FILE",
-            "text":     "No SLA matrix uploaded — compliance uses assumed defaults.",
-            "severity": "critical" if sla_type == "default" else "info",
-        }] if sla_type == "default" else []
-        base["blocked"] = (sla_type == "default")
-        base["note"] = (
-            "Using default SLA windows from system configuration. "
-            "Upload a customer SLA matrix to override."
-            if sla_type == "default"
-            else "Using customer-approved SLA windows from uploaded matrix."
-        )
+        # No rich _sla_intelligence object in config_store. This happens for the
+        # Tier-1 BatchSLA XLSX path (ceilings resolve through build_sla_index, which
+        # doesn't persist an intelligence object) as well as true default mode.
+        # Describe the source HONESTLY from the resolved ceilings instead of
+        # mislabeling a loaded matrix as "none / Default system values".
+        _is_default = (sla_type == "default")
+        base["contracts"] = []
+        if _is_default:
+            base["schema_type"]    = "none"
+            base["detected_model"] = "Default system values"
+            base["warnings"] = [{
+                "code":     "NO_SLA_FILE",
+                "text":     "No SLA matrix uploaded — compliance uses assumed defaults.",
+                "severity": "critical",
+            }]
+            base["blocked"] = True
+            base["note"] = (
+                "Using default SLA windows from system configuration. "
+                "Upload a customer SLA matrix to override."
+            )
+        else:
+            # Customer SLA source (matrix / batch_sla_xlsx / customer fallback).
+            # Leave schema_type empty (no parser classification to report) so the UI
+            # derives the model chip from the resolved windows instead of "NONE".
+            base["schema_type"] = ""
+            _rc = base.get("resolved_ceilings") or []
+            if len(_rc) > 1:
+                base["detected_model"] = f"{len(_rc)} windows {_rc[0]:.1f}–{_rc[-1]:.1f}h"
+            elif len(_rc) == 1:
+                base["detected_model"] = f"1 window {_rc[0]:.1f}h"
+            else:
+                base["detected_model"] = "Customer SLA windows"
+            base["warnings"] = []
+            base["blocked"]  = False
+            base["note"] = "Using customer-approved SLA windows from uploaded matrix."
 
     return base

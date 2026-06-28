@@ -115,6 +115,25 @@ function _bufferBand(bufPct) {
   return { tone: "ok", color: THEME.green, label: "Healthy" };
 }
 
+/**
+ * The single source of truth for the headline "daily" SLA ceiling LABEL.
+ *
+ * A customer matrix carries several daily-class windows (e.g. 6h BY_DAILY vs
+ * 7.5h BY SEQ DAILY); the raw daily_limit_hrs can surface the LOOSER one, so a
+ * lone "Daily Xh" label drawn from it contradicts the per-(sub_app, date)
+ * compliance and the per-job tables. window_dominant_ceiling_hrs is the ceiling
+ * governing the most in-scope run volume — the batch type the headline mainly
+ * describes. EVERY ceiling label/dashed line/footer must read from HERE so no
+ * card can go stale against the gauge, chart and headline.
+ */
+function _headlineCeiling(kpis) {
+  const dom = Number(kpis?.window_dominant_ceiling_hrs);
+  if (Number.isFinite(dom) && dom > 0) return dom;
+  const dly = Number(kpis?.daily_limit_hrs);
+  if (Number.isFinite(dly) && dly > 0) return dly;
+  return SLA_DAILY_HRS;
+}
+
 // Utility job exclusion — file watchers, exports, DB backups excluded by default.
 // Toggled by the user via the batch review panel toggle.
 let _batchExcludeUtility = true;
@@ -1668,6 +1687,25 @@ function _isJobExcluded(job) {
   return _batchExcludeUtility && !!job.is_utility;
 }
 
+/**
+ * Set of job names removed from analysis on the Batch Review tab (auto-detected
+ * utility + manual excludes). The SLA Matrix headline tiles (Worst Job, Tightest
+ * Buffer) must honour the SAME exclusion so an excluded utility job — e.g. a file
+ * watcher that idles for hours — can never become the page's headline "worst" or
+ * "tightest" job. Reuses _isJobExcluded as the single source of exclusion truth.
+ * Empty when no batch is loaded → the SLA Matrix tab then shows its full scope.
+ */
+function _excludedJobNameSet() {
+  const out = new Set();
+  try {
+    for (const j of (window.appData?.batch?.top_jobs || [])) {
+      if (_isJobExcluded(j)) out.add(String(j.Job_Name || "").toUpperCase());
+    }
+  } catch {}
+  try { _batchManualExclude.forEach((n) => out.add(String(n).toUpperCase())); } catch {}
+  return out;
+}
+
 /** Filter excluded jobs from batch payload.
  *  Returns a shallow copy with filtered arrays. Also masks excluded job names
  *  from the window top_job field so the Daily Batch Window tooltip is clean. */
@@ -2044,18 +2082,46 @@ function renderBatchReview(data) {
   // When jobs are excluded/included, recompute the fleet SLA buffer from the
   // current visible set so the doughnut gauge updates instantly — no server
   // round-trip needed.
+  //
+  // The gauge is the WORST-JOB headroom (its subtitle says so, and it sits beside
+  // the Worst-Job-Peak card + Top-10 table). It must therefore mirror the worst
+  // job — the highest-peak scored job and ITS per-job ceiling — exactly like the
+  // backend fleet_sla_buffer. Averaging every job's buffer here (the old bug) made
+  // the gauge read ~93% while the very card next to it read ~90% for the same job.
   const _filteredJobs = filtered.top_jobs || [];
   const _displayKpis = (() => {
     if (!_filteredJobs.length) return data.kpis;
-    const validBuffers = _filteredJobs.map(j => j.buffer_pct ?? 0);
-    const avgBuf = validBuffers.reduce((s, v) => s + v, 0) / validBuffers.length;
-    const avgBufRounded = Math.round(avgBuf * 10) / 10;
-    const status = avgBuf >= 50 ? "EXCELLENT" : avgBuf >= 30 ? "HEALTHY" : avgBuf >= 15 ? "CAUTION" : "CRITICAL";
+    const validBuffers = _filteredJobs
+      .map(j => j.buffer_pct)
+      .filter(v => v != null && Number.isFinite(v));
     const breachCount = validBuffers.filter(b => b < 0).length;
-    const critCount = validBuffers.filter(b => b >= 0 && b < 10).length;
+    const critCount   = validBuffers.filter(b => b >= 0 && b < 10).length;
+
+    // No active job filtering → trust the backend fleet buffer verbatim so the
+    // gauge == Worst-Job-Peak card == Top-10 by construction.
+    const _unfiltered = _filteredJobs.length === (data.top_jobs || []).length;
+    let _fleetBuf = (data.kpis?.fleet_sla_buffer) || {};
+    if (!_unfiltered) {
+      // Recompute the worst job (highest peak among scored jobs) for the visible
+      // set — same selection the backend uses — and take ITS buffer, not the mean.
+      let _worst = null;
+      for (const j of _filteredJobs) {
+        if (j.buffer_pct == null || !Number.isFinite(j.buffer_pct)) continue;
+        const pk = Number(j.peak_hrs);
+        if (!Number.isFinite(pk)) continue;
+        if (!_worst || pk > Number(_worst.peak_hrs)) _worst = j;
+      }
+      if (_worst) {
+        const bp = Math.round(Number(_worst.buffer_pct) * 10) / 10;
+        const status = (bp < 0 || bp <= SLA_ATRISK_PCT) ? "CRITICAL"
+                     : bp <= SLA_LONGJOB_PCT             ? "CAUTION"
+                     : bp >= 50                          ? "EXCELLENT" : "HEALTHY";
+        _fleetBuf = { ..._fleetBuf, buffer_pct: bp, status, job_name: _worst.Job_Name ?? _fleetBuf.job_name };
+      }
+    }
     return {
       ...data.kpis,
-      fleet_sla_buffer: { ...((data.kpis?.fleet_sla_buffer) || {}), buffer_pct: avgBufRounded, status },
+      fleet_sla_buffer: _fleetBuf,
       total_breach_jobs: breachCount,
       total_critical_jobs: critCount,
     };
@@ -2203,6 +2269,13 @@ function renderBatchSlaSourceTags(sla, kpis) {
     const dailyHrs  = isMatrix ? (sla.daily_hrs  || pd.daily_hrs  || 6.0) : (pd.daily_hrs  || 6.0);
     const weeklyHrs = isMatrix ? (sla.weekly_hrs || pd.weekly_hrs || 8.0) : (pd.weekly_hrs || 8.0);
 
+    // Single-number ceiling for the compact LABEL chips (source tag + ceiling tag).
+    // Prefer the volume-dominant resolved ceiling so the lone "Daily Xh" never
+    // contradicts the per-sub-app compliance, the worst-breach callout or the
+    // per-job tables. Falls back to the daily default when no windows were measured.
+    const _domCeil = Number(kpis?.window_dominant_ceiling_hrs);
+    const labelCeil = (isMatrix && Number.isFinite(_domCeil) && _domCeil > 0) ? _domCeil : dailyHrs;
+
     // Determine source label for small chip
     let srcLabel;
     if (isMatrix) {
@@ -2213,19 +2286,29 @@ function renderBatchSlaSourceTags(sla, kpis) {
       srcLabel = "Assumed (no SLA file)";
     }
 
-    // Build rich label with model info
-    const modelTag = sla.schema_type ? ` · ${sla.schema_type.toUpperCase()} model` : "";
+    // Build rich label with model info. When a customer matrix resolved several
+    // distinct windows, name them (e.g. "4 windows 6.0–14.0h") instead of a bare
+    // schema word — and never render "NONE model" while a real matrix is loaded.
+    const _rcModel = Array.isArray(sla.resolved_ceilings) ? sla.resolved_ceilings : [];
+    let modelTag = "";
+    if (_rcModel.length > 1) {
+      modelTag = ` · ${_rcModel.length} windows ${Number(sla.resolved_ceiling_min).toFixed(1)}–${Number(sla.resolved_ceiling_max).toFixed(1)}h`;
+    } else if (_rcModel.length === 1) {
+      modelTag = ` · 1 window ${Number(_rcModel[0]).toFixed(1)}h`;
+    } else if (sla.schema_type && sla.schema_type !== "none") {
+      modelTag = ` · ${sla.schema_type.toUpperCase()} model`;
+    }
     const validTag = sla.valid_rows > 0 ? ` · ${sla.valid_rows} rules` : "";
     const matchStats = sla.match_stats;
     const matchTag = matchStats?.total_jobs > 0
       ? ` · ${matchStats.sla_matrix}/${matchStats.total_jobs} matched`
         + (matchStats.assumed > 0 ? ` (${matchStats.assumed} assumed)` : "")
       : "";
-    const label = `SLA: ${srcLabel}${modelTag}${validTag}${matchTag} · Daily ${Number(dailyHrs).toFixed(1)}h`;
+    const label = `SLA: ${srcLabel}${modelTag}${validTag}${matchTag} · Daily ${Number(labelCeil).toFixed(1)}h`;
 
     if (tag1) { tag1.textContent = label; tag1.classList.remove("hidden"); }
     if (tag2) { tag2.textContent = label; tag2.classList.remove("hidden"); }
-    if (ceiling) { ceiling.textContent = `${Number(dailyHrs).toFixed(1)} h`; }
+    if (ceiling) { ceiling.textContent = `${Number(labelCeil).toFixed(1)} h`; }
 
     if (sla.blocked) {
       if (tag1) tag1.style.color = THEME.red;
@@ -2242,6 +2325,11 @@ function renderBatchSlaSourceTags(sla, kpis) {
         `<span class="text-[9px] px-1.5 py-0.5 rounded border ${w.severity === "critical" ? "text-Cred border-Cred/30" : "text-Camber border-Camber/30"}">${escapeHtml(w.text || "").substring(0, 80)}</span>`
       ).join(" ");
       warnEl.classList.remove("hidden");
+    } else if (warnEl) {
+      // Clear any stale warning (e.g. the "No SLA matrix uploaded" box from a prior
+      // default-mode render) so it never lingers after a real matrix is loaded.
+      warnEl.innerHTML = "";
+      warnEl.classList.add("hidden");
     }
 
     // ── Render SLA Baseline Banner ───────────────────────────
@@ -2500,7 +2588,7 @@ function renderBatchKpis(k) {
   setText("bk-ok",     String(k.jobs_ok));
   setText(
     "bk-breach-sub",
-    `SLA ${_n(k.daily_limit_hrs, 6).toFixed(1)}h`
+    `SLA ${_headlineCeiling(k).toFixed(1)}h`
   );
 
   // Failed Runs (execution failures — ENDED NOT OK / ABENDED / TERMINATED).
@@ -2858,7 +2946,12 @@ function _fmtHrs(h) {
  */
 function _buildBatchNarrative(winData, k) {
   k = k || {};
-  const ceiling = _n(k.daily_limit_hrs, SLA_DAILY_HRS) || SLA_DAILY_HRS;
+  // Headline/label ceiling: prefer the volume-dominant resolved ceiling so the
+  // "X/Y day(s) finished inside the Nh window" phrase names the ceiling that
+  // actually binds most days (matching the worst-breach callout + per-job tables).
+  // Per-day breach flags + compliance % are unaffected (those use each sub-app's
+  // OWN ceiling); this only drives the headline label + the min_buffer fallback.
+  const ceiling = _headlineCeiling(k);
   const days = (Array.isArray(winData) ? winData : []).filter(w => w && w.run_date);
   if (!days.length) return null;
 
@@ -3091,7 +3184,7 @@ function renderSlaBufferChart(k) {
   const legEl = document.getElementById("chart-sla-buffer-legend");
   if (legEl) {
     legEl.className = "flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 px-1 text-[10px] text-Cmuted";
-    legEl.innerHTML = _bufferBandLegendHtml(k.daily_limit_hrs);
+    legEl.innerHTML = _bufferBandLegendHtml(_headlineCeiling(k));
   }
 }
 
@@ -3194,6 +3287,14 @@ function renderWindowTrendChart(winData, topJobsData) {
 
   if (!winData || winData.length === 0) return;
 
+  // Volume-dominant resolved ceiling for the dashed SLA reference line, the
+  // non-breach buffer band + the tooltip fallbacks, so this chart's ceiling
+  // matches the headline + gauge instead of the looser global default. This
+  // function isn't passed kpis, so read it from the live batch payload.
+  const _kp = window.appData?.batch?.kpis || {};
+  const _domCeilW = Number(_kp.window_dominant_ceiling_hrs);
+  const winCeil = (Number.isFinite(_domCeilW) && _domCeilW > 0) ? _domCeilW : SLA_DAILY_HRS;
+
   // Build excluded set from ALL top_jobs (unfiltered) — caller must pass full list
   const excludedNameSet = new Set((topJobsData || []).filter(j => _isJobExcluded(j)).map(j => j.Job_Name));
   const labels   = winData.map((w) => w.run_date);
@@ -3262,7 +3363,13 @@ function renderWindowTrendChart(winData, topJobsData) {
   // not as a base colour, so anomaly detection isn't lost.
   const _dayBand = (w, i) => {
     if (w.breach) return "red";
-    const bufPct = SLA_DAILY_HRS > 0 ? ((SLA_DAILY_HRS - values[i]) / SLA_DAILY_HRS) * 100 : 100;
+    // Prefer the binding sub-app's OWN buffer (DAILY=6h, WEEKLY=9h…) when the
+    // backend supplies it — mirroring the narrative — so the bar colour reflects
+    // the real per-day ceiling; fall back to the dominant ceiling, never the
+    // looser global default.
+    const bufPct = (w.min_buffer_pct != null && isFinite(+w.min_buffer_pct))
+      ? +w.min_buffer_pct
+      : (winCeil > 0 ? ((winCeil - values[i]) / winCeil) * 100 : 100);
     return bufPct <= SLA_ATRISK_PCT ? "red" : bufPct <= SLA_LONGJOB_PCT ? "amber" : "green";
   };
   const bgColors  = winData.map((w, i) => {
@@ -3473,7 +3580,7 @@ function renderWindowTrendChart(winData, topJobsData) {
               const excludedNames = rawNames.filter(n => excludedNameSet.has(n));
               if (hasElapsed) {
                 const effH = +(w.effective_hrs || 0);
-                const ceilH = +(w.breach_sub_ceil || w.sla_hrs || w.sla_ceil || SLA_DAILY_HRS || 0);
+                const ceilH = +(w.breach_sub_ceil || w.sla_hrs || w.sla_ceil || winCeil || 0);
                 if (effH > 0) {
                   const verdict = w.breach
                     ? `BREACH — ${w.breach_sub_app || "a sub-app"} +${(+(w.breach_overrun_hrs ?? (effH - ceilH))).toFixed(1)}h over its ${ceilH ? ceilH.toFixed(1) : "?"}h ceiling`
@@ -3529,7 +3636,7 @@ function renderWindowTrendChart(winData, topJobsData) {
               }
               if (topJobs[i]) lines.push(`Longest job: ${topJobs[i]}`);
               if (winData[i]?.breach) {
-                const ov  = (w.breach_overrun_hrs != null) ? +w.breach_overrun_hrs : (values[i] - SLA_DAILY_HRS);
+                const ov  = (w.breach_overrun_hrs != null) ? +w.breach_overrun_hrs : (values[i] - winCeil);
                 const sub = w.breach_sub_app ? `${w.breach_sub_app} ` : "";
                 const cl  = (w.breach_sub_ceil != null) ? ` ${(+w.breach_sub_ceil).toFixed(1)}h ceiling` : " limit";
                 lines.push(`⚠ SLA BREACH  ${sub}+${ov.toFixed(1)}h over${cl}`);
@@ -3570,12 +3677,12 @@ function renderWindowTrendChart(winData, topJobsData) {
         },
       },
     },
-    plugins: [slaLinePlugin(SLA_DAILY_HRS), enrichPlugin, crosshairPlugin],
+    plugins: [slaLinePlugin(winCeil), enrichPlugin, crosshairPlugin],
   });
 
   // ── Shared buffer-band legend (identical semantics to the SLA Buffer gauge) ──
   const winLeg = document.getElementById("chart-window-legend");
-  if (winLeg) winLeg.innerHTML = _bufferBandLegendHtml(SLA_DAILY_HRS)
+  if (winLeg) winLeg.innerHTML = _bufferBandLegendHtml(winCeil)
     + `<span class="inline-flex items-center gap-1"><span class="inline-block w-4 h-0 border-t-2" style="border-color:rgba(45,212,191,0.95)"></span> active busy time</span>`;
 
   // ── Render spike legend below chart ─────────────────────────
@@ -3691,9 +3798,9 @@ function renderTopJobsChart(topJobs, kpis) {
   if (!canvas) return;
   destroyChart("topJobs");
 
-  // Use the resolved SLA ceiling from this dataset (per compute_metrics),
-  // falls back to the global SLA_DAILY_HRS which is already synced above.
-  const chartSla = kpis?.daily_limit_hrs ?? SLA_DAILY_HRS;
+  // Single dashed reference line: the dominant (volume-weighted) ceiling, so the
+  // Top-Jobs chart agrees with the headline / gauge / window chart (one source).
+  const chartSla = _headlineCeiling(kpis);
 
   // Sort ascending so the largest peak appears at the top of a horizontal bar
   const sorted = [...topJobs].sort((a, b) => a.peak_hrs - b.peak_hrs);
@@ -3845,7 +3952,7 @@ function renderTopBreachesTable(rows, kpis) {
   const trueBreaches = all.filter((r) => (r.buffer_pct ?? 100) < 0);
   const displayRows  = trueBreaches.length > 0 ? trueBreaches : all.slice(0, 10);
   const isFallback   = trueBreaches.length === 0;
-  const defaultSla   = kpis?.daily_limit_hrs ?? SLA_DAILY_HRS;
+  const defaultSla   = _headlineCeiling(kpis);
 
   // Adaptive mode: PATH C (no XLSX loaded) — breaches are regressions vs history baseline
   const batchSlaPath  = window.appData?.batch?.kpis?.sla_path
@@ -3860,7 +3967,11 @@ function renderTopBreachesTable(rows, kpis) {
   const dateRangeLabel = dateRange.length === 2
     ? `${dateRange[0]} → ${dateRange[1]}`
     : (dataSpanDays > 0 ? `${dataSpanDays} day(s)` : "");
-  const slaCeiling = batchKpis.sla_ceiling || batchKpis.sla_daily_hrs || defaultSla;
+  // Use the shared headline ceiling (volume-dominant binding ceiling) so the
+  // "SLA ceiling"/"Global cap" label below can't surface the looser global
+  // sla_ceiling (e.g. 7.5h BY SEQ) while the gauge, chart and headline all show
+  // the dominant 6.0h. One source for every ceiling label on the page.
+  const slaCeiling = _headlineCeiling(batchKpis) || defaultSla;
 
   // Update title / subtitle dynamically
   if (title) {
@@ -15510,6 +15621,13 @@ function _renderSlaCommitmentsPanel() {
         return { val: rt, src: rt != null ? "xlsx_last_run" : "none" };
       };
 
+      // How many displayed contract workflows actually resolved to live Ctrl-M
+      // runtime (vs falling back to the XLSX last-run sample). The header must
+      // reflect the DISPLAYED rows — not merely whether any Ctrl-M data exists —
+      // otherwise it claims "matched" while every row shows an XLSX sample and the
+      // SLA Debug panel (Ctrl-M elapsed) reads as contradicting this table.
+      const _matchedCount = workflows.filter(w => entryOf(w) != null).length;
+
       batchEl.innerHTML = `
         <div class="text-[10px] text-Cmuted mb-1.5">
           ${workflows.length} workflow(s) loaded ·
@@ -15519,7 +15637,9 @@ function _renderSlaCommitmentsPanel() {
             : ""} ·
           types: <span class="text-Cteal font-semibold">${(batchSlaInfo.batch_types || []).join(", ") || "—"}</span>
           ${Object.keys(canonicalMap).length > 0
-            ? `· <span class="text-Cgreen font-semibold">✓ Ctrl-M runtime matched</span>`
+            ? (_matchedCount > 0
+                ? `· <span class="text-Cgreen font-semibold" title="${_matchedCount}/${workflows.length} contract workflows resolved to live Ctrl-M runtime">✓ Ctrl-M runtime matched (${_matchedCount}/${workflows.length})</span>`
+                : `· <span class="text-Camber font-semibold" title="Ctrl-M runtime is loaded, but its sub-application names don't match these XLSX contract names — so the rows below show XLSX last-run samples. The SLA Debug panel shows the live Ctrl-M elapsed-time verdict for the actual sub-applications.">⚠ Ctrl-M loaded but unmatched — rows show XLSX last-run</span>`)
             : `· <span class="text-Camber" title="Showing XLSX last-run data. Run SLA Matrix with Ctrl-M upload for live runtime.">⚠ using XLSX last-run — upload Ctrl-M for live data</span>`}
         </div>
         <div class="overflow-x-auto rounded-lg border border-Cborder/40">
@@ -15735,9 +15855,9 @@ function _renderSlaCommitmentsPanel() {
         debugEl.className = "mt-2";
         debugEl.innerHTML = `
           <summary class="text-[9px] text-Cmuted cursor-pointer hover:text-Cwhite/60 select-none py-1">
-            🔬 SLA Debug — ${debugWfRows.length} workflow(s) resolved
-            ${breaches.length > 0 ? `· <span class="text-Cred font-bold">${breaches.length} BREACH</span>` : ""}
-            ${misses.length > 0 ? `· <span class="text-Camber">${misses.length} prefix-miss (Tier 2/3 fallback)</span>` : ""}
+            🔬 SLA Debug — ${debugWfRows.length} sub-application(s) resolved from live Ctrl-M elapsed runtime
+            ${breaches.length > 0 ? `· <span class="text-Cred font-bold" title="Live elapsed wall-clock (max End − min Start) exceeded the resolved ceiling. This is the authoritative window verdict and may differ from the XLSX last-run samples in the contract table above.">${breaches.length} BREACH (elapsed vs ceiling)</span>` : ""}
+            ${misses.length > 0 ? `· <span class="text-Camber" title="Sub-application did not join to a Tier-1 contract row by name — its ceiling came from a Tier 2/3 fallback.">${misses.length} unjoined (Tier 2/3 fallback)</span>` : ""}
           </summary>
           <div class="mt-1.5 overflow-x-auto rounded border border-Cborder/30 bg-Cbg/60">
             <table class="w-full text-[9px]">
@@ -16085,21 +16205,59 @@ function _renderSlaMatrix(data) {
   if (drEl) { drEl.textContent = String(driftN); drEl.className = `text-2xl font-bold ${driftN > 0 ? "text-Camber" : "text-Cgreen"}`; }
 
   // ── Tightest Buffer — the single job closest to its SLA ceiling (job-level headroom) ──
-  const _bufs = (data.job_summary || [])
-    .map((j) => j.buffer_pct)
-    .filter((v) => v != null && !Number.isNaN(v));
+  // Honour the Batch Review exclusion set so an excluded utility job (file watcher,
+  // housekeeping) can't surface as the headline tightest job.
+  const _exSetTB = _excludedJobNameSet();
+  const _allScored = (data.job_summary || [])
+    .filter((j) => j.buffer_pct != null && !Number.isNaN(j.buffer_pct));
+  const _inScopeTB = _allScored.filter(
+    (j) => !_exSetTB.has(String(j.job_name || "").toUpperCase())
+  );
+  const _tightJobs = _inScopeTB.length ? _inScopeTB : _allScored;
+  const _tbExcluded = _allScored.length - _tightJobs.length;
   const tbEl = document.getElementById("slak-tightbuf");
   if (tbEl) {
-    if (_bufs.length) {
-      const _minBuf = Math.min(..._bufs);
+    if (_tightJobs.length) {
+      const _tight  = _tightJobs.reduce((a, b) => (b.buffer_pct < a.buffer_pct ? b : a));
+      const _minBuf = _tight.buffer_pct;
       tbEl.textContent = _minBuf.toFixed(1) + "%";
       tbEl.className = `text-2xl font-bold ${_minBuf >= 40 ? "text-Cgreen" : _minBuf >= 15 ? "text-Camber" : "text-Cred"}`;
+      // Trace which job/calc this number comes from — otherwise it's one of several
+      // unattributed "buffer %" figures on the page with no way to tell them apart.
+      tbEl.title = `${_tight.job_name || "?"} — ${_n(_tight.peak_hrs).toFixed(2)}h peak vs `
+        + `${_n(_tight.sla_limit).toFixed(2)}h ceiling = ${_minBuf.toFixed(1)}% headroom. `
+        + `Lowest (SLA−peak)/SLA across ${_tightJobs.length} scored jobs`
+        + (_tbExcluded > 0 ? ` (${_tbExcluded} excluded-from-analysis job(s) skipped).` : ".");
     } else {
       tbEl.textContent = "—";
       tbEl.className = "text-2xl font-bold text-Cmuted";
+      tbEl.title = "";
     }
   }
-  setText("slak-limit", _n(data.sla_limit_hrs).toFixed(2) + "h");
+  // ── SLA Limit — name the resolved-ceiling RANGE when jobs resolve to multiple
+  // distinct ceilings (per-window matrix). A single flat number contradicts this
+  // page's "every workflow has its own ceiling" premise. ──
+  const _ceilSet = Array.from(new Set(
+    (data.job_summary || [])
+      .map((j) => j.sla_limit)
+      .filter((v) => v != null && Number.isFinite(v) && v > 0)
+      .map((v) => Math.round(v * 100) / 100)
+  )).sort((a, b) => a - b);
+  const _limitEl = document.getElementById("slak-limit");
+  if (_limitEl) {
+    if (_ceilSet.length > 1) {
+      _limitEl.textContent = `${_ceilSet[0].toFixed(1)}–${_ceilSet[_ceilSet.length - 1].toFixed(1)}h`;
+      _limitEl.title = `${_ceilSet.length} distinct resolved ceilings: `
+        + `${_ceilSet.map((c) => c.toFixed(1) + "h").join(", ")}. `
+        + `Unmatched jobs fall back to ${_n(data.sla_limit_hrs).toFixed(2)}h.`;
+    } else if (_ceilSet.length === 1) {
+      _limitEl.textContent = _ceilSet[0].toFixed(2) + "h";
+      _limitEl.title = "";
+    } else {
+      _limitEl.textContent = _n(data.sla_limit_hrs).toFixed(2) + "h";
+      _limitEl.title = "";
+    }
+  }
   // explicit_sla_matrix = true ONLY when per-job contract rows from an uploaded
   // SLA file were matched. Schedule-type ceilings alone do NOT qualify.
   const isPerJob = data.explicit_sla_matrix === true;
@@ -16156,8 +16314,32 @@ function _renderSlaMatrix(data) {
 
   const wEl = document.getElementById("slak-worst");
   if (wEl) {
-    wEl.textContent = data.worst_job ? `${data.worst_job} (${_n(data.worst_hrs).toFixed(2)}h)` : "—";
-    wEl.title = data.worst_job ? `+${_n(data.worst_margin_hrs).toFixed(2)}h over SLA` : "";
+    // Recompute the headline worst job from the SCOPED job list so an excluded
+    // utility job (e.g. a file watcher on the Batch Review "excluded from analysis"
+    // list) can't surface as the dashboard's worst job. Falls back to the backend
+    // value when no batch/exclusions are loaded (SLA Matrix shows its full scope).
+    let _wName = data.worst_job, _wHrs = _n(data.worst_hrs), _wMargin = _n(data.worst_margin_hrs);
+    const _exSetW = _excludedJobNameSet();
+    if (_exSetW.size) {
+      const _cand = (data.job_summary || []).filter(
+        (j) => j.peak_hrs != null && !_exSetW.has(String(j.job_name || "").toUpperCase())
+      );
+      if (_cand.length) {
+        const _w = _cand.reduce((a, b) => (_n(b.peak_hrs) > _n(a.peak_hrs) ? b : a));
+        _wName = _w.job_name;
+        _wHrs  = _n(_w.peak_hrs);
+        _wMargin = (_w.sla_limit != null) ? (_n(_w.peak_hrs) - _n(_w.sla_limit)) : _wMargin;
+      }
+    }
+    wEl.textContent = _wName ? `${_wName} (${_wHrs.toFixed(2)}h)` : "—";
+    if (_wName) {
+      const _skipped = _exSetW.size ? " · excludes utility/excluded-from-analysis jobs" : "";
+      wEl.title = (_wMargin > 0
+        ? `+${_wMargin.toFixed(2)}h over its SLA ceiling`
+        : `${Math.abs(_wMargin).toFixed(2)}h headroom to its SLA ceiling (longest-running job)`) + _skipped;
+    } else {
+      wEl.title = "";
+    }
   }
 
   // Breach & At-Risk detail table was removed in the SLA-tab refocus (it duplicated

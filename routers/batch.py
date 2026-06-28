@@ -58,6 +58,10 @@ class BatchKPIs(BaseModel):
     failed_runs: int = 0
     fail_rate_pct: float = 0.0
     daily_limit_hrs: float = DAILY_LIMIT_HRS
+    # Volume-dominant resolved ceiling for single-number LABELS only; reconciles
+    # the lone "Daily Xh" display strings with per-sub-app compliance. May be None
+    # when no wall-clock windows were measured (falls back to daily_limit_hrs).
+    window_dominant_ceiling_hrs: Optional[float] = None
     monthly_limit_hrs: float = 8.0
     fleet_sla_buffer: Optional[Dict[str, Any]] = None
 
@@ -193,6 +197,10 @@ def _payload_to_response(
             try:
                 from services import session_cache
                 session_cache.set("last_hour_heatmap", payload.get("hour_heatmap"))
+                # Publish the batch window scope BEFORE computing the SLA matrix so
+                # the matrix uses the IDENTICAL out-of-scope sub-app set (one shared
+                # windows denominator across both pages).
+                session_cache.ac_set("window_out_of_scope_subs", payload.get("out_of_scope_subs") or [])
             except Exception:
                 pass
             sla_mx_dict = _compute_sla_matrix(df, sla_mode, custom).model_dump()
@@ -254,6 +262,9 @@ def _payload_to_response(
         session_cache.ac_set("batch_top_jobs",  resp_dict.get("top_jobs") or [])
         session_cache.ac_set("job_summary",     resp_dict.get("top_jobs") or [])   # canonical merged slot
         session_cache.ac_set("daily_window_series", resp_dict.get("window") or [])
+        # Exact window scope (out-of-scope sub-apps) so the SLA Matrix page can
+        # publish the IDENTICAL windows denominator for the same dataset.
+        session_cache.ac_set("window_out_of_scope_subs", resp_dict.get("out_of_scope_subs") or [])
         session_cache.ac_set("regression_df",   resp_dict.get("anomalies") or [])
         session_cache.ac_set("failure_grid",     resp_dict.get("failure_grid") or {})
         session_cache.ac_set("longpole_matrix",  resp_dict.get("longpole_matrix") or {})

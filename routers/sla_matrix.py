@@ -1036,6 +1036,23 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         worst_job    = worst["job_name"]
         worst_hrs_val = worst["run_hrs"]
         worst_margin = worst["breach_margin_hrs"]
+    elif job_summary:
+        # Fallback: no run-level breach detail (e.g. SLA-file path with no Ctrl-M
+        # join produced an empty detail list), but the per-job rollup still exists.
+        # Use the longest-running job (job_summary is already sorted by peak desc)
+        # so the tile is never a blank em-dash while 800 jobs sit underneath it.
+        w = job_summary[0]
+        worst_job     = str(w.get("job_name") or "")
+        try:
+            worst_hrs_val = float(w.get("peak_hrs") or 0.0)
+        except (TypeError, ValueError):
+            worst_hrs_val = 0.0
+        try:
+            _wsla = float(w.get("sla_limit") or 0.0)
+        except (TypeError, ValueError):
+            _wsla = 0.0
+        # Signed margin: positive = over SLA, negative = headroom remaining.
+        worst_margin = round(worst_hrs_val - _wsla, 4) if _wsla > 0 else 0.0
 
     total_jobs = int(rdf["job_name"].nunique()) if not rdf.empty else 0
 
@@ -1179,6 +1196,45 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                      "sla_hrs": float(r.get("sla_hrs", global_sla_hrs))}
                     for _, r in wgrp.iterrows()
                 ]
+
+                # ── Shared windows scope with Batch Review (one denominator) ──
+                # Batch Review drops out-of-scope sub-applications from its window
+                # denominator. The matrix must arrive at the IDENTICAL scope so both
+                # pages publish ONE windows fraction. We derive that scope HERE,
+                # self-sufficiently, so there is NO cross-page ordering dependency
+                # and no stale-cache coupling:
+                #   1. Cyclic high-frequency feeds (CDC/polling/OUTBOUND) — detected
+                #      with the SAME detect_cyclic_subs the batch uses. These usually
+                #      classify as UNKNOWN, so the engine's schedule-type filter alone
+                #      misses them; the two-guard detector (frequency + sub-15-min
+                #      runtime) catches them without touching long-running daily
+                #      batches that merely run at high volume.
+                #   2. Any sub-apps Batch Review explicitly marked out-of-scope this
+                #      session (e.g. manual user exclusions), when available.
+                # Schedule-type exclusions (MONTHLY/ADHOC/…) are already handled
+                # inside compute_window_compliance, so they are not repeated here.
+                try:
+                    _oos_set: set[str] = set()
+                    if _has_sub and "run_time_hrs" in wdf.columns:
+                        from services.batch_calculator import detect_cyclic_subs as _dcs
+                        _oos_set |= {str(s).upper() for s in _dcs(wdf)}
+                    try:
+                        from services import session_cache as _sc
+                        _oos_set |= {
+                            str(s).upper()
+                            for s in (_sc.ac_get("window_out_of_scope_subs") or [])
+                        }
+                    except Exception:
+                        pass
+                    if _oos_set and _has_sub:
+                        _w_scoped = [
+                            d for d in w_detail_list
+                            if str(d.get("sub_app", "")).upper() not in _oos_set
+                        ]
+                        if _w_scoped:
+                            w_detail_list = _w_scoped
+                except Exception:
+                    pass
 
                 # ── Canonical window compliance via SHARED engine (sole path) ─
                 # Pass the real per-sub-app ceiling map (NOT {}). w_detail_list
