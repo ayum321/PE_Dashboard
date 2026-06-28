@@ -62,6 +62,17 @@ class BatchKPIs(BaseModel):
     # the lone "Daily Xh" display strings with per-sub-app compliance. May be None
     # when no wall-clock windows were measured (falls back to daily_limit_hrs).
     window_dominant_ceiling_hrs: Optional[float] = None
+    # Distinct in-scope ceiling spread — drives the honest multi-ceiling headline
+    # ("each within its own ceiling, min–max") when count > 1.
+    window_inscope_ceiling_count: Optional[int] = None
+    window_inscope_ceiling_min: Optional[float] = None
+    window_inscope_ceiling_max: Optional[float] = None
+    # Breach traceability — per-breach-day attribution, excluded sub-apps, and the
+    # per-sub-app rollup (with structural/intermittent pattern) so the headline
+    # breach count is auditable down to which sub-app drove it.
+    window_breach_attribution: Optional[List[Dict[str, Any]]] = None
+    window_excluded_sub_apps: Optional[List[Dict[str, Any]]] = None
+    window_sub_app_rollup: Optional[List[Dict[str, Any]]] = None
     monthly_limit_hrs: float = 8.0
     fleet_sla_buffer: Optional[Dict[str, Any]] = None
 

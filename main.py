@@ -20,7 +20,6 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import os
 
-from routers import ai as ai_router
 from routers import batch as batch_router
 from routers import benchmark as benchmark_router
 from routers import config as config_router
@@ -29,16 +28,21 @@ from routers import executive as executive_router
 from routers import export as export_router
 from routers import final_judgment as final_judgment_router
 from routers import findings as findings_router
-from routers import pe_consultant as pe_consultant_router
-from routers import pe_narrative as pe_narrative_router
 from routers import redflags as redflags_router
 from routers import resource as resource_router
 from routers import sla_matrix as sla_matrix_router
 from routers import sla_intelligence as sla_intelligence_router
 from routers import sow as sow_router
 from routers import upload as upload_router
-from routers import agent as agent_router
 from routers import azure_resource as azure_resource_router
+
+# ── AI routers (mounted only when pe_config.AI_ENABLED) ─────────
+from services import pe_config
+if pe_config.AI_ENABLED:
+    from routers import ai as ai_router
+    from routers import pe_consultant as pe_consultant_router
+    from routers import pe_narrative as pe_narrative_router
+    from routers import agent as agent_router
 
 # ── Paths ───────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
@@ -149,7 +153,6 @@ app.include_router(batch_router.router,       prefix="/api", tags=["batch"])
 app.include_router(resource_router.router,    prefix="/api", tags=["resource"])
 app.include_router(export_router.router,      prefix="/api", tags=["export"])
 app.include_router(findings_router.router,    prefix="/api", tags=["findings"])
-app.include_router(ai_router.router,          prefix="/api", tags=["ai"])
 app.include_router(correlation_router.router, prefix="/api", tags=["correlation"])
 app.include_router(executive_router.router,   prefix="/api", tags=["executive"])
 app.include_router(redflags_router.router,    prefix="/api", tags=["redflags"])
@@ -159,10 +162,14 @@ app.include_router(benchmark_router.router,   prefix="/api", tags=["benchmark"])
 app.include_router(config_router.router,      prefix="/api", tags=["config"])
 app.include_router(sow_router.router,         prefix="/api", tags=["sow"])
 app.include_router(final_judgment_router.router, prefix="/api", tags=["judgment"])
-app.include_router(pe_consultant_router.router, prefix="/api", tags=["consultant"])
-app.include_router(pe_narrative_router.router,  prefix="/api", tags=["pe-narrative"])
-app.include_router(agent_router.router,         prefix="/api", tags=["agent"])
 app.include_router(azure_resource_router.router, prefix="/api", tags=["azure"])
+
+# ── AI routers — mounted only when pe_config.AI_ENABLED (disabled by default) ──
+if pe_config.AI_ENABLED:
+    app.include_router(ai_router.router,             prefix="/api", tags=["ai"])
+    app.include_router(pe_consultant_router.router,  prefix="/api", tags=["consultant"])
+    app.include_router(pe_narrative_router.router,   prefix="/api", tags=["pe-narrative"])
+    app.include_router(agent_router.router,          prefix="/api", tags=["agent"])
 
 
 # ── Audit Context — lightweight status endpoint ─────────────────────────────

@@ -125,6 +125,69 @@ def test_grade_floor_caps_at_c_with_any_critical() -> None:
     print(f"  [OK] grade floor: 3 critical + 20 ok -> grade {g} (capped <= C)")
 
 
+def test_breach_attribution_is_traceable() -> None:
+    """The headline breach count must trace to a cause: which sub-app drove each
+    breach day (structural vs intermittent), and which sub-apps were excluded from
+    the denominator. Encodes the Haleon pressure-test: a structural breacher
+    (PO_RANGES, every day) makes "all-pass" impossible, while a 23.7h OUTBOUND
+    breacher (EDI_OB_850) is excluded and must be named, not silently hidden."""
+    dates = [f"2025-12-{d:02d}" for d in range(1, 16)]  # 15 days
+    recs = []
+    for d in dates:
+        # structural: 11h vs 8.833h ceiling — breaches EVERY day it runs
+        recs.append({"run_date": d, "sub_app": "PO_RANGES", "effective_hrs": 11.0,
+                     "sla_ceil": 8.833, "schedule_type": "UNKNOWN"})
+        # clean: always within ceiling
+        recs.append({"run_date": d, "sub_app": "AM_DAILY", "effective_hrs": 2.6,
+                     "sla_ceil": 6.0, "schedule_type": "DAILY"})
+        # intermittent: breaches only 2 of 15 days
+        eff = 9.0 if d in ("2025-12-07", "2025-12-10") else 3.0
+        recs.append({"run_date": d, "sub_app": "EDI_852", "effective_hrs": eff,
+                     "sla_ceil": 6.0, "schedule_type": "DAILY"})
+        # excluded: 23.7h OUTBOUND — out of denominator but MUST be surfaced
+        recs.append({"run_date": d, "sub_app": "EDI_OB_850", "effective_hrs": 23.7,
+                     "sla_ceil": 6.0, "schedule_type": "OUTBOUND"})
+
+    r = ce.compute_window_compliance(recs, {})
+
+    # 1. All-pass is arithmetically 0 — a structural breacher runs every day.
+    all_pass = r["total_days"] - r["breach_days"]
+    if all_pass != 0:
+        _fail(f"ALL-PASS REGRESSION: expected 0 all-pass days (PO_RANGES breaches "
+              f"all 15), got {all_pass}")
+
+    # 2. Pattern classification: structural vs intermittent vs clean.
+    by_sa = {s["sub_app"]: s for s in r["per_sub_app"]}
+    if by_sa["PO_RANGES"]["pattern"] != "structural":
+        _fail(f"expected PO_RANGES=structural, got {by_sa['PO_RANGES']['pattern']}")
+    if by_sa["EDI_852"]["pattern"] != "intermittent":
+        _fail(f"expected EDI_852=intermittent, got {by_sa['EDI_852']['pattern']}")
+    if by_sa["AM_DAILY"]["pattern"] != "clean":
+        _fail(f"expected AM_DAILY=clean, got {by_sa['AM_DAILY']['pattern']}")
+
+    # 3. Excluded sub-app surfaced (not silently dropped).
+    ex_names = {e["sub_app"] for e in r["excluded_sub_apps"]}
+    if "EDI_OB_850" not in ex_names:
+        _fail(f"EXCLUSION OPACITY: EDI_OB_850 (OUTBOUND) not surfaced, got {ex_names}")
+
+    # 4. Per-breach-day attribution names the driver + overrun (not unattributed).
+    if len(r["breach_days_detail"]) != r["breach_days"]:
+        _fail(f"breach_days_detail count {len(r['breach_days_detail'])} != "
+              f"breach_days {r['breach_days']}")
+    first = r["breach_days_detail"][0]
+    drivers = {b["sub_app"] for b in first["breachers"]}
+    if "PO_RANGES" not in drivers:
+        _fail(f"attribution missing PO_RANGES on {first['run_date']}: {drivers}")
+    po = next(b for b in first["breachers"] if b["sub_app"] == "PO_RANGES")
+    if not (20 <= po["overrun_pct"] <= 30):
+        _fail(f"OVERRUN MISFRAME: PO_RANGES overrun {po['overrun_pct']}% "
+              f"(expected ~24.5% at 8.833h ceiling, NOT a 0.6h catastrophic read)")
+
+    print(f"  [OK] breach attribution: 0/15 all-pass · PO_RANGES=structural(15/15) "
+          f"EDI_852=intermittent(2/15) · EDI_OB_850 excluded(OUTBOUND,23.7h) named · "
+          f"overrun +{po['overrun_pct']}% (8.833h ceiling, not 0.6h)")
+
+
 def main() -> None:
     print("Window-compliance keystone regression suite")
     print("-" * 60)
@@ -133,6 +196,7 @@ def main() -> None:
     test_distinct_day_rollup_is_honest()
     test_legacy_per_date_records_still_work()
     test_grade_floor_caps_at_c_with_any_critical()
+    test_breach_attribution_is_traceable()
     print("-" * 60)
     print("ALL REGRESSION CHECKS PASSED")
 

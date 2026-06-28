@@ -375,6 +375,9 @@ def extract_chart_metrics(image_bytes: bytes, api_key: str) -> list[dict]:
     Combined charts (CPU + Memory + IOPS on one graph) return multiple entries.
     Uses an in-process SHA256 cache to skip re-processing identical images.
     """
+    from services import pe_config
+    if not pe_config.AI_ENABLED:
+        return []
     # Cache check
     img_hash = hashlib.sha256(image_bytes).hexdigest()
     if img_hash in _VISION_CACHE:
@@ -671,6 +674,10 @@ def enrich_servers_with_vision(
     is used so each server's charts are grouped by their heading label eliminating
     fragile position-based index arithmetic.
     """
+    from services import pe_config
+    if not pe_config.AI_ENABLED:
+        logger.info("vision: AI disabled (pe_config.AI_ENABLED=False) — skipping enrichment")
+        return existing_servers
     if not api_key:
         from services.config_store import get_gemini_key
         api_key = get_gemini_key()

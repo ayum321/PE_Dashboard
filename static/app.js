@@ -134,6 +134,26 @@ function _headlineCeiling(kpis) {
   return SLA_DAILY_HRS;
 }
 
+/**
+ * Single source for every short SLA-ceiling TEXT label (card footers, table
+ * subtitles). When the matrix binds MORE THAN ONE distinct in-scope ceiling, a
+ * lone "SLA 0.6h" pins the dominant value onto a rollup that was actually judged
+ * against each sub-app's OWN ceiling — unreconcilable for a reader. In that case
+ * emit the honest range ("SLA 0.1–8.8h"); otherwise the single binding ceiling.
+ * Routing all labels through here means a multi-ceiling customer can never make
+ * one card go stale against the headline.
+ */
+function _ceilingLabel(kpis, prefix) {
+  prefix = prefix || "SLA";
+  const cnt  = Number(kpis?.window_inscope_ceiling_count);
+  const cmin = Number(kpis?.window_inscope_ceiling_min);
+  const cmax = Number(kpis?.window_inscope_ceiling_max);
+  if (Number.isFinite(cnt) && cnt > 1 && Number.isFinite(cmin) && Number.isFinite(cmax)) {
+    return `${prefix} ${cmin.toFixed(1)}–${cmax.toFixed(1)}h`;
+  }
+  return `${prefix} ${_headlineCeiling(kpis).toFixed(1)}h`;
+}
+
 // Utility job exclusion — file watchers, exports, DB backups excluded by default.
 // Toggled by the user via the batch review panel toggle.
 let _batchExcludeUtility = true;
@@ -2588,7 +2608,7 @@ function renderBatchKpis(k) {
   setText("bk-ok",     String(k.jobs_ok));
   setText(
     "bk-breach-sub",
-    `SLA ${_headlineCeiling(k).toFixed(1)}h`
+    _ceilingLabel(k, "SLA")
   );
 
   // Failed Runs (execution failures — ENDED NOT OK / ABENDED / TERMINATED).
@@ -2952,6 +2972,16 @@ function _buildBatchNarrative(winData, k) {
   // Per-day breach flags + compliance % are unaffected (those use each sub-app's
   // OWN ceiling); this only drives the headline label + the min_buffer fallback.
   const ceiling = _headlineCeiling(k);
+  // Multi-ceiling guard: when the matrix binds MORE THAN ONE distinct in-scope
+  // ceiling, the per-day breach flags were judged against EACH sub-app's own
+  // ceiling — NOT the dominant one — so pinning a single "inside the Nh window"
+  // label is dishonest. Expose the spread so the headline can say "each within
+  // its own ceiling (min–max)" instead. Falls back to single-ceiling phrasing.
+  const ceilCount = Number(k?.window_inscope_ceiling_count);
+  const ceilMin = Number(k?.window_inscope_ceiling_min);
+  const ceilMax = Number(k?.window_inscope_ceiling_max);
+  const multiCeiling = Number.isFinite(ceilCount) && ceilCount > 1
+    && Number.isFinite(ceilMin) && Number.isFinite(ceilMax);
   const days = (Array.isArray(winData) ? winData : []).filter(w => w && w.run_date);
   if (!days.length) return null;
 
@@ -3018,8 +3048,22 @@ function _buildBatchNarrative(winData, k) {
     ? "ok"
     : (compliance >= 95 ? "ok" : compliance >= 80 ? "warning" : "critical");
 
+  // Breach attribution — name WHICH sub-apps drive the breach days (structural vs
+  // intermittent) and WHICH sub-apps were excluded from the denominator, so the
+  // headline count is auditable and never an opaque "N breaches". Sourced from the
+  // shared compliance engine (k.window_sub_app_rollup / k.window_excluded_sub_apps).
+  const rollup = Array.isArray(k.window_sub_app_rollup) ? k.window_sub_app_rollup : [];
+  const breachDrivers = rollup
+    .filter(r => (r.breach_days || 0) > 0)
+    .sort((a, b) => (b.breach_days || 0) - (a.breach_days || 0)
+                 || (b.worst_window_hrs || 0) - (a.worst_window_hrs || 0));
+  const excludedSubApps = (Array.isArray(k.window_excluded_sub_apps) ? k.window_excluded_sub_apps : [])
+    .filter(e => e && (e.sub_app || "").trim());
+
   return { ceiling, total, breachDays, cleanDays, compliance,
-           tight, tightest, worstBreach, atRiskMins, trend, tone };
+           tight, tightest, worstBreach, atRiskMins, trend, tone,
+           multiCeiling, ceilCount, ceilMin, ceilMax,
+           breachDrivers, excludedSubApps };
 }
 
 /** Render the batch story banner + computed micro-narrative callouts. */
@@ -3032,16 +3076,28 @@ function renderBatchStory(data, k) {
 
   // Window-size note shown above the charts row ("over the last N days").
   const noteEl = document.getElementById("batch-buffer-window-note");
-  if (noteEl) noteEl.textContent = `over the last ${nar.total} day(s) · ${_fmtHrs(nar.ceiling)} SLA ceiling`;
+  if (noteEl) {
+    const _ceilNote = nar.multiCeiling
+      ? `${nar.ceilCount} SLA windows ${_fmtHrs(nar.ceilMin)}–${_fmtHrs(nar.ceilMax)}`
+      : `${_fmtHrs(nar.ceiling)} SLA ceiling`;
+    noteEl.textContent = `over the last ${nar.total} day(s) · ${_ceilNote}`;
+  }
 
   const customer = (window.appData && window.appData.customerName) || (k && k.customer_name) || "";
   const env  = ((k && (k.batch_env || k.env_type)) || "").toUpperCase();
   const who  = [customer, env].filter(Boolean).join(" · ");
   const toneHex = nar.tone === "ok" ? THEME.green : nar.tone === "warning" ? THEME.amber : THEME.red;
 
+  // Headline phrasing: with a SINGLE binding ceiling, name it ("inside the Nh
+  // window"). With MULTIPLE distinct ceilings, every day was judged against each
+  // sub-app's OWN ceiling, so name the per-workflow rule + the range instead of
+  // pinning the dominant ceiling (which would misstate the non-dominant days).
+  const _winLabel = nar.multiCeiling
+    ? `its own SLA ceiling (${nar.ceilCount} windows, ${_fmtHrs(nar.ceilMin)}–${_fmtHrs(nar.ceilMax)})`
+    : `the ${_fmtHrs(nar.ceiling)} window`;
   const ans = nar.breachDays === 0
-    ? `Yes — every one of the ${nar.total} day(s) finished inside the ${_fmtHrs(nar.ceiling)} window (${nar.compliance.toFixed(0)}% day compliance).`
-    : `${nar.cleanDays}/${nar.total} day(s) finished inside the ${_fmtHrs(nar.ceiling)} window — ${nar.compliance.toFixed(0)}% day compliance, ${nar.breachDays} breach${nar.breachDays > 1 ? "es" : ""}.`;
+    ? `Yes — every one of the ${nar.total} day(s) finished inside ${_winLabel} (${nar.compliance.toFixed(0)}% day compliance).`
+    : `${nar.cleanDays}/${nar.total} day(s) finished inside ${_winLabel} — ${nar.compliance.toFixed(0)}% day compliance, ${nar.breachDays} breach${nar.breachDays > 1 ? "es" : ""}.`;
 
   let trendChip = "";
   if (nar.trend) {
@@ -3073,6 +3129,30 @@ function renderBatchStory(data, k) {
     }
     s += wb.top ? `; longest job ${_esc(wb.top)}.` : ".";
     callouts.push({ tone: "critical", text: s });
+  }
+  // Breach attribution — make "${breachDays} breaches" traceable to a cause.
+  // Structural drivers (breach most days they run) are a standing capacity/contract
+  // problem; intermittent ones are performance regressions — different remediation.
+  if (nar.breachDays > 0 && nar.breachDrivers && nar.breachDrivers.length) {
+    const _driverTxt = nar.breachDrivers.slice(0, 4).map(d => {
+      const tag = d.pattern === "structural" ? "structural" : "intermittent";
+      const ceilTxt = (d.ceiling > 0) ? ` vs ${_fmtHrs(d.ceiling)} ceiling` : "";
+      return `${_esc(d.sub_app)} (${tag} — ${d.breach_days}/${d.total_windows} days, worst ${_fmtHrs(d.worst_window_hrs)}${ceilTxt})`;
+    }).join("; ");
+    const _more = nar.breachDrivers.length > 4 ? ` +${nar.breachDrivers.length - 4} more` : "";
+    callouts.push({ tone: "critical",
+      text: `Breach days driven by: ${_driverTxt}${_more}.` });
+  }
+  // Exclusion transparency — structural breachers classified OUTBOUND/CYCLIC/
+  // MONTHLY are dropped from the all-pass denominator; name them so the pass
+  // count is never silently inflated by hiding the worst offenders.
+  if (nar.excludedSubApps && nar.excludedSubApps.length) {
+    const _exTxt = nar.excludedSubApps.slice(0, 4).map(e =>
+      `${_esc(e.sub_app)} (${_esc(e.schedule_type || "excluded")}${e.worst_hrs ? `, ${_fmtHrs(e.worst_hrs)}` : ""})`
+    ).join("; ");
+    const _exMore = nar.excludedSubApps.length > 4 ? ` +${nar.excludedSubApps.length - 4} more` : "";
+    callouts.push({ tone: "warning",
+      text: `Excluded from compliance denominator (not daily-judged): ${_exTxt}${_exMore}.` });
   }
   if (nar.breachDays === 0 && nar.tight.length) {
     let s = `${nar.tight.length} of ${nar.total} day(s) ran within ${SLA_ATRISK_PCT}% of their SLA ceiling`;
@@ -4204,7 +4284,7 @@ function renderTopBreachesTable(rows, kpis) {
       parts.push(`Mode: <span class="font-bold text-Camber">adaptive per-job baselines</span>`);
       parts.push(`Global cap: <span class="font-bold text-Cwhite">${slaCeiling.toFixed(1)}h</span>`);
     } else {
-      parts.push(`SLA ceiling: <span class="font-bold text-Cwhite">${slaCeiling.toFixed(1)}h</span>`);
+      parts.push(`<span class="font-bold text-Cwhite">${_ceilingLabel(batchKpis, "SLA ceiling:")}</span>`);
     }
     if (dataSpanDays > 0) parts.push(`Observation: <span class="font-bold text-Cwhite">${dataSpanDays}d</span>`);
     if (isFallback && displayRows.length > 0) {
@@ -10176,6 +10256,12 @@ async function _triggerPeNarrativeImpl() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (res.status === 404) {
+      // AI router not mounted (pe_config.AI_ENABLED=False). Treat as a clean
+      // "feature off" — hide the card silently, never toast an error.
+      if (card) card.classList.add("hidden");
+      return;
+    }
     if (!res.ok) {
       toast("error", "PE Narrative error", (await res.text()).slice(0, 200));
       return;

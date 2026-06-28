@@ -144,16 +144,23 @@ def compute_window_compliance(
         _excluded = excluded_types if excluded_types is not None else _pc.COMPLIANCE_EXCLUDED_TYPES
         _atrisk_pct = _pc.SLA_ATRISK_PCT
         _daily_default = _pc.SLA_DAILY_HRS
+        _structural_ratio = getattr(_pc, "SLA_STRUCTURAL_RATIO", 0.60)
     except Exception:
         _excluded = {"CYCLIC", "CYCLIC_INTERVAL", "ADHOC", "CALENDAR_BASED",
                      "OUTBOUND", "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY",
                      "QUARTERLY", "ANNUAL"}
         _atrisk_pct = 15.0
         _daily_default = 6.0
+        _structural_ratio = 0.60
 
     daily: Dict[Any, Dict[str, Any]] = {}
     warnings: List[str] = []
     excluded_windows = 0
+    # Exclusion transparency: which sub_apps were dropped from the denominator and
+    # why. A structural breacher classified OUTBOUND/CYCLIC/etc. silently leaves the
+    # all-pass count, so the consumer must be able to name them (e.g. "<SUB_APP> 23.7h
+    # excluded as OUTBOUND") instead of presenting an opaque pass count.
+    _excluded_detail: Dict[str, Dict[str, Any]] = {}
 
     for rec in window_records:
         date_str = str(rec.get("run_date") or rec.get("date") or "").strip()
@@ -163,15 +170,8 @@ def compute_window_compliance(
 
         sched = str(rec.get("schedule_type") or "").upper()
 
-        # Skip CYCLIC/ADHOC/excluded schedule types.
-        if sched in _excluded:
-            excluded_windows += 1
-            continue
-
-        # Point-2: prefer the SLA-binding effective window (longest contiguous
-        # batch run) when the caller provides it; fall back to the elapsed span
-        # (or summed total) for legacy callers.  An explicit None check preserves
-        # a genuine effective_hrs of 0.0 instead of skipping to elapsed_hrs.
+        # Per-row effective duration + sub_app (computed up-front so excluded rows
+        # can still be attributed by name/hours below, not just counted).
         _eff = rec.get("effective_hrs")
         if _eff is None:
             _eff = rec.get("elapsed_hrs")
@@ -179,6 +179,23 @@ def compute_window_compliance(
             _eff = rec.get("total_hrs")
         elapsed = float(_eff or 0.0)
         sub_app = str(rec.get("sub_app") or rec.get("Sub_Application") or "").strip()
+
+        # Skip CYCLIC/ADHOC/excluded schedule types.
+        if sched in _excluded:
+            excluded_windows += 1
+            _ek = sub_app.upper() or "(unnamed)"
+            _ed = _excluded_detail.get(_ek)
+            if _ed is None:
+                _ed = _excluded_detail[_ek] = {
+                    "sub_app": sub_app or _ek, "schedule_type": sched,
+                    "windows": 0, "worst_hrs": 0.0,
+                }
+            _ed["windows"] += 1
+            if elapsed > _ed["worst_hrs"]:
+                _ed["worst_hrs"] = round(elapsed, 3)
+            continue
+
+        # effective duration + sub_app already computed up-front above.
         ceil = rec.get("sla_ceil")
         if ceil is None:
             ceil = ceiling_map.get(sub_app.upper())
@@ -312,12 +329,26 @@ def compute_window_compliance(
         # Window severity ratio (worst window ÷ ceiling): >1 = over the window,
         # mirrors the SRI 0–1+ scale so the bubble/treemap colour by real breach.
         severity = round(ww / cl, 3) if cl > 0 else 0.0
+        # Breach PATTERN — makes the headline breach count diagnosable without a
+        # second screen. STRUCTURAL = breaches on most days it ran (≥ the config
+        # ratio): a standing capacity/contract problem. INTERMITTENT = occasional
+        # spikes (a performance regression). CLEAN = never breached. These drive
+        # completely different remediation paths, so the verdict names the pattern,
+        # not just the count. Ratio is config-driven (pe_config.SLA_STRUCTURAL_RATIO),
+        # never a per-customer constant.
+        bdays = len(rec["_breach_days"])
+        if bdays <= 0:
+            pattern = "clean"
+        elif tw > 0 and (bdays / tw) >= _structural_ratio:
+            pattern = "structural"
+        else:
+            pattern = "intermittent"
         per_sub_app.append({
             "sub_app":          rec["sub_app"],
             "schedule_type":    rec["schedule_type"],
             "total_windows":    tw,
             "breach_windows":   rec["breach_windows"],
-            "breach_days":      len(rec["_breach_days"]),
+            "breach_days":      bdays,
             "ok_windows":       rec["ok_windows"],
             "at_risk_windows":  rec["at_risk_windows"],
             "worst_window_hrs": round(ww, 3),
@@ -326,8 +357,40 @@ def compute_window_compliance(
             "compliance_pct":   comp,
             "severity":         severity,
             "status":           status,
+            "pattern":          pattern,
         })
     per_sub_app.sort(key=lambda r: (-r["breach_windows"], -(r["severity"] or 0)))
+
+    # ── Per-breach-day attribution ───────────────────────────────────────────
+    # "11 breach days" is unauditable on its own — a reader can't tell if one
+    # structural sub-app failed every day or several spiked once. For each breach
+    # DATE, name the breaching sub-apps with their judged hours, own ceiling and
+    # overrun, so the count traces straight to a cause. Fully generic: derived
+    # from the same per-(sub_app, date) windows the compliance % is built on.
+    _bd_attr: Dict[str, List[Dict[str, Any]]] = {}
+    for row in daily.values():
+        if not bool(row.get("breach")):
+            continue
+        d = str(row.get("run_date") or "")
+        cl = float(row.get("sla_ceil") or 0.0)
+        eh = float(row.get("elapsed_hrs") or 0.0)
+        _bd_attr.setdefault(d, []).append({
+            "sub_app":      str(row.get("sub_app") or ""),
+            "effective_hrs": round(eh, 3),
+            "ceiling":      round(cl, 3),
+            "overrun_hrs":  round(eh - cl, 3) if cl > 0 else None,
+            "overrun_pct":  round((eh - cl) / cl * 100, 1) if cl > 0 else None,
+        })
+    breach_days_detail = [
+        {"run_date": d, "breachers": sorted(v, key=lambda b: -(b.get("overrun_hrs") or 0))}
+        for d, v in sorted(_bd_attr.items())
+    ]
+
+    # Excluded sub-apps (worst-first) so the denominator is never opaque.
+    excluded_sub_apps = sorted(
+        _excluded_detail.values(),
+        key=lambda e: -float(e.get("worst_hrs") or 0.0),
+    )
 
     return {
         "compliance_pct":   compliance_pct,
@@ -339,6 +402,8 @@ def compute_window_compliance(
         "total_days":       total_days,
         "breach_days":      breach_days,
         "breach_day_list":  sorted(str(d) for d in breach_day_set if d),
+        "breach_days_detail": breach_days_detail,
+        "excluded_sub_apps":  excluded_sub_apps,
         "per_sub_app":      per_sub_app,
         "warnings":         warnings,
     }

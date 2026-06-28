@@ -1842,6 +1842,13 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # resolved ceiling. Defaults to the global ceiling; refined below to the
     # volume-dominant resolved ceiling once the per-sub-app window map is built.
     window_dominant_ceiling = float(global_ceil)
+    # Distinct in-scope resolved ceilings (count + range). When the matrix binds
+    # MORE THAN ONE ceiling, a single "inside the Nh window" headline is dishonest
+    # (each day was judged against its own ceiling, not the dominant one), so the
+    # UI must phrase the headline as "each within its own ceiling (min–max)".
+    window_inscope_ceiling_count = 1
+    window_inscope_ceiling_min = float(global_ceil)
+    window_inscope_ceiling_max = float(global_ceil)
 
     if has_end_time and "Sub_Application" in df_analysis.columns:
         # ── Gap 1: Sentinel job map from BatchSLA XLSX ───────────────────────
@@ -2007,8 +2014,8 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # When BatchSLA XLSX is present, build a direct sub_app-pattern→sla_hrs map
         # from the workflow rows. This is Priority 0 in _sub_sla() — it overrides
         # job_sla_map scanning for sub_apps where the workflow name substring-matches,
-        # so PO_RANGES gets 8.83h (from XLSX), not 6.0h (global_ceil default).
-        # Sub-string match: "HALEON_PO_RANGES" in "TEST_HALEON_PO_RANGES" → True.
+        # so a workflow gets its XLSX ceiling (e.g. 8.83h), not the 6.0h global_ceil
+        # default. Sub-string match: "<WORKFLOW>" in "<ENV>_<WORKFLOW>" → True.
         _xlsx_sla_map: dict = {}
         try:
             from services import config_store as _cs_p1
@@ -2042,7 +2049,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             sub_app  = str(row["Sub_Application"])
             sa_upper = sub_app.upper()
             # Priority 0: direct XLSX workflow SLA (fuzzy substring match)
-            # "HALEON_PO_RANGES" matches "TEST_HALEON_PO_RANGES" via substring
+            # "<WORKFLOW>" matches "<ENV>_<WORKFLOW>" via substring
             for _wk, _wv in _xlsx_sla_map.items():
                 if _wk in sa_upper or sa_upper in _wk:
                     return _wv
@@ -2234,6 +2241,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 window_dominant_ceiling = float(
                     sorted(_ceil_vol.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
                 )
+                # Distinct in-scope ceilings drive the honest multi-ceiling headline.
+                _distinct_ceils = sorted(_ceil_vol.keys())
+                window_inscope_ceiling_count = len(_distinct_ceils)
+                window_inscope_ceiling_min = float(_distinct_ceils[0])
+                window_inscope_ceiling_max = float(_distinct_ceils[-1])
         except Exception:
             pass
 
@@ -2753,6 +2765,14 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # Pair-level counts (actual denominator for batch_window_compliance %)
         "window_total_pairs":      int(window_compliance.get("total_windows") or 0) or None,
         "window_breach_pairs":     int(window_compliance.get("breach_count") or 0) if int(window_compliance.get("total_windows") or 0) else None,
+        # Breach traceability: per-breach-day attribution (which sub-app drove each
+        # breach day) + per-sub-app breach pattern (structural vs intermittent). Lets
+        # the headline name the cause instead of an unattributed "N breaches". The
+        # excluded-from-denominator list is sourced from the CANONICAL upstream
+        # _excl_sub_reasons (see "excluded_sub_apps" below) where exclusion actually
+        # happens — NOT re-derived here — so there is one source for that fact.
+        "window_breach_attribution": window_compliance.get("breach_days_detail") or [],
+        "window_sub_app_rollup":     window_compliance.get("per_sub_app") or [],
         "window_date_count":       len(unique_dates),
         "window_excluded_days":    _window_excluded_days,
         # Canonical (sub_app, date)-granular window compliance from the shared engine
@@ -2806,6 +2826,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # lone "Daily Xh" labels with the per-sub-app compliance + per-job tables;
         # never feeds the compliance math (which uses per-sub-app ceilings).
         "window_dominant_ceiling_hrs": round(float(window_dominant_ceiling), 3),
+        # Distinct in-scope ceiling spread — when count > 1 the headline must say
+        # "each within its OWN ceiling (min–max)" rather than pin the dominant one,
+        # because the per-day breach flags used many ceilings, not just dominant.
+        "window_inscope_ceiling_count": int(window_inscope_ceiling_count),
+        "window_inscope_ceiling_min": round(float(window_inscope_ceiling_min), 3),
+        "window_inscope_ceiling_max": round(float(window_inscope_ceiling_max), 3),
         "confidence":       conf,
         # ── Auto-detected SLA schedule mode (exposed for smart defaults) ────
         "sla_detected_mode": _detect_sla_mode(df),
@@ -3454,6 +3480,19 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "window_day_compliance_pct":   m.get("window_day_compliance_pct"),
             "window_total_pairs":      m.get("window_total_pairs"),
             "window_breach_pairs":     m.get("window_breach_pairs"),
+            # Breach traceability surfaced to the frontend headline.
+            "window_breach_attribution": m.get("window_breach_attribution") or [],
+            # Excluded sub-apps sourced from the CANONICAL upstream exclusion list
+            # (_excl_sub_reasons, where MONTHLY/OUTBOUND/CYCLIC are actually removed
+            # from scope) — mapped to the {sub_app, schedule_type, worst_hrs} shape the
+            # headline reads. Single source; the engine never re-derives this.
+            "window_excluded_sub_apps":  [
+                {"sub_app": e.get("sub_app"),
+                 "schedule_type": e.get("reason"),
+                 "worst_hrs": e.get("peak_hrs")}
+                for e in (m.get("excluded_sub_apps") or [])
+            ],
+            "window_sub_app_rollup":     m.get("window_sub_app_rollup") or [],
             # Canonical (sub_app, date)-granular window compliance (shared engine).
             # Both Batch Review and SLA Matrix read the same definition.
             "window_compliance":           m.get("window_compliance"),
@@ -3480,6 +3519,9 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             ),
             "daily_limit_hrs":    m["sla_ceiling"],
             "window_dominant_ceiling_hrs": m.get("window_dominant_ceiling_hrs"),
+            "window_inscope_ceiling_count": m.get("window_inscope_ceiling_count"),
+            "window_inscope_ceiling_min": m.get("window_inscope_ceiling_min"),
+            "window_inscope_ceiling_max": m.get("window_inscope_ceiling_max"),
             "monthly_limit_hrs":  pe_config.SLA_MONTHLY_HRS,
             "fleet_sla_buffer":   m["fleet_sla_buffer"],
             # Window-level SLA buffer (whole nightly batch window vs SLA ceiling).

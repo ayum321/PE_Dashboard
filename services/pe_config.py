@@ -14,6 +14,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 # ── Internal import (lazy to avoid circular) ─────────────────────────────────
@@ -26,16 +27,21 @@ def _cfg(key: str, default: Any = None) -> Any:
         return default
 
 
+# ── AI master switch ──────────────────────────────────────────────────────────
+# Single kill-switch for ALL AI/LLM integration (NVIDIA NIM + Google Gemini text
+# AND Gemini vision). When False the app runs fully on its deterministic engine:
+# no external API calls are made and no API keys are required. The 4 AI routers
+# (ai, agent, pe_narrative, pe_consultant) are not mounted, and ai_engine.chat /
+# gemini_vision short-circuit. Flip back on with PE_AI_ENABLED=1 (env) or by
+# setting this to True — nothing else needs to change.
+AI_ENABLED: bool = os.environ.get("PE_AI_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 # ── Vision provider ───────────────────────────────────────────────────────────
 VISION_PROVIDER: str = "gemini"   # "gemini" | "azure" | "local"
 
 
 # ── CPU thresholds (%) ────────────────────────────────────────────────────────
-@property
-def _cpu_warn(self) -> float:
-    return float(_cfg("cpu_warning",  75.0))
-
-
 # Use module-level constants (re-read live via reload() below)
 CPU_WARN:  float = 75.0   # Warning band
 CPU_CRIT:  float = 90.0   # Critical — rule engine fires
@@ -86,6 +92,11 @@ SLA_BUFFER_WARN:  float = 15.0   # % buffer below which job is AT_RISK (kept for
 #   buffer > LONGJOB_PCT        → OK
 SLA_ATRISK_PCT:   float = 15.0   # % buffer threshold → AT_RISK below this
 SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
+# Breach-day ratio (breach_days ÷ days_run) at/above which a sub-app's breach
+# pattern is classified STRUCTURAL (standing capacity/contract problem) rather
+# than INTERMITTENT (occasional regression). Pure methodology ratio — NOT a
+# customer value; applies identically to every uploaded dataset.
+SLA_STRUCTURAL_RATIO: float = 0.60
 
 # ── Batch window decomposition (busy-time, idle gaps, blocks) ─────────────────
 # The "Daily Batch Window" elapsed span (first-start → last-end) overstates the
@@ -349,7 +360,7 @@ def reload() -> None:
     global CPU_WARN, CPU_CRIT, MEM_WARN, MEM_CRIT, DISK_WARN, DISK_CRIT
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
-    global SLA_ATRISK_PCT, SLA_LONGJOB_PCT
+    global SLA_ATRISK_PCT, SLA_LONGJOB_PCT, SLA_STRUCTURAL_RATIO
     global BATCH_BLOCK_GAP_HRS, LONGPOLE_TOP_N, LONGPOLE_WINDOW_SHARE_PCT
     global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
     global FJ_PEN_WINDOW_CAP, FJ_PEN_FAILRATE_CAP, FJ_PEN_OVERRUN_CAP, FJ_PEN_REGRESSION_CAP
@@ -386,6 +397,7 @@ def reload() -> None:
     SLA_BUFFER_WARN   = _f("sla_buffer_warn",   15.0)
     SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
     SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
+    SLA_STRUCTURAL_RATIO = _f("sla_structural_ratio", 0.60)
     BATCH_BLOCK_GAP_HRS = _f("batch_block_gap_hrs", 1.0)
     try:
         LONGPOLE_TOP_N = int(_cfg("longpole_top_n", 8))

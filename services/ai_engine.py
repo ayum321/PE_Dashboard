@@ -315,6 +315,9 @@ def chat(
 
     Returns (text, model_id). Raises RuntimeError only when every provider fails.
     """
+    from services import pe_config
+    if not pe_config.AI_ENABLED:
+        raise RuntimeError("ai_engine: AI disabled (pe_config.AI_ENABLED=False)")
     from services.config_store import (
         get_nvidia_key, get_gemini_key, get as cfg_get,
     )
@@ -406,6 +409,17 @@ def chat_json(
 
 def is_ready() -> dict:
     """Status snapshot for /api/ai-status (UI 'AI is online' banner)."""
+    from services import pe_config
+    if not pe_config.AI_ENABLED:
+        return {
+            "nvidia_key":  False,
+            "gemini_key":  False,
+            "provider":    "disabled",
+            "text_model":  None,
+            "nim_models":  [],
+            "dead_models": {},
+            "ai_enabled":  False,
+        }
     from services.config_store import get_nvidia_key, get_gemini_key, get as cfg_get
     with _DEAD_LOCK:
         dead = dict(_DEAD_MODELS)
