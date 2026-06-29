@@ -2547,6 +2547,38 @@
             </div>
           </div>
 
+          <!-- ── Questions to Raise with the Customer — dynamic PE investigation bank ── -->
+          <div id="pe-questions-card"
+               class="hidden rounded-2xl border border-Camber/30 bg-gradient-to-br from-Camber/8 via-Ccard to-Ccard2 shadow-panel overflow-hidden">
+            <div class="px-5 py-3.5 border-b border-Cborder/40 flex flex-wrap items-center gap-3 justify-between">
+              <div class="flex items-center gap-2.5 min-w-0">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-Camber shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z"/>
+                </svg>
+                <div class="min-w-0">
+                  <h2 class="text-sm font-bold text-Cwhite tracking-tight">Questions to Raise with the Customer</h2>
+                  <p class="text-[11px] text-Cmuted leading-snug">Specific, evidence-backed questions generated from what the uploaded data actually shows — name the job, the number, the date.</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-Cred/20 text-Cred">
+                  <span id="peq-critical">0</span> Critical
+                </span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-Camber/20 text-Camber">
+                  <span id="peq-high">0</span> High
+                </span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-Cblue/20 text-Cblue">
+                  <span id="peq-medium">0</span> Medium
+                </span>
+              </div>
+            </div>
+            <div id="pe-questions-list" class="p-4 space-y-2.5"></div>
+            <div id="pe-questions-empty" class="py-10 text-center hidden">
+              <p class="text-sm font-semibold text-Cwhite">No open questions</p>
+              <p class="text-xs text-Cmuted mt-1">The data shows no flaws that warrant a customer query right now.</p>
+            </div>
+          </div>
+
         </section>
 
         <!-- VIEW · RED FLAGS & RCA — removed; coverage now lives in PE Findings -->
