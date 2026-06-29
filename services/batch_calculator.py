@@ -2773,6 +2773,9 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # happens — NOT re-derived here — so there is one source for that fact.
         "window_breach_attribution": window_compliance.get("breach_days_detail") or [],
         "window_sub_app_rollup":     window_compliance.get("per_sub_app") or [],
+        # Config-driven cut-off for structural vs intermittent, surfaced so the
+        # classification is self-documenting (e.g. "structural · threshold ≥60%").
+        "window_structural_ratio": window_compliance.get("structural_ratio"),
         "window_date_count":       len(unique_dates),
         "window_excluded_days":    _window_excluded_days,
         # Canonical (sub_app, date)-granular window compliance from the shared engine
@@ -3493,6 +3496,9 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                 for e in (m.get("excluded_sub_apps") or [])
             ],
             "window_sub_app_rollup":     m.get("window_sub_app_rollup") or [],
+            # Structural-pattern cut-off, passed through so the headline can publish
+            # the rule alongside the classification ("structural · ≥60% of run-days").
+            "window_structural_ratio":   m.get("window_structural_ratio"),
             # Canonical (sub_app, date)-granular window compliance (shared engine).
             # Both Batch Review and SLA Matrix read the same definition.
             "window_compliance":           m.get("window_compliance"),

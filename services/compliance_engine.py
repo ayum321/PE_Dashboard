@@ -405,6 +405,11 @@ def compute_window_compliance(
         "breach_days_detail": breach_days_detail,
         "excluded_sub_apps":  excluded_sub_apps,
         "per_sub_app":      per_sub_app,
+        # The classification cut-off (config-driven, not customer data) surfaced so
+        # the consumer can label "structural (≥N% of run-days)" — a PE lead can then
+        # agree/disagree without reading source. Pattern is interpretation, never a
+        # silent rule; we publish the rule with it.
+        "structural_ratio": _structural_ratio,
         "warnings":         warnings,
     }
 

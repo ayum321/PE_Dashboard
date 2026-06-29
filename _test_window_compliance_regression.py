@@ -170,6 +170,12 @@ def test_breach_attribution_is_traceable() -> None:
     if "EDI_OB_850" not in ex_names:
         _fail(f"EXCLUSION OPACITY: EDI_OB_850 (OUTBOUND) not surfaced, got {ex_names}")
 
+    # 3b. Structural cut-off published so the label is auditable, not "trust me".
+    if r.get("structural_ratio") is None:
+        _fail("TRANSPARENCY GAP: structural_ratio not surfaced — label has no rule")
+    if abs(float(r["structural_ratio"]) - 0.60) > 1e-9:
+        _fail(f"structural_ratio expected 0.60, got {r['structural_ratio']}")
+
     # 4. Per-breach-day attribution names the driver + overrun (not unattributed).
     if len(r["breach_days_detail"]) != r["breach_days"]:
         _fail(f"breach_days_detail count {len(r['breach_days_detail'])} != "

@@ -73,6 +73,8 @@ class BatchKPIs(BaseModel):
     window_breach_attribution: Optional[List[Dict[str, Any]]] = None
     window_excluded_sub_apps: Optional[List[Dict[str, Any]]] = None
     window_sub_app_rollup: Optional[List[Dict[str, Any]]] = None
+    # Structural-vs-intermittent cut-off (config ratio) surfaced for transparency.
+    window_structural_ratio: Optional[float] = None
     monthly_limit_hrs: float = 8.0
     fleet_sla_buffer: Optional[Dict[str, Any]] = None
 

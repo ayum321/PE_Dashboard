@@ -3059,11 +3059,14 @@ function _buildBatchNarrative(winData, k) {
                  || (b.worst_window_hrs || 0) - (a.worst_window_hrs || 0));
   const excludedSubApps = (Array.isArray(k.window_excluded_sub_apps) ? k.window_excluded_sub_apps : [])
     .filter(e => e && (e.sub_app || "").trim());
+  // Structural cut-off (config ratio) — published with the label so a PE lead can
+  // agree/disagree with "structural" without reading source. Pct, sane fallback.
+  const structuralPct = Math.round((Number(k.window_structural_ratio) || 0.60) * 100);
 
   return { ceiling, total, breachDays, cleanDays, compliance,
            tight, tightest, worstBreach, atRiskMins, trend, tone,
            multiCeiling, ceilCount, ceilMin, ceilMax,
-           breachDrivers, excludedSubApps };
+           breachDrivers, excludedSubApps, structuralPct };
 }
 
 /** Render the batch story banner + computed micro-narrative callouts. */
@@ -3134,10 +3137,13 @@ function renderBatchStory(data, k) {
   // Structural drivers (breach most days they run) are a standing capacity/contract
   // problem; intermittent ones are performance regressions — different remediation.
   if (nar.breachDays > 0 && nar.breachDrivers && nar.breachDrivers.length) {
+    const _thr = nar.structuralPct || 60;
     const _driverTxt = nar.breachDrivers.slice(0, 4).map(d => {
-      const tag = d.pattern === "structural" ? "structural" : "intermittent";
+      const tag = d.pattern === "structural"
+        ? `structural · ${d.breach_days}/${d.total_windows} days ≥${_thr}%`
+        : `intermittent · ${d.breach_days}/${d.total_windows} days <${_thr}%`;
       const ceilTxt = (d.ceiling > 0) ? ` vs ${_fmtHrs(d.ceiling)} ceiling` : "";
-      return `${_esc(d.sub_app)} (${tag} — ${d.breach_days}/${d.total_windows} days, worst ${_fmtHrs(d.worst_window_hrs)}${ceilTxt})`;
+      return `${_esc(d.sub_app)} (${tag}, worst ${_fmtHrs(d.worst_window_hrs)}${ceilTxt})`;
     }).join("; ");
     const _more = nar.breachDrivers.length > 4 ? ` +${nar.breachDrivers.length - 4} more` : "";
     callouts.push({ tone: "critical",
