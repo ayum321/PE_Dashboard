@@ -76,6 +76,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from services.spike_schema import make_spike_record
+
 logger = logging.getLogger("pe_dashboard.azure_monitor")
 
 
@@ -880,21 +882,15 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                     used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
                     sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band)
 
-                    spikes.append({
-                        "start": spike_start,
-                        "end": series_points[i - 1]["t"],
-                        "peak": round(spike_peak, 2),
-                        "peak_time": spike_peak_time,
-                        "duration_min": dur_min,
-                        "severity": sv["severity"],
-                        "reason_code": sv["reason_code"],
-                        "severity_reason": sv["severity_reason"],
-                        "confidence": sv["confidence"],
-                        "z_score": round(spike_z, 2),
-                        "mean": round(mean, 2),
-                        "std": round(std, 2),
-                        "detection": "z_score",
-                    })
+                    spikes.append(make_spike_record(
+                        start=spike_start, end=series_points[i - 1]["t"],
+                        peak=round(spike_peak, 2), peak_time=spike_peak_time,
+                        duration_min=dur_min, severity=sv["severity"],
+                        reason_code=sv["reason_code"], severity_reason=sv["severity_reason"],
+                        confidence=sv["confidence"], detection="z_score",
+                        z_score=round(spike_z, 2), mean=round(mean, 2), std=round(std, 2),
+                        threshold=sv.get("threshold"), peak_pct=sv.get("peak_pct"),
+                    ))
                     in_spike = False
 
         # Close any open spike at end of series
@@ -908,21 +904,15 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 dur_min = 0
             used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
             sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band)
-            spikes.append({
-                "start": spike_start,
-                "end": series_points[-1]["t"],
-                "peak": round(spike_peak, 2),
-                "peak_time": spike_peak_time,
-                "duration_min": dur_min,
-                "severity": sv["severity"],
-                "reason_code": sv["reason_code"],
-                "severity_reason": sv["severity_reason"],
-                "confidence": sv["confidence"],
-                "z_score": round(spike_z, 2),
-                "mean": round(mean, 2),
-                "std": round(std, 2),
-                "detection": "z_score",
-            })
+            spikes.append(make_spike_record(
+                start=spike_start, end=series_points[-1]["t"],
+                peak=round(spike_peak, 2), peak_time=spike_peak_time,
+                duration_min=dur_min, severity=sv["severity"],
+                reason_code=sv["reason_code"], severity_reason=sv["severity_reason"],
+                confidence=sv["confidence"], detection="z_score",
+                z_score=round(spike_z, 2), mean=round(mean, 2), std=round(std, 2),
+                threshold=sv.get("threshold"), peak_pct=sv.get("peak_pct"),
+            ))
 
     # ── Classifier 2: Absolute threshold breach detection ──
     # Catches chronically sick servers that z-score misses
@@ -980,21 +970,19 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         )
                         if not overlaps:
                             sev = "critical_sustained" if dur_min > 60 else breach_severity
-                            spikes.append({
-                                "start": breach_start,
-                                "end": series_points[i - 1]["t"],
-                                "peak": round(breach_peak, 2),
-                                "peak_time": breach_peak_time,
-                                "duration_min": dur_min,
-                                "severity": sev,
-                                "reason_code": "abs_sustained" if dur_min > 60 else "abs_breach",
-                                "severity_reason": f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
-                                "confidence": "high",
-                                "z_score": round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
-                                "mean": round(mean, 2),
-                                "std": round(std, 2),
-                                "detection": "absolute_threshold",
-                            })
+                            used_pk = (100.0 - breach_peak) if is_inverted else breach_peak
+                            spikes.append(make_spike_record(
+                                start=breach_start, end=series_points[i - 1]["t"],
+                                peak=round(breach_peak, 2), peak_time=breach_peak_time,
+                                duration_min=dur_min, severity=sev,
+                                reason_code="abs_sustained" if dur_min > 60 else "abs_breach",
+                                severity_reason=f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
+                                confidence="high", detection="absolute_threshold",
+                                z_score=round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
+                                mean=round(mean, 2), std=round(std, 2),
+                                threshold=crit_thresh if breach_severity == "critical" else warn_thresh,
+                                peak_pct=round(used_pk, 1),
+                            ))
                     in_breach = False
 
         # Close open breach at end of series
@@ -1013,21 +1001,19 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 )
                 if not overlaps:
                     sev = "critical_sustained" if dur_min > 60 else breach_severity
-                    spikes.append({
-                        "start": breach_start,
-                        "end": series_points[-1]["t"],
-                        "peak": round(breach_peak, 2),
-                        "peak_time": breach_peak_time,
-                        "duration_min": dur_min,
-                        "severity": sev,
-                        "reason_code": "abs_sustained" if dur_min > 60 else "abs_breach",
-                        "severity_reason": f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
-                        "confidence": "high",
-                        "z_score": round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
-                        "mean": round(mean, 2),
-                        "std": round(std, 2),
-                        "detection": "absolute_threshold",
-                    })
+                    used_pk = (100.0 - breach_peak) if is_inverted else breach_peak
+                    spikes.append(make_spike_record(
+                        start=breach_start, end=series_points[-1]["t"],
+                        peak=round(breach_peak, 2), peak_time=breach_peak_time,
+                        duration_min=dur_min, severity=sev,
+                        reason_code="abs_sustained" if dur_min > 60 else "abs_breach",
+                        severity_reason=f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
+                        confidence="high", detection="absolute_threshold",
+                        z_score=round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
+                        mean=round(mean, 2), std=round(std, 2),
+                        threshold=crit_thresh if breach_severity == "critical" else warn_thresh,
+                        peak_pct=round(used_pk, 1),
+                    ))
 
     return spikes
 

@@ -86,6 +86,17 @@ def main():
     assert crit2 and str(crit2[0].get("reason_code", "")).startswith("abs"), sp2
     print("  [OK] sustained 92% CPU -> critical (typed reason_code, absolute significance gate)")
 
+    # canonical schema contract: every spike from every path has identical keys
+    from services.spike_schema import make_spike_record
+    canon = set(make_spike_record(start="", end="", peak=0, peak_time="", duration_min=0,
+                                   severity="notable", reason_code="x", severity_reason="",
+                                   confidence="low", detection="z_score").keys())
+    all_sp = sp + sp2
+    assert all_sp and all(set(x.keys()) == canon for x in all_sp), \
+        [k for x in all_sp for k in (set(x.keys()) ^ canon)]
+    assert all(x["peak_pct"] is not None and x["threshold"] is not None for x in sp2), sp2
+    print(f"  [OK] all spike paths emit identical {len(canon)}-key canonical record")
+
     print("-" * 60)
     print("ALL PATTERN-DETECTION CHECKS PASSED")
 
