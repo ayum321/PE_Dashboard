@@ -103,10 +103,13 @@ def _ai_narrative(flags: List[RedFlag],
 def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
     bk          = body.batch_kpis    or {}
     rk          = body.resource_kpis or {}
-    servers     = body.servers       or []
-    anomalies   = body.anomalies     or []
-    issues      = body.issues        or []
-    top_breaches= body.top_breaches  or []
+    # Harden all caller-supplied lists to dict items — a single non-dict row
+    # (None/str/int from a partial parse) elsewhere crashes .get() and 500s the
+    # whole red-flags + downstream PE-consultant cascade. Generic across 250+ customers.
+    servers     = [s for s in (body.servers or [])      if isinstance(s, dict)]
+    anomalies   = [a for a in (body.anomalies or [])    if isinstance(a, dict)]
+    issues      = [i for i in (body.issues or [])       if isinstance(i, dict)]
+    top_breaches= [j for j in (body.top_breaches or []) if isinstance(j, dict)]
     sla_mx      = body.sla_matrix    or {}
 
     flags:       List[RedFlag]   = []
@@ -208,7 +211,7 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
         worst_job    = sla_mx.get("worst_job") or ""
         worst_hrs    = _f(sla_mx.get("worst_hrs"))
         worst_margin = _f(sla_mx.get("worst_margin_hrs"))
-        breach_rows  = sla_mx.get("breaches") or []
+        breach_rows  = [r for r in (sla_mx.get("breaches") or []) if isinstance(r, dict)]
 
         if sla_breach > 0 and worst_job:
             top_breaches_listed = ", ".join(
