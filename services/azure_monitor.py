@@ -740,26 +740,45 @@ def _abs_breach_cfg(metric_name: str) -> dict | None:
 
 
 def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
-                       band: dict) -> tuple:
+                       band: dict) -> dict:
     """Two-gate severity: a statistical anomaly only escalates to warning/critical
     when its ABSOLUTE value is also operationally material. A z-score spike that
     is statistically unusual for a VM but trivial in absolute terms (e.g. 12% CPU
     on an idle box) is NOTABLE, never WARNING. ``used_peak`` is in used-% space
-    (higher = worse), so memory must be pre-converted (100 - available). Returns
-    (severity, reason, confidence) — reason/confidence surface so a PE lead can
-    judge the call without reading source.
+    (higher = worse), so memory must be pre-converted (100 - available).
+
+    Returns a STRUCTURED dict so it's audit-defensible and machine-readable for
+    later export into PE findings — never a freetext-only string:
+      severity, reason_code (typed enum), severity_reason (human text),
+      confidence, threshold (the band crossed), peak_pct, duration_min, z_score.
     """
     warn, crit = band["warn"], band["crit"]
     conf = "high" if z >= z_crit else "medium" if z >= 2.0 else "low"
+    pk, du, zr = round(used_peak, 1), int(dur_min), round(z, 1)
     if used_peak >= crit:
         if dur_min > 30:
-            return "critical_sustained", f"{used_peak:.0f}% ≥ {crit:.0f}% crit for {dur_min}min", "high"
+            return {"severity": "critical_sustained", "reason_code": "abs_crit_sustained",
+                    "severity_reason": f"{pk:.0f}% ≥ {crit:.0f}% crit for {du}min",
+                    "confidence": "high", "threshold": crit, "peak_pct": pk,
+                    "duration_min": du, "z_score": zr}
         if dur_min < 5:
-            return "warning", f"{used_peak:.0f}% ≥ {crit:.0f}% crit but only {dur_min}min — possible artifact", conf
-        return "critical", f"{used_peak:.0f}% ≥ {crit:.0f}% crit for {dur_min}min", "high"
+            return {"severity": "warning", "reason_code": "abs_crit_brief",
+                    "severity_reason": f"{pk:.0f}% ≥ {crit:.0f}% crit but only {du}min — possible artifact",
+                    "confidence": conf, "threshold": crit, "peak_pct": pk,
+                    "duration_min": du, "z_score": zr}
+        return {"severity": "critical", "reason_code": "abs_crit",
+                "severity_reason": f"{pk:.0f}% ≥ {crit:.0f}% crit for {du}min",
+                "confidence": "high", "threshold": crit, "peak_pct": pk,
+                "duration_min": du, "z_score": zr}
     if used_peak >= warn:
-        return "warning", f"{used_peak:.0f}% ≥ {warn:.0f}% warn band", conf
-    return "notable", f"statistical anomaly (z={z:.1f}) but {used_peak:.0f}% < {warn:.0f}% warn — not operationally material", conf
+        return {"severity": "warning", "reason_code": "abs_warn",
+                "severity_reason": f"{pk:.0f}% ≥ {warn:.0f}% warn band",
+                "confidence": conf, "threshold": warn, "peak_pct": pk,
+                "duration_min": du, "z_score": zr}
+    return {"severity": "notable", "reason_code": "stat_anomaly_immaterial",
+            "severity_reason": f"statistical anomaly (z={zr}) but {pk:.0f}% < {warn:.0f}% warn — not operationally material",
+            "confidence": conf, "threshold": warn, "peak_pct": pk,
+            "duration_min": du, "z_score": zr}
 
 
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
@@ -859,8 +878,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                     # Two-gate severity: z-score selects the spike, absolute value
                     # sets the label. used-% = peak for CPU/disk, 100-peak for mem.
                     used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
-                    severity, sev_reason, conf = _classify_severity(
-                        used_peak, dur_min, spike_z, z_critical, band)
+                    sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band)
 
                     spikes.append({
                         "start": spike_start,
@@ -868,9 +886,10 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         "peak": round(spike_peak, 2),
                         "peak_time": spike_peak_time,
                         "duration_min": dur_min,
-                        "severity": severity,
-                        "severity_reason": sev_reason,
-                        "confidence": conf,
+                        "severity": sv["severity"],
+                        "reason_code": sv["reason_code"],
+                        "severity_reason": sv["severity_reason"],
+                        "confidence": sv["confidence"],
                         "z_score": round(spike_z, 2),
                         "mean": round(mean, 2),
                         "std": round(std, 2),
@@ -888,17 +907,17 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
             except Exception:
                 dur_min = 0
             used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
-            severity, sev_reason, conf = _classify_severity(
-                used_peak, dur_min, spike_z, z_critical, band)
+            sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band)
             spikes.append({
                 "start": spike_start,
                 "end": series_points[-1]["t"],
                 "peak": round(spike_peak, 2),
                 "peak_time": spike_peak_time,
                 "duration_min": dur_min,
-                "severity": severity,
-                "severity_reason": sev_reason,
-                "confidence": conf,
+                "severity": sv["severity"],
+                "reason_code": sv["reason_code"],
+                "severity_reason": sv["severity_reason"],
+                "confidence": sv["confidence"],
                 "z_score": round(spike_z, 2),
                 "mean": round(mean, 2),
                 "std": round(std, 2),
@@ -968,6 +987,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                                 "peak_time": breach_peak_time,
                                 "duration_min": dur_min,
                                 "severity": sev,
+                                "reason_code": "abs_sustained" if dur_min > 60 else "abs_breach",
                                 "severity_reason": f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
                                 "confidence": "high",
                                 "z_score": round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
@@ -1000,6 +1020,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         "peak_time": breach_peak_time,
                         "duration_min": dur_min,
                         "severity": sev,
+                        "reason_code": "abs_sustained" if dur_min > 60 else "abs_breach",
                         "severity_reason": f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
                         "confidence": "high",
                         "z_score": round((breach_peak - mean) / std, 2) if std > 0.001 else 0,

@@ -7146,7 +7146,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     const spikeTable = document.createElement("div");
     spikeTable.className = "rounded-lg border border-red-500/20 bg-red-500/5 p-3 overflow-x-auto";
 
-    let rows = groups.map(group => {
+    let rowObjs = groups.map(group => {
       if (group.length === 1) {
         const s = group[0];
         const metricLabel = metricConfig.find(m => m.key === s.metric)?.label || s.metric;
@@ -7171,8 +7171,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const srcFormula = s.formula ? ` | Derived: ${s.formula}` : "";
         const lineageTitle = `Source: ${srcMetric} (${srcAgg}, ${srcGrain})${srcFormula}`;
         const sevReason = s.severity_reason || "";
+        const isNotable = (s.severity || "") === "notable";
 
-        return `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${detectionTag}${_confBadge(s.confidence)}</td>
+        return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${detectionTag}${_confBadge(s.confidence)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite" title="${lineageTitle}">${escapeHtml(metricLabel)}${s.is_derived ? ' <span class="text-[7px] px-0.5 rounded" style="color:'+THEME.cyan+';background:'+hexA(THEME.cyan,0.12)+'">derived</span>' : ''}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s.metric, s.peak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}</td>
@@ -7180,7 +7181,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">peak @ ${peakTime}</td>
           <td class="py-1.5 text-[10px] text-Cmuted">${_formatDeviation(s)}</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
-        </tr>`;
+        </tr>` };
 
       } else {
         // Recurring pattern — collapsed row
@@ -7207,7 +7208,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
         const minStart = group.reduce((a, g) => g.start < a ? g.start : a, group[0].start);
         const maxEnd   = group.reduce((a, g) => g.end   > a ? g.end   : a, group[0].end);
-        return `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" style="background:${hexA(THEME.amber, 0.04)}" title="Click to reload deep dive for this recurring pattern window" onclick="openSpikeWindow(${JSON.stringify(minStart)},${JSON.stringify(maxEnd)})">
+        const isNotable = worstSev === "NOTABLE";
+        return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" style="background:${hexA(THEME.amber, 0.04)}" title="Click to reload deep dive for this recurring pattern window" onclick="openSpikeWindow(${JSON.stringify(minStart)},${JSON.stringify(maxEnd)})">
           <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}">${worstSev} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">RECURRING</span>${_confBadge(confLabel)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite">${escapeHtml(metricLabel)} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">${group.length}×</span></td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s0.metric, maxPeak)}</td>
@@ -7216,9 +7218,12 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${patternColor}">${patternLabel} <span class="text-[8px] text-Cmuted">(${distinctDays}d)</span></td>
           <td class="py-1.5 text-[10px] text-Cmuted">peak ${_formatPeak(s0.metric, maxPeak)}, avg duration ${avgDur}min</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
-        </tr>`;
+        </tr>` };
       }
-    }).join("");
+    }).filter(Boolean);
+    const actionableRows = rowObjs.filter(r => !r.notable).map(r => r.html).join("");
+    const notableRows = rowObjs.filter(r => r.notable).map(r => r.html).join("");
+    const notableCount = rowObjs.filter(r => r.notable).length;
 
     // Sparse-data warning: if any metric has <24 datapoints, warn
     const sparseMetrics = availableMetrics.filter(mc => {
@@ -7238,17 +7243,32 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     }
     const provLine = `<div class="text-[8px] text-Cmuted mb-1">Source: Azure Monitor · Aggregation: Average · Grain: ${grainLabel || "auto"} · Datapoints: ${firstPts?.length || "?"}</div>`;
 
-    spikeTable.innerHTML = `
-      <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Anomaly & Spike Events</div>
-      ${provLine}${sparseWarn}
-      <table class="w-full text-left"><thead>
+    const tableHead = `<table class="w-full text-left"><thead>
         <tr class="text-[9px] text-Cmuted uppercase tracking-wider">
           <th class="pb-1 pr-3">Severity</th><th class="pb-1 pr-3">Metric</th>
           <th class="pb-1 pr-3">Peak</th><th class="pb-1 pr-3">Window</th>
           <th class="pb-1 pr-3">Duration</th><th class="pb-1 pr-3">Pattern</th>
           <th class="pb-1">Detail</th>
-        </tr>
-      </thead><tbody>${rows}</tbody></table>
+        </tr></thead>`;
+
+    // Actionable (critical/warning) at full weight; if none, say so honestly.
+    const actionableBlock = actionableRows
+      ? `${tableHead}<tbody>${actionableRows}</tbody></table>`
+      : `<div class="text-[9px] text-Cmuted py-1">No critical or warning events — all detected anomalies are informational.</div>`;
+
+    // NOTABLE = statistical but not operationally material → collapsed, de-weighted.
+    // Visible on demand so a PE lead actions critical/warning and ignores noise.
+    const notableBlock = notableCount
+      ? `<details class="mt-2">
+          <summary class="text-[9px] text-Cmuted cursor-pointer select-none hover:text-Cwhite">▸ ${notableCount} informational (NOTABLE) — statistical anomalies below action threshold</summary>
+          <div class="opacity-60 mt-1">${tableHead}<tbody>${notableRows}</tbody></table></div>
+        </details>`
+      : "";
+
+    spikeTable.innerHTML = `
+      <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Anomaly & Spike Events</div>
+      ${provLine}${sparseWarn}
+      ${actionableBlock}${notableBlock}
     `;
     card.appendChild(spikeTable);
   }

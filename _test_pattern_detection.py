@@ -72,16 +72,19 @@ def main():
          for i, v in enumerate([3] * 40 + [12] * 3 + [3] * 40)]
     sp = az._detect_spikes(s, 2.0, "Percentage CPU")
     assert sp and all(x["severity"] == "notable" for x in sp), sp
+    assert all(x.get("reason_code") == "stat_anomaly_immaterial" for x in sp), sp
+    assert all(x.get("confidence") in ("high", "medium", "low") for x in sp), sp
     crit = sum(1 for x in sp if x["severity"].startswith("critical"))
     assert crit == 0, "trivial spikes must not count as critical"
-    print(f"  [OK] 12% CPU z-spike -> notable, 0 critical (badge matches table)")
+    print(f"  [OK] 12% CPU z-spike -> notable, typed reason_code, 0 critical (badge matches table)")
 
-    # sustained 92% CPU > 30min -> critical with high confidence
+    # sustained 92% CPU > 30min -> critical with high confidence + typed reason_code
     s2 = [{"t": (b + timedelta(minutes=i * 5)).isoformat() + "Z", "v": v}
           for i, v in enumerate([40] * 20 + [92] * 12 + [40] * 20)]
     sp2 = az._detect_spikes(s2, 2.0, "Percentage CPU")
-    assert any(x["severity"].startswith("critical") and x["confidence"] == "high" for x in sp2), sp2
-    print("  [OK] sustained 92% CPU -> critical (absolute significance gate)")
+    crit2 = [x for x in sp2 if x["severity"].startswith("critical") and x["confidence"] == "high"]
+    assert crit2 and str(crit2[0].get("reason_code", "")).startswith("abs"), sp2
+    print("  [OK] sustained 92% CPU -> critical (typed reason_code, absolute significance gate)")
 
     print("-" * 60)
     print("ALL PATTERN-DETECTION CHECKS PASSED")
