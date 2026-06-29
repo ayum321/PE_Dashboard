@@ -48,6 +48,8 @@ def _load_runs(job_runs: List[dict]) -> List[dict]:
             "job": r.get("Job_Name") or r.get("Sub_Application") or "?",
             "start": s, "end": e,
             "hrs": float(hrs) if hrs is not None else round((e - s).total_seconds() / 3600.0, 2),
+            # HOST-PIN UPGRADE: add "host": r.get("host") here once Ctrl-M rows carry
+            # one; the join in attribute_spikes() then filters hits by host == vm.
         })
     return runs
 
@@ -68,6 +70,11 @@ def attribute_spikes(vms: Dict[str, Any], job_runs: List[dict], top_n: int = 5) 
                 if ws is None or we is None:
                     continue
                 # overlap: run started before window end AND ended after window start
+                # HOST-PIN UPGRADE: this is the single join site. When the customer
+                # supplies a job→VM map, carry r["host"] through _load_runs and add
+                #   hits = [r for r in hits if r["host"] == vm_name]
+                # here to narrow from time-coincidence to host-pinned causation. No
+                # other change needed — overlap, ranking, and summary stay identical.
                 hits = [r for r in runs if r["start"] < we and r["end"] > ws]
                 hits.sort(key=lambda r: r["hrs"], reverse=True)
                 top = hits[:top_n]
