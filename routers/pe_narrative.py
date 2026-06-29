@@ -228,16 +228,17 @@ def _build_verdict_reason(verdict: str, facts: Dict[str, Any]) -> str:
         if window_total_days:
             clean_days = window_total_days - window_breach_days
             fact = (
-                f"batch finished within its SLA window on only {clean_days}/{window_total_days} "
-                f"day(s) ({window_comp:.1f}%, < 90% floor)"
+                f"window SLA compliance of only {window_comp:.1f}% — the batch "
+                f"finished inside its window on {clean_days} of {window_total_days} "
+                f"day(s), below the 90% floor"
             )
         else:
-            fact = f"batch-window SLA compliance {window_comp:.1f}% (< 90% floor)"
+            fact = f"window SLA compliance of only {window_comp:.1f}% (below the 90% floor)"
         drivers.append(fact)
 
     job_comp = _num(facts.get("job_sla_compliance_pct"))
     if job_comp is not None and job_comp < 90:
-        drivers.append(f"job-level SLA compliance {job_comp:.1f}% (< 90% floor)")
+        drivers.append(f"job-level SLA compliance of {job_comp:.1f}% (below the 90% floor)")
 
     deadline_comp = _num(facts.get("deadline_compliance_pct"))
     deadline_breach_days = _int(facts.get("deadline_breach_days"), 0)
@@ -934,21 +935,6 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     if not sla_rows:
         sla_rows = [["NA — upload batch CSV to populate", "NA", "NA", "NA"]]
 
-    window_note = ""
-    if wtd:
-        # The `compliance` headline above already states the day-level window % — here
-        # we add the breach-day fraction (which reconciles with it) plus the pair-level
-        # figure as an explicitly labeled secondary, never juxtaposed as one number.
-        _pair_n = _num(window_pair_compliance)
-        _pair_detail = ""
-        if _pair_n is not None and compliance is not None and abs(_pair_n - float(compliance)) > 0.1:
-            _pair_detail = f" (per sub-app \u00d7 day window: {_pair_n:.1f}%)"
-        window_note = (
-            f" Batch made its window on {wtd - wbd}/{wtd} day(s)"
-            + (f"; exceeded on {wbd}/{wtd}" if wbd else "")
-            + f".{_pair_detail}"
-        )
-
     sf_findings     = sf.get("findings") or []
     regression_note = ""
     priority_note   = ""
@@ -1015,7 +1001,6 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     if (total_runs or total_jobs) is not None:
         _runs_n  = int(total_runs or total_jobs or 0)
         _jobs_n  = int(total_jobs or 0)
-        _fail_s  = f"{_int(fail_runs)}" if fail_runs is not None else "—"
         _comp_s  = f"{float(compliance):.1f}%" if compliance is not None else "NA"
         _jsc_s   = f"{float(job_sla_comp):.1f}%" if job_sla_comp is not None else None
         # Per-window SLA ceiling label. The matrix can define several windows
@@ -1036,26 +1021,74 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             _sla_s = f"{next(iter(_ceil_vals)):.1f}h"
         else:
             _sla_s = f"{float(sla_limit):.1f}h" if sla_limit is not None else "not defined"
-        # Show window compliance as headline (the PE sign-off metric).
-        # When only job-day compliance is available, label it clearly so the reader
-        # knows it is an estimate and not the authoritative window figure.
+        # Conclusive scope summary written as plain English sentences. The verdict
+        # panel above carries the reconciliation and the direction; this paragraph
+        # states the underlying facts in grammatical prose rather than a telegraphic
+        # "·"-delimited metric dump, and keeps the three commonly-confused signals
+        # (day-level window compliance, individual run breaches, execution failures)
+        # clearly separated so a reader is never left guessing which is which.
+        _clean_days = (wtd - wbd) if (wtd is not None and wbd is not None) else None
         if _window_compliance_is_estimated:
-            comp_parts = f"SLA compliance (job-day estimate \u2014 no window data): {_comp_s}"
+            lead = (
+                f"Across {_runs_n:,} runs of {_jobs_n:,} unique jobs, batch SLA "
+                f"compliance is {_comp_s} (a job-day estimate — no per-window "
+                f"completion data was available for this upload)."
+            )
+        elif wtd:
+            lead = (
+                f"Across {_runs_n:,} runs of {_jobs_n:,} unique jobs, the batch held "
+                f"its delivery window on {_clean_days} of {wtd} day(s) ({_comp_s})"
+                + (f" and exceeded it on {wbd}" if wbd else "")
+                + f", measured against a {_sla_s} ceiling."
+            )
         else:
-            comp_parts = f"Window SLA compliance: {_comp_s}"
-            if _jsc_s and _jsc_s != _comp_s:
-                comp_parts += f" \u00b7 Job-day compliance: {_jsc_s}"
+            lead = (
+                f"Across {_runs_n:,} runs of {_jobs_n:,} unique jobs, window SLA "
+                f"compliance is {_comp_s} against a {_sla_s} ceiling."
+            )
+
+        _detail_bits: List[str] = []
+        if _jsc_s and _jsc_s != _comp_s and not _window_compliance_is_estimated:
+            _detail_bits.append(
+                f"every job stayed within its own ceiling ({_jsc_s} job-day compliance)"
+            )
+        if breaches is not None:
+            _bn = _int(breaches)
+            _detail_bits.append(
+                "no individual run breached its ceiling" if _bn == 0
+                else f"{_bn:,} run(s) breached an individual ceiling"
+            )
+        if fail_runs is not None:
+            _frn = _int(fail_runs)
+            _detail_bits.append(
+                "no runs failed to complete" if _frn == 0
+                else f"{_frn:,} run(s) failed to complete"
+            )
+        detail_sentence = ""
+        if _detail_bits:
+            if len(_detail_bits) == 1:
+                _joined = _detail_bits[0]
+            else:
+                _joined = ", ".join(_detail_bits[:-1]) + ", and " + _detail_bits[-1]
+            detail_sentence = " " + _joined[0].upper() + _joined[1:] + "."
+
+        # Per-(sub-app × day) figure kept as a labelled secondary when it diverges
+        # from the headline day-level number.
+        _pair_n = _num(window_pair_compliance)
+        _pair_sentence = ""
+        if _pair_n is not None and compliance is not None and abs(_pair_n - float(compliance)) > 0.1:
+            _pair_sentence = (
+                f" Counting every sub-app × day combination individually, "
+                f"compliance is {_pair_n:.1f}%."
+            )
+
         prose_b = (
-            f"Batch execution analysis: {_runs_n:,} total runs · "
-            f"{_jobs_n:,} unique jobs · "
-            f"{comp_parts} · "
-            f"{_int(breaches)} SLA breach(es) · "
-            f"{_fail_s} execution failure(s) · "
-            f"SLA ceiling: {_sla_s}."
-            + window_note
+            lead
+            + detail_sentence
+            + _pair_sentence
             + regression_note
             + priority_note
-            + (f" {critical_count} critical finding(s) require resolution before PE sign-off."
+            + (f" {critical_count} critical finding(s) must be resolved before PE sign-off."
                if critical_count > 0 else "")
         )
 
