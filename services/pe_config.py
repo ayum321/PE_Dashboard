@@ -164,6 +164,15 @@ BENCHMARK_ACTION_SLA: dict[str, float] = {
 
 # ── Anomaly detection ─────────────────────────────────────────────────────────
 ANOMALY_Z_THRESHOLD: float = 2.0    # z-score cutoff for statistical outliers
+# Pattern recurrence evidence floor: a "recurring_time" spike pattern must hit on
+# at least PATTERN_MIN_OCCURRENCES distinct days AND on ≥ PATTERN_MIN_RATIO of the
+# days observed. Both gates together so a sparse weekly batch on a 30-day window
+# (4/30=13%) still fires while a 2-day coincidence on a 15-day window does not.
+PATTERN_MIN_OCCURRENCES: int = 3
+PATTERN_MIN_RATIO: float = 0.20
+# Time-to-breach projection (predict_linear): only emit when the linear fit is
+# trustworthy — R² at/above this. Below it the slope is noise, not a trend.
+PREDICT_MIN_R2: float = 0.60
 
 # ── Batch runtime comparison — suspect "near-instant collapse" guard ──────────
 # In a PROD-vs-TEST batch runtime file, a job whose runtime collapses from a
@@ -368,6 +377,7 @@ def reload() -> None:
     global FJ_PEN_FAILRATE_PER_PCT, FJ_PEN_OVERRUN_PER_PCT, FJ_PEN_REGRESSION_PER_JOB
     global FJ_PEN_SLA_PER_PCT, FJ_PEN_BENCH_PER_PCT, FJ_PEN_RES_CRIT_PER, FJ_PEN_RES_DUAL_PER, FJ_PEN_SOW_PER
     global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
+    global PATTERN_MIN_OCCURRENCES, PATTERN_MIN_RATIO, PREDICT_MIN_R2
     global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO
     global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
     global BATCH_DATA_HEAVY_PATTERNS
@@ -437,6 +447,9 @@ def reload() -> None:
         if _bam:
             BENCHMARK_ACTION_SLA = _bam
     ANOMALY_Z_THRESHOLD = _f("anomaly_z_threshold", 2.0)
+    PATTERN_MIN_OCCURRENCES = int(_f("pattern_min_occurrences", 3))
+    PATTERN_MIN_RATIO       = _f("pattern_min_ratio",       0.20)
+    PREDICT_MIN_R2          = _f("predict_min_r2",          0.60)
     BATCH_NOWORK_SEC           = _f("batch_nowork_sec",            5.0)
     BATCH_COLLAPSE_MIN_OLD_SEC = _f("batch_collapse_min_old_sec", 30.0)
     BATCH_COLLAPSE_RATIO       = _f("batch_collapse_ratio",        0.05)

@@ -8462,6 +8462,8 @@ function _buildDeepDiveSummary() {
           trend_direction: data.trend_direction,
           trend_delta: data.trend_delta,
           trend_pct: data.trend_pct,
+          trend_r2: data.trend_r2,
+          hours_to_warn: data.hours_to_warn,
           chronic_pressure_days: (data.chronic_pressure_days || []).length,
           total_days: (data.daily_stats || []).length,
           recurring_spikes: data.recurring_spikes || [],

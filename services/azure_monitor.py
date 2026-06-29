@@ -990,7 +990,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     return spikes
 
 
-def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
+def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int = 24) -> list:
     """Detect recurring and cross-VM patterns from spike data.
 
     Looks for:
@@ -1002,8 +1002,12 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
     """
     from datetime import datetime as _dt
     from collections import defaultdict
+    from services import pe_config
 
     patterns = []
+    days_observed = max(1.0, hours_back / 24.0)
+    min_occ = pe_config.PATTERN_MIN_OCCURRENCES
+    min_ratio = pe_config.PATTERN_MIN_RATIO
 
     # ── 1. Time-of-day clustering: spikes at similar hours across days ──
     for vm_name, metric_spikes in all_vm_spikes.items():
@@ -1012,19 +1016,28 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
             for s in spikes:
                 try:
                     t = _dt.fromisoformat(s["peak_time"].replace("Z", "+00:00"))
-                    hour_hits[t.hour].append({**s, "metric": metric, "vm": vm_name})
+                    hour_hits[t.hour].append({**s, "metric": metric, "vm": vm_name, "_day": t.date()})
                 except Exception:
                     pass
         for hour, events in hour_hits.items():
-            if len(events) >= 2:
+            # Recurrence evidence floor: count DISTINCT days the hour spiked, not
+            # raw events (multiple metrics on one day are one occurrence). Fire
+            # only on ≥ min_occ distinct days AND ≥ min_ratio of days observed —
+            # both gates, so a sparse weekly pattern fires but a 2-day fluke does
+            # not. Ratio is surfaced so a PE lead can judge confidence directly.
+            day_count = len({e["_day"] for e in events})
+            ratio = day_count / days_observed
+            if day_count >= min_occ and ratio >= min_ratio:
                 metrics_hit = list({e["metric"] for e in events})
                 worst = max(events, key=lambda e: e["z_score"])
+                pct = round(ratio * 100)
                 patterns.append({
                     "type": "recurring_time",
                     "severity": "critical" if worst["z_score"] >= 3.0 else "high",
-                    "title": f"Recurring spikes at ~{hour:02d}:00 on {vm_name}",
+                    "title": f"Recurring spikes at ~{hour:02d}:00 on {vm_name} ({day_count}/{round(days_observed)} days, {pct}%)",
                     "description": (
-                        f"{len(events)} spike events cluster around {hour:02d}:00 UTC "
+                        f"Spikes recurred on {day_count} distinct days "
+                        f"({pct}% of {round(days_observed)} days observed) around {hour:02d}:00 UTC "
                         f"across {', '.join(metrics_hit)}. "
                         f"Peak {worst['peak']}% (z={worst['z_score']}). "
                         f"Indicates a scheduled job or periodic load trigger."
@@ -1032,6 +1045,8 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]]) -> list:
                     "vms": [vm_name],
                     "hour": hour,
                     "count": len(events),
+                    "recurrence_days": day_count,
+                    "recurrence_ratio": round(ratio, 2),
                     "peak_z": worst["z_score"],
                 })
 
@@ -1283,7 +1298,7 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
 
     # ── Pattern detection across all VMs ──
     all_vm_spikes = {vm: data.get("spikes", {}) for vm, data in result.items()}
-    patterns = _detect_patterns(all_vm_spikes)
+    patterns = _detect_patterns(all_vm_spikes, hours_back)
 
     logger.info("Time-series fetch for %d VMs took %.1fs, %d patterns detected",
                 len(resource_ids), _t.perf_counter() - t0, len(patterns))
@@ -1310,6 +1325,7 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
     """
     from datetime import datetime as _dt
     from collections import defaultdict
+    from services import pe_config
 
     days_observed = hours_back / 24.0
     if days_observed < 2:
@@ -1465,6 +1481,31 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
 
             trend_dir = "rising" if trend_delta > 2 else "falling" if trend_delta < -2 else "stable"
 
+            # ── Time-to-breach projection (predict_linear) ──
+            # Project hours until the metric crosses its WARN threshold via a
+            # least-squares linear fit. Only emit when the trend is RISING and the
+            # fit is trustworthy (R² ≥ PREDICT_MIN_R2) — below that the slope is
+            # noise and would manufacture false urgency on a flat-but-jittery VM.
+            hours_to_warn = None
+            trend_r2 = None
+            if len(parsed) >= 10:
+                _t0 = _times[0]
+                xs = [(pp["t"] - _t0).total_seconds() / 3600.0 for pp in parsed]
+                ys = all_vals
+                n = len(xs)
+                mx = sum(xs) / n
+                my = sum(ys) / n
+                sxx = sum((x - mx) ** 2 for x in xs)
+                sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+                syy = sum((y - my) ** 2 for y in ys)
+                slope = sxy / sxx if sxx > 0 else 0.0
+                trend_r2 = round((sxy * sxy) / (sxx * syy), 2) if sxx > 0 and syy > 0 else 0.0
+                warn = _metric_elevation(display_name)["warn"]
+                current = max(parsed, key=lambda pp: pp["t"])["v"]
+                if (trend_dir == "rising" and trend_r2 >= pe_config.PREDICT_MIN_R2
+                        and slope > 0 and current < warn):
+                    hours_to_warn = round((warn - current) / slope, 1)
+
             # ── Sustained chronic pressure: consecutive hours above threshold ──
             chronic_windows = []
             if daily_stats:
@@ -1514,6 +1555,8 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
                 "trend_direction": trend_dir,
                 "trend_delta": trend_delta,
                 "trend_pct": trend_pct,
+                "trend_r2": trend_r2,
+                "hours_to_warn": hours_to_warn,
                 "chronic_pressure_days": chronic_windows,
                 "recurring_spikes": recurring_spikes,
                 "overall_mean": round(sum(all_vals) / len(all_vals), 2),
