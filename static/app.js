@@ -6771,6 +6771,18 @@ function _inferEnv(vmName) {
 }
 
 // ── Server card (collapsed) — trend arrow, role tag, projected breach ──
+function _baselineBadge(bc, opts = {}) {
+  if (!bc || !Number.isFinite(bc.pulls)) return "";
+  const minP = bc.min_pulls || 3;
+  const degraded = bc.pulls < minP;
+  const muSig = (bc.baseline_mean != null && bc.baseline_std != null)
+    ? ` · μ=${bc.baseline_mean}% σ=${bc.baseline_std}%` : "";
+  const sz = opts.compact ? "text-[7px] px-1" : "text-[9px] px-2";
+  return degraded
+    ? `<span class="${sz} py-0.5 rounded-full font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} pulls stored — anomaly detection uses session-only baseline (degraded).">Baseline: ${bc.pulls}/${minP} pulls — session only</span>`
+    : `<span class="${sz} py-0.5 rounded-full font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} pulls / ${bc.retention_days}d.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
+}
+
 function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   const spikes = vmData.spikes || {};
   const stats = vmData.stats || {};
@@ -6843,13 +6855,17 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   let sparkSvg = "";
   if (sparkSource.length > 4) {
     let vals = sparkSource.map(p => p.v);
-    // Memory stays as Available % — no inversion needed (matches Azure Portal)
-    const mn = Math.min(...vals), mx = Math.max(...vals);
+    // Fixed Y-axis across all cards so amplitudes are comparable: CPU/MEM 0–100%,
+    // disk 0–max-observed. Auto-scaling per card makes an 8–15% mem dip and a
+    // 60–95% one look the same — a PE lead must see the dangerously-low line.
+    const fixed0to100 = domLabel === "MEM" || domLabel === "CPU";
+    const mn = fixed0to100 ? 0 : Math.min(...vals);
+    const mx = fixed0to100 ? 100 : Math.max(...vals);
     const rng = mx - mn || 1;
     const w = 80, h = 24;
     const step = w / (vals.length - 1);
     const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - mn) / rng) * h).toFixed(1)}`).join(" ");
-    sparkSvg = `<svg width="${w}" height="${h}" class="opacity-60 group-hover:opacity-100 transition"><polyline points="${pts}" fill="none" stroke="${domColor}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+    sparkSvg = `<svg width="${w}" height="${h}" class="opacity-60 group-hover:opacity-100 transition" title="${domLabel} ${fixed0to100 ? "scale 0–100%" : "scale 0–max"} — fixed across all cards"><polyline points="${pts}" fill="none" stroke="${domColor}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
   }
 
   // Two-stage severity: z-score + absolute threshold gate
@@ -6960,10 +6976,11 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           ${vmEnvBadge}
           ${waveBadge}
         </div>
-        <div class="flex items-center gap-2 mt-1">
+        <div class="flex items-center gap-2 mt-1 flex-wrap">
           <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
           <span class="text-[9px] text-Cmuted">${criticalCount} anomal${criticalCount > 1 ? "ies" : "y"}</span>
           ${breachLabel ? `<span class="text-[8px] font-bold px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
+          ${_baselineBadge(vmData.baseline_confidence, { compact: true })}
         </div>
       </div>
       <div class="text-right shrink-0">
@@ -7073,19 +7090,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   // can change without a backend deploy. Degraded (<min pulls) pulses amber:
   // anomaly detection is on session-only μ/σ, not historical. Trusted = green.
   const bc = vmData.baseline_confidence;
-  let baselineBadge = "";
-  if (bc && Number.isFinite(bc.pulls)) {
-    // Derive degraded from counts locally so the label can't disagree with the
-    // number (avoids "5/3 — session only"). Trusted mode shows μ/σ so a PE lead
-    // sees why a spike is 16σ on a quiet box vs 2σ on a busy one.
-    const minP = bc.min_pulls || 3;
-    const degraded = bc.pulls < minP;
-    const muSig = (bc.baseline_mean != null && bc.baseline_std != null)
-      ? ` · μ=${bc.baseline_mean}% σ=${bc.baseline_std}%` : "";
-    baselineBadge = degraded
-      ? `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} pulls stored — anomaly detection uses session-only baseline (degraded). Trusts historical after ${minP}.">Baseline: ${bc.pulls}/${minP} pulls — session only</span>`
-      : `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} stored pulls over ${bc.retention_days}d. μ/σ explain z-score sensitivity.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
-  }
+  const baselineBadge = _baselineBadge(bc);
 
   card.innerHTML = `
     <div class="flex items-center justify-between gap-2 flex-wrap">
