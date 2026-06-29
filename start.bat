@@ -351,7 +351,7 @@ echo.
 echo   [4/7] Verifying app files...
 
 set "FILES_OK=1"
-for %%F in (main.py _find_port.py _open_browser.py _seed_config.py) do (
+for %%F in (main.py _find_port.py _open_browser.py _seed_config.py _cleanup_stale.py) do (
     if not exist "%%F" (
         echo   [ERROR] Missing: %%F
         set "FILES_OK=0"
@@ -465,6 +465,16 @@ REM  4. If uvicorn still fails to bind, auto-retry next free port
 REM ================================================================
 echo.
 echo   [6/7] Securing port...
+
+REM Self-heal: reap stale PE Dashboard server processes left over from prior
+REM runs BEFORE touching ports. The plain port scan below only catches things
+REM LISTENING on a candidate port; it misses orphaned uvicorn --reload workers
+REM and servers that fell back to a random ephemeral port (e.g. :60371). Those
+REM are what pile up over days and choke the machine. The reaper attributes
+REM processes to THIS folder (cmdline signature + working directory) and kills
+REM them + their child trees. It never blocks startup (always exits 0).
+echo        Reaping stale dashboard processes...
+!PY! _cleanup_stale.py --quiet 2>nul
 
 REM Kill any process listening on candidate ports
 for %%Q in (8000 8765 8080 8888 9000 9090 9999 7878 5000) do (

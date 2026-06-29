@@ -40,6 +40,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM ── Self-heal: reap stale PE Dashboard processes from prior runs ──
+REM Catches orphaned --reload workers and ephemeral-port servers that the
+REM port scan below misses. Attributes by folder; never blocks startup.
+echo   Reaping stale dashboard processes...
+!PY! _cleanup_stale.py --quiet 2>nul
+
 REM ── Kill any existing server on common PE Dashboard ports (8000, 8765) ──
 for /f "tokens=5" %%K in ('netstat -ano 2^>nul ^| findstr "LISTENING" ^| findstr ":8000 "') do (
     echo   Killing PID %%K on port 8000
