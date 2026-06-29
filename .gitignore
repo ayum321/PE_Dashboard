@@ -64,3 +64,7 @@ start_debug.bat
 # Test output / scratch
 .cache/
 tests/
+
+.pe_baseline.db
+.pe_baseline.db-wal
+.pe_baseline.db-shm
