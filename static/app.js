@@ -13320,68 +13320,76 @@ function _renderRedFlagsResults(data) {
 
 
 // ─────────────────────────────────────────────────────────────
-// QUESTIONS TO RAISE WITH THE CUSTOMER — renders the dynamic PE
-// investigation question bank (incl. per-job/per-day batch questions)
-// directly on the PE Findings page. Reads window.appData.redFlags.
+// QUESTIONS TO RAISE WITH THE CUSTOMER — distributes the dynamic PE
+// investigation questions inline into the relevant Batch Review panels
+// (regression → Top Breaching Jobs · SLA/scheduling → Daily Batch Window
+// · failures → execution-failures strip) instead of one giant card.
+// Each strip shows the strongest 2-3 questions for its area. Reads the
+// /red-flags response (data.flags[] with category/risk/context/question).
 // ─────────────────────────────────────────────────────────────
 function _renderPeQuestions(data) {
-  const card  = document.getElementById("pe-questions-card");
-  const listEl = document.getElementById("pe-questions-list");
-  const emptyEl = document.getElementById("pe-questions-empty");
-  if (!card || !listEl) return;
-
-  const flags  = (data && Array.isArray(data.flags)) ? data.flags : [];
-
-  // Order questions strongest-first so the most material query leads.
+  // Map each question category to one of the three Batch Review strips.
+  const BUCKET = {
+    "Runtime & Regression": "regression",
+    "SLA & Scheduling":     "sla",
+    "Batch":                "sla",
+    "Testing":              "sla",
+    "Execution Failures":   "failures",
+  };
+  const MAX_PER_BUCKET = 3;
   const RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
-  const sorted = [...flags].sort(
-    (a, b) => (RANK[a.risk] ?? 9) - (RANK[b.risk] ?? 9)
-  );
-
-  // Count badges
-  const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
-  flags.forEach(f => { counts[f.risk] = (counts[f.risk] || 0) + 1; });
-  setText("peq-critical", counts.CRITICAL || 0);
-  setText("peq-high",     counts.HIGH     || 0);
-  setText("peq-medium",   counts.MEDIUM   || 0);
-
-  // Never hide the card once there is data to assess — show the empty state
-  // explicitly so the user knows the bank ran and found nothing to ask.
-  card.classList.remove("hidden");
-
-  if (!sorted.length) {
-    listEl.classList.add("hidden");
-    if (emptyEl) emptyEl.classList.remove("hidden");
-    return;
-  }
-  listEl.classList.remove("hidden");
-  if (emptyEl) emptyEl.classList.add("hidden");
-
-  const STYLE = {
-    CRITICAL: { border: "border-Cred",   bg: "bg-Cred/5",   badge: "bg-Cred/20 text-Cred" },
-    HIGH:     { border: "border-Camber", bg: "bg-Camber/5", badge: "bg-Camber/20 text-Camber" },
-    MEDIUM:   { border: "border-Cblue",  bg: "bg-Cblue/5",  badge: "bg-Cblue/20 text-Cblue" },
-    LOW:      { border: "border-Cgreen", bg: "bg-Cgreen/5", badge: "bg-Cgreen/20 text-Cgreen" },
+  const DOT = {
+    CRITICAL: "bg-Cred", HIGH: "bg-Camber", MEDIUM: "bg-Cblue", LOW: "bg-Cgreen",
   };
 
-  listEl.innerHTML = sorted.map((f) => {
-    const s = STYLE[f.risk] || STYLE.MEDIUM;
-    const dp = f.data_point ? `<span class="text-[10px] text-Cmuted font-mono">${_esc(f.data_point)}</span>` : "";
-    return `<div class="rounded-xl border-l-4 ${s.border} ${s.bg} border border-Cborder/60 px-4 py-3">
-      <div class="flex items-start gap-2.5">
-        <span class="text-[10px] font-bold text-Cmuted mt-0.5 shrink-0 font-mono">${_esc(f.id || "")}</span>
-        <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2 flex-wrap mb-1">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-Cmuted">${_esc(f.category || "")}</span>
-            <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${s.badge}">${_esc(f.risk || "")}</span>
-            ${dp}
-          </div>
-          <p class="text-xs text-Cmuted mb-1.5 leading-relaxed">${_esc(f.context || "")}</p>
-          <p class="text-xs text-Cwhite font-semibold leading-relaxed">❓ ${_esc(f.question || "")}</p>
-        </div>
-      </div>
+  const hosts = {
+    regression: document.getElementById("batch-q-regression"),
+    sla:        document.getElementById("batch-q-sla"),
+    failures:   document.getElementById("batch-q-failures"),
+  };
+  // Nothing to render into (e.g. batch view not in DOM) — bail quietly.
+  if (!hosts.regression && !hosts.sla && !hosts.failures) return;
+
+  const flags = (data && Array.isArray(data.flags)) ? data.flags : [];
+  const buckets = { regression: [], sla: [], failures: [] };
+  flags.forEach((f) => {
+    const key = BUCKET[f.category];
+    if (key && buckets[key]) buckets[key].push(f);
+  });
+
+  const renderRow = (f) => {
+    const dot = DOT[f.risk] || DOT.MEDIUM;
+    const chip = f.data_point
+      ? `<span class="text-[9px] font-mono text-Cmuted shrink-0 mt-[3px]">${_esc(f.data_point)}</span>`
+      : "";
+    return `<div class="flex items-start gap-2">
+      <span class="w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-[6px]"></span>
+      <p class="text-[11px] text-Cwhite/90 leading-relaxed flex-1 min-w-0">${_esc(f.question || "")}</p>
+      ${chip}
     </div>`;
-  }).join("");
+  };
+
+  Object.keys(buckets).forEach((key) => {
+    const host = hosts[key];
+    const wrap = document.getElementById(`batch-q-${key}-wrap`);
+    if (!host) return;
+    const items = buckets[key].sort(
+      (a, b) => (RANK[a.risk] ?? 9) - (RANK[b.risk] ?? 9)
+    );
+    if (!items.length) {
+      host.innerHTML = "";
+      if (wrap) wrap.classList.add("hidden");
+      return;
+    }
+    const shown = items.slice(0, MAX_PER_BUCKET);
+    const extra = items.length - shown.length;
+    let html = shown.map(renderRow).join("");
+    if (extra > 0) {
+      html += `<p class="text-[10px] text-Cmuted/70 italic mt-1">+${extra} more ${key === "failures" ? "failure" : key === "sla" ? "scheduling" : "regression"} question${extra > 1 ? "s" : ""} in PE Findings export</p>`;
+    }
+    host.innerHTML = html;
+    if (wrap) wrap.classList.remove("hidden");
+  });
 }
 
 
