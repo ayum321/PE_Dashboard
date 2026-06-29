@@ -50,6 +50,24 @@ from services.pe_utils import (
 router = APIRouter()
 
 
+# Environment detection from job / sub-application names. A leading PROD_/TEST_/
+# UAT_/DEV_/STG_ prefix is the standard Ctrl-M convention; used to adapt SOW
+# volume questions (a partial TEST load is often intentional scope, a PROD run
+# below the contracted floor is a forecast / commercial concern).
+import re as _re
+
+_RE_ENV_TEST = _re.compile(r"^(?:TEST|UAT|DEV|STG|SIT|QA)[_\-]", _re.IGNORECASE)
+_RE_ENV_PROD = _re.compile(r"^PROD[_\-]", _re.IGNORECASE)
+
+
+def _re_env_test(name: str) -> bool:
+    return bool(_RE_ENV_TEST.match(str(name or "").strip()))
+
+
+def _re_env_prod(name: str) -> bool:
+    return bool(_RE_ENV_PROD.match(str(name or "").strip()))
+
+
 def _get_data_coverage(batch_kpis: dict | None) -> dict | None:
     """Single source of truth for fetching data_coverage — request payload first, session cache fallback."""
     cov = (batch_kpis or {}).get("data_coverage") or None
@@ -2772,24 +2790,85 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         low_util = [i for i in items if i.get("status") in ("LOW", "UNDER")]
         in_range = [i for i in items if i.get("status") in ("OPTIMAL", "ACCEPTABLE")]
 
+        # Compact volume formatter — keeps the headline numbers readable
+        # (191000 → "191K", 1_500_000 → "1.5M") so the consultative question
+        # reads the way a PE lead would phrase it to the customer.
+        def _fmt_vol(v) -> str:
+            n = _f(v)
+            a = abs(n)
+            if a >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+            if a >= 1_000:
+                return f"{n / 1_000:.0f}K"
+            return f"{n:.0f}"
+
+        # Detect whether the loaded dataset is a TEST/UAT run so the question
+        # adapts: a TEST run with partial volume is often intentional scope, a
+        # PROD run below the contracted floor is a forecast/commercial concern.
+        _env_names = [
+            str(s.get("Sub_Application") or s.get("sub_application") or "")
+            for s in (sub_stats or [])
+        ]
+        _n_test = sum(1 for n in _env_names if _re_env_test(n))
+        _n_prod = sum(1 for n in _env_names if _re_env_prod(n))
+        _is_test_env = _n_test > 0 and _n_test >= _n_prod
+
+        # Per-metric consultative question — names the real percentage and the
+        # actual-vs-target volumes, then asks the specific "why / confirm with
+        # customer" question a reviewer would raise before sign-off.
+        def _low_question(m) -> str:
+            label = m.get("label") or m.get("key") or m.get("metric") or "Volume metric"
+            pct   = _f(m.get("pct"))
+            act   = _fmt_vol(m.get("actual"))
+            sow   = _fmt_vol(m.get("sow"))
+            _lbl_l = label.lower()
+            if "sku" in _lbl_l:
+                tail = ("has the customer confirmed this represents the full item master "
+                        "in scope for TEST?" if _is_test_env else
+                        "confirm with the customer whether the item master in scope has shrunk.")
+            elif _is_test_env:
+                tail = "is this a TEST environment intentional partial load or a genuine data gap?"
+            else:
+                tail = ("why is production volume below the contracted floor — has the forecast "
+                        "changed, or is upstream data incomplete?")
+            return f"{label} is only {pct:.1f}% of SOW target ({act} vs {sow}) — {tail}"
+
+        def _high_question(m) -> str:
+            label = m.get("label") or m.get("key") or m.get("metric") or "Volume metric"
+            pct   = _f(m.get("pct"))
+            act   = _fmt_vol(m.get("actual"))
+            sow   = _fmt_vol(m.get("sow"))
+            return (f"{label} is at {pct:.1f}% of SOW target ({act} vs {sow}) — above the 110% "
+                    f"ceiling; confirm with the customer whether the volume forecast and "
+                    f"commercials need revision before sign-off.")
+
         if exceeded:
             names = ", ".join(i.get("label") or i.get("metric") or "?" for i in exceeded[:3])
+            _q = " · ".join(_high_question(i) for i in exceeded[:3])
             add("critical", "📈",
                 f"SOW volume above 110% ceiling: {len(exceeded)} metric(s) exceed contracted limit",
-                f"Metrics: {names} — above 110% of approved SOW. Per standard process, "
-                f"consumption must remain within 70%-110%. Formal review and acknowledgment required.",
+                f"{_q} Per standard process, consumption must remain within 70%-110% of approved SOW; "
+                f"formal review and acknowledgment required.",
                 source="sow",
-                recommendation="Raise commercial review with client. Document deviation formally before sign-off.",
-                evidence_class="measured")
+                recommendation="Raise commercial review with the customer and document the deviation "
+                               "formally before sign-off.",
+                evidence_class="measured",
+                root_cause="SOW_VOLUME_OVER")
         if low_util:
-            names = ", ".join(i.get("metric") or i.get("label") or "?" for i in low_util[:3])
+            names = ", ".join(i.get("label") or i.get("metric") or "?" for i in low_util[:3])
+            _q = " · ".join(_low_question(i) for i in low_util[:3])
+            _reco = ("Confirm with the customer that the TEST scope is intentional and the scenarios "
+                     "are representative; formally acknowledge the deviation before sign-off."
+                     if _is_test_env else
+                     "Confirm with the customer whether the volume forecast changed or upstream data "
+                     "is incomplete; formally acknowledge the deviation before sign-off.")
             add("warning", "📉",
-                f"SOW volume below 70% floor: {len(low_util)} metric(s) under-utilised",
-                f"Metrics: {names} — below 70% of approved SOW. Per standard process, "
-                f"consumption must remain within 70%-110%. Formal acknowledgment required.",
+                f"SOW volume below 70% floor: {len(low_util)} metric(s) under target — customer confirmation needed",
+                f"{_q} Per standard process, consumption must remain within 70%-110% of approved SOW.",
                 source="sow",
-                recommendation="Validate test scenarios are representative. Formally acknowledge deviation with client.",
-                evidence_class="measured")
+                recommendation=_reco,
+                evidence_class="measured",
+                root_cause="SOW_VOLUME_UNDER")
         if in_range and not exceeded and not low_util:
             add("ok", "📊",
                 f"SOW utilisation within 70%-110% standard process window: {len(in_range)} metric(s)",
