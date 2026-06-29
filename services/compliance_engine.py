@@ -270,6 +270,14 @@ def compute_window_compliance(
             ok_count += 1
 
     compliance_pct = round((ok_count + at_risk_count) / total_windows * 100, 1) if total_windows > 0 else 0.0
+    # Zero scorable windows ≠ 0% compliant. Every sub-app excluded (all OUTBOUND/
+    # CYCLIC/MONTHLY) is a "nothing to judge" state, not total failure — surface it
+    # so the headline can say "no scorable windows" instead of a misleading 0%.
+    if total_windows == 0 and excluded_windows > 0:
+        warnings.append(
+            f"No scorable windows: all {excluded_windows} window(s) are excluded "
+            f"schedule types (OUTBOUND/CYCLIC/MONTHLY/etc.) — compliance N/A, not 0%."
+        )
 
     # Distinct-day rollups so the UI can still show an honest "X / Y days"
     # alongside the per-window compliance denominator.

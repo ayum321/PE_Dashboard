@@ -194,6 +194,76 @@ def test_breach_attribution_is_traceable() -> None:
           f"overrun +{po['overrun_pct']}% (8.833h ceiling, not 0.6h)")
 
 
+def test_customer_archetypes() -> None:
+    """250+ customers ship wildly different batch shapes. The engine must give an
+    accurate, non-misleading verdict for each archetype — not just Haleon's. Each
+    case below is a distinct customer shape; a regression in any one is a silent
+    wrong answer on real audits."""
+    # A) Single ceiling, all clean — simplest customer. 100% compliant, 0 breaches.
+    recs = [{"run_date": f"2025-12-{d:02d}", "sub_app": "DAILY_LOAD",
+             "effective_hrs": 3.0, "sla_ceil": 6.0, "schedule_type": "DAILY"}
+            for d in range(1, 11)]
+    r = ce.compute_window_compliance(recs, {})
+    if r["compliance_pct"] != 100.0 or r["breach_days"] != 0:
+        _fail(f"ARCHETYPE single-ceiling: expected 100%/0 breaches, got "
+              f"{r['compliance_pct']}%/{r['breach_days']}")
+
+    # B) Mixed ceilings, one dominant by volume (Haleon). Tight sub-app must NOT be
+    #    dragged by the long one; each judged on its own ceiling.
+    recs = []
+    for d in range(1, 11):
+        recs.append({"run_date": f"2025-12-{d:02d}", "sub_app": "TIGHT",
+                     "effective_hrs": 0.5, "sla_ceil": 0.6, "schedule_type": "DAILY"})
+        recs.append({"run_date": f"2025-12-{d:02d}", "sub_app": "WIDE",
+                     "effective_hrs": 8.0, "sla_ceil": 9.0, "schedule_type": "WEEKLY"})
+    r = ce.compute_window_compliance(recs, {})
+    if r["compliance_pct"] != 100.0:
+        _fail(f"ARCHETYPE mixed-ceiling: tight sub-app dragged, got {r['compliance_pct']}%")
+
+    # C) Cross-midnight window: effective_hrs spans 22:00→06:00 = 8h vs 7.5h ceiling.
+    #    The breach must register on the run_date regardless of midnight crossing.
+    recs = [{"run_date": f"2025-12-{d:02d}", "sub_app": "NIGHT_SEQ",
+             "effective_hrs": 8.0, "sla_ceil": 7.5, "schedule_type": "DAILY"}
+            for d in range(1, 6)]
+    r = ce.compute_window_compliance(recs, {})
+    if r["breach_days"] != 5:
+        _fail(f"ARCHETYPE cross-midnight: expected 5 breaches, got {r['breach_days']}")
+
+    # D) Every sub-app cyclic/outbound — zero scorable denominator. Must be N/A
+    #    (warned), NOT a misleading 0% catastrophic verdict.
+    recs = [{"run_date": f"2025-12-{d:02d}", "sub_app": "OB", "effective_hrs": 20,
+             "sla_ceil": 6, "schedule_type": "OUTBOUND"} for d in range(1, 6)]
+    r = ce.compute_window_compliance(recs, {})
+    if r["total_windows"] != 0:
+        _fail(f"ARCHETYPE zero-denom: expected 0 windows, got {r['total_windows']}")
+    if not any("No scorable" in w for w in r["warnings"]):
+        _fail("ARCHETYPE zero-denom: 0% returned with NO 'no scorable windows' warning "
+              "— reads as total failure, the silent-wrong-answer trap")
+
+    # E) Structural breach on a weekly workflow. Denominator MUST be days-it-ran (4),
+    #    not calendar days — else 3/4 dilutes to 3/30 and never trips structural.
+    recs = [{"run_date": f"2025-12-{d:02d}", "sub_app": "WK", "schedule_type": "DAILY",
+             "effective_hrs": (3.0 if d == 1 else 10.0), "sla_ceil": 6.0}
+            for d in (1, 8, 15, 22)]
+    r = ce.compute_window_compliance(recs, {})
+    wk = {s["sub_app"]: s for s in r["per_sub_app"]}["WK"]
+    if wk["total_windows"] != 4 or wk["pattern"] != "structural":
+        _fail(f"ARCHETYPE weekly-structural: expected tw=4/structural (3/4 ran), got "
+              f"tw={wk['total_windows']}/{wk['pattern']}")
+
+    # F) No BatchSLA XLSX — empty ceiling_map falls back to daily default. A short
+    #    job must read compliant (meaningful), not get a silent wrong ceiling.
+    recs = [{"run_date": f"2025-12-{d:02d}", "sub_app": "D", "effective_hrs": 3.0,
+             "sla_ceil": None, "schedule_type": "DAILY"} for d in range(1, 4)]
+    r = ce.compute_window_compliance(recs, {})  # no ceiling map at all
+    if r["total_windows"] != 3 or r["compliance_pct"] != 100.0:
+        _fail(f"ARCHETYPE no-xlsx fallback: expected 3 windows/100%, got "
+              f"{r['total_windows']}/{r['compliance_pct']}%")
+
+    print("  [OK] archetypes: single·mixed·cross-midnight·zero-denom(N/A warned)·"
+          "weekly-structural(4 ran)·no-xlsx fallback — all give honest verdicts")
+
+
 def main() -> None:
     print("Window-compliance keystone regression suite")
     print("-" * 60)
@@ -203,6 +273,7 @@ def main() -> None:
     test_legacy_per_date_records_still_work()
     test_grade_floor_caps_at_c_with_any_critical()
     test_breach_attribution_is_traceable()
+    test_customer_archetypes()
     print("-" * 60)
     print("ALL REGRESSION CHECKS PASSED")
 
