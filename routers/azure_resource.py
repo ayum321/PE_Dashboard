@@ -941,7 +941,7 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
                 if not prior or not hist:
                     continue
                 recent = {"mean": float(st.get("mean", 0.0)), "std": float(st.get("std", 0.0))}
-                rc = detect_regime_change(recent, prior, k=pe_config.ANOMALY_Z_THRESHOLD)
+                rc = detect_regime_change(recent, prior, k=pe_config.REGIME_DRIFT_Z_THRESHOLD)
                 if not rc["detected"]:
                     continue
                 arrow = "↑" if rc["direction"] == "up" else "↓"

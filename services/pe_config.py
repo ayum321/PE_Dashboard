@@ -187,6 +187,11 @@ MIN_BASELINE_PULLS: int = 3
 # prior + MIN_BASELINE_PULLS recent (≥8 total), else suppressed as insufficient
 # history. Emits a 'regime_change' pattern, never escalates existing anomalies.
 MIN_PRIOR_PULLS: int = 5
+# Regime-drift sensitivity, separated from ANOMALY_Z_THRESHOLD so gradual drift
+# (e.g. 15→18→22→26% over 8 pulls) can be tuned independently of live-spike
+# sensitivity once real multi-customer history exists. Defaults to the live z so
+# behaviour is identical today — separation is for empirical calibration later.
+REGIME_DRIFT_Z_THRESHOLD: float = 2.0
 
 # ── Batch runtime comparison — suspect "near-instant collapse" guard ──────────
 # In a PROD-vs-TEST batch runtime file, a job whose runtime collapses from a
@@ -392,7 +397,7 @@ def reload() -> None:
     global FJ_PEN_SLA_PER_PCT, FJ_PEN_BENCH_PER_PCT, FJ_PEN_RES_CRIT_PER, FJ_PEN_RES_DUAL_PER, FJ_PEN_SOW_PER
     global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
     global PATTERN_MIN_OCCURRENCES, PATTERN_MIN_RATIO, PREDICT_MIN_R2
-    global BASELINE_RETENTION_DAYS, MIN_BASELINE_PULLS, MIN_PRIOR_PULLS
+    global BASELINE_RETENTION_DAYS, MIN_BASELINE_PULLS, MIN_PRIOR_PULLS, REGIME_DRIFT_Z_THRESHOLD
     global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO
     global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
     global BATCH_DATA_HEAVY_PATTERNS
@@ -468,6 +473,7 @@ def reload() -> None:
     BASELINE_RETENTION_DAYS = int(_f("baseline_retention_days", 90))
     MIN_BASELINE_PULLS      = int(_f("min_baseline_pulls",       3))
     MIN_PRIOR_PULLS         = int(_f("min_prior_pulls",          5))
+    REGIME_DRIFT_Z_THRESHOLD = _f("regime_drift_z_threshold", ANOMALY_Z_THRESHOLD)
     BATCH_NOWORK_SEC           = _f("batch_nowork_sec",            5.0)
     BATCH_COLLAPSE_MIN_OLD_SEC = _f("batch_collapse_min_old_sec", 30.0)
     BATCH_COLLAPSE_RATIO       = _f("batch_collapse_ratio",        0.05)
