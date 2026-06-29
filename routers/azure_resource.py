@@ -48,7 +48,23 @@ from services.azure_monitor import (
     search_vms,
 )
 from services.resource_calculator import build_resource_payload
+from services import baseline_store
 router = APIRouter()
+
+
+def _baseline_ns(resource_id: str, vm_name: str) -> tuple[str, str]:
+    """Customer + VM namespace for the baseline store, parsed from the ARM
+    resource id (/subscriptions/<sub>/.../virtualMachines/<vm>). Falls back to
+    'default' when the subscription segment is absent so the store never breaks."""
+    cust, vm = "default", vm_name
+    parts = (resource_id or "").split("/")
+    for i, seg in enumerate(parts):
+        low = seg.lower()
+        if low == "subscriptions" and i + 1 < len(parts):
+            cust = parts[i + 1]
+        elif low == "virtualmachines" and i + 1 < len(parts):
+            vm = parts[i + 1]
+    return cust, vm
 
 # ── Per-session identity ──────────────────────────────────────────────────────
 # Azure credentials are scoped per browser session (see azure_monitor.py). The
@@ -895,6 +911,27 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
     result = raw["vms"]
     patterns = raw.get("patterns", [])
     baseline = raw.get("baseline", {})
+
+    # ── Baseline persistence: record THIS pull's classified spikes + μ/σ snapshot
+    # AFTER classification, BEFORE the display filter (so NOTABLE history is kept).
+    # Failure-isolated: a locked/full DB must never 500 the Azure pull. customer +
+    # vm namespace come from the ARM resource id so no extra request field is needed.
+    for vm_name, vm_data in result.items():
+        try:
+            rid = vm_data.get("resource_id", "") or vm_name
+            cust, vm_ns = _baseline_ns(rid, vm_name)
+            stats = vm_data.get("stats", {})
+            for metric, splist in vm_data.get("spikes", {}).items():
+                st = stats.get(metric, {})
+                baseline_store.record_pull(
+                    cust, vm_ns, metric, splist,
+                    float(st.get("mean", 0.0)), float(st.get("std", 0.0)),
+                    int(st.get("count", 0)))
+            # CPU is the representative metric for the card's confidence badge.
+            vm_data["baseline_confidence"] = baseline_store.baseline_confidence(
+                cust, vm_ns, "Percentage CPU")
+        except Exception as exc:
+            logger.warning("baseline_store record failed for %s: %s", vm_name, exc)
 
     # ── Spike filter: keep critical + warning; drop only "normal" noise ──────────
     # Previously "critical_only" silenced warning-level spikes server-side,

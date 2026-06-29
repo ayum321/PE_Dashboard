@@ -7060,6 +7060,17 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   const ddEnvColor = ddEnv === "PROD" ? THEME.red : ddEnv === "TEST" ? THEME.amber : ddEnv === "DEV" ? THEME.cyan : "";
   const ddEnvTag = ddEnv ? `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${ddEnvColor};background:${hexA(ddEnvColor,0.12)}">${ddEnv}</span>` : "";
 
+  // Baseline-confidence badge — formatted locally from the raw dict so display
+  // can change without a backend deploy. Degraded (<min pulls) pulses amber:
+  // anomaly detection is on session-only μ/σ, not historical. Trusted = green.
+  const bc = vmData.baseline_confidence;
+  let baselineBadge = "";
+  if (bc) {
+    baselineBadge = bc.degraded
+      ? `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${bc.min_pulls} pulls stored — anomaly detection uses session-only baseline (degraded). Trusts historical after ${bc.min_pulls}.">Baseline: ${bc.pulls}/${bc.min_pulls} — session only</span>`
+      : `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} stored pulls over ${bc.retention_days} days.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d</span>`;
+  }
+
   card.innerHTML = `
     <div class="flex items-center justify-between gap-2 flex-wrap">
       <div class="flex items-center gap-2">
@@ -7067,6 +7078,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         <span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.border,0.4)}">${ddRole}</span>
         ${ddEnvTag}
         ${sevBadge}
+        ${baselineBadge}
       </div>
       <div class="text-[10px] text-Cmuted">${headerStats}</div>
     </div>
