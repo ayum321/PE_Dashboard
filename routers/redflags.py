@@ -411,6 +411,71 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             f"{breach_count} breaches + {len(critical_srvs)} critical servers",
         )
 
+    # ── Dynamic PE batch-review question bank ────────────────────
+    # Turn whatever the Ctrl-M upload actually shows into specific, plain-English
+    # consultative questions (named jobs, real old→new times, named breach days).
+    # Hydrate the richer batch detail from session_cache because the frontend
+    # red-flags payload only carries headline KPIs.
+    try:
+        from services import session_cache as _sc
+        from services.batch_questions import generate_batch_questions, SEV_RANK
+
+        _last_batch = _sc.get("last_batch") or {}
+
+        def _src(*keys):
+            for k in keys:
+                v = _sc.ac_get(k)
+                if v:
+                    return v
+            for k in keys:
+                v = _last_batch.get(k)
+                if v:
+                    return v
+            return None
+
+        # Lifecycle hint: a TEST/UAT dataset frames questions toward go-live.
+        _env_names = [
+            str(s.get("Sub_Application") or s.get("sub_application") or "")
+            for s in (body.sub_stats or [])
+        ]
+        _is_test = any(
+            str(n).upper().startswith(("TEST_", "UAT_", "SIT_", "QA_", "STG_", "DEV_"))
+            for n in _env_names
+        )
+        _lifecycle = "go-live" if _is_test else ""
+
+        _qctx = {
+            "kpis":        bk or _last_batch.get("kpis"),
+            "job_summary": _src("job_summary", "batch_top_jobs") or body.top_breaches,
+            "anomalies":   body.anomalies or _src("regression_df"),
+            "window":      _src("daily_window_series"),
+            "sla_matrix":  sla_mx or _sc.get("last_sla_matrix"),
+            "benchmark":   _sc.get("last_benchmark"),
+            "sub_stats":   body.sub_stats,
+        }
+
+        _bank = generate_batch_questions(_qctx, lifecycle=_lifecycle)
+        # Red-flags already emits a repeat-offender flag above; drop the bank's
+        # duplicate so the same finding is not shown twice.
+        for _bq in _bank:
+            if _bq.get("root_cause") == "REPEAT_BREACH" and sla_mx:
+                continue
+            add_flag(
+                _bq["category"], _bq["observation"], _bq["question"],
+                _bq["severity"], _bq["evidence"],
+            )
+            if SEV_RANK.get(_bq["severity"], 0) >= SEV_RANK["CRITICAL"]:
+                risk_matrix.append(RiskItem(
+                    area=_bq["category"],
+                    risk="CRITICAL",
+                    impact=_bq["observation"],
+                    recommendation=_bq["question"],
+                ))
+    except Exception as _qe:  # question bank is additive — never break red-flags
+        import logging
+        logging.getLogger("pe_dashboard.redflags").warning(
+            "batch question bank failed: %s", _qe)
+
     # ── Standard PE pre-go-live questions ───────────────────────
     add_flag(
         "Testing",
