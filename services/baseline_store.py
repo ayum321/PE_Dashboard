@@ -122,3 +122,23 @@ def historical_baseline(customer_id: str, vm_id: str, metric: str) -> Optional[d
     mean = sum(r[0] * r[2] for r in rows) / tot
     std = sum(r[1] * r[2] for r in rows) / tot
     return {"mean": mean, "std": std, "pulls": len(rows), "n": tot}
+
+
+def get_prior_baseline(customer_id: str, vm_id: str, metric: str,
+                       exclude_recent_n: int = 3) -> Optional[dict]:
+    """Pooled μ/σ from snapshots OLDER than the last `exclude_recent_n` pulls — the
+    "prior regime" half of a regime-drift comparison. Returns None when fewer than
+    MIN_PRIOR_PULLS remain after excluding the recent window, so drift only fires
+    with ≥ MIN_PRIOR_PULLS prior + exclude_recent_n recent (≥8 total by default)."""
+    with _lock:
+        conn = _connect()
+        rows = conn.execute(
+            "SELECT mean, std, n FROM baseline_snapshots WHERE customer_id=? AND vm_id=? AND metric=? "
+            "ORDER BY pull_ts ASC", (customer_id, vm_id, metric)).fetchall()
+    prior = rows[:-exclude_recent_n] if exclude_recent_n > 0 else rows
+    if len(prior) < pe_config.MIN_PRIOR_PULLS:
+        return None
+    tot = sum(r[2] for r in prior) or 1
+    mean = sum(r[0] * r[2] for r in prior) / tot
+    std = sum(r[1] * r[2] for r in prior) / tot
+    return {"mean": mean, "std": std, "pulls": len(prior), "n": tot}

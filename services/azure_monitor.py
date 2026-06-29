@@ -1018,6 +1018,24 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     return spikes
 
 
+def detect_regime_change(recent_baseline: dict, prior_baseline: dict,
+                         k: float = 2.0) -> dict:
+    """Pure two-window step-change test. Compares recent vs prior pooled (mean,std);
+    flags a regime shift when the gap exceeds k pooled σ. No DB, no side effects.
+    Returns {detected, delta_sigma, direction, mean_recent, mean_prior}."""
+    mr, sr = float(recent_baseline["mean"]), float(recent_baseline["std"])
+    mp, sp = float(prior_baseline["mean"]), float(prior_baseline["std"])
+    pooled = ((sr * sr + sp * sp) / 2.0) ** 0.5
+    delta_sigma = round((mr - mp) / pooled, 2) if pooled else 0.0
+    return {
+        "detected": abs(delta_sigma) >= k,
+        "delta_sigma": delta_sigma,
+        "direction": "up" if mr >= mp else "down",
+        "mean_recent": round(mr, 1),
+        "mean_prior": round(mp, 1),
+    }
+
+
 def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int = 24) -> list:
     """Detect recurring and cross-VM patterns from spike data.
 

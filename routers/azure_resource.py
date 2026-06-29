@@ -38,6 +38,7 @@ from services.azure_monitor import (
     browser_login,
     clear_browser_credential,
     clear_vm_inventory_cache,
+    detect_regime_change,
     discover_vms,
     fetch_vm_metrics,
     fetch_vm_timeseries,
@@ -49,6 +50,7 @@ from services.azure_monitor import (
 )
 from services.resource_calculator import build_resource_payload
 from services import baseline_store
+from services import pe_config
 router = APIRouter()
 
 
@@ -930,6 +932,31 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
             # CPU is the representative metric for the card's confidence badge.
             vm_data["baseline_confidence"] = baseline_store.baseline_confidence(
                 cust, vm_ns, "Percentage CPU")
+            # Regime-drift: step-change between the prior window and this pull. Fires
+            # only when both prior (>=MIN_PRIOR_PULLS) and historical gates pass, so
+            # it never escalates an existing spike — it's a separate classification.
+            for metric, st in stats.items():
+                prior = baseline_store.get_prior_baseline(cust, vm_ns, metric)
+                hist = baseline_store.historical_baseline(cust, vm_ns, metric)
+                if not prior or not hist:
+                    continue
+                recent = {"mean": float(st.get("mean", 0.0)), "std": float(st.get("std", 0.0))}
+                rc = detect_regime_change(recent, prior, k=pe_config.ANOMALY_Z_THRESHOLD)
+                if not rc["detected"]:
+                    continue
+                arrow = "↑" if rc["direction"] == "up" else "↓"
+                patterns.append({
+                    "type": "regime_change",
+                    "severity": "high",
+                    "title": f"Regime shift {arrow} on {vm_name} ({metric})",
+                    "description": (
+                        f"{metric} mean shifted from μ={rc['mean_prior']}% to "
+                        f"μ={rc['mean_recent']}% ({'+' if rc['delta_sigma'] >= 0 else ''}{rc['delta_sigma']}σ) "
+                        f"vs the prior {prior['pulls']}-pull baseline."
+                    ),
+                    "vms": [vm_name], "recurrence_days": None,
+                    "delta_sigma": rc["delta_sigma"], "direction": rc["direction"],
+                })
         except Exception as exc:
             logger.warning("baseline_store record failed for %s: %s", vm_name, exc)
 

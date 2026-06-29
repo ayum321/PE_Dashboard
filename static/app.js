@@ -6140,7 +6140,29 @@ let _deepDivePatterns = [];   // stored for export
 
 function _renderDeepDivePatterns(patterns) {
   _deepDivePatterns = patterns || [];
-  // No visible rendering — patterns feed into export report only.
+  // Most patterns feed the export report only. Regime shifts are surfaced inline
+  // as compact chips — same visual weight as "likely recurring", not a severity
+  // escalation. Worst offenders first so a PE lead sees the biggest step-change.
+  const banner = document.getElementById("deepdive-spike-banner");
+  let row = document.getElementById("deepdive-regime-row");
+  const regimes = _deepDivePatterns
+    .filter(p => p.type === "regime_change")
+    .sort((a, b) => Math.abs(b.delta_sigma || 0) - Math.abs(a.delta_sigma || 0));
+  if (!regimes.length) { row?.remove(); return; }
+  if (!row && banner) {
+    row = document.createElement("div");
+    row.id = "deepdive-regime-row";
+    row.className = "flex items-center gap-2 flex-wrap mb-1";
+    banner.parentNode.insertBefore(row, banner);
+  }
+  if (!row) return;
+  row.innerHTML = regimes.map(p => {
+    const arrow = p.direction === "up" ? "↑" : "↓";
+    const c = "#a78bfa";
+    return `<span class="text-[10px] font-semibold px-2 py-1 rounded-full cursor-help"
+      style="color:${c};background:${hexA(c,0.12)};border:1px solid ${hexA(c,0.3)}"
+      title="${escapeHtml(p.description || "")}">Regime shift ${arrow} ${escapeHtml((p.vms||[])[0]||"")}</span>`;
+  }).join("");
 }
 
 // ── Heatmap column binning ────────────────────────────────────
