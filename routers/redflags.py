@@ -40,7 +40,7 @@ class RedFlagsRequest(BaseModel):
 
 class RedFlag(BaseModel):
     id:         str   # Q1, Q2, …
-    category:   str   # CPU | Memory | Batch | DR | Scheduling | Governance | Correlation | Testing
+    category:   str   # Volume | CPU | Memory | Batch | DR | Scheduling | Governance | Correlation | Testing
     context:    str   # One-sentence observation (with numbers)
     question:   str   # The PE investigation question
     risk:       str   # CRITICAL | HIGH | MEDIUM | LOW
@@ -410,6 +410,47 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             "CRITICAL",
             f"{breach_count} breaches + {len(critical_srvs)} critical servers",
         )
+
+    # ── Volume / SOW commitment flags ────────────────────────────
+    # Compare delivered DFU / SKU / item-location actuals against the SOW targets
+    # so a reviewer can challenge a partial TEST load (under-volume) or an
+    # over-commitment (above the contracted ceiling) before sign-off. Driven purely
+    # by the uploaded/entered numbers — generic across every customer.
+    _sow_cmp     = (body.model_extra or {}).get("sow_compare") or {}
+    _sow_metrics = _sow_cmp.get("metrics") if isinstance(_sow_cmp, dict) else None
+    if isinstance(_sow_metrics, list):
+        for _m in _sow_metrics:
+            if not isinstance(_m, dict):
+                continue
+            _label   = str(_m.get("label") or _m.get("key") or "Volume metric").strip()
+            _sow_v   = _f(_m.get("sow"), 0.0)
+            _act_raw = _m.get("actual")
+            if _act_raw is None or _sow_v <= 0:
+                continue  # no target or no actual → nothing to challenge
+            _act_v = _f(_act_raw, 0.0)
+            _pct   = _f(_m.get("pct")) if _m.get("pct") is not None else round(_act_v / _sow_v * 100, 1)
+            _act_s = f"{_act_v:,.0f}"
+            _sow_s = f"{_sow_v:,.0f}"
+            if _pct < 70:
+                add_flag(
+                    "Volume",
+                    f"{_label} is only {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}).",
+                    f"Is this an intentional partial load for the TEST environment, or a genuine "
+                    f"data gap? Please confirm whether {_act_s} represents the full "
+                    f"{_label.lower()} in scope for this phase.",
+                    "HIGH" if _pct < 50 else "MEDIUM",
+                    f"{_label}: {_pct:.0f}% of SOW",
+                )
+            elif _pct > 110:
+                add_flag(
+                    "Volume",
+                    f"{_label} is {_pct:.1f}% of the SOW ceiling ({_act_s} vs {_sow_s}) — above the contracted volume.",
+                    f"Has additional infrastructure capacity been sized for this overage, and "
+                    f"does the SOW need a commercial revision to reflect the higher "
+                    f"{_label.lower()}?",
+                    "MEDIUM",
+                    f"{_label}: {_pct:.0f}% of SOW",
+                )
 
     # ── Dynamic PE batch-review question bank ────────────────────
     # Turn whatever the Ctrl-M upload actually shows into specific, plain-English

@@ -10555,6 +10555,77 @@ function renderPeNarrative(data) {
     uat:            THEME.green,
   };
 
+  // ── Customer questions, distributed into their owning section ──────────────
+  // The deterministic /red-flags bank already produced specific, evidence-cited
+  // questions for this audit. Rather than dumping them in one card, we attach the
+  // strongest few to the section they belong to — SOW/volume gaps under Data
+  // Volume, batch & SLA asks under Batch Execution, resource pressure under
+  // Infrastructure, readiness/governance under UAT — so the reviewer reads the
+  // observation and the question right beside the data that triggered it.
+  const Q_SECTION = {
+    "Volume":               "data_volume",
+    "Batch":                "batch_sla",
+    "Scheduling":           "batch_sla",
+    "SLA & Scheduling":     "batch_sla",
+    "SLA-Matrix":           "batch_sla",
+    "Runtime & Regression": "batch_sla",
+    "Execution Failures":   "batch_sla",
+    "Correlation":          "batch_sla",
+    "CPU":                  "infrastructure",
+    "Memory":               "infrastructure",
+    "Infrastructure":       "infrastructure",
+    "Testing":              "uat",
+    "DR":                   "uat",
+    "Monitoring":           "uat",
+    "Governance":           "uat",
+  };
+  const Q_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  const Q_DOT  = { CRITICAL: THEME.red, HIGH: THEME.amber, MEDIUM: THEME.blue, LOW: THEME.green };
+  const _qFlags = (window.appData && window.appData.redFlags && Array.isArray(window.appData.redFlags.flags))
+    ? window.appData.redFlags.flags : [];
+  const qBySection = {};
+  _qFlags.forEach((f) => {
+    const sid = Q_SECTION[f && f.category];
+    if (!sid) return;
+    (qBySection[sid] = qBySection[sid] || []).push(f);
+  });
+
+  const _sectionQuestionsHtml = (sid, accent) => {
+    const items = (qBySection[sid] || []).slice()
+      .sort((a, b) => (Q_RANK[a.risk] ?? 9) - (Q_RANK[b.risk] ?? 9));
+    if (!items.length) return "";
+    const MAXQ  = 3;
+    const shown = items.slice(0, MAXQ);
+    const extra = items.length - shown.length;
+    const rows = shown.map((f) => {
+      const dot  = Q_DOT[f.risk] || THEME.blue;
+      const chip = f.data_point
+        ? `<span class="text-[9px] font-mono text-Cmuted shrink-0 ml-2 mt-0.5">${_esc(f.data_point)}</span>`
+        : "";
+      return `<div class="py-1.5 border-b border-Cborder/20 last:border-0">
+        <div class="flex items-start gap-2">
+          <span class="w-1.5 h-1.5 rounded-full shrink-0 mt-[6px]" style="background:${dot}"></span>
+          <div class="flex-1 min-w-0">
+            ${f.context ? `<p class="text-[11px] text-Cmuted leading-snug">${_esc(f.context)}</p>` : ""}
+            <p class="text-[12px] text-Cwhite/90 font-medium leading-snug mt-0.5">${_esc(f.question || "")}</p>
+          </div>
+          ${chip}
+        </div>
+      </div>`;
+    }).join("");
+    const more = extra > 0
+      ? `<p class="text-[10px] text-Cmuted/70 italic mt-1.5">+${extra} more question${extra > 1 ? "s" : ""} for this area in the Red Flags export.</p>`
+      : "";
+    return `<div class="px-4 py-3 border-t border-Cborder/30" style="background:${hexA(accent, 0.04)}">
+        <p class="text-[10px] uppercase tracking-wider font-semibold mb-1.5 flex items-center gap-1.5"
+           style="color:${hexA(accent, 0.95)}">
+          <span>Questions to raise with the customer</span>
+          <span class="text-Cmuted/60 normal-case font-normal tracking-normal">— evidence-cited, from this audit</span>
+        </p>
+        ${rows}${more}
+      </div>`;
+  };
+
   (data.sections || []).forEach((sec, idx) => {
     const accent = sectionAccent[sec.id] || THEME.cyan;
     const block = document.createElement("div");
@@ -10610,7 +10681,8 @@ function renderPeNarrative(data) {
          </div>`
       : "";
 
-    block.innerHTML = headHtml + provHtml + panelHtml + proseHtml + captionHtml + tableHtml;
+    block.innerHTML = headHtml + provHtml + panelHtml + proseHtml + captionHtml + tableHtml
+                    + _sectionQuestionsHtml(sec.id, accent);
     wrap.appendChild(block);
   });
 }
@@ -13211,6 +13283,8 @@ async function _triggerRedFlagsImpl() {
     sub_stats:     window.appData.batch?.sub_stats    || [],
     // Hardwired interconnection — SLA Matrix output drives matched red flags
     sla_matrix:    window.appData.slaMatrix || null,
+    // SOW vs actual volume — feeds the Data Volume questions (DFU/SKU under/over target)
+    sow_compare:   window.appData.sowCompare || _buildSowCompareFromManual() || null,
   };
 
   try {
@@ -13222,6 +13296,12 @@ async function _triggerRedFlagsImpl() {
     window.appData.redFlags = data;
     _renderRedFlagsResults(data);
     _renderPeQuestions(data);
+    // The PE narrative may have rendered before these questions existed (the
+    // findings cascade fires red-flags and narrative in parallel) — re-render it
+    // so each narrative section now carries its own customer questions.
+    if (window.appData.peNarrative) {
+      try { renderPeNarrative(window.appData.peNarrative); } catch (_) {}
+    }
     // Cross-pillar cascade — if findings + sla matrix are also loaded, run consultant
     triggerPeConsultant().catch(() => {});
   } catch (err) {
