@@ -174,6 +174,15 @@ PATTERN_MIN_RATIO: float = 0.20
 # trustworthy — R² at/above this. Below it the slope is noise, not a trend.
 PREDICT_MIN_R2: float = 0.60
 
+# ── Baseline persistence (ADR-001: SQLite-WAL store, see services/spike_schema.py) ──
+# Rolling history kept per customer:vm:metric. Pruned on write — unbounded growth
+# across 250+ customers × ~16 VMs × 4 metrics would fill disk fast otherwise.
+BASELINE_RETENTION_DAYS: int = 90
+# Cold-start gate: until a VM has this many stored pulls, anomaly detection falls
+# back to session-only μ/σ (degraded mode). Surface "Baseline: N pulls / 90 days"
+# on the VM card so a PE lead knows whether to trust the anomaly count.
+MIN_BASELINE_PULLS: int = 3
+
 # ── Batch runtime comparison — suspect "near-instant collapse" guard ──────────
 # In a PROD-vs-TEST batch runtime file, a job whose runtime collapses from a
 # multi-minute baseline to a couple of seconds almost never reflects a genuine
@@ -378,6 +387,7 @@ def reload() -> None:
     global FJ_PEN_SLA_PER_PCT, FJ_PEN_BENCH_PER_PCT, FJ_PEN_RES_CRIT_PER, FJ_PEN_RES_DUAL_PER, FJ_PEN_SOW_PER
     global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
     global PATTERN_MIN_OCCURRENCES, PATTERN_MIN_RATIO, PREDICT_MIN_R2
+    global BASELINE_RETENTION_DAYS, MIN_BASELINE_PULLS
     global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO
     global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
     global BATCH_DATA_HEAVY_PATTERNS
@@ -450,6 +460,8 @@ def reload() -> None:
     PATTERN_MIN_OCCURRENCES = int(_f("pattern_min_occurrences", 3))
     PATTERN_MIN_RATIO       = _f("pattern_min_ratio",       0.20)
     PREDICT_MIN_R2          = _f("predict_min_r2",          0.60)
+    BASELINE_RETENTION_DAYS = int(_f("baseline_retention_days", 90))
+    MIN_BASELINE_PULLS      = int(_f("min_baseline_pulls",       3))
     BATCH_NOWORK_SEC           = _f("batch_nowork_sec",            5.0)
     BATCH_COLLAPSE_MIN_OLD_SEC = _f("batch_collapse_min_old_sec", 30.0)
     BATCH_COLLAPSE_RATIO       = _f("batch_collapse_ratio",        0.05)

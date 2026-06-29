@@ -41,6 +41,22 @@ Limit: breaks under multi-instance (load-balanced) FastAPI workers. If/when
        already namespaced and the row shape equals this contract, so it's a
        backend swap, not a schema migration. Define the table from this
        contract verbatim; change here first, never in the store.
+ROLLBACK SIGNAL (the symptom, not the theory): this ADR is INVALIDATED the
+       moment you see `sqlite3.OperationalError: database is locked` under
+       load, OR FastAPI is deployed behind a load balancer with >1 worker /
+       >1 instance. That is the known scaling boundary, not a bug — migrate
+       to Postgres, don't tune SQLite. Single-worker uvicorn = supported.
+
+PERSISTENCE BUILD DECISIONS (locked before build, configured in pe_config):
+    Retention      90-day rolling window, pruned ON WRITE — pe_config
+                   BASELINE_RETENTION_DAYS. 250+ cust × ~16 VM × 4 metric ×
+                   30-day pulls grows fast; never unbounded.
+    Baseline calc  store raw spikes + a per-pull baseline snapshot (μ/σ).
+                   recompute-on-read does not scale and hides drift; the
+                   snapshot trail surfaces step/regime change over weeks.
+    Cold start     history_count < MIN_BASELINE_PULLS (=3) → session-only μ/σ
+                   (degraded). Surface "Baseline: N pulls / 90 days" on the
+                   VM card so the anomaly count is never silently untrusted.
 """
 from __future__ import annotations
 
