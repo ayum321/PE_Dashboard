@@ -36,12 +36,16 @@ from routers import sow as sow_router
 from routers import upload as upload_router
 from routers import azure_resource as azure_resource_router
 
-# ── AI routers (mounted only when pe_config.AI_ENABLED) ─────────
+# ── AI routers ──────────────────────────────────────────────────
+# pe_narrative + pe_consultant build a COMPLETE deterministic review (4-part
+# conclusive verdict + cross-links) with AI off; the LLM only rewrites prose.
+# They must always mount so the conclusive review never disappears. Only the
+# pure-AI routers (ai, agent) are gated behind AI_ENABLED.
 from services import pe_config
+from routers import pe_consultant as pe_consultant_router
+from routers import pe_narrative as pe_narrative_router
 if pe_config.AI_ENABLED:
     from routers import ai as ai_router
-    from routers import pe_consultant as pe_consultant_router
-    from routers import pe_narrative as pe_narrative_router
     from routers import agent as agent_router
 
 # ── Paths ───────────────────────────────────────────────────────
@@ -164,11 +168,13 @@ app.include_router(sow_router.router,         prefix="/api", tags=["sow"])
 app.include_router(final_judgment_router.router, prefix="/api", tags=["judgment"])
 app.include_router(azure_resource_router.router, prefix="/api", tags=["azure"])
 
-# ── AI routers — mounted only when pe_config.AI_ENABLED (disabled by default) ──
+# ── AI routers ────────────────────────────────────────────────────────────────
+# pe_narrative + pe_consultant always mount (deterministic core, AI is optional
+# prose). ai + agent require a live LLM and stay gated behind AI_ENABLED.
+app.include_router(pe_consultant_router.router,  prefix="/api", tags=["consultant"])
+app.include_router(pe_narrative_router.router,   prefix="/api", tags=["pe-narrative"])
 if pe_config.AI_ENABLED:
     app.include_router(ai_router.router,             prefix="/api", tags=["ai"])
-    app.include_router(pe_consultant_router.router,  prefix="/api", tags=["consultant"])
-    app.include_router(pe_narrative_router.router,   prefix="/api", tags=["pe-narrative"])
     app.include_router(agent_router.router,          prefix="/api", tags=["agent"])
 
 
