@@ -6012,6 +6012,7 @@ function loadMetricsDeepDive() {
     // Phase 1: instant — lightweight banner + patterns
     _renderDeepDiveBanner(data.summary);
     _renderDeepDivePatterns(data.patterns || []);
+    _renderSpikeAttribution(data.spike_attribution || null);
 
     // Phase 2: deferred — stagger heavy Plotly heatmaps + Chart.js cards
     const _ddDeferred = [
@@ -6137,6 +6138,7 @@ function _renderDeepDiveBanner(summary) {
 // Pattern computation feeds Fleet Diagnosis cards and export only.
 // The user sees conclusions, never raw computation.
 let _deepDivePatterns = [];   // stored for export
+let _deepDiveAttribution = null;   // spike-to-batch join, stored for export
 
 function _renderDeepDivePatterns(patterns) {
   _deepDivePatterns = patterns || [];
@@ -6165,7 +6167,38 @@ function _renderDeepDivePatterns(patterns) {
   }).join("");
 }
 
-// ── Heatmap column binning ────────────────────────────────────
+// ── Spike-to-batch attribution panel ──────────────────────────
+// The cross-source join: for each Azure spike, which Ctrl-M jobs were executing.
+// Time-coincidence only (no host column in Ctrl-M) — caveat shown so a PE lead
+// reads "concurrent with" not "caused by". Renders below the regime row; hidden
+// when no batch file is loaded or no spike overlapped a run.
+function _renderSpikeAttribution(attr) {
+  _deepDiveAttribution = attr || null;
+  const banner = document.getElementById("deepdive-spike-banner");
+  document.getElementById("deepdive-attr-panel")?.remove();
+  const rows = (attr?.rows || []).filter(r => r.concurrent_jobs > 0);
+  if (!banner || !rows.length) return;
+  const s = attr.summary || {};
+  const panel = document.createElement("div");
+  panel.id = "deepdive-attr-panel";
+  panel.className = "mb-1 rounded-lg px-3 py-2 text-[11px]";
+  panel.style.background = hexA(THEME.cyan, 0.06);
+  panel.style.border = `1px solid ${hexA(THEME.cyan, 0.25)}`;
+  const top = rows.slice(0, 6).map(r => {
+    const pk = r.peak != null ? `${Math.round(r.peak)}%` : "?";
+    const t = r.peak_time ? new Date(r.peak_time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    return `<div class="flex items-center justify-between gap-2 py-0.5">
+      <span class="text-Cmuted truncate">${escapeHtml(r.vm)} · ${escapeHtml(r.metric.replace(" Percentage",""))} ${pk} @ ${t}</span>
+      <span class="font-semibold" style="color:${THEME.cyan}">${r.concurrent_jobs} job${r.concurrent_jobs>1?"s":""} · ${escapeHtml(r.heaviest||"")}${r.heaviest_hrs!=null?` (${r.heaviest_hrs}h)`:""}</span>
+    </div>`;
+  }).join("");
+  panel.innerHTML = `
+    <div class="flex items-center justify-between mb-1">
+      <span class="font-bold text-Cwhite">Spike ↔ Batch attribution</span>
+      <span class="text-[9px] text-Cmuted cursor-help" title="${escapeHtml(s.caveat||"")}">${s.spikes_attributed||0}/${s.spikes_total||0} spikes concurrent with jobs · time-coincidence ⓘ</span>
+    </div>${top}`;
+  banner.parentNode.insertBefore(panel, banner);
+}
 // Reduces a time-axis heatmap to at most 120 display columns by averaging
 // adjacent bins and using the midpoint timestamp. For a 360h/1h-grain window
 // this cuts Plotly's rendering work from 360 columns to 90 (4h bins) — a 4×
@@ -8574,6 +8607,7 @@ function _buildDeepDiveSummary() {
     affected_vms: summary.affected_vms || 0,
     vm_count: summary.vm_count || 0,
     patterns: patterns.slice(0, 5),
+    spike_attribution: _deepDiveAttribution || null,
     per_vm: perVm.slice(0, 10), // top 10 worst VMs
     baseline: {
       days_observed: baseline.days_observed || 0,

@@ -51,6 +51,7 @@ from services.azure_monitor import (
 from services.resource_calculator import build_resource_payload
 from services import baseline_store
 from services import pe_config
+from services.spike_attribution import attribute_spikes
 router = APIRouter()
 
 
@@ -1026,11 +1027,24 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
                 if sev in _INCLUDE_SEVERITIES:
                     affected_vms.add(vm_name)
 
+    # ── Spike-to-batch attribution: which Ctrl-M jobs ran during each spike. The
+    # one cross-source join no other PE tool does. Failure-isolated; empty when no
+    # batch file is cached. Time-coincidence only (no host) — caveat in summary.
+    spike_attr = {"rows": [], "summary": {"spikes_total": 0, "runs_loaded": 0}}
+    try:
+        from services import session_cache as _sc
+        runs = _sc.get("job_runs_df") or []
+        if runs:
+            spike_attr = attribute_spikes(result, runs)
+    except Exception as exc:
+        logger.warning("spike attribution failed: %s", exc)
+
     response = {
         "vms": result,
         "heatmap": heatmap,
         "patterns": patterns,
         "baseline": baseline,
+        "spike_attribution": spike_attr,
         "window": raw.get("window", {}),
         "summary": {
             "vm_count":       len(result),
