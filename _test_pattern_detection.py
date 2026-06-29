@@ -6,6 +6,9 @@ Locks the three production-grade hardening fixes so they can't silently regress:
   2. ratio surfaced in title        : "(d/N days, P%)" so a PE lead sees the
                                        confidence without reading source
   3. predict_linear time-to-breach  : only emitted when rising AND R2 gate met
+  4. severity absolute-significance   : a z-spike trivial in absolute terms is
+                                        NOTABLE, never WARNING/critical, and the
+                                        badge count == critical rows in table
 
 Generic only — config-driven thresholds, no customer values.
 """
@@ -63,9 +66,25 @@ def main():
     assert rec2["hours_to_warn"] is None, "noisy/flat must not project a breach"
     print("  [OK] flat/noisy -> no false time-to-breach (R2 gate holds)")
 
+    # severity two-gate: 12% CPU z-spike on idle box -> NOTABLE (not WARNING)
+    b = datetime(2025, 1, 1)
+    s = [{"t": (b + timedelta(minutes=i * 5)).isoformat() + "Z", "v": v}
+         for i, v in enumerate([3] * 40 + [12] * 3 + [3] * 40)]
+    sp = az._detect_spikes(s, 2.0, "Percentage CPU")
+    assert sp and all(x["severity"] == "notable" for x in sp), sp
+    crit = sum(1 for x in sp if x["severity"].startswith("critical"))
+    assert crit == 0, "trivial spikes must not count as critical"
+    print(f"  [OK] 12% CPU z-spike -> notable, 0 critical (badge matches table)")
+
+    # sustained 92% CPU > 30min -> critical with high confidence
+    s2 = [{"t": (b + timedelta(minutes=i * 5)).isoformat() + "Z", "v": v}
+          for i, v in enumerate([40] * 20 + [92] * 12 + [40] * 20)]
+    sp2 = az._detect_spikes(s2, 2.0, "Percentage CPU")
+    assert any(x["severity"].startswith("critical") and x["confidence"] == "high" for x in sp2), sp2
+    print("  [OK] sustained 92% CPU -> critical (absolute significance gate)")
+
     print("-" * 60)
     print("ALL PATTERN-DETECTION CHECKS PASSED")
-
 
 if __name__ == "__main__":
     main()

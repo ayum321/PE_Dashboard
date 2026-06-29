@@ -6178,12 +6178,14 @@ function _renderDeepDiveHeatmap(heatmap) {
     y: vmNames,
     type: "heatmap",
     colorscale: [
-      [0,    "#0d1526"],
-      [0.15, "#1e3a5f"],
-      [0.35, "#3b82f6"],
-      [0.55, "#f59e0b"],
-      [0.75, "#ef4444"],
-      [1.0,  "#dc2626"],
+      [0.00, "#0b1220"],   // 0% — base
+      [0.02, "#163a5f"],   // 2% — idle is now VISIBLE (was near-black before)
+      [0.10, "#1e5fa0"],   // 10% — light routine load
+      [0.30, "#2f80ed"],   // 30% — busy but healthy
+      [0.55, "#38bdf8"],   // 55% — elevated
+      [0.75, "#f59e0b"],   // 75% — WARN
+      [0.90, "#ef4444"],   // 90% — CRIT
+      [1.00, "#dc2626"],   // 100%
     ],
     zmin: 0,
     zmax: 100,
@@ -6471,6 +6473,9 @@ function _confBadge(conf) {
     "observed":    { c: THEME.green,  bg: THEME.green },
     "inferred":    { c: THEME.amber,  bg: THEME.amber },
     "weak-signal": { c: THEME.red,    bg: THEME.red },
+    "high":        { c: THEME.green,  bg: THEME.green },
+    "medium":      { c: THEME.amber,  bg: THEME.amber },
+    "low":         { c: THEME.muted,  bg: THEME.muted },
   };
   const cc = colors[conf] || colors["weak-signal"];
   return `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded ml-1" style="color:${cc.c};background:${hexA(cc.bg,0.12)}">${conf}</span>`;
@@ -7036,8 +7041,19 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     headerStats += `${cpuStatsH ? " · " : ""}<span class="text-Ccyan">Mem avail ${memStats.mean}% · min ${memStats.min}% ${memMinTag}</span> <span class="text-[7px] px-0.5 rounded cursor-help" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)}" title="Source: Available Memory Percentage (Azure Monitor Average). Higher = more free memory.">ℹ</span>`;
   }
 
-  let criticalCount = 0;
-  for (const ms of Object.values(spikes)) criticalCount += ms.length;
+  // Count by real severity so the badge matches the spike table exactly.
+  // "critical" = critical + critical_sustained; everything else is a lesser
+  // anomaly (warning/notable). Label the badge to whichever is the headline.
+  let critCount = 0, totalCount = 0;
+  for (const ms of Object.values(spikes)) {
+    for (const s of ms) {
+      totalCount++;
+      if ((s.severity || "").startsWith("critical")) critCount++;
+    }
+  }
+  const sevBadge = critCount > 0
+    ? `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">${critCount} critical</span>`
+    : `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25">${totalCount} anomal${totalCount === 1 ? "y" : "ies"}</span>`;
 
   const ddRole = _inferRole(vmName);
   const ddEnv = _inferEnv(vmName);
@@ -7050,7 +7066,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         <span class="text-xs font-bold text-Cwhite">${escapeHtml(vmName)}</span>
         <span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.border,0.4)}">${ddRole}</span>
         ${ddEnvTag}
-        <span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">${criticalCount} critical</span>
+        ${sevBadge}
       </div>
       <div class="text-[10px] text-Cmuted">${headerStats}</div>
     </div>
@@ -7143,7 +7159,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
         // Bug 3+4: severity-aware labels (sustained, absolute threshold)
         const sev = (s.severity || "critical").toUpperCase().replace("_", " ");
-        const sevColor = sev.includes("SUSTAINED") ? THEME.purple : sev === "WARNING" ? THEME.amber : THEME.red;
+        const sevColor = sev.includes("SUSTAINED") ? THEME.purple : sev === "WARNING" ? THEME.amber : sev === "NOTABLE" ? THEME.muted : THEME.red;
         const detectionTag = s.detection === "absolute_threshold"
           ? `<span class="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
           : "";
@@ -7179,8 +7195,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
         // Bug 5: Show BOTH severity + recurring tag, not just "RECURRING"
         const worstSev = group.some(g => (g.severity || "").includes("sustained")) ? "CRITICAL SUSTAINED"
-          : group.some(g => g.severity === "critical") ? "CRITICAL" : "WARNING";
-        const sevColor = worstSev.includes("SUSTAINED") ? THEME.purple : worstSev === "WARNING" ? THEME.amber : THEME.red;
+          : group.some(g => g.severity === "critical") ? "CRITICAL"
+          : group.some(g => g.severity === "warning") ? "WARNING" : "NOTABLE";
+        const sevColor = worstSev.includes("SUSTAINED") ? THEME.purple : worstSev === "WARNING" ? THEME.amber : worstSev === "NOTABLE" ? THEME.muted : THEME.red;
 
         // Evidence-backed recurring label
         const confLabel = group[0].confidence;
@@ -7222,7 +7239,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     const provLine = `<div class="text-[8px] text-Cmuted mb-1">Source: Azure Monitor · Aggregation: Average · Grain: ${grainLabel || "auto"} · Datapoints: ${firstPts?.length || "?"}</div>`;
 
     spikeTable.innerHTML = `
-      <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Critical Spike Events</div>
+      <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Anomaly & Spike Events</div>
       ${provLine}${sparseWarn}
       <table class="w-full text-left"><thead>
         <tr class="text-[9px] text-Cmuted uppercase tracking-wider">

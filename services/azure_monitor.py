@@ -739,6 +739,29 @@ def _abs_breach_cfg(metric_name: str) -> dict | None:
     return None
 
 
+def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
+                       band: dict) -> tuple:
+    """Two-gate severity: a statistical anomaly only escalates to warning/critical
+    when its ABSOLUTE value is also operationally material. A z-score spike that
+    is statistically unusual for a VM but trivial in absolute terms (e.g. 12% CPU
+    on an idle box) is NOTABLE, never WARNING. ``used_peak`` is in used-% space
+    (higher = worse), so memory must be pre-converted (100 - available). Returns
+    (severity, reason, confidence) — reason/confidence surface so a PE lead can
+    judge the call without reading source.
+    """
+    warn, crit = band["warn"], band["crit"]
+    conf = "high" if z >= z_crit else "medium" if z >= 2.0 else "low"
+    if used_peak >= crit:
+        if dur_min > 30:
+            return "critical_sustained", f"{used_peak:.0f}% ≥ {crit:.0f}% crit for {dur_min}min", "high"
+        if dur_min < 5:
+            return "warning", f"{used_peak:.0f}% ≥ {crit:.0f}% crit but only {dur_min}min — possible artifact", conf
+        return "critical", f"{used_peak:.0f}% ≥ {crit:.0f}% crit for {dur_min}min", "high"
+    if used_peak >= warn:
+        return "warning", f"{used_peak:.0f}% ≥ {warn:.0f}% warn band", conf
+    return "notable", f"statistical anomaly (z={z:.1f}) but {used_peak:.0f}% < {warn:.0f}% warn — not operationally material", conf
+
+
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                    metric_name: str = "") -> list:
     """Detect spikes in a time-series using DUAL classifiers:
@@ -785,6 +808,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     # spike detector, per-VM hot-hours, and fleet hot-hours all read ONE shared
     # threshold set instead of three parallel hardcoded tables.
     abs_cfg = _abs_breach_cfg(metric_name)
+    band = _metric_elevation(metric_name)   # used-% warn/crit for the abs-significance gate
 
     spikes = []
 
@@ -832,16 +856,11 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                     except Exception:
                         dur_min = 0
 
-                    # Duration-aware severity
-                    if spike_z >= z_critical:
-                        if dur_min < 5:
-                            severity = "warning"  # possible artifact
-                        elif dur_min > 30:
-                            severity = "critical_sustained"
-                        else:
-                            severity = "critical"
-                    else:
-                        severity = "warning"
+                    # Two-gate severity: z-score selects the spike, absolute value
+                    # sets the label. used-% = peak for CPU/disk, 100-peak for mem.
+                    used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
+                    severity, sev_reason, conf = _classify_severity(
+                        used_peak, dur_min, spike_z, z_critical, band)
 
                     spikes.append({
                         "start": spike_start,
@@ -850,6 +869,8 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         "peak_time": spike_peak_time,
                         "duration_min": dur_min,
                         "severity": severity,
+                        "severity_reason": sev_reason,
+                        "confidence": conf,
                         "z_score": round(spike_z, 2),
                         "mean": round(mean, 2),
                         "std": round(std, 2),
@@ -866,15 +887,9 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 dur_min = max(1, round((t1 - t0).total_seconds() / 60))
             except Exception:
                 dur_min = 0
-            if spike_z >= z_critical:
-                if dur_min < 5:
-                    severity = "warning"
-                elif dur_min > 30:
-                    severity = "critical_sustained"
-                else:
-                    severity = "critical"
-            else:
-                severity = "warning"
+            used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
+            severity, sev_reason, conf = _classify_severity(
+                used_peak, dur_min, spike_z, z_critical, band)
             spikes.append({
                 "start": spike_start,
                 "end": series_points[-1]["t"],
@@ -882,6 +897,8 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 "peak_time": spike_peak_time,
                 "duration_min": dur_min,
                 "severity": severity,
+                "severity_reason": sev_reason,
+                "confidence": conf,
                 "z_score": round(spike_z, 2),
                 "mean": round(mean, 2),
                 "std": round(std, 2),
@@ -951,6 +968,8 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                                 "peak_time": breach_peak_time,
                                 "duration_min": dur_min,
                                 "severity": sev,
+                                "severity_reason": f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
+                                "confidence": "high",
                                 "z_score": round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
                                 "mean": round(mean, 2),
                                 "std": round(std, 2),
@@ -981,6 +1000,8 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         "peak_time": breach_peak_time,
                         "duration_min": dur_min,
                         "severity": sev,
+                        "severity_reason": f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
+                        "confidence": "high",
                         "z_score": round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
                         "mean": round(mean, 2),
                         "std": round(std, 2),
