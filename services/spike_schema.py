@@ -57,6 +57,11 @@ PERSISTENCE BUILD DECISIONS (locked before build, configured in pe_config):
     Cold start     history_count < MIN_BASELINE_PULLS (=3) → session-only μ/σ
                    (degraded). Surface "Baseline: N pulls / 90 days" on the
                    VM card so the anomaly count is never silently untrusted.
+    NOTABLE→base   NOTABLE spikes are hidden from the table but DO persist to
+                   history (recorded before the display filter). Over 90 days a
+                   quiet VM's μ/σ tightens, so its first 40% spike is correctly
+                   high-σ while a busy VM's is low-σ. Card shows μ/σ in trusted
+                   mode to explain the sensitivity — not a bug, by design.
 """
 from __future__ import annotations
 

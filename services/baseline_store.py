@@ -89,14 +89,23 @@ def record_pull(customer_id: str, vm_id: str, metric: str, spikes: list[dict],
 
 def baseline_confidence(customer_id: str, vm_id: str, metric: str) -> dict:
     """Cold-start gate: how many stored pulls back this VM:metric. degraded=True
-    until MIN_BASELINE_PULLS, so the VM card can show 'Baseline: N / 90 days'."""
+    until MIN_BASELINE_PULLS, so the VM card can show 'Baseline: N / 90 days'.
+    Includes pooled mean/std so the card can explain z-score sensitivity
+    (μ=11.2% σ=1.8% → a 40% spike is 16σ here vs 2σ on a busier server)."""
     with _lock:
         conn = _connect()
-        n = conn.execute(
-            "SELECT COUNT(*) FROM baseline_snapshots WHERE customer_id=? AND vm_id=? AND metric=?",
-            (customer_id, vm_id, metric)).fetchone()[0]
+        rows = conn.execute(
+            "SELECT mean, std, n FROM baseline_snapshots WHERE customer_id=? AND vm_id=? AND metric=?",
+            (customer_id, vm_id, metric)).fetchall()
+    n = len(rows)
+    mean = std = None
+    if n:
+        tot = sum(r[2] for r in rows) or 1
+        mean = round(sum(r[0] * r[2] for r in rows) / tot, 1)
+        std = round(sum(r[1] * r[2] for r in rows) / tot, 1)
     return {"pulls": n, "retention_days": pe_config.BASELINE_RETENTION_DAYS,
-            "min_pulls": pe_config.MIN_BASELINE_PULLS, "degraded": n < pe_config.MIN_BASELINE_PULLS}
+            "min_pulls": pe_config.MIN_BASELINE_PULLS, "degraded": n < pe_config.MIN_BASELINE_PULLS,
+            "baseline_mean": mean, "baseline_std": std}
 
 
 def historical_baseline(customer_id: str, vm_id: str, metric: str) -> Optional[dict]:

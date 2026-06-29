@@ -7065,10 +7065,17 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   // anomaly detection is on session-only μ/σ, not historical. Trusted = green.
   const bc = vmData.baseline_confidence;
   let baselineBadge = "";
-  if (bc) {
-    baselineBadge = bc.degraded
-      ? `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${bc.min_pulls} pulls stored — anomaly detection uses session-only baseline (degraded). Trusts historical after ${bc.min_pulls}.">Baseline: ${bc.pulls}/${bc.min_pulls} — session only</span>`
-      : `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} stored pulls over ${bc.retention_days} days.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d</span>`;
+  if (bc && Number.isFinite(bc.pulls)) {
+    // Derive degraded from counts locally so the label can't disagree with the
+    // number (avoids "5/3 — session only"). Trusted mode shows μ/σ so a PE lead
+    // sees why a spike is 16σ on a quiet box vs 2σ on a busy one.
+    const minP = bc.min_pulls || 3;
+    const degraded = bc.pulls < minP;
+    const muSig = (bc.baseline_mean != null && bc.baseline_std != null)
+      ? ` · μ=${bc.baseline_mean}% σ=${bc.baseline_std}%` : "";
+    baselineBadge = degraded
+      ? `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} pulls stored — anomaly detection uses session-only baseline (degraded). Trusts historical after ${minP}.">Baseline: ${bc.pulls}/${minP} pulls — session only</span>`
+      : `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} stored pulls over ${bc.retention_days}d. μ/σ explain z-score sensitivity.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
   }
 
   card.innerHTML = `
