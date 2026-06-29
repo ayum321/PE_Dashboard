@@ -5345,14 +5345,22 @@ function renderResourceBarChart(servers) {
     return env ? `${truncate(s.server, 18)} [${env}]` : truncate(s.server, 22);
   });
 
+  // Normalise each metric to "% of its warn budget" so a 5% CPU (warn 90) reads
+  // tiny and a 90% mem reads near-full on ONE comparable scale — raw % vs raw %
+  // is misleading (CPU sliver next to mem). DB-expected mem uses the 95% crit
+  // ceiling so SGA/PGA at 90% isn't shown as alarming. Raw % stays in tooltip.
+  const TH = RESOURCE_THRESHOLDS;
+  const budget = (raw, warn) => raw == null ? 0 : Math.min(100, (raw / warn) * 100);
+  const memWarn = (s) => (s.type === "DB" && (s.mem_pct||0) >= TH.db_mem_band_low) ? TH.db_mem_crit : TH.mem_warn;
+
   charts.resourceBars = new Chart(canvas.getContext("2d"), {
     type: "bar",
     data: {
       labels,
       datasets: [
-        { label: "CPU %",       data: top.map((s) => s.cpu_pct  || 0), backgroundColor: "rgba(59,130,246,0.8)",  borderColor: "#3b82f6",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
-        { label: "Mem Used %", data: top.map((s) => s.mem_pct  || 0), backgroundColor: "rgba(245,158,11,0.7)",  borderColor: "#f59e0b",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
-        { label: "Disk %",     data: top.map((s) => s.disk_pct || 0), backgroundColor: "rgba(168,85,247,0.8)",  borderColor: "#a855f7",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "CPU %",       data: top.map((s) => budget(s.cpu_pct, TH.cpu_warn)),  backgroundColor: "rgba(59,130,246,0.8)",  borderColor: "#3b82f6",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "Mem Used %", data: top.map((s) => budget(s.mem_pct, memWarn(s))), backgroundColor: "rgba(245,158,11,0.7)",  borderColor: "#f59e0b",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
+        { label: "Disk %",     data: top.map((s) => budget(s.disk_pct, TH.disk_warn)),  backgroundColor: "rgba(168,85,247,0.8)",  borderColor: "#a855f7",  borderWidth: 1, borderRadius: 4, barPercentage: 0.82, categoryPercentage: 0.78 },
       ],
     },
     options: {
@@ -5379,8 +5387,9 @@ function renderResourceBarChart(servers) {
           callbacks: {
             label: (ctx) => {
               const srv = top[ctx.dataIndex];
-              let lbl = ` ${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)}%`;
-              // Annotate DB servers in expected SGA/PGA memory band
+              const raw = ctx.datasetIndex === 0 ? srv?.cpu_pct : ctx.datasetIndex === 1 ? srv?.mem_pct : srv?.disk_pct;
+              const warn = ctx.datasetIndex === 0 ? RESOURCE_THRESHOLDS.cpu_warn : ctx.datasetIndex === 1 ? memWarn(srv) : RESOURCE_THRESHOLDS.disk_warn;
+              let lbl = ` ${ctx.dataset.label}: ${raw != null ? raw.toFixed(1) : "0.0"}% raw · ${ctx.parsed.x.toFixed(0)}% of ${warn}% budget`;
               if (ctx.datasetIndex === 1 && srv?.type === "DB"
                   && (srv.mem_pct || 0) >= 80 && (srv.mem_pct || 0) <= 92) {
                 lbl += " (DB expected — SGA/PGA)";
@@ -5396,7 +5405,7 @@ function renderResourceBarChart(servers) {
           min: 0, max: 105,
           grid:   { color: "rgba(255,255,255,0.04)", drawBorder: false },
           ticks:  { color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" }, callback: (v) => `${v}%`, stepSize: 25 },
-          title:  { display: true, text: "Utilisation % (longer bar = more pressure)", color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" } },
+          title:  { display: true, text: "% of warn threshold (100% = at warning)", color: THEME.muted, font: { size: 11, family: "Sora, sans-serif" } },
         },
         y: {
           grid:  { display: false },
@@ -5404,7 +5413,7 @@ function renderResourceBarChart(servers) {
         },
       },
     },
-    plugins: [resourceThresholdLinesPlugin(75, 90)],
+    plugins: [resourceThresholdLinesPlugin(83, 100)],
   });
 
   // Enterprise: export toolbar
@@ -5473,8 +5482,8 @@ function renderResourceHeatmap(servers) {
   const barCell = (val, ok = 60, warn = 80, opts = {}) => {
     if (val == null || isNaN(Number(val)) || val < 0) {
       if (opts.showGapWarning) {
-        return `<div class="metric-bar-track" title="No disk I/O telemetry collected for this server — monitoring gap, not idle"><div class="metric-bar-fill" style="width:0%;background:${hexA(THEME.amber,0.25)}"></div></div>
-              <div class="text-[9px] text-right mt-0.5 font-semibold whitespace-nowrap" style="color:${THEME.amber};min-width:3rem" title="No disk I/O telemetry collected — monitoring gap, not confirmed idle">⚠ monitoring gap</div>`;
+        return `<div class="metric-bar-track" title="Disk bandwidth % not emitted by this VM SKU/agent — metric absent, not idle. Confirm OS disk monitoring is enabled."><div class="metric-bar-fill" style="width:0%;background:${hexA(THEME.amber,0.25)}"></div></div>
+              <div class="text-[9px] text-right mt-0.5 font-semibold whitespace-nowrap" style="color:${THEME.amber};min-width:3rem" title="Disk bandwidth % not emitted by this VM SKU/agent — metric absent, not idle">⚠ no disk metric</div>`;
       }
       return `<div class="metric-bar-track" title="No data"><div class="metric-bar-fill" style="width:0%;background:#475569"></div></div>
               <div class="text-[10px] text-Cmuted text-right mt-0.5 font-mono" style="min-width:3rem">N/A</div>`;
