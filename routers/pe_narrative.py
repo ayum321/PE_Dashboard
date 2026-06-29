@@ -785,29 +785,58 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     # jobs. Overrun is kept honest/positive by only listing days whose runtime
     # actually exceeded the ceiling.
     _win_recs = b.get("window") or []
-    if sla_limit:
-        _ceil = float(sla_limit)
-        _breach_rows = []
-        for w in _win_recs:
-            if not w.get("breach"):
-                continue
-            _rt = _num(w.get("elapsed_hrs")) or 0.0
-            if _rt <= 0:
-                _rt = _num(w.get("total_hrs")) or 0.0
-            if _rt <= _ceil:
-                continue
-            _breach_rows.append((w, _rt, _rt - _ceil))
-        _breach_rows.sort(key=lambda t: t[2], reverse=True)
-        if _breach_rows:
-            for w, _rt, _ov in _breach_rows[:6]:
-                _fc = _int(w.get("fail_count"), 0)
-                _lbl = str(w.get("run_date", "NA")) + (f"  ·  {_fc} job fail" if _fc else "")
-                sla_rows.append([_lbl, f"{_rt:.2f} hrs", f"{_ceil:.1f} hrs", f"+{_ov:.2f} hrs"])
-            sla_headers = ["Breach Date", "Window Runtime", "SLA Ceiling", "Overrun"]
-            table_caption = (
-                f"Days the batch missed its SLA window — worst overrun first "
-                f"({len(_breach_rows)} day(s) breached)."
-            )
+    _global_ceil = _num(sla_limit)
+    _breach_rows = []
+    for w in _win_recs:
+        if not w.get("breach"):
+            continue
+        # Each breach day carries the SPECIFIC sub-app/window that missed, its own
+        # ceiling, its effective runtime, and the exact overrun — emitted per
+        # (sub_app × run_date) by the batch calculator. These differ per day and
+        # per window type (BY_DAILY 6h vs SEQ 7.5h vs WEEKLY 9h vs OUTBOUND 14h),
+        # so they must NOT be flattened to one global ceiling. Prefer them; only
+        # fall back to the whole-day wall-clock vs the global ceiling when a day
+        # was flagged breaching without per-sub-app detail (e.g. deadline-only).
+        _sub_ceil = _num(w.get("breach_sub_ceil"))
+        _sub_rt   = _num(w.get("breach_sub_effective"))
+        _sub_ov   = _num(w.get("breach_overrun_hrs"))
+        _sub_app  = str(w.get("breach_sub_app") or "").strip()
+        if _sub_ceil and _sub_ceil > 0 and _sub_rt is not None and _sub_rt > 0:
+            _ceil = _sub_ceil
+            _rt   = _sub_rt
+            _ov   = _sub_ov if (_sub_ov is not None and _sub_ov > 0) else max(_rt - _ceil, 0.0)
+        elif _global_ceil and _global_ceil > 0:
+            _ceil = _global_ceil
+            _rt   = _num(w.get("effective_hrs")) or _num(w.get("elapsed_hrs")) or _num(w.get("total_hrs")) or 0.0
+            _ov   = _rt - _ceil
+            _sub_app = ""  # no per-window attribution available
+        else:
+            continue
+        if _rt <= 0 or _ov <= 0:
+            continue
+        _breach_rows.append((w, _rt, _ceil, _ov, _sub_app))
+    _breach_rows.sort(key=lambda t: t[3], reverse=True)
+    if _breach_rows:
+        for w, _rt, _ceil, _ov, _sub_app in _breach_rows[:6]:
+            _fc = _int(w.get("fail_count"), 0)
+            # Date · which window breached · job-fail count — names the exact
+            # window so a reader never has to guess which ceiling applies.
+            _bits = []
+            if _sub_app:
+                _bits.append(_sub_app)
+            if _fc:
+                _bits.append(f"{_fc} job fail")
+            _lbl = str(w.get("run_date", "NA"))
+            if _bits:
+                _lbl += "  ·  " + "  ·  ".join(_bits)
+            sla_rows.append([_lbl, f"{_rt:.2f} hrs", f"{_ceil:.1f} hrs", f"+{_ov:.2f} hrs"])
+        sla_headers = ["Breach Date", "Window Runtime", "SLA Ceiling", "Overrun"]
+        _shown = min(len(_breach_rows), 6)
+        _tail = f", worst {_shown} shown" if len(_breach_rows) > 6 else ""
+        table_caption = (
+            f"Days the batch missed its SLA window — worst overrun first "
+            f"({len(_breach_rows)} day(s) breached{_tail})."
+        )
 
     # Priority order for the remaining SLA table rows:
     # 1. Production Ctrl-M breach data (top_breaches) — authoritative measured runtime
@@ -989,7 +1018,24 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         _fail_s  = f"{_int(fail_runs)}" if fail_runs is not None else "—"
         _comp_s  = f"{float(compliance):.1f}%" if compliance is not None else "NA"
         _jsc_s   = f"{float(job_sla_comp):.1f}%" if job_sla_comp is not None else None
-        _sla_s   = f"{float(sla_limit):.1f}h" if sla_limit is not None else "not defined"
+        # Per-window SLA ceiling label. The matrix can define several windows
+        # (e.g. BY_DAILY 6h, SEQ 7.5h, WEEKLY 9h, OUTBOUND 14h); collapsing them
+        # to one number is what produced the "7.5h everywhere" mislabel. Show the
+        # real spread when more than one distinct ceiling is in force.
+        _ceil_vals = set()
+        for _cv in (si.get("ceilings") or {}).values():
+            _cvn = _num(_cv)
+            if _cvn and _cvn > 0:
+                _ceil_vals.add(round(_cvn, 1))
+        for _br in _breach_rows:
+            if _br[2] and _br[2] > 0:
+                _ceil_vals.add(round(_br[2], 1))
+        if len(_ceil_vals) >= 2:
+            _sla_s = f"{min(_ceil_vals):.1f}\u2013{max(_ceil_vals):.1f}h across {len(_ceil_vals)} windows"
+        elif len(_ceil_vals) == 1:
+            _sla_s = f"{next(iter(_ceil_vals)):.1f}h"
+        else:
+            _sla_s = f"{float(sla_limit):.1f}h" if sla_limit is not None else "not defined"
         # Show window compliance as headline (the PE sign-off metric).
         # When only job-day compliance is available, label it clearly so the reader
         # knows it is an estimate and not the authoritative window figure.
