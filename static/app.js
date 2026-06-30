@@ -10612,31 +10612,42 @@ function renderPeNarrative(data) {
     const MAXQ  = 3;
     const shown = items.slice(0, MAXQ);
     const extra = items.length - shown.length;
-    const rows = shown.map((f) => {
-      const dot  = Q_DOT[f.risk] || THEME.blue;
+    const SEV_LABEL = { CRITICAL: "Critical", HIGH: "High", MEDIUM: "Medium", LOW: "Low" };
+    const rows = shown.map((f, i) => {
+      const dot = Q_DOT[f.risk] || THEME.blue;
+      const sev = SEV_LABEL[f.risk] || "Review";
+      // Evidence badge (e.g. "0.63h peak / -11% buffer") sits beneath the
+      // question as a quiet, monospaced chip rather than floating tiny text.
       const chip = f.data_point
-        ? `<span class="text-[9px] font-mono text-Cmuted shrink-0 ml-2 mt-0.5">${_esc(f.data_point)}</span>`
+        ? `<span class="inline-block text-[10.5px] font-mono text-Cmuted bg-Cbg/50 border border-Cborder/40 rounded px-2 py-0.5 mt-1.5">${_esc(f.data_point)}</span>`
         : "";
-      return `<div class="py-1.5 border-b border-Cborder/20 last:border-0">
-        <div class="flex items-start gap-2">
-          <span class="w-1.5 h-1.5 rounded-full shrink-0 mt-[6px]" style="background:${dot}"></span>
+      // Numbered severity badge keeps the list scannable and colour-coded.
+      return `<div class="py-3 border-b border-Cborder/20 last:border-0">
+        <div class="flex items-start gap-3">
+          <span class="inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold shrink-0 mt-0.5"
+                style="background:${hexA(dot, 0.16)};color:${dot}">${i + 1}</span>
           <div class="flex-1 min-w-0">
-            ${f.context ? `<p class="text-[11px] text-Cmuted leading-snug">${_esc(f.context)}</p>` : ""}
-            <p class="text-[12px] text-Cwhite/90 font-medium leading-snug mt-0.5">${_esc(f.question || "")}</p>
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-[9.5px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                    style="background:${hexA(dot, 0.14)};color:${dot}">${sev}</span>
+            </div>
+            ${f.context ? `<p class="text-[12.5px] text-Cwhite/70 leading-relaxed">${_esc(f.context)}</p>` : ""}
+            <p class="text-[13.5px] text-Cwhite font-semibold leading-relaxed mt-1">${_esc(f.question || "")}</p>
+            ${chip}
           </div>
-          ${chip}
         </div>
       </div>`;
     }).join("");
     const more = extra > 0
-      ? `<p class="text-[10px] text-Cmuted/70 italic mt-1.5">+${extra} more question${extra > 1 ? "s" : ""} for this area in the Red Flags export.</p>`
+      ? `<p class="text-[11px] text-Cmuted/70 italic mt-2.5">+${extra} more question${extra > 1 ? "s" : ""} for this area in the Red Flags export.</p>`
       : "";
-    return `<div class="px-4 py-3 border-t border-Cborder/30" style="background:${hexA(accent, 0.04)}">
-        <p class="text-[10px] uppercase tracking-wider font-semibold mb-1.5 flex items-center gap-1.5"
-           style="color:${hexA(accent, 0.95)}">
-          <span>Questions to raise with the customer</span>
-          <span class="text-Cmuted/60 normal-case font-normal tracking-normal">— evidence-cited, from this audit</span>
-        </p>
+    return `<div class="px-4 py-4 border-t border-Cborder/30" style="background:${hexA(accent, 0.05)}">
+        <div class="flex items-baseline gap-2 mb-2.5">
+          <p class="text-[12px] uppercase tracking-wider font-bold" style="color:${hexA(accent, 0.95)}">
+            Questions to raise with the customer
+          </p>
+          <span class="text-[10.5px] text-Cmuted/70 normal-case font-normal tracking-normal">evidence-cited, from this audit</span>
+        </div>
         ${rows}${more}
       </div>`;
   };
@@ -13310,7 +13321,6 @@ async function _triggerRedFlagsImpl() {
     const data = await res.json();
     window.appData.redFlags = data;
     _renderRedFlagsResults(data);
-    _renderPeQuestions(data);
     // The PE narrative may have rendered before these questions existed (the
     // findings cascade fires red-flags and narrative in parallel) — re-render it
     // so each narrative section now carries its own customer questions.
@@ -13415,77 +13425,12 @@ function _renderRedFlagsResults(data) {
 
 
 // ─────────────────────────────────────────────────────────────
-// QUESTIONS TO RAISE WITH THE CUSTOMER — distributes the dynamic PE
-// investigation questions inline into the relevant Batch Review panels
-// (regression → Top Breaching Jobs · SLA/scheduling → Daily Batch Window
-// · failures → execution-failures strip) instead of one giant card.
-// Each strip shows the strongest 2-3 questions for its area. Reads the
-// /red-flags response (data.flags[] with category/risk/context/question).
+// Customer questions are surfaced ONLY on the PE Findings page
+// (inside each narrative section via _sectionQuestionsHtml). The
+// Batch Review page intentionally carries no question strips — it
+// is a metrics view, so the consultative questions live with the
+// audit narrative where the reviewer reads them in context.
 // ─────────────────────────────────────────────────────────────
-function _renderPeQuestions(data) {
-  // Map each question category to one of the three Batch Review strips.
-  const BUCKET = {
-    "Runtime & Regression": "regression",
-    "SLA & Scheduling":     "sla",
-    "Batch":                "sla",
-    "Testing":              "sla",
-    "Execution Failures":   "failures",
-  };
-  const MAX_PER_BUCKET = 3;
-  const RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
-  const DOT = {
-    CRITICAL: "bg-Cred", HIGH: "bg-Camber", MEDIUM: "bg-Cblue", LOW: "bg-Cgreen",
-  };
-
-  const hosts = {
-    regression: document.getElementById("batch-q-regression"),
-    sla:        document.getElementById("batch-q-sla"),
-    failures:   document.getElementById("batch-q-failures"),
-  };
-  // Nothing to render into (e.g. batch view not in DOM) — bail quietly.
-  if (!hosts.regression && !hosts.sla && !hosts.failures) return;
-
-  const flags = (data && Array.isArray(data.flags)) ? data.flags : [];
-  const buckets = { regression: [], sla: [], failures: [] };
-  flags.forEach((f) => {
-    const key = BUCKET[f.category];
-    if (key && buckets[key]) buckets[key].push(f);
-  });
-
-  const renderRow = (f) => {
-    const dot = DOT[f.risk] || DOT.MEDIUM;
-    const chip = f.data_point
-      ? `<span class="text-[9px] font-mono text-Cmuted shrink-0 mt-[3px]">${_esc(f.data_point)}</span>`
-      : "";
-    return `<div class="flex items-start gap-2">
-      <span class="w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-[6px]"></span>
-      <p class="text-[11px] text-Cwhite/90 leading-relaxed flex-1 min-w-0">${_esc(f.question || "")}</p>
-      ${chip}
-    </div>`;
-  };
-
-  Object.keys(buckets).forEach((key) => {
-    const host = hosts[key];
-    const wrap = document.getElementById(`batch-q-${key}-wrap`);
-    if (!host) return;
-    const items = buckets[key].sort(
-      (a, b) => (RANK[a.risk] ?? 9) - (RANK[b.risk] ?? 9)
-    );
-    if (!items.length) {
-      host.innerHTML = "";
-      if (wrap) wrap.classList.add("hidden");
-      return;
-    }
-    const shown = items.slice(0, MAX_PER_BUCKET);
-    const extra = items.length - shown.length;
-    let html = shown.map(renderRow).join("");
-    if (extra > 0) {
-      html += `<p class="text-[10px] text-Cmuted/70 italic mt-1">+${extra} more ${key === "failures" ? "failure" : key === "sla" ? "scheduling" : "regression"} question${extra > 1 ? "s" : ""} in PE Findings export</p>`;
-    }
-    host.innerHTML = html;
-    if (wrap) wrap.classList.remove("hidden");
-  });
-}
 
 
 // ─────────────────────────────────────────────────────────────
