@@ -107,6 +107,11 @@ def _int(v, default=0):
         return default
 
 
+def _days(n: Any) -> str:
+    """Grammatical 'day'/'days' for a count — avoids the machine-style 'day(s)'."""
+    return "day" if _int(n) == 1 else "days"
+
+
 def _fmt_pct(v: Any) -> str:
     n = _num(v)
     return "NA" if n is None else f"{n:.1f}%"
@@ -230,7 +235,7 @@ def _build_verdict_reason(verdict: str, facts: Dict[str, Any]) -> str:
             fact = (
                 f"window SLA compliance of only {window_comp:.1f}% — the batch "
                 f"finished inside its window on {clean_days} of {window_total_days} "
-                f"day(s), below the 90% floor"
+                f"{_days(window_total_days)}, below the 90% floor"
             )
         else:
             fact = f"window SLA compliance of only {window_comp:.1f}% (below the 90% floor)"
@@ -836,7 +841,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         _tail = f", worst {_shown} shown" if len(_breach_rows) > 6 else ""
         table_caption = (
             f"Days the batch missed its SLA window — worst overrun first "
-            f"({len(_breach_rows)} day(s) breached{_tail})."
+            f"({len(_breach_rows)} {_days(len(_breach_rows))} breached{_tail})."
         )
 
     # Priority order for the remaining SLA table rows:
@@ -1037,8 +1042,8 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         elif wtd:
             lead = (
                 f"Across {_runs_n:,} runs of {_jobs_n:,} unique jobs, the batch held "
-                f"its delivery window on {_clean_days} of {wtd} day(s) ({_comp_s})"
-                + (f" and exceeded it on {wbd}" if wbd else "")
+                f"its delivery window on {_clean_days} of {wtd} {_days(wtd)} ({_comp_s})"
+                + (f" and breached it on {wbd}" if wbd else "")
                 + f", measured against a {_sla_s} ceiling."
             )
         else:
@@ -1419,14 +1424,14 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         # Cite the actual driver — window days first (the canonical PE sign-off signal)
         # so the scenario text reconciles with the headline window-compliance figure.
         if _cp_window_breach > 0 and _cp_window_total:
-            base = f"batch missed its SLA window on {_cp_window_breach}/{_cp_window_total} day(s)"
+            base = f"the batch missed its SLA window on {_cp_window_breach} of {_cp_window_total} {_days(_cp_window_total)}"
             if _cp_breach == 0:
                 base += " despite every job clearing its individual ceiling"
             return base
         if _cp_breach > 0:
             return f"{_cp_breach} SLA breach(es)"
         if _cp_deadline_breach > 0:
-            return f"batch missed its wall-clock deadline on {_cp_deadline_breach} day(s)"
+            return f"the batch missed its wall-clock deadline on {_cp_deadline_breach} {_days(_cp_deadline_breach)}"
         return "a batch SLA issue"
 
     # suppress the scenario when all resource metrics are 0 (image-only docx)
@@ -1471,8 +1476,9 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     elif _cp_batch_loaded and not _cp_resource_loaded:
         if _cp_batch_unhealthy:
             _cp_diagnosis = (
-                f"Scenario: BATCH-ONLY — {_cp_batch_breach_phrase()} with no resource data available. "
-                "Root cause cannot be confirmed without infrastructure evidence."
+                f"Scenario: BATCH-ONLY — {_cp_batch_breach_phrase()}. "
+                "No resource report was uploaded, so the root cause cannot be "
+                "confirmed without infrastructure evidence."
             )
         else:
             _cp_diagnosis = (
@@ -1486,7 +1492,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         )
 
     # -- Summary -----------------------------------------------------------
-    parts = [f"Completed the PE Review for {customer or 'the account'}."]
+    parts = [f"PE review completed for {customer or 'the account'}."]
     # Headline = DAY-LEVEL window compliance, paired with the breach-day fraction it
     # reconciles with. Pair-level ((sub_app × day)) shown only as a labeled secondary.
     if wtd:
@@ -1494,11 +1500,11 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         _day_comp = _comp_n if _comp_n is not None else round(_clean_days / wtd * 100, 1)
         _win_line = (
             f"Batch window compliance: {_day_comp:.1f}% "
-            f"— made its window on {_clean_days}/{wtd} day(s)"
-            + (f", exceeded on {wbd}/{wtd}" if wbd else "") + "."
+            f"— the batch met its window on {_clean_days} of {wtd} {_days(wtd)}"
+            + (f" and breached it on {wbd}" if wbd else "") + "."
         )
         if _window_pair_n is not None and abs(_window_pair_n - _day_comp) > 0.1:
-            _win_line += f" (per sub-app \u00d7 day window: {_window_pair_n:.1f}%.)"
+            _win_line += f" (Counted per sub-app \u00d7 day, window compliance is {_window_pair_n:.1f}%.)"
         parts.append(_win_line)
     elif _comp_n is not None:
         parts.append(f"Batch SLA compliance: {_comp_n:.1f}%.")
@@ -1523,7 +1529,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             f"{rf_crit} critical finding(s) require immediate attention before PE sign-off."
         )
     parts.append(
-        f"Overall verdict: {verdict}. {verdict_reason}. Sections below contain the full evidence breakdown."
+        f"Overall verdict: {verdict}. The full evidence breakdown is in the sections below."
     )
 
     return {
@@ -1650,7 +1656,7 @@ def _bare_fallback(customer: str) -> Dict[str, Any]:
         "verdict_reason": "CONDITIONAL — driven by insufficient evidence loaded",
         "evidence_facts": {},
         "summary": (
-            f"Completed the PE Review for {customer or 'the account'}. "
+            f"PE review completed for {customer or 'the account'}. "
             "Analysis data could not be fully compiled. "
             "Please verify all data sources are uploaded and recalculate."
         ),
