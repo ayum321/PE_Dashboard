@@ -344,66 +344,100 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             tight_buf, tight_day = _bv, w
 
     if comp is not None and total_days > 0:
-        _dword = _plural(total_days, "day", "days")
-        if breach_ct == 0:
-            # 100% compliant — confirm + stress-test rather than stay silent.
+        # Grammar helpers so 1-day captures read naturally, not "all 1 day".
+        _all_days = "the single measured day" if total_days == 1 else f"all {total_days} measured days"
+        _xofy = (lambda x: "the only measured day" if total_days == 1
+                 else f"{x} of {total_days} days")
+        _tight_date = _fmt_date((tight_day or {}).get("run_date"))
+        # Below this many measured days the compliance % is too small a sample to
+        # call a trend — a PE reviewer would never label one bad day "systemic".
+        _MIN_TREND_DAYS = 3
+        _small_sample = total_days < _MIN_TREND_DAYS
+
+        if _small_sample:
+            # Too few days to judge steady-state — frame around the sample itself.
+            if breach_ct == 0:
+                _buf_clause = (f", with {tight_buf:.0f}% buffer to spare on the tightest day"
+                               if tight_buf is not None else "")
+                _count = "one day" if total_days == 1 else f"{total_days} days"
+                out.append(_q(
+                    "SLA & Scheduling", "LOW",
+                    f"Only {_count} of batch data {'was' if total_days == 1 else 'were'} "
+                    f"captured, and {'it' if total_days == 1 else 'every day'} finished inside "
+                    f"the SLA window{_buf_clause}.",
+                    "A short clean run is encouraging but too small to confirm steady-state "
+                    "behaviour. Can a fuller capture — a normal week including the peak day — be "
+                    "shared so the SLA can be validated under routine load?",
+                    f"100% compliance · {total_days}-day sample",
+                    root_cause="SMALL_SAMPLE_CLEAN",
+                ))
+            else:
+                _count = "one day" if total_days == 1 else f"{total_days} days"
+                out.append(_q(
+                    "SLA & Scheduling", "HIGH",
+                    f"Only {_count} of data {'was' if total_days == 1 else 'were'} captured and "
+                    f"{_xofy(breach_ct)} breached the window.",
+                    "The sample is too small to tell a one-off from a pattern. Is this day "
+                    "representative of normal load, and can a fuller capture be shared so the "
+                    "real compliance picture is clear?",
+                    f"{comp:.0f}% compliance · {total_days}-day sample",
+                    root_cause="SMALL_SAMPLE_BREACH",
+                ))
+        elif breach_ct == 0:
+            # 100% compliant over a meaningful sample — confirm + stress-test.
             if tight_buf is not None and tight_buf < _atrisk:
                 out.append(_q(
                     "SLA & Scheduling", "MEDIUM",
-                    f"Window compliance is 100% across all {total_days} measured {_dword}, but "
-                    f"the margin is thin — the tightest day "
-                    f"({_fmt_date((tight_day or {}).get('run_date'))}) finished with only "
-                    f"{tight_buf:.0f}% buffer left.",
+                    f"Window compliance is 100% across {_all_days}, but the margin is thin: "
+                    f"the tightest day ({_tight_date}) finished with only {tight_buf:.0f}% "
+                    f"buffer left.",
                     "It passes today but has little room to absorb growth. Has it been validated "
                     "against full production data volume, and what is the data-growth forecast "
                     "before the next peak?",
-                    f"100% compliance · tightest {tight_buf:.0f}% buffer · {total_days} {_dword}",
+                    f"100% compliance · tightest {tight_buf:.0f}% buffer · {total_days} days",
                     root_cause="HEALTHY_THIN_MARGIN",
                 ))
             else:
-                _tclause = (
-                    f" — even the tightest day ({_fmt_date((tight_day or {}).get('run_date'))}) "
-                    f"kept {tight_buf:.0f}% buffer" if tight_buf is not None else ""
-                )
+                _tclause = (f" The tightest day ({_tight_date}) still kept {tight_buf:.0f}% buffer."
+                            if tight_buf is not None else "")
                 out.append(_q(
                     "SLA & Scheduling", "LOW",
-                    f"Window compliance is 100% — all {total_days} measured {_dword} finished "
-                    f"inside the SLA window{_tclause}.",
-                    "Has this been validated against full production data volume? Is there a "
-                    "data-growth forecast, and enough window headroom to absorb it before the "
-                    "next peak?",
-                    f"100% window compliance · {total_days} {_dword}",
+                    f"Window compliance is 100% — {_all_days} finished inside the SLA window."
+                    f"{_tclause}",
+                    "Performance is healthy. Has it been validated against full production data "
+                    "volume, and is there enough window headroom to absorb forecast growth before "
+                    "the next peak?",
+                    f"100% window compliance · {total_days} days",
                     root_cause="HEALTHY_HEADROOM",
                 ))
         elif comp >= _target:
             out.append(_q(
                 "SLA & Scheduling", "MEDIUM",
-                f"Window compliance is {comp:.0f}% — {breach_ct} of {total_days} {_dword} "
-                f"missed the window.",
+                f"Window compliance is {comp:.0f}% — {_xofy(breach_ct)} missed the window.",
                 "Are these isolated one-offs or an early sign of pressure as volume grows? Is "
                 "monitoring catching them before they become a hard breach?",
-                f"{comp:.0f}% compliance · {breach_ct}/{total_days} {_dword}",
+                f"{comp:.0f}% compliance · {breach_ct}/{total_days} days",
                 root_cause="NEAR_MISS",
             ))
         elif comp >= _crit:
             out.append(_q(
                 "SLA & Scheduling", "HIGH",
                 f"Window compliance is {comp:.0f}% — below the {_target:.0f}% production target, "
-                f"with {breach_ct} breach {_plural(breach_ct, 'day', 'days')} of {total_days}.",
-                f"What is the remediation plan — with named owners and dates — to get back above "
+                f"with {_xofy(breach_ct)} breaching.",
+                f"What is the remediation plan, with named owners and dates, to get back above "
                 f"{_target:.0f}% before sign-off?",
-                f"{comp:.0f}% compliance · {breach_ct}/{total_days} {_dword}",
+                f"{comp:.0f}% compliance · {breach_ct}/{total_days} days",
                 root_cause="SUB_TARGET_COMPLIANCE",
             ))
         else:
             out.append(_q(
                 "SLA & Scheduling", "CRITICAL",
-                f"Window compliance is {comp:.0f}% — well below the {_target:.0f}% target; "
-                f"{breach_ct} of {total_days} {_dword} breached the window.",
-                "This is systemic, not a one-off. Is the SLA still correct for current data "
-                "volumes, or is this a capacity/code problem? What is the recovery plan and "
-                "by when?",
-                f"{comp:.0f}% compliance · {breach_ct}/{total_days} {_dword}",
+                f"Window compliance is {comp:.0f}% — well below the {_target:.0f}% target, with "
+                f"{_xofy(breach_ct)} breaching the window.",
+                "This is a recurring pattern, not a one-off. Is the SLA still correct for current "
+                "data volumes, or is this a capacity or code problem? What is the recovery plan, "
+                "and by when?",
+                f"{comp:.0f}% compliance · {breach_ct}/{total_days} days",
                 root_cause="SYSTEMIC_BREACH",
             ))
 
