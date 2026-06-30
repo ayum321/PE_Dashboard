@@ -548,6 +548,48 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
     if job_cands:
         # Worst job = lowest buffer = most over (or closest to) its own ceiling.
         job_cands.sort(key=lambda t: t[1])
+        # Jobs eating deep into their own ceiling (at-risk band or breaching).
+        deep      = [c for c in job_cands if c[1] <= _atrisk]
+        breaching = [c for c in deep if c[1] < 0]
+
+        # ── Multiple long jobs in the same window — the concurrency / contention
+        #    angle. When several jobs run deep into the SLA, the real question is
+        #    what is running longest and whether they overlap and starve each
+        #    other of CPU / memory / I/O / DB, rather than each running cleanly.
+        if len(deep) >= 2:
+            top = deep[:3]
+            named = ", ".join(f"{n} ({_humanize_hrs(pk)})" for n, bf, pk, av, sl, us in top)
+            n_more = len(deep) - len(top)
+            more_clause = f", plus {n_more} more" if n_more > 0 else ""
+            longest = max(deep, key=lambda c: c[2])
+            # The list is ordered by tightest buffer; the longest-by-runtime job
+            # may differ, so only call it out when it is not already leading.
+            _biggest_clause = (
+                f", with {longest[0]} the single biggest at {_humanize_hrs(longest[2])}"
+                if longest[0] != top[0][0] else ""
+            )
+            sev = "CRITICAL" if breaching else "HIGH"
+            if not breaching:
+                _breach_clause = " — all still inside the ceiling but with little headroom"
+            elif len(breaching) == len(deep):
+                _breach_clause = (" — both already over the ceiling" if len(deep) == 2
+                                  else f" — all {len(deep)} already over the ceiling")
+            else:
+                _breach_clause = f" — {len(breaching)} of them already over the ceiling"
+            out.append(_q(
+                "SLA & Scheduling", sev,
+                f"{len(deep)} jobs are running deep into the SLA window{_breach_clause}. "
+                f"The longest are {named}{more_clause}{_biggest_clause}.",
+                "When several long jobs land in the same window, the issue is often how they "
+                "are scheduled, not any one job. Are these running one after another or all at "
+                "once? If they overlap, are they competing for the same CPU, memory, I/O or "
+                f"database — so each runs slower than it would alone? Is {longest[0]} on the "
+                "critical path, and would resequencing or staggering the jobs (or moving "
+                "non-critical work outside the window) recover time?",
+                f"{len(deep)} jobs \u2264{_atrisk:.0f}% buffer \u00b7 {len(breaching)} breaching",
+                root_cause="WINDOW_CONCURRENCY",
+            ))
+
         name, buf, peak, avg, sla, used = job_cands[0]
         if used <= 0:
             used = (peak / sla * 100.0) if sla > 0 else 0.0

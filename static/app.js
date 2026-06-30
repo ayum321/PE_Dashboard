@@ -10596,20 +10596,41 @@ function renderPeNarrative(data) {
   };
   const Q_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
   const Q_DOT  = { CRITICAL: THEME.red, HIGH: THEME.amber, MEDIUM: THEME.blue, LOW: THEME.green };
+  // Within a section, after severity, prefer the questions most central to that
+  // section's story. For Batch Execution that means the SLA & scheduling and
+  // job-level questions lead, ahead of failures/regression — otherwise the
+  // alphabetically-later "SLA & Scheduling" flags get buried under same-severity
+  // flags from other categories and never surface in the cap.
+  const Q_CAT_PRIORITY = {
+    "SLA & Scheduling":     0,
+    "Scheduling":           0,
+    "Batch":                0,
+    "Volume":               0,
+    "SLA-Matrix":           1,
+    "Runtime & Regression": 2,
+    "Correlation":          3,
+    "Execution Failures":   4,
+  };
   const _qFlags = (window.appData && window.appData.redFlags && Array.isArray(window.appData.redFlags.flags))
     ? window.appData.redFlags.flags : [];
   const qBySection = {};
-  _qFlags.forEach((f) => {
+  _qFlags.forEach((f, i) => {
     const sid = Q_SECTION[f && f.category];
     if (!sid) return;
+    f.__idx = i;  // preserve original order as the final stable tiebreaker
     (qBySection[sid] = qBySection[sid] || []).push(f);
   });
 
   const _sectionQuestionsHtml = (sid, accent) => {
-    const items = (qBySection[sid] || []).slice()
-      .sort((a, b) => (Q_RANK[a.risk] ?? 9) - (Q_RANK[b.risk] ?? 9));
+    const items = (qBySection[sid] || []).slice().sort((a, b) =>
+      ((Q_RANK[a.risk] ?? 9) - (Q_RANK[b.risk] ?? 9)) ||
+      ((Q_CAT_PRIORITY[a.category] ?? 5) - (Q_CAT_PRIORITY[b.category] ?? 5)) ||
+      ((a.__idx ?? 0) - (b.__idx ?? 0))
+    );
     if (!items.length) return "";
-    const MAXQ  = 3;
+    // Batch Execution & SLA is the densest, most important section — give it
+    // room for the SLA, concurrency and job-level questions; others stay tight.
+    const MAXQ  = sid === "batch_sla" ? 5 : 3;
     const shown = items.slice(0, MAXQ);
     const extra = items.length - shown.length;
     const SEV_LABEL = { CRITICAL: "Critical", HIGH: "High", MEDIUM: "Medium", LOW: "Low" };
