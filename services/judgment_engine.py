@@ -55,6 +55,11 @@ def _i(v: Any) -> Optional[int]:
     return None if n is None else int(n)
 
 
+def _dys(n: Any) -> str:
+    """Grammatical 'day'/'days' for a count — avoids machine-style 'day(s)'."""
+    return "day" if _i(n) == 1 else "days"
+
+
 def _first(*vals: Any) -> Any:
     """Coalesce that treats 0/0.0 as valid (unlike `a or b`)."""
     for v in vals:
@@ -144,7 +149,7 @@ def _score_batch(b: Optional[Dict[str, Any]], mode: str) -> Optional[PillarScore
         if wbd is not None and wtd:
             clean = wtd - wbd
             fact = (f"Batch finished within its SLA window on only "
-                    f"{clean}/{wtd} day(s) ({wc:.1f}%), below the {base:.1f}% "
+                    f"{clean} of {wtd} {_dys(wtd)} ({wc:.1f}%), below the {base:.1f}% "
                     f"job-level pass rate — window is the binding constraint")
             cite = f"window_day_compliance_pct={wc:.1f}, clean_days={clean}/{wtd}"
         else:
@@ -250,7 +255,7 @@ def _score_sla(s: Optional[Dict[str, Any]], mode: str) -> Optional[PillarScore]:
         pen += p
         if wbd is not None and wtd:
             clean = wtd - wbd
-            fact = (f"SLA window met on only {clean}/{wtd} day(s) ({wc:.1f}%), "
+            fact = (f"SLA window met on only {clean} of {wtd} {_dys(wtd)} ({wc:.1f}%), "
                     f"below the {base:.1f}% run-level pass rate")
             cite = f"window_day_compliance_pct={wc:.1f}, clean_days={clean}/{wtd}"
         else:
@@ -731,23 +736,23 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if binding == "window":
         if tone == "crit":
             if wtd:
-                headline = (f"Batch missed its delivery window on {wbd} of {wtd} day(s) "
-                            f"({window:.1f}%). Not ready for PE sign-off.")
+                headline = (f"The batch missed its delivery window on {wbd} of {wtd} {_dys(wtd)} "
+                            f"({window:.1f}%) and is not ready for PE sign-off.")
             else:
-                headline = (f"Batch window compliance is {window:.1f}%. "
-                            f"Not ready for PE sign-off.")
+                headline = (f"Batch window compliance is {window:.1f}%, "
+                            f"so the batch is not ready for PE sign-off.")
             if crit_n > 0 and (window is None or window >= 90.0):
-                headline = (f"{crit_n} critical finding(s) block PE sign-off "
+                headline = (f"{crit_n} critical {('finding' if crit_n == 1 else 'findings')} block PE sign-off "
                             f"despite {window:.1f}% window compliance.")
         elif tone == "warn":
             _cl = clean if clean is not None else "—"
             _wt = wtd if wtd else "—"
-            headline = (f"Batch made its delivery window on {_cl} of {_wt} day(s) "
-                        f"({window:.1f}%) — review the flagged risks before sign-off.")
+            headline = (f"The batch made its delivery window on {_cl} of {_wt} {_dys(wtd)} "
+                        f"({window:.1f}%); review the flagged risks before sign-off.")
         else:
             _wt = wtd if wtd else "every"
-            headline = (f"Batch met its delivery window on all {_wt} day(s) "
-                        f"({window:.1f}%). Clear for PE sign-off.")
+            headline = (f"The batch met its delivery window on all {_wt} {_dys(wtd)} "
+                        f"({window:.1f}%) and is clear for PE sign-off.")
     elif binding == "job_estimate":
         _verdict = {"crit": "Not ready for PE sign-off.",
                     "warn": "Review the flagged risks before sign-off.",
@@ -764,7 +769,7 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # ── KPI strip (only tiles we actually have data for) ──────────────────────
     kpis: List[Dict[str, Any]] = []
     if window is not None:
-        sub = (f"{clean}/{wtd} day(s) clean" if (clean is not None and wtd) else
+        sub = (f"{clean} of {wtd} {_dys(wtd)} clean" if (clean is not None and wtd) else
                "wall-clock batch deadline")
         kpis.append({
             "label": "Window Compliance" + (" (est.)" if est else ""),
@@ -824,7 +829,7 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                      f"job-day estimate ({window:.1f}%). Upload batch data with End_Time "
                      f"to get the authoritative window-compliance number.")
     elif window is not None and job is not None and (job - window) > 1.0:
-        _days = (f"on {wbd} of {wtd} day(s)" if (wbd and wtd) else "")
+        _days = (f"on {wbd} of {wtd} {_dys(wtd)}" if (wbd and wtd) else "")
         explainer = (f"Window {window:.1f}% vs Job-level {job:.1f}%: every job finished under "
                      f"its own ceiling, but the batch as a whole missed its wall-clock "
                      f"delivery deadline {_days}. Window is the binding SLA for sign-off.")
@@ -844,7 +849,7 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             root = "Address the flagged risks below."
         acts: List[str] = []
         if crit_n > 0:
-            acts.append(f"resolve the {crit_n} critical finding(s)")
+            acts.append(f"resolve the {crit_n} critical {('finding' if crit_n == 1 else 'findings')}")
         _rn = reg_jobs if reg_jobs else reg_count
         if _rn:
             acts.append(f"investigate the {_rn} regressed job(s)")
