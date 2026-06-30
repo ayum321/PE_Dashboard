@@ -64,6 +64,8 @@ def _humanize_hrs(hrs: float) -> str:
         return f"{int(round(m))} minutes"
     if h < 2:
         return f"{h:.1f} hours" if abs(h - 1.0) > 0.05 else "1 hour"
+    if abs(h - round(h)) < 0.05:  # whole hours read cleaner without the .0
+        return f"{int(round(h))} hours"
     return f"{h:.1f} hours"
 
 
@@ -343,6 +345,27 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
         if tight_buf is None or _bv < tight_buf:
             tight_buf, tight_day = _bv, w
 
+    # Driving job + facts for a given breach day, so questions can name the
+    # specific job that pushed the day over — not just "the daily batch".
+    def _driver_for(day: Dict[str, Any]) -> str:
+        return (str(day.get("top_job") or "").strip()
+                or str(day.get("breach_sub_app") or "").strip())
+
+    def _day_facts(day: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "date":    _fmt_date(day.get("run_date")),
+            "eff":     _f(day.get("breach_sub_effective") or day.get("effective_hrs")),
+            "ceil":    _f(day.get("breach_sub_ceil")),
+            "overrun": _f(day.get("breach_overrun_hrs")),
+            "sub":     day.get("breach_sub_app") or "the daily batch",
+            "driver":  _driver_for(day),
+        }
+
+    breach_days = sorted(
+        (w for w in window if w.get("breach")),
+        key=lambda w: _f(w.get("breach_overrun_hrs")), reverse=True,
+    )
+
     if comp is not None and total_days > 0:
         # Grammar helpers so 1-day captures read naturally, not "all 1 day".
         _all_days = "the single measured day" if total_days == 1 else f"all {total_days} measured days"
@@ -410,6 +433,26 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                     f"100% window compliance · {total_days} days",
                     root_cause="HEALTHY_HEADROOM",
                 ))
+        elif breach_ct == 1 and breach_days:
+            # A single bad day on an otherwise clean run — this is the one-off case.
+            # Ask what ran in PARALLEL that specific day, not for a systemic plan.
+            f = _day_facts(breach_days[0])
+            _ceil_clause = f" against its {_humanize_hrs(f['ceil'])} ceiling" if f["ceil"] > 0 else ""
+            _driver_clause = f", led by {f['driver']}," if f["driver"] else ""
+            _sev = "CRITICAL" if f["overrun"] >= 1.0 else "HIGH"
+            out.append(_q(
+                "SLA & Scheduling", _sev,
+                f"{f['sub']} breached the window only on {f['date']} — it ran "
+                f"{_humanize_hrs(f['eff'])}{_ceil_clause}, {_humanize_hrs(f['overrun'])} over"
+                f"{_driver_clause} while the other {total_days - 1} measured days stayed inside "
+                f"the window.",
+                f"A single overrun on an otherwise clean run usually points to a one-off event "
+                f"rather than a capacity limit. Was anything unusual running alongside the batch "
+                f"on {f['date']} — an ad-hoc data reload, a release or deployment, a manual "
+                f"reprocess, or a parallel backup? Was it logged as an incident with a root cause?",
+                f"{f['date']}: +{f['overrun']:.2f}h over on {f['sub']}",
+                root_cause="ONEOFF_BREACH",
+            ))
         elif comp >= _target:
             out.append(_q(
                 "SLA & Scheduling", "MEDIUM",
@@ -441,26 +484,21 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                 root_cause="SYSTEMIC_BREACH",
             ))
 
-    breach_days = sorted(
-        (w for w in window if w.get("breach")),
-        key=lambda w: _f(w.get("breach_overrun_hrs")), reverse=True,
-    )
-
-    if breach_days:
-        worst = breach_days[0]
-        date    = _fmt_date(worst.get("run_date"))
-        eff     = _f(worst.get("breach_sub_effective") or worst.get("effective_hrs"))
-        ceil    = _f(worst.get("breach_sub_ceil"))
-        overrun = _f(worst.get("breach_overrun_hrs"))
-        sub     = worst.get("breach_sub_app") or "the daily batch"
-        ceil_clause = f" against the {_humanize_hrs(ceil)} ceiling" if ceil > 0 else ""
+    # ── Worst breach day (named) — only when there are 2+ breach days, since a
+    #    single breach is already the one-off headline above. Names the driving
+    #    job and asks what specifically pushed that day over.
+    if breach_days and len(breach_days) >= 2:
+        f = _day_facts(breach_days[0])
+        _ceil_clause = f" against the {_humanize_hrs(f['ceil'])} ceiling" if f["ceil"] > 0 else ""
+        _driver_clause = (f" The longest-running job that day was {f['driver']}."
+                          if f["driver"] else "")
         out.append(_q(
             "SLA & Scheduling", "CRITICAL",
-            f"The worst breach was {date} — {sub} ran {_humanize_hrs(eff)}{ceil_clause}, "
-            f"{_humanize_hrs(overrun)} over.",
-            "Which jobs drove that day's overrun, and has the incident been documented "
-            "with a root cause?",
-            f"{date}: +{overrun:.2f}h over on {sub}",
+            f"The worst breach was {f['date']} — {f['sub']} ran {_humanize_hrs(f['eff'])}"
+            f"{_ceil_clause}, {_humanize_hrs(f['overrun'])} over.{_driver_clause}",
+            f"What pushed {f['date']} over — a data-volume spike, a parallel activity, or a slow "
+            f"dependency? Has the day been logged as an incident with a documented root cause?",
+            f"{f['date']}: +{f['overrun']:.2f}h over on {f['sub']}",
             root_cause="WINDOW_BREACH",
         ))
 
@@ -475,9 +513,68 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                 "SLA & Scheduling", "HIGH",
                 f"{bits} also breached the batch window.",
                 "Do these dates line up with any known infrastructure events, releases, or "
-                "data-load spikes?",
+                "data-load spikes, or is the same job slow on every one of them?",
                 f"{len(rest)} further breach {_plural(len(rest), 'day', 'days')}",
                 root_cause="WINDOW_BREACH",
+            ))
+
+    # ── Job-level driver — a specific job running long against its OWN ceiling.
+    #    This is the "one job is taking too much time" angle: name the job, its
+    #    actual peak runtime vs its SLA, and ask what it is doing / can it be tuned.
+    jobs = [j for j in (ctx.get("job_summary") or []) if isinstance(j, dict)]
+
+    def _jget(j: Dict[str, Any], *keys):
+        for k in keys:
+            v = j.get(k)
+            if v is not None:
+                return v
+        return None
+
+    job_cands: List[tuple] = []
+    for j in jobs:
+        if j.get("is_utility"):
+            continue
+        name = _jget(j, "Job_Name", "job_name")
+        buf  = _jget(j, "buffer_pct")
+        peak = _f(_jget(j, "peak_hrs", "peak_run_hrs", "peak"))
+        sla  = _f(_jget(j, "sla_hrs"))
+        if not name or buf is None or peak <= 0 or sla <= 0:
+            continue
+        job_cands.append((
+            str(name), _f(buf), peak, _f(_jget(j, "avg_hrs", "mean_hrs")),
+            sla, _f(_jget(j, "sla_used_pct")),
+        ))
+
+    if job_cands:
+        # Worst job = lowest buffer = most over (or closest to) its own ceiling.
+        job_cands.sort(key=lambda t: t[1])
+        name, buf, peak, avg, sla, used = job_cands[0]
+        if used <= 0:
+            used = (peak / sla * 100.0) if sla > 0 else 0.0
+        if buf < 0:
+            _avg_clause = (f", well above its usual {_humanize_hrs(avg)}"
+                           if avg > 0 and peak >= avg * 1.25 else "")
+            out.append(_q(
+                "SLA & Scheduling", "CRITICAL",
+                f"{name} is the single job most over its own ceiling — it peaked at "
+                f"{_humanize_hrs(peak)} against a {_humanize_hrs(sla)} SLA{_avg_clause}.",
+                f"Is {_humanize_hrs(peak)} the expected runtime for this job, or is it running "
+                f"long? What is it processing in that step, and can the work be split, indexed, "
+                f"or run in parallel to bring it back under {_humanize_hrs(sla)}?",
+                f"{name}: {peak:.2f}h peak vs {sla:.2f}h SLA ({buf:.0f}% buffer)",
+                root_cause="JOB_LEVEL_BREACH",
+            ))
+        elif buf <= _atrisk:
+            out.append(_q(
+                "SLA & Scheduling", "HIGH",
+                f"{name} is the tightest job against its ceiling — it peaked at "
+                f"{_humanize_hrs(peak)}, using {used:.0f}% of its {_humanize_hrs(sla)} SLA "
+                f"({buf:.0f}% buffer left).",
+                f"It clears today but has very little headroom. Is {_humanize_hrs(peak)} the "
+                f"expected runtime, and what is the data-growth forecast before this job tips "
+                f"over its ceiling?",
+                f"{name}: {used:.0f}% of SLA · {buf:.0f}% buffer",
+                root_cause="JOB_LEVEL_TIGHT",
             ))
 
     # Repeat offenders across days (pattern, not a one-off).
@@ -495,8 +592,9 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             "SLA & Scheduling", "CRITICAL",
             f"{len(repeat_offenders)} {_plural(len(repeat_offenders), 'job', 'jobs')} breached "
             f"on multiple runs — a pattern, not an anomaly ({names}).",
-            "Has the SLA been re-validated against current data volumes, or is a code fix "
-            "the right remediation?",
+            "Since the same job is slow repeatedly, this is unlikely to be a one-off. Has its SLA "
+            "been re-validated against current data volumes, or is a code or indexing fix the "
+            "right remediation?",
             f"{len(repeat_offenders)} repeat {_plural(len(repeat_offenders), 'offender', 'offenders')}",
             root_cause="REPEAT_BREACH",
         ))
