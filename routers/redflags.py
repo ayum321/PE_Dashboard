@@ -413,15 +413,24 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
 
     # ── Volume / SOW commitment flags ────────────────────────────
     # Compare each delivered DFU / SKU / item-location actual against its SOW target
-    # and raise a banded, situation-specific question. The reviewer needs a different
-    # conversation depending on HOW far the delivery sits from the contract:
+    # and raise a banded, situation-specific question. The bands and the remediation
+    # doctrine come from PE practice:
     #
-    #   < 40%   delivery is far below contract — demand justification (is the customer
-    #           even aware the load is this light? is it a deliberate TEST subset?)
-    #   40-70%  materially under target — confirm the remaining volume and a ramp plan
-    #   70-110% within the healthy contracted band — no question (green)
-    #   > 110%  above the contracted ceiling — flag the over-usage and ask the purge /
-    #           capacity / commercial-revision questions
+    #   ±10% of SOW (90–110%) is the accepted operating band — no question (green).
+    #
+    #   OVER-consumption (>110%): obsolete data is deleted/purged wherever possible
+    #     (retention + exclusion rules); if it cannot be purged, a new SOW is required,
+    #     especially once it crosses into the next T-shirt size. Confirm customer
+    #     approval of the current data dynamics.
+    #
+    #   UNDER-consumption is the harder case: light load will not exercise the system,
+    #     so the team must acknowledge performance may degrade as volumes grow. We need
+    #     the customer's data-growth plan / commitment; and if growth is expected it
+    #     must first be loaded in TEST with a batch impact analysis (via consulting)
+    #     before PROD, to avoid a sudden runtime problem under data growth.
+    #       70–90%  mildly under (just outside the ±10% band) — confirm growth plan
+    #       40–70%  materially under — growth commitment + TEST-first validation
+    #       < 40%   severely under — formal justification + customer awareness
     #
     # Phrasing is varied deterministically per metric (stable hash) so a multi-metric
     # audit reads like a prepared consultant, not the same sentence repeated. Driven
@@ -453,67 +462,92 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
                 w if w.isupper() else w.lower() for w in _label.split()
             ) or "volume"
             _ev    = f"{_label}: {_pct:.0f}% of SOW"
+            _gap   = _sow_v - _act_v
+            _over  = _act_v - _sow_v
+            # Target value that brings an overage back inside the accepted +10% band.
+            _purge_target = _sow_v * 1.10
 
             if _pct < 40:
-                # Far below contract — strongest concern; severity steepens as it drops.
+                # Severely under contract — formal justification + customer awareness.
+                # Lead with the performance-degradation acknowledgement PE requires.
                 _q = _vol_pick([
-                    (f"This is far below the contracted volume — is the customer aware the load "
-                     f"is this light, and is it a deliberate TEST subset or a genuine data gap? "
-                     f"Please provide written justification before sign-off."),
-                    (f"At under 40% of target, the environment is not being exercised at "
-                     f"contracted scale. What is the justification, and when will {_low} reach the "
-                     f"committed {_sow_s} so performance is validated at full load?"),
-                    (f"Such a light load will not surface volume-driven SLA risk. Has the customer "
-                     f"confirmed in writing that {_act_s} is the intended scope for this phase, and "
-                     f"is there a ramp plan to the contracted {_sow_s}?"),
+                    (f"Because {_low} is far below the contracted volume, the project team must "
+                     f"acknowledge that performance may degrade as volumes grow toward {_sow_s}. "
+                     f"What is the written justification for {_act_s}, and has the customer formally "
+                     f"approved running at this level for this phase?"),
+                    (f"A load this light will not exercise the system at contracted scale, so volume-"
+                     f"driven SLA risk stays hidden. Is there a customer data-growth plan to reach "
+                     f"{_sow_s}? If growth is expected, it must be loaded in TEST first with a batch "
+                     f"impact analysis before PROD to avoid a sudden runtime problem."),
+                    (f"At under 40% of target, is the customer aware the environment is running well "
+                     f"below the SOW? Please confirm whether {_act_s} is a deliberate TEST subset or a "
+                     f"data gap, and provide the growth commitment plus the TEST-first impact-analysis "
+                     f"plan before sign-off."),
                 ], _label)
                 add_flag(
                     "Volume",
-                    f"{_label} is only {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — far below contract.",
+                    f"{_label} is only {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — severely under contract.",
                     _q,
                     "CRITICAL" if _pct < 25 else "HIGH",
                     _ev,
                 )
             elif _pct < 70:
-                # Materially under — confirm remaining volume + ramp.
+                # Materially under — growth commitment + TEST-first validation.
                 _q = _vol_pick([
-                    (f"This is materially under the contracted target. Is the remaining "
-                     f"{_sow_v - _act_v:,.0f} ({_low}) scheduled for a later phase, and has a ramp "
-                     f"plan been agreed before go-live?"),
-                    (f"Delivery sits below the healthy band. Does {_act_s} represent the full "
-                     f"in-scope {_low} for this run, or is a top-up load expected before sign-off?"),
-                    (f"At {_pct:.0f}% of target the system is under-exercised. What is the plan to "
-                     f"reach the contracted {_sow_s}, and will performance be re-validated at that volume?"),
+                    (f"This is materially under contract. Is the remaining {_gap:,.0f} ({_low}) "
+                     f"committed for a later phase, and — if data growth is planned — will it be "
+                     f"validated in TEST with a batch impact analysis before PROD?"),
+                    (f"At {_pct:.0f}% of target the system is under-exercised, so the team should note "
+                     f"performance may degrade as {_low} grows. Does {_act_s} represent the full in-scope "
+                     f"volume, or is a top-up load expected, and is there a growth commitment from the customer?"),
+                    (f"Delivery sits well below the accepted ±10% band. What is the plan to reach the "
+                     f"contracted {_sow_s}, and will batch be re-validated at that volume through a "
+                     f"consulting-led impact analysis before go-live?"),
                 ], _label)
                 add_flag(
                     "Volume",
-                    f"{_label} is {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — below the healthy 70–110% band.",
+                    f"{_label} is {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — materially under the accepted ±10% band.",
                     _q,
                     "MEDIUM",
                     _ev,
                 )
-            elif _pct > 110:
-                # Above the contracted ceiling — over-usage, purge & capacity conversation.
-                _over = _act_v - _sow_v
+            elif _pct < 90:
+                # Mildly under — just outside the ±10% accepted band. Lightest touch.
                 _q = _vol_pick([
-                    (f"Delivery exceeds the contracted ceiling by {_over:,.0f}. When can this overage "
-                     f"be purged, is a purge/archival plan in place, and is the customer aware they "
-                     f"are running above the SOW commitment?"),
-                    (f"This is {_pct:.0f}% of the contracted ceiling. Is the excess {_low} stale data "
-                     f"that can be archived or purged, and on what schedule — or does the SOW need a "
-                     f"commercial revision and additional sized capacity?"),
-                    (f"Running above the SOW ceiling raises both cost and capacity risk. Has retention "
-                     f"been reviewed, is there an agreed purge cadence for the surplus {_over:,.0f}, and "
-                     f"has infrastructure been sized for the higher {_low}?"),
+                    (f"This sits just below the accepted ±10% band. Is {_low} expected to grow toward "
+                     f"the contracted {_sow_s}, and is that growth captured in a plan?"),
+                    (f"At {_pct:.0f}% of target {_low} is marginally light. Confirm whether the remaining "
+                     f"{_gap:,.0f} will be loaded, and whether any growth will be impact-assessed in TEST first."),
                 ], _label)
                 add_flag(
                     "Volume",
-                    f"{_label} is {_pct:.1f}% of the SOW ceiling ({_act_s} vs {_sow_s}) — above the contracted volume.",
+                    f"{_label} is {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — just below the accepted ±10% band.",
+                    _q,
+                    "LOW",
+                    _ev,
+                )
+            elif _pct > 110:
+                # Over the contracted ceiling — purge obsolete / exclusion rules, else new SOW.
+                _q = _vol_pick([
+                    (f"Delivery exceeds the contracted ceiling by {_over:,.0f}. What technical steps "
+                     f"(purging or exclusion rules) will reduce {_low} from {_act_s} back toward the "
+                     f"accepted {_purge_target:,.0f} (≤110%), and has the customer approved the current "
+                     f"data dynamics?"),
+                    (f"This is {_pct:.0f}% of the SOW ceiling. Can the obsolete {_low} be purged or "
+                     f"excluded, and on what schedule? If it cannot be reduced, a new SOW is needed — "
+                     f"especially if this crosses into the next T-shirt size."),
+                    (f"Running above contract raises cost and capacity risk. Is there an agreed "
+                     f"retention/purge cadence for the surplus {_over:,.0f}, is the customer aware they "
+                     f"are over the SOW commitment, and does the contract need re-sizing to the next tier?"),
+                ], _label)
+                add_flag(
+                    "Volume",
+                    f"{_label} is {_pct:.1f}% of the SOW ceiling ({_act_s} vs {_sow_s}) — over the contracted volume.",
                     _q,
                     "HIGH" if _pct > 130 else "MEDIUM",
                     _ev,
                 )
-            # 70–110% → within the healthy contracted band → no question (green).
+            # 90–110% → within the accepted ±10% band → no question (green).
 
     # ── Dynamic PE batch-review question bank ────────────────────
     # Turn whatever the Ctrl-M upload actually shows into specific, plain-English
