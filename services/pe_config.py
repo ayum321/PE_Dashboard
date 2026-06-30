@@ -98,6 +98,19 @@ SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
 # customer value; applies identically to every uploaded dataset.
 SLA_STRUCTURAL_RATIO: float = 0.60
 
+# ── Window/SLA compliance bands (day-level %) ─────────────────────────────────
+# The share of measured days a batch must finish inside its SLA window. These
+# drive the deterministic PE question ladder (services/batch_questions.py) so the
+# customer question scales with the actual compliance equation:
+#   compliance == 100%                 → healthy → headroom/validation question
+#   TARGET ≤ compliance < 100%         → near-miss → one-off vs early-warning
+#   CRIT   ≤ compliance < TARGET       → sub-target → remediation plan
+#   compliance < CRIT                  → systemic → SLA-validity / recovery plan
+# Pure PE methodology bars (95% production target, 80% systemic floor) — identical
+# for every customer; override per-account via config_store if a contract differs.
+SLA_COMPLIANCE_TARGET_PCT: float = 95.0   # production go-live compliance target
+SLA_COMPLIANCE_CRIT_PCT:   float = 80.0   # below this, breaches are systemic
+
 # ── Batch window decomposition (busy-time, idle gaps, blocks) ─────────────────
 # The "Daily Batch Window" elapsed span (first-start → last-end) overstates the
 # real workload when a day's jobs run in separated clusters (e.g. a morning
@@ -389,6 +402,7 @@ def reload() -> None:
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT, SLA_STRUCTURAL_RATIO
+    global SLA_COMPLIANCE_TARGET_PCT, SLA_COMPLIANCE_CRIT_PCT
     global BATCH_BLOCK_GAP_HRS, LONGPOLE_TOP_N, LONGPOLE_WINDOW_SHARE_PCT
     global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
     global FJ_PEN_WINDOW_CAP, FJ_PEN_FAILRATE_CAP, FJ_PEN_OVERRUN_CAP, FJ_PEN_REGRESSION_CAP
@@ -428,6 +442,8 @@ def reload() -> None:
     SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
     SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
     SLA_STRUCTURAL_RATIO = _f("sla_structural_ratio", 0.60)
+    SLA_COMPLIANCE_TARGET_PCT = _f("sla_compliance_target_pct", 95.0)
+    SLA_COMPLIANCE_CRIT_PCT   = _f("sla_compliance_crit_pct",   80.0)
     BATCH_BLOCK_GAP_HRS = _f("batch_block_gap_hrs", 1.0)
     try:
         LONGPOLE_TOP_N = int(_cfg("longpole_top_n", 8))

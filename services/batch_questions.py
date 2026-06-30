@@ -305,6 +305,108 @@ def _sla_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
 
     window = [w for w in (ctx.get("window") or []) if isinstance(w, dict)]
+    kpis   = ctx.get("kpis") or {}
+
+    # ── Headline compliance ladder — a deterministic function of the equation ──
+    # The window questions below only fire when there ARE breaches, which left a
+    # 100%-compliant customer with a silent strip. This headline always emits ONE
+    # question scaled to the actual day-level compliance %, so the same audit reads
+    # correctly from "perfect, stress-test it" through to "systemic, fix the SLA".
+    import services.pe_config as _pc
+    _target = _f(getattr(_pc, "SLA_COMPLIANCE_TARGET_PCT", 95.0), 95.0)
+    _crit   = _f(getattr(_pc, "SLA_COMPLIANCE_CRIT_PCT",   80.0), 80.0)
+    _atrisk = _f(getattr(_pc, "SLA_ATRISK_PCT", 15.0), 15.0)
+
+    total_days  = _i(kpis.get("window_total_days"))
+    breach_ct   = _i(kpis.get("window_breach_days"))
+    comp        = kpis.get("window_day_compliance_pct")
+    if comp is None:
+        comp = kpis.get("window_compliance_pct")
+    # Fall back to deriving straight from the per-day window list when KPIs absent.
+    if (comp is None or total_days <= 0) and window:
+        measured   = [w for w in window if _f(w.get("effective_hrs")) > 0 or ("breach" in w)]
+        total_days = len(measured)
+        breach_ct  = sum(1 for w in measured if w.get("breach"))
+        comp = round((total_days - breach_ct) / total_days * 100.0, 1) if total_days else None
+    comp = _f(comp) if comp is not None else None
+
+    # Tightest CLEAN day — the smallest surviving buffer, used to qualify "100%"
+    # (100% with 4% buffer is not the same story as 100% with 60% buffer).
+    tight_day, tight_buf = None, None
+    for w in window:
+        if w.get("breach"):
+            continue
+        _b = w.get("min_buffer_pct")
+        if _b is None:
+            continue
+        _bv = _f(_b)
+        if tight_buf is None or _bv < tight_buf:
+            tight_buf, tight_day = _bv, w
+
+    if comp is not None and total_days > 0:
+        _dword = _plural(total_days, "day", "days")
+        if breach_ct == 0:
+            # 100% compliant — confirm + stress-test rather than stay silent.
+            if tight_buf is not None and tight_buf < _atrisk:
+                out.append(_q(
+                    "SLA & Scheduling", "MEDIUM",
+                    f"Window compliance is 100% across all {total_days} measured {_dword}, but "
+                    f"the margin is thin — the tightest day "
+                    f"({_fmt_date((tight_day or {}).get('run_date'))}) finished with only "
+                    f"{tight_buf:.0f}% buffer left.",
+                    "It passes today but has little room to absorb growth. Has it been validated "
+                    "against full production data volume, and what is the data-growth forecast "
+                    "before the next peak?",
+                    f"100% compliance · tightest {tight_buf:.0f}% buffer · {total_days} {_dword}",
+                    root_cause="HEALTHY_THIN_MARGIN",
+                ))
+            else:
+                _tclause = (
+                    f" — even the tightest day ({_fmt_date((tight_day or {}).get('run_date'))}) "
+                    f"kept {tight_buf:.0f}% buffer" if tight_buf is not None else ""
+                )
+                out.append(_q(
+                    "SLA & Scheduling", "LOW",
+                    f"Window compliance is 100% — all {total_days} measured {_dword} finished "
+                    f"inside the SLA window{_tclause}.",
+                    "Has this been validated against full production data volume? Is there a "
+                    "data-growth forecast, and enough window headroom to absorb it before the "
+                    "next peak?",
+                    f"100% window compliance · {total_days} {_dword}",
+                    root_cause="HEALTHY_HEADROOM",
+                ))
+        elif comp >= _target:
+            out.append(_q(
+                "SLA & Scheduling", "MEDIUM",
+                f"Window compliance is {comp:.0f}% — {breach_ct} of {total_days} {_dword} "
+                f"missed the window.",
+                "Are these isolated one-offs or an early sign of pressure as volume grows? Is "
+                "monitoring catching them before they become a hard breach?",
+                f"{comp:.0f}% compliance · {breach_ct}/{total_days} {_dword}",
+                root_cause="NEAR_MISS",
+            ))
+        elif comp >= _crit:
+            out.append(_q(
+                "SLA & Scheduling", "HIGH",
+                f"Window compliance is {comp:.0f}% — below the {_target:.0f}% production target, "
+                f"with {breach_ct} breach {_plural(breach_ct, 'day', 'days')} of {total_days}.",
+                f"What is the remediation plan — with named owners and dates — to get back above "
+                f"{_target:.0f}% before sign-off?",
+                f"{comp:.0f}% compliance · {breach_ct}/{total_days} {_dword}",
+                root_cause="SUB_TARGET_COMPLIANCE",
+            ))
+        else:
+            out.append(_q(
+                "SLA & Scheduling", "CRITICAL",
+                f"Window compliance is {comp:.0f}% — well below the {_target:.0f}% target; "
+                f"{breach_ct} of {total_days} {_dword} breached the window.",
+                "This is systemic, not a one-off. Is the SLA still correct for current data "
+                "volumes, or is this a capacity/code problem? What is the recovery plan and "
+                "by when?",
+                f"{comp:.0f}% compliance · {breach_ct}/{total_days} {_dword}",
+                root_cause="SYSTEMIC_BREACH",
+            ))
+
     breach_days = sorted(
         (w for w in window if w.get("breach")),
         key=lambda w: _f(w.get("breach_overrun_hrs")), reverse=True,
