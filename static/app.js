@@ -3646,9 +3646,14 @@ function renderWindowTrendChart(winData, topJobsData) {
               const isSpike = spikeIdxs.has(i);
               const spike = isSpike ? "  ⚡ SPIKE" : "";
               const shown = counts[i] || 0;
-              const raw = rawCounts[i] || shown;
-              const excluded = excludedCounts[i] || Math.max(raw - shown, 0);
-              return `${labels[i]}  ·  ${shown} shown / ${raw} raw / ${excluded} excluded${spike}`;
+              // Lead with TOTAL EXECUTIONS (CSV row count for the day) — the headline
+              // figure an analyst looks for first. Falls back to the unique-job count
+              // when per-day run totals aren't available.
+              const totRuns = +(winData[i]?.raw_run_count || 0);
+              const head = totRuns > 0
+                ? `${totRuns} execution${totRuns === 1 ? "" : "s"}`
+                : `${shown} job${shown === 1 ? "" : "s"}`;
+              return `${labels[i]}  ·  ${head}${spike}`;
             },
             label: (ctx) => {
               const i = ctx.dataIndex;
@@ -3662,8 +3667,6 @@ function renderWindowTrendChart(winData, topJobsData) {
               const shown = counts[i] || 0;
               const raw = rawCounts[i] || shown;
               const excluded = excludedCounts[i] || Math.max(raw - shown, 0);
-              const rawNames = Array.isArray(winData[i]?.raw_job_names) ? winData[i].raw_job_names : [];
-              const excludedNames = rawNames.filter(n => excludedNameSet.has(n));
               if (hasElapsed) {
                 const effH = +(w.effective_hrs || 0);
                 const ceilH = +(w.breach_sub_ceil || w.sla_hrs || w.sla_ceil || winCeil || 0);
@@ -3708,33 +3711,10 @@ function renderWindowTrendChart(winData, topJobsData) {
               } else {
                 lines.push(`Total (summed): ${rawSums[i].toFixed(2)}h`);
               }
-              lines.push(`Unique jobs shown here: ${shown}`);
-              lines.push(`Raw unique jobs in file: ${raw}`);
-              // Total executions (runs) — distinct from unique-job count. This is the
-              // number an analyst gets when counting CSV rows for the day (a job that
-              // ran 3× = 3 runs but 1 unique job). Surfacing it kills the runs-vs-jobs
-              // confusion (e.g. 218 runs on a day with 207 unique jobs).
-              const totRuns = +(w.raw_run_count || 0);
-              const scopeRuns = +(w.scope_run_count || 0);
-              if (totRuns > 0) {
-                const repeats = Math.max(totRuns - raw, 0);
-                lines.push(`Total executions (runs): ${totRuns}${repeats > 0 ? `  (${repeats} are repeat runs)` : ""}`);
-                // The summed-runtime figure above is over IN-SCOPE runs only, so
-                // surface that count when it differs — otherwise a reader ties
-                // the hours to the raw run total and the math looks off.
-                if (scopeRuns > 0 && scopeRuns !== totRuns) {
-                  lines.push(`In-scope executions: ${scopeRuns}  (the runs behind the summed runtime)`);
-                }
-              }
-              lines.push(`Unique jobs excluded from chart scope: ${excluded}`);
-              if (excludedNames.length > 0) {
-                const preview = excludedNames.slice(0, 6).join(", ");
-                lines.push(`Excl. jobs: ${preview}${excludedNames.length > 6 ? `, … +${excludedNames.length - 6} more` : ""}`);
-              } else if (excludedNameSet.size > 0 && rawNames.length === 0) {
-                lines.push(`Excluded jobs: ${excludedNameSet.size} global exclusions (no per-day name data)`);
-              } else {
-                lines.push("Excluded jobs: none in this day's data");
-              }
+              // Total executions now leads the tooltip header, so the lower section
+              // stays clean: just a compact unique-job count for context. The verbose
+              // executions/excluded breakdown was removed for readability.
+              lines.push(`Unique jobs in window: ${shown}`);
               if (topJobs[i]) lines.push(`Longest job: ${topJobs[i]}`);
               if (winData[i]?.breach) {
                 const ov  = (w.breach_overrun_hrs != null) ? +w.breach_overrun_hrs : (values[i] - winCeil);
