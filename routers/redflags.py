@@ -443,7 +443,7 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
     _sow_cmp     = (body.model_extra or {}).get("sow_compare") or {}
     _sow_metrics = _sow_cmp.get("metrics") if isinstance(_sow_cmp, dict) else None
     if isinstance(_sow_metrics, list):
-        for _m in _sow_metrics:
+        for _idx, _m in enumerate(_sow_metrics):
             if not isinstance(_m, dict):
                 continue
             _label   = str(_m.get("label") or _m.get("key") or "Volume metric").strip()
@@ -466,27 +466,30 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             _over  = _act_v - _sow_v
             # Target value that brings an overage back inside the accepted +10% band.
             _purge_target = _sow_v * 1.10
+            # Seed the phrasing picker with the metric's position as well as its name,
+            # so two metrics that fall in the SAME band (e.g. DFU and SKU both severely
+            # under) never draw the identical sentence — each reads as its own question.
+            _seed  = f"{_label}#{_idx}"
 
             if _pct < 40:
-                # Severely under contract — formal justification + customer awareness.
-                # Lead with the performance-degradation acknowledgement PE requires.
+                # Severely under contract. Three plain-English angles: (1) is it
+                # intentional & approved, (2) the hidden risk + TEST-first remedy,
+                # (3) the growth plan + performance acknowledgement.
                 _q = _vol_pick([
-                    (f"Because {_low} is far below the contracted volume, the project team must "
-                     f"acknowledge that performance may degrade as volumes grow toward {_sow_s}. "
-                     f"What is the written justification for {_act_s}, and has the customer formally "
-                     f"approved running at this level for this phase?"),
-                    (f"A load this light will not exercise the system at contracted scale, so volume-"
-                     f"driven SLA risk stays hidden. Is there a customer data-growth plan to reach "
-                     f"{_sow_s}? If growth is expected, it must be loaded in TEST first with a batch "
-                     f"impact analysis before PROD to avoid a sudden runtime problem."),
-                    (f"At under 40% of target, is the customer aware the environment is running well "
-                     f"below the SOW? Please confirm whether {_act_s} is a deliberate TEST subset or a "
-                     f"data gap, and provide the growth commitment plus the TEST-first impact-analysis "
-                     f"plan before sign-off."),
-                ], _label)
+                    (f"Running at {_pct:.0f}% of contract is a big gap. Is this a deliberate partial "
+                     f"load for this phase, or is {_low} data still being brought in? Please confirm the "
+                     f"customer has agreed to validate at {_act_s} rather than the contracted {_sow_s}."),
+                    (f"At this volume the batch isn't being tested at real scale, so any slowdown that "
+                     f"only appears once data grows is still hidden today. If {_low} is expected to climb "
+                     f"toward {_sow_s}, that growth should be loaded into TEST and impact-tested first, "
+                     f"before it reaches PROD."),
+                    (f"This is well under the contracted {_sow_s}. What is the plan and timeline to reach "
+                     f"full volume, and has the customer accepted that batch runtimes may rise as {_low} "
+                     f"grows from {_act_s}?"),
+                ], _seed)
                 add_flag(
                     "Volume",
-                    f"{_label} is only {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — severely under contract.",
+                    f"{_label} is running at just {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — well below the SOW.",
                     _q,
                     "CRITICAL" if _pct < 25 else "HIGH",
                     _ev,
@@ -494,19 +497,18 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             elif _pct < 70:
                 # Materially under — growth commitment + TEST-first validation.
                 _q = _vol_pick([
-                    (f"This is materially under contract. Is the remaining {_gap:,.0f} ({_low}) "
-                     f"committed for a later phase, and — if data growth is planned — will it be "
-                     f"validated in TEST with a batch impact analysis before PROD?"),
-                    (f"At {_pct:.0f}% of target the system is under-exercised, so the team should note "
-                     f"performance may degrade as {_low} grows. Does {_act_s} represent the full in-scope "
-                     f"volume, or is a top-up load expected, and is there a growth commitment from the customer?"),
-                    (f"Delivery sits well below the accepted ±10% band. What is the plan to reach the "
-                     f"contracted {_sow_s}, and will batch be re-validated at that volume through a "
-                     f"consulting-led impact analysis before go-live?"),
-                ], _label)
+                    (f"At {_pct:.0f}% of contract, is the remaining {_gap:,.0f} of {_low} coming in a "
+                     f"later phase? If more data is on the way, the batch should be re-checked at the "
+                     f"higher volume in TEST before go-live."),
+                    (f"This is short of the contracted volume. Does {_act_s} cover everything in scope, "
+                     f"or is more {_low} still to be loaded? If more is expected, please plan a TEST run "
+                     f"at that volume so any runtime impact is caught early."),
+                    (f"Delivery sits below the accepted range. What is the plan to reach the contracted "
+                     f"{_sow_s}, and has the customer accepted that runtimes may rise as {_low} grows?"),
+                ], _seed)
                 add_flag(
                     "Volume",
-                    f"{_label} is {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — materially under the accepted ±10% band.",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — below the accepted ±10% range.",
                     _q,
                     "MEDIUM",
                     _ev,
@@ -514,14 +516,14 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             elif _pct < 90:
                 # Mildly under — just outside the ±10% accepted band. Lightest touch.
                 _q = _vol_pick([
-                    (f"This sits just below the accepted ±10% band. Is {_low} expected to grow toward "
-                     f"the contracted {_sow_s}, and is that growth captured in a plan?"),
-                    (f"At {_pct:.0f}% of target {_low} is marginally light. Confirm whether the remaining "
-                     f"{_gap:,.0f} will be loaded, and whether any growth will be impact-assessed in TEST first."),
-                ], _label)
+                    (f"{_label} is a little under the accepted range, at {_pct:.0f}% of contract. Is it "
+                     f"expected to grow toward {_sow_s}, and is that captured in a plan?"),
+                    (f"This sits just below the ±10% band. Please confirm whether the remaining "
+                     f"{_gap:,.0f} of {_low} will be loaded, and flag any growth for a quick TEST check first."),
+                ], _seed)
                 add_flag(
                     "Volume",
-                    f"{_label} is {_pct:.1f}% of the SOW target ({_act_s} vs {_sow_s}) — just below the accepted ±10% band.",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — just below the accepted ±10% range.",
                     _q,
                     "LOW",
                     _ev,
@@ -529,20 +531,19 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             elif _pct > 110:
                 # Over the contracted ceiling — purge obsolete / exclusion rules, else new SOW.
                 _q = _vol_pick([
-                    (f"Delivery exceeds the contracted ceiling by {_over:,.0f}. What technical steps "
-                     f"(purging or exclusion rules) will reduce {_low} from {_act_s} back toward the "
-                     f"accepted {_purge_target:,.0f} (≤110%), and has the customer approved the current "
-                     f"data dynamics?"),
-                    (f"This is {_pct:.0f}% of the SOW ceiling. Can the obsolete {_low} be purged or "
-                     f"excluded, and on what schedule? If it cannot be reduced, a new SOW is needed — "
+                    (f"{_label} is about {_over:,.0f} over the contracted ceiling. Can the older {_low} "
+                     f"be purged or excluded, and on what schedule? Bringing it back to roughly "
+                     f"{_purge_target:,.0f} keeps it inside the agreed range."),
+                    (f"This is {_pct:.0f}% of contract. Is there a retention or purge plan for the extra "
+                     f"{_over:,.0f}? If the data cannot be reduced, the SOW likely needs re-sizing — "
                      f"especially if this crosses into the next T-shirt size."),
-                    (f"Running above contract raises cost and capacity risk. Is there an agreed "
-                     f"retention/purge cadence for the surplus {_over:,.0f}, is the customer aware they "
-                     f"are over the SOW commitment, and does the contract need re-sizing to the next tier?"),
-                ], _label)
+                    (f"Running above contract adds cost and capacity risk. Is the customer aware they are "
+                     f"over the SOW, and does the contract need to move up a size to cover the extra "
+                     f"{_over:,.0f} of {_low}?"),
+                ], _seed)
                 add_flag(
                     "Volume",
-                    f"{_label} is {_pct:.1f}% of the SOW ceiling ({_act_s} vs {_sow_s}) — over the contracted volume.",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — over the SOW ceiling.",
                     _q,
                     "HIGH" if _pct > 130 else "MEDIUM",
                     _ev,
