@@ -831,8 +831,8 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     elif window is not None and job is not None and (job - window) > 1.0:
         _days = (f"on {wbd} of {wtd} {_dys(wtd)}" if (wbd and wtd) else "")
         explainer = (f"Window {window:.1f}% vs Job-level {job:.1f}%: every job finished under "
-                     f"its own ceiling, but the batch as a whole missed its wall-clock "
-                     f"delivery deadline {_days}. Window is the binding SLA for sign-off.")
+                     f"its own ceiling, but the batch's end-to-end run was longer than its "
+                     f"SLA window {_days}. Window is the binding SLA for sign-off.")
 
     # ── direction: root-cause-aware next step ─────────────────────────────────
     if tone == "ok":
