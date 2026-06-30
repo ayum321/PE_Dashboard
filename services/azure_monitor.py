@@ -59,11 +59,52 @@ if _uname_stub is not None:
     _platform.uname = lambda: _uname_stub
 
 # Fix 3: msal_extensions DPAPI hang — FilePersistenceWithDataProtection → CryptProtectData
-# hangs on Python 3.14 free-threaded. Replace with plain FilePersistence before any import.
+# hangs on Python 3.14 free-threaded. We bypass DPAPI with a plain file cache, BUT the
+# stock FilePersistence opens the cache in text mode with no encoding → on Windows it uses
+# cp1252 and CRASHES with "'charmap' codec can't decode byte 0x9d" when the file holds a
+# stale DPAPI/binary blob or any non-cp1252 byte (the error our field users hit after
+# signing in). Install a UTF-8, self-healing persistence: writes UTF-8, and on an
+# undecodable/corrupt cache it deletes the file and reports "no cache" so MSAL starts
+# clean instead of throwing. Done before any azure.identity import so the patch is in place.
 try:
+    import os as _os_persist
     import msal_extensions as _msal_ext
     from msal_extensions import FilePersistence as _FP
-    _msal_ext.FilePersistenceWithDataProtection = _FP
+    from msal_extensions.persistence import (
+        PersistenceNotFound as _PersistenceNotFound,
+        _open as _persist_open,
+    )
+
+    class _SafeFilePersistence(_FP):
+        """Plain-file token cache that always reads/writes UTF-8 and self-heals a
+        corrupt/legacy cache instead of crashing the sign-in."""
+
+        def save(self, content):
+            with _os_persist.fdopen(_persist_open(self._location), "w+", encoding="utf-8") as handle:
+                handle.write(content)
+
+        def load(self):
+            try:
+                with open(self._location, "r", encoding="utf-8") as handle:
+                    return handle.read()
+            except FileNotFoundError:
+                raise _PersistenceNotFound(
+                    message="Persistence not initialized. You can recover by calling a save() first.",
+                    location=self._location,
+                )
+            except (UnicodeDecodeError, ValueError):
+                # Corrupt / legacy-binary cache — delete it and behave as "no cache"
+                try:
+                    _os_persist.remove(self._location)
+                except OSError:
+                    pass
+                raise _PersistenceNotFound(
+                    message="Persistence was corrupt and has been reset. Recover by calling save() first.",
+                    location=self._location,
+                )
+
+    _msal_ext.FilePersistence = _SafeFilePersistence
+    _msal_ext.FilePersistenceWithDataProtection = _SafeFilePersistence
     _msal_ext.PersistedTokenCache               # touch to confirm module loaded
 except Exception:
     pass
@@ -71,6 +112,8 @@ except Exception:
 
 import hashlib as _hashlib
 import logging
+import os
+import sys as _sys
 import threading as _threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -256,6 +299,74 @@ def _token_cache_options():
         return None
 
 
+_MSAL_CACHE_NAME = "pe_dashboard_browser_msal_cache"
+
+
+def _msal_token_cache_files() -> list:
+    """Best-effort list of the on-disk MSAL token-cache files this app creates.
+
+    azure-identity stores the browser refresh-token cache under
+    ``<user-data>/.IdentityService/<name><suffix>`` where suffix is ``.nocae``
+    or ``.cae``. We list every variant so a corrupt/locked cache can be purged
+    without depending on the SDK internals. Returns an empty list on any error."""
+    out = []
+    try:
+        if _sys.platform.startswith("win"):
+            base = os.environ.get("LOCALAPPDATA")
+            root = Path(base) / ".IdentityService" if base else None
+        else:
+            root = Path(os.path.expanduser("~")) / ".IdentityService"
+        if root is None:
+            return out
+        for suffix in (".nocae", ".cae", ""):
+            out.append(root / f"{_MSAL_CACHE_NAME}{suffix}")
+    except Exception:
+        return []
+    return out
+
+
+def _purge_msal_token_cache() -> int:
+    """Delete the MSAL persistent token-cache file(s). Best-effort, never raises.
+
+    Used to self-heal a corrupt cache (e.g. the Windows cp1252/'charmap' decode
+    crash, a stale DPAPI blob, or a version mismatch) so the next interactive
+    login starts from a clean state. Returns the count of files removed."""
+    removed = 0
+    for f in _msal_token_cache_files():
+        try:
+            if f.exists():
+                f.unlink()
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        logger.info("Purged %d corrupt MSAL token-cache file(s).", removed)
+    return removed
+
+
+def _is_cache_persistence_error(exc: BaseException) -> bool:
+    """True when an auth exception is a token-cache read/write failure rather
+    than a genuine user cancellation/timeout. Walks the exception chain and
+    matches the Windows 'charmap' codec crash, any Unicode/codec decode error,
+    and msal-extensions persistence errors. Conservative: only these classes of
+    failure trigger the purge-and-retry-without-persistence path."""
+    seen = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, UnicodeDecodeError):
+            return True
+        msg = str(cur).lower()
+        if any(tok in msg for tok in (
+            "charmap", "codec can't decode", "codec can not decode",
+            "'utf-8' codec", "persistence", "persisted", "token cache",
+            "tokencache", ".identityservice",
+        )):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _restore_browser_credential(session_id=None) -> bool:
     """Try to restore this session's browser credential from its persistent
     AuthenticationRecord. Uses silent auth (no browser popup). Returns True if
@@ -287,7 +398,11 @@ def _restore_browser_credential(session_id=None) -> bool:
             return True
     except Exception as exc:
         logger.debug("Could not restore cached credential: %s", exc)
-        # Do NOT delete cache files on restore failure — only on explicit sign-out
+        # If the persistent token cache itself is corrupt (e.g. the Windows
+        # 'charmap' crash), purge it so the next interactive login starts clean.
+        # Identity files are left intact — only on explicit sign-out are those removed.
+        if _is_cache_persistence_error(exc):
+            _purge_msal_token_cache()
     return False
 
 
@@ -354,9 +469,27 @@ def browser_login(session_id=None) -> dict:
         # Now get a token (will be silent — cached from authenticate())
         token = cred.get_token("https://management.azure.com/.default")
     except Exception as exc:
-        raise AzureConfigError(
-            f"Browser login failed or was cancelled. Error: {exc}"
-        )
+        # A corrupt/legacy token cache (e.g. the Windows cp1252/'charmap' crash) must
+        # never block sign-in. Purge the bad cache and retry ONCE without persistence —
+        # login still succeeds; the only cost is re-auth after the next server restart.
+        if _is_cache_persistence_error(exc):
+            logger.warning(
+                "Token cache unreadable (%s) — purging and retrying without persistence.", exc
+            )
+            _purge_msal_token_cache()
+            try:
+                cred = InteractiveBrowserCredential(timeout=_BROWSER_AUTH_TIMEOUT_S)
+                record = cred.authenticate(scopes=["https://management.azure.com/.default"])
+                _save_auth_record(record, session_id)
+                token = cred.get_token("https://management.azure.com/.default")
+            except Exception as exc2:
+                raise AzureConfigError(
+                    f"Browser login failed or was cancelled. Error: {exc2}"
+                )
+        else:
+            raise AzureConfigError(
+                f"Browser login failed or was cancelled. Error: {exc}"
+            )
 
     # Decode JWT to extract identity
     try:
