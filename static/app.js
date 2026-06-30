@@ -3685,6 +3685,15 @@ function renderWindowTrendChart(winData, topJobsData) {
                   lines.push(`Idle inside span: ${idle.toFixed(2)}h  (${idlePct.toFixed(0)}% of the span is gaps)`);
                 }
                 if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h  (in-scope runs added up — excluded jobs not counted)`);
+                // Reconciliation: if you SUM every Run_Time row for this day in
+                // Excel you get the RAW total — that figure minus the excluded
+                // jobs' runtime equals the in-scope summed runtime above.
+                const exclH = +(w.excluded_hrs || 0);
+                const rawTotH = +(w.raw_total_hrs || 0);
+                if (exclH > 0.005) {
+                  lines.push(`Excluded from total: ${exclH.toFixed(2)}h  (${excluded} job${excluded === 1 ? "" : "s"} out of scope)`);
+                  if (rawTotH > 0) lines.push(`Raw total (all rows, matches Excel SUM): ${rawTotH.toFixed(2)}h`);
+                }
                 // Batch blocks: morning/evening clusters split by idle gaps.
                 const blocks = Array.isArray(w.batch_blocks) ? w.batch_blocks : [];
                 if (blocks.length > 1) {

@@ -2353,9 +2353,10 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     _raw_window_counts = (
         df.groupby("run_date", as_index=False)
           .agg(raw_job_count=("Job_Name", "nunique"),
-               raw_run_count=("Job_Name", "size"))
+               raw_run_count=("Job_Name", "size"),
+               raw_total_hrs=("run_time_hrs", "sum"))
         if "Job_Name" in df.columns and "run_date" in df.columns
-        else pd.DataFrame(columns=["run_date", "raw_job_count", "raw_run_count"])
+        else pd.DataFrame(columns=["run_date", "raw_job_count", "raw_run_count", "raw_total_hrs"])
     )
     _raw_window_names = (
         df.groupby("run_date")["Job_Name"]
@@ -2390,6 +2391,14 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     window["raw_run_count"]   = window["raw_run_count"].fillna(window["scope_run_count"]).astype(int)
     window["scope_run_count"] = window["scope_run_count"].fillna(window["job_count"]).astype(int)
     window["excluded_job_count"] = (window["raw_job_count"] - window["job_count"]).clip(lower=0).astype(int)
+    # Per-day runtime carried by the excluded jobs (raw − in-scope). Surfaced so
+    # the tooltip can reconcile the in-scope "Summed runtime" against a raw Excel
+    # SUM of every row for the day — the difference IS this excluded runtime.
+    if "raw_total_hrs" in window.columns:
+        window["raw_total_hrs"] = window["raw_total_hrs"].fillna(window["total_hrs"])
+    else:
+        window["raw_total_hrs"] = window["total_hrs"]
+    window["excluded_hrs"] = (window["raw_total_hrs"] - window["total_hrs"]).clip(lower=0).round(3)
     window["raw_job_names"] = window["raw_job_names"].apply(
         lambda v: [str(x) for x in v] if isinstance(v, list) else []
     )
@@ -3397,6 +3406,8 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         window_records.append({
             "run_date":     date_str,
             "total_hrs":    total_hrs,
+            "raw_total_hrs": round(float(r.get("raw_total_hrs", total_hrs) or total_hrs), 3),
+            "excluded_hrs":  round(float(r.get("excluded_hrs", 0) or 0), 3),
             "elapsed_hrs":  elapsed_hrs,
             "active_busy_hrs": round(float(r.get("active_busy_hrs", 0) or 0), 3),
             "idle_gap_hrs":    round(float(r.get("idle_gap_hrs", 0) or 0), 3),
