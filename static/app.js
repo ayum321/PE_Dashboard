@@ -3684,7 +3684,7 @@ function renderWindowTrendChart(winData, topJobsData) {
                   lines.push(`Active busy time: ${busy.toFixed(2)}h  (real compute — overlaps counted once)`);
                   lines.push(`Idle inside span: ${idle.toFixed(2)}h  (${idlePct.toFixed(0)}% of the span is gaps)`);
                 }
-                if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h  (all runs added up)`);
+                if (rawSums[i] > 0) lines.push(`Summed runtime: ${rawSums[i].toFixed(2)}h  (in-scope runs added up — excluded jobs not counted)`);
                 // Batch blocks: morning/evening clusters split by idle gaps.
                 const blocks = Array.isArray(w.batch_blocks) ? w.batch_blocks : [];
                 if (blocks.length > 1) {
@@ -3710,6 +3710,12 @@ function renderWindowTrendChart(winData, topJobsData) {
               if (totRuns > 0) {
                 const repeats = Math.max(totRuns - raw, 0);
                 lines.push(`Total executions (runs): ${totRuns}${repeats > 0 ? `  (${repeats} are repeat runs)` : ""}`);
+                // The summed-runtime figure above is over IN-SCOPE runs only, so
+                // surface that count when it differs — otherwise a reader ties
+                // the hours to the raw run total and the math looks off.
+                if (scopeRuns > 0 && scopeRuns !== totRuns) {
+                  lines.push(`In-scope executions: ${scopeRuns}  (the runs behind the summed runtime)`);
+                }
               }
               lines.push(`Unique jobs excluded from chart scope: ${excluded}`);
               if (excludedNames.length > 0) {
