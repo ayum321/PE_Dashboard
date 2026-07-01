@@ -10601,6 +10601,7 @@ function renderPeNarrative(data) {
     "DR":                   "uat",
     "Monitoring":           "uat",
     "Governance":           "uat",
+    "Approval":             "uat",
   };
   const Q_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
   const Q_DOT  = { CRITICAL: THEME.red, HIGH: THEME.amber, MEDIUM: THEME.blue, LOW: THEME.green };

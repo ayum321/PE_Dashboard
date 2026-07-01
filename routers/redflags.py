@@ -640,6 +640,29 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
         "MEDIUM", "Pre-go-live requirement",
     )
 
+    # ── Customer sign-off gate ───────────────────────────────────
+    # A PE audit is not complete without formal customer approval of the batch
+    # schedule and SLA window timings. Fires only when there IS batch/SLA data to
+    # sign off on, and phrases toward the environment actually under review (a
+    # TEST/UAT capture asks for sign-off on the TEST schedule + windows).
+    _has_batch = total_jobs > 0 or bool(sla_mx) or bool(bk.get("window_total_days"))
+    if _has_batch:
+        _env_is_test = any(
+            str(s.get("Sub_Application") or s.get("sub_application") or "").upper()
+            .startswith(("TEST_", "UAT_", "SIT_", "QA_", "STG_", "DEV_"))
+            for s in (body.sub_stats or [])
+        )
+        _env_word = "TEST/UAT" if _env_is_test else "production"
+        add_flag(
+            "Approval",
+            f"The audit reviews the {_env_word} batch schedule and SLA window timings, but no "
+            f"formal customer approval is attached to this dataset.",
+            f"Has the customer formally reviewed and signed off on the {_env_word} batch "
+            f"schedule and SLA window timings? If approval exists, please attach the signed "
+            f"document (or SharePoint link) so it is captured against this audit.",
+            "HIGH", "No customer sign-off attached",
+        )
+
     # ── Tally by risk level ──────────────────────────────────────
     by_risk: Dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in flags:

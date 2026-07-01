@@ -173,7 +173,8 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             "Runtime & Regression", sev,
             f"{job} went from {_humanize_secs(old)} to {_humanize_secs(new)} on the new "
             f"release — a {fac} regression.",
-            f"What caused this slowdown, and has a root-cause analysis been completed {tail}?",
+            f"What caused this step-up, has a root-cause analysis been completed, and is it "
+            f"resolved now — confirmed in a clean re-run at the same data volume {tail}?",
             f"{job}: {_humanize_secs(old)} → {_humanize_secs(new)} ({fac})",
             root_cause="BATCH_RUNTIME_REGRESSION",
         ))
