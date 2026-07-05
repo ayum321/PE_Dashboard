@@ -18,6 +18,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
 from services.pe_utils import coerce_float as _f, coerce_int as _i
+import services.pe_config as _pc
 
 router = APIRouter()
 
@@ -164,17 +165,44 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
             )
 
         if top_breaches:
-            worst = top_breaches[0]
-            add_flag(
-                "Batch",
-                f"Job '{worst.get('Job_Name','?')}' is the worst SLA offender at "
-                f"{_f(worst.get('peak_hrs')):.2f} hrs peak runtime.",
-                "Has this job's root cause been formally analysed? "
-                "Is a code fix, resource allocation change, or SLA waiver required?",
-                "CRITICAL",
-                f"{_f(worst.get('peak_hrs')):.2f}h peak / "
-                f"{_f(worst.get('buffer_pct')):.0f}% buffer left",
-            )
+            # top_breaches falls back to "top-10 jobs by peak runtime" when nothing
+            # actually breached (services/batch_calculator.py breaches_df fallback).
+            # In that fallback state, item [0] is just the single longest-running
+            # job in an otherwise healthy batch — it is NOT an "SLA offender" and
+            # must not be told to root-cause/code-fix/waiver just for being tallest.
+            # Gate on the SAME buffer thresholds the rest of the dashboard uses
+            # (pe_config.SLA_ATRISK_PCT / SLA_LONGJOB_PCT) so this flag only fires
+            # when the job is genuinely at risk, scaling severity to how bad it is.
+            worst    = top_breaches[0]
+            _buf     = worst.get("buffer_pct")
+            _buf_pct = _f(_buf) if _buf is not None else None
+            if _buf_pct is not None and _buf_pct <= _pc.SLA_LONGJOB_PCT:
+                if _buf_pct <= 0:
+                    _sev, _ask = "CRITICAL", (
+                        "Has this job's root cause been formally analysed? "
+                        "Is a code fix, resource allocation change, or SLA waiver required?"
+                    )
+                elif _buf_pct <= _pc.SLA_ATRISK_PCT:
+                    _sev, _ask = "HIGH", (
+                        "This job is close to breaching its SLA — what is the remediation "
+                        "plan, and is it being actively monitored before it tips into breach?"
+                    )
+                else:
+                    _sev, _ask = "MEDIUM", (
+                        "Buffer is thinning but still positive — is this job trending upward, "
+                        "and does it need a fix now or just continued monitoring?"
+                    )
+                add_flag(
+                    "Batch",
+                    f"Job '{worst.get('Job_Name','?')}' is the longest-running batch job at "
+                    f"{_f(worst.get('peak_hrs')):.2f} hrs peak runtime, with only "
+                    f"{_buf_pct:.0f}% SLA buffer left.",
+                    _ask, _sev,
+                    f"{_f(worst.get('peak_hrs')):.2f}h peak / {_buf_pct:.0f}% buffer left",
+                )
+            # else: buffer_pct is None (no buffer data to judge) or comfortably
+            # healthy (> SLA_LONGJOB_PCT) — being the tallest job in a compliant
+            # batch is not itself a red flag, so no question is raised.
 
     # Zero-duration / pre-execution terminations
     zero_dur = [
@@ -300,7 +328,9 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
 
     if mem_critical:
         # Separate DB servers in expected band from genuine memory pressure
-        from services import pe_config as _pc
+        # (module-level `_pc` import above covers this — no local re-import,
+        # which previously shadowed _pc as function-local for the whole function
+        # and broke the earlier buffer-materiality check with an UnboundLocalError).
         db_mem_expected = [s for s in mem_critical
                           if (s.get("type") or s.get("server_type") or "").upper() == "DB"
                           and _f(s.get("mem_used")) <= _pc.DB_MEM_BAND_HIGH]

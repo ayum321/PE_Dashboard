@@ -121,6 +121,30 @@ def _is_file_watcher(job: str) -> bool:
     return "FILEWATCHER" in b or "WATCHER" in b or "FILEWATCH" in b
 
 
+def _job_buffer_lookup(ctx: Dict[str, Any]) -> Dict[str, float]:
+    """Map job-root -> tightest buffer_pct seen for that job in job_summary.
+
+    Statistical outliers (z-score vs a job's OWN tiny baseline) are only an SLA
+    concern if the job is actually close to its ceiling. A 38-minute job that
+    usually takes 10 minutes but runs against an 8-hour window still has ~90%
+    buffer left — no PE would raise that as a root-cause item. This lookup lets
+    the runtime-anomaly path check real SLA materiality before asking anything.
+    """
+    lookup: Dict[str, float] = {}
+    for j in (ctx.get("job_summary") or []):
+        if not isinstance(j, dict):
+            continue
+        name = j.get("Job_Name") or j.get("job_name")
+        buf = j.get("buffer_pct")
+        if not name or buf is None:
+            continue
+        root = _job_root(str(name))
+        bv = _f(buf)
+        if root not in lookup or bv < lookup[root]:
+            lookup[root] = bv
+    return lookup
+
+
 # Day-of-week / schedule-variant tokens a job name is commonly suffixed with —
 # e.g. W_IS_FILE_WATCHER_INBOUND_Daily and W_IS_FILE_WATCHER_INBOUND_TUE are the
 # SAME job run on two different schedules, not two different jobs. Stripping
@@ -243,7 +267,17 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
         ))
 
     # When there is no benchmark, fall back to statistical outliers vs own baseline.
+    # IMPORTANT: z-score alone measures deviation from a job's OWN history, not SLA
+    # risk. A job that usually takes 10 minutes and ran 38 minutes is a genuine
+    # statistical outlier (z could be 3+) but if its ceiling is 8 hours it still has
+    # ~90% buffer left — that is not something a PE would ask a customer to
+    # root-cause. Gate every outlier on real SLA materiality (buffer_pct from
+    # job_summary, same thresholds as the rest of the dashboard) before asking
+    # anything; only genuinely tight/at-risk/breaching jobs get a question, and the
+    # severity + wording scale to how material the situation actually is.
     if not regr:
+        import services.pe_config as _pc
+        buf_lookup = _job_buffer_lookup(ctx)
         anomalies = [a for a in (ctx.get("anomalies") or []) if isinstance(a, dict)]
         outliers = sorted(
             (a for a in anomalies if _f(a.get("z_score") or a.get("zscore")) >= 2.0),
@@ -262,6 +296,18 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             if peak <= 0 or avg <= 0:
                 continue
             root = _job_root(job)
+            buf = buf_lookup.get(root)
+            if buf is not None:
+                # Known buffer: only material if it's not comfortably healthy.
+                if buf > _pc.SLA_LONGJOB_PCT:
+                    continue
+            else:
+                # Unknown buffer (no matching job_summary row): fall back to a
+                # stricter absolute bar so we don't silently drop real signal,
+                # but also don't fire on sub-hour blips with no SLA context.
+                z_val = _f(a.get("z_score") or a.get("zscore"))
+                if z_val < 3.0 or peak < 1.0:
+                    continue
             if root not in groups:
                 groups[root] = []
                 order.append(root)
@@ -274,12 +320,29 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             peak = _f(worst.get("peak_hrs") or worst.get("run_hrs"))
             avg  = _f(worst.get("avg_hrs") or worst.get("mean_hrs"))
             z    = _f(worst.get("z_score") or worst.get("zscore"))
-            sev = "CRITICAL" if z >= 3 else "HIGH"
+            buf  = buf_lookup.get(root)
+
+            # Severity follows real SLA materiality (buffer bracket) when known;
+            # falls back to the z-score-only tiering only when buffer is unknown.
+            if buf is not None:
+                if buf <= 0:
+                    sev = "CRITICAL"
+                elif buf <= _pc.SLA_ATRISK_PCT:
+                    sev = "HIGH"
+                else:
+                    sev = "MEDIUM"
+            else:
+                sev = "CRITICAL" if z >= 4 else "HIGH"
 
             sibling_names = [
                 (m.get("job_name") or m.get("Job_Name") or "?") for m in members if m is not worst
             ]
             names_txt = job if not sibling_names else f"{job} and its {_plural(len(sibling_names), 'schedule sibling', 'schedule siblings')} ({', '.join(sibling_names)})"
+
+            # Deterministic phrasing rotation (not random) so multiple qualifying
+            # jobs in the same audit — or the same job type across customers —
+            # don't all read as the identical copy-pasted sentence.
+            _variant = (len(root) + int(round(z * 10))) % 3
 
             # A file-watcher/listener job's peak is upstream-file arrival latency,
             # not CPU/compute time — ask about the file source, not "code fix".
@@ -287,25 +350,49 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                 question = (
                     "Did the upstream file arrive late that run, or is the watcher's "
                     "poll/timeout interval mis-tuned — has this been checked against the "
-                    "source system's file-delivery SLA?"
-                )
+                    "source system's file-delivery SLA?",
+                    "Is the source system's file-delivery timing consistent, or does this "
+                    "watcher need its poll interval / timeout re-tuned to the actual "
+                    "upstream schedule?",
+                    "What does the upstream file-arrival log show for that run — a late "
+                    "drop, or a watcher-side delay — and does the timeout need adjusting?",
+                )[_variant]
+            elif sev == "MEDIUM":
+                # Buffer is thin but not breaching/at-risk — a watch item, not an
+                # urgent root-cause demand.
+                question = (
+                    "Buffer is narrowing on this job — is this a one-off or the start "
+                    "of a trend, and should it move onto the watch list before it "
+                    "reaches the at-risk threshold?",
+                    "Is this run being tracked as a trend, or was it an isolated spike — "
+                    "worth a monitoring flag even though it's still inside its SLA window?",
+                    "Nothing to fix urgently, but is this pattern being monitored so it "
+                    "doesn't quietly erode further before the next review?",
+                )[_variant]
             else:
                 question = (
                     "Was another job or batch window running in parallel at that time, "
                     "or is this job dependent on an upstream step that ran long — has the "
-                    "specific run been traced to a root cause?"
-                )
+                    "specific run been traced to a root cause?",
+                    "What was competing for resources on that run — a parallel batch "
+                    "window, an upstream dependency, or a data-volume spike — and has "
+                    "that been confirmed?",
+                    "Has this specific run been traced to a cause (parallel contention, "
+                    "upstream delay, or data volume), or is it still unexplained?",
+                )[_variant]
 
             if len(members) > 1:
                 observation = (
                     f"{names_txt} both peaked at {_humanize_hrs(peak)} against a "
-                    f"{_humanize_hrs(avg)} average — {z:.1f} standard deviations above normal, "
-                    "on both their run-day schedules."
+                    f"{_humanize_hrs(avg)} average — {z:.1f} standard deviations above normal"
+                    + (f", leaving only {buf:.0f}% SLA buffer" if buf is not None else "")
+                    + ", on both their run-day schedules."
                 )
             else:
                 observation = (
                     f"{job} peaked at {_humanize_hrs(peak)} against its {_humanize_hrs(avg)} "
-                    f"average — {z:.1f} standard deviations above normal."
+                    f"average — {z:.1f} standard deviations above normal"
+                    + (f", leaving only {buf:.0f}% SLA buffer." if buf is not None else ".")
                 )
 
             out.append(_q(
@@ -313,6 +400,7 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                 observation,
                 question,
                 f"{job}: {peak:.2f}h peak vs {avg:.3f}h avg (z={z:.1f})"
+                + (f", {buf:.0f}% buffer" if buf is not None else "")
                 + (f" · {len(sibling_names)} sibling schedule(s) also affected" if sibling_names else ""),
                 root_cause="RUNTIME_REGRESSION",
             ))
