@@ -121,6 +121,37 @@ def _is_file_watcher(job: str) -> bool:
     return "FILEWATCHER" in b or "WATCHER" in b or "FILEWATCH" in b
 
 
+# Day-of-week / schedule-variant tokens a job name is commonly suffixed with —
+# e.g. W_IS_FILE_WATCHER_INBOUND_Daily and W_IS_FILE_WATCHER_INBOUND_TUE are the
+# SAME job run on two different schedules, not two different jobs. Stripping
+# these lets the question generator recognise siblings and merge them into one
+# technical question instead of repeating the identical template per variant.
+_SCHEDULE_SUFFIX_RE = None
+
+
+def _job_root(name: str) -> str:
+    """Collapse a job name to its schedule-agnostic root for de-duplication.
+
+    'W_IS_FILE_WATCHER_INBOUND_Daily' and 'W_IS_FILE_WATCHER_INBOUND_TUE' both
+    collapse to 'W_IS_FILE_WATCHER_INBOUND' — siblings on different run-day
+    schedules, so they should be raised as ONE question, not one each.
+    """
+    import re
+    global _SCHEDULE_SUFFIX_RE
+    if _SCHEDULE_SUFFIX_RE is None:
+        _SCHEDULE_SUFFIX_RE = re.compile(
+            r"[_\-](DAILY|WEEKLY|MONTHLY|TUE|TUESDAY|MON|MONDAY|WED|WEDNESDAY|"
+            r"THU|THURSDAY|FRI|FRIDAY|SAT|SATURDAY|SUN|SUNDAY|SEQ)+$",
+            re.I,
+        )
+    base = _base_job(name)
+    prev = None
+    while prev != base:
+        prev = base
+        base = _SCHEDULE_SUFFIX_RE.sub("", base)
+    return base.upper().strip("_-") or _base_job(name).upper()
+
+
 # ── question container ────────────────────────────────────────────────────────
 
 def _q(category: str, severity: str, observation: str, question: str,
@@ -218,20 +249,71 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             (a for a in anomalies if _f(a.get("z_score") or a.get("zscore")) >= 2.0),
             key=lambda a: _f(a.get("z_score") or a.get("zscore")), reverse=True,
         )
-        for a in outliers[:3]:
-            job  = a.get("job_name") or a.get("Job_Name") or "?"
+        # Group by schedule-agnostic root so a Daily/TUE (or Mon/Wed/Fri…) pair of
+        # the SAME job is raised as ONE technical question, not the identical
+        # template repeated once per schedule variant (e.g. two near-identical
+        # "W_IS_FILE_WATCHER_INBOUND_Daily" / "..._TUE" entries).
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        order: List[str] = []
+        for a in outliers:
+            job = a.get("job_name") or a.get("Job_Name") or "?"
             peak = _f(a.get("peak_hrs") or a.get("run_hrs"))
             avg  = _f(a.get("avg_hrs") or a.get("mean_hrs"))
-            z    = _f(a.get("z_score") or a.get("zscore"))
             if peak <= 0 or avg <= 0:
                 continue
+            root = _job_root(job)
+            if root not in groups:
+                groups[root] = []
+                order.append(root)
+            groups[root].append(a)
+
+        for root in order[:3]:
+            members = groups[root]
+            worst = max(members, key=lambda a: _f(a.get("z_score") or a.get("zscore")))
+            job  = worst.get("job_name") or worst.get("Job_Name") or "?"
+            peak = _f(worst.get("peak_hrs") or worst.get("run_hrs"))
+            avg  = _f(worst.get("avg_hrs") or worst.get("mean_hrs"))
+            z    = _f(worst.get("z_score") or worst.get("zscore"))
             sev = "CRITICAL" if z >= 3 else "HIGH"
+
+            sibling_names = [
+                (m.get("job_name") or m.get("Job_Name") or "?") for m in members if m is not worst
+            ]
+            names_txt = job if not sibling_names else f"{job} and its {_plural(len(sibling_names), 'schedule sibling', 'schedule siblings')} ({', '.join(sibling_names)})"
+
+            # A file-watcher/listener job's peak is upstream-file arrival latency,
+            # not CPU/compute time — ask about the file source, not "code fix".
+            if _is_file_watcher(job):
+                question = (
+                    "Did the upstream file arrive late that run, or is the watcher's "
+                    "poll/timeout interval mis-tuned — has this been checked against the "
+                    "source system's file-delivery SLA?"
+                )
+            else:
+                question = (
+                    "Was another job or batch window running in parallel at that time, "
+                    "or is this job dependent on an upstream step that ran long — has the "
+                    "specific run been traced to a root cause?"
+                )
+
+            if len(members) > 1:
+                observation = (
+                    f"{names_txt} both peaked at {_humanize_hrs(peak)} against a "
+                    f"{_humanize_hrs(avg)} average — {z:.1f} standard deviations above normal, "
+                    "on both their run-day schedules."
+                )
+            else:
+                observation = (
+                    f"{job} peaked at {_humanize_hrs(peak)} against its {_humanize_hrs(avg)} "
+                    f"average — {z:.1f} standard deviations above normal."
+                )
+
             out.append(_q(
                 "Runtime & Regression", sev,
-                f"{job} peaked at {_humanize_hrs(peak)} against its {_humanize_hrs(avg)} "
-                f"average — {z:.1f} standard deviations above normal.",
-                "Is this a one-off spike or a developing trend, and has the cause been traced?",
-                f"{job}: {peak:.2f}h peak vs {avg:.3f}h avg (z={z:.1f})",
+                observation,
+                question,
+                f"{job}: {peak:.2f}h peak vs {avg:.3f}h avg (z={z:.1f})"
+                + (f" · {len(sibling_names)} sibling schedule(s) also affected" if sibling_names else ""),
                 root_cause="RUNTIME_REGRESSION",
             ))
 
