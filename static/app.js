@@ -18261,16 +18261,26 @@ function _renderBatchPerfSummary(data) {
     <th class="text-right py-1.5 text-Cmuted text-[10px] font-semibold">Δ sec</th>
   </tr></thead>`;
 
+  const regBand = _n(bps.regress_band_pct) || _n(data.threshold_pct) || 10;
+  const imprBand = _n(bps.improve_band_pct) || 5;
+
   let html = `<h3 class="text-sm font-bold text-Cwhite mb-4">Batch Runtime Comparison</h3>
-    <div class="flex flex-wrap gap-3 mb-5">
+    <div class="flex flex-wrap gap-3 mb-2">
       ${statCard("Total Jobs",   bps.total_jobs,    "text-Cwhite",  `${bps.comparable} comparable`)}
-      ${statCard("Regressions",  bps.regressions,   bps.regressions > 0 ? "text-Cred"   : "text-Cgreen", "worse than before")}
-      ${statCard("Improvements", bps.improvements,  bps.improvements > 0 ? "text-Cgreen" : "text-Cmuted", "faster than before")}
-      ${statCard("No Change",    bps.no_change,     "text-Cmuted",  "within ±threshold")}
+      ${statCard("Regressions",  bps.regressions,   bps.regressions > 0 ? "text-Cred"   : "text-Cgreen", `slower by &gt;${regBand.toFixed(0)}%`)}
+      ${statCard("Improvements", bps.improvements,  bps.improvements > 0 ? "text-Cgreen" : "text-Cmuted", `faster by &gt;${imprBand.toFixed(0)}%`)}
+      ${statCard("No Change",    bps.no_change,     "text-Cmuted",  `within −${imprBand.toFixed(0)}%…+${regBand.toFixed(0)}%`)}
       ${suspect > 0 ? statCard("Suspect",  suspect, "text-Camber", "near-instant · no-data?") : ""}
       ${dropped > 0 ? statCard("Not Run",  dropped, "text-Camber", "no data in new env") : ""}
       ${newOnly > 0 ? statCard("New Only",  newOnly, "text-Cmuted", "no prior baseline") : ""}
       ${statCard("Net Runtime",  `${netSecs >= 0 ? "−" : "+"}${netMin} min`, netCol, `${netDir} per run · comparable only`)}
+    </div>
+    <div class="text-[10px] text-Cmuted mb-5 leading-relaxed">
+      Counting rule: a two-sided pair counts as a <span class="text-Cred">regression</span> only when it is
+      &gt;${regBand.toFixed(0)}% slower and an <span class="text-Cgreen">improvement</span> only when
+      &gt;${imprBand.toFixed(0)}% faster — smaller moves are tolerance jitter (No&nbsp;Change).
+      One-sided pairs (New&nbsp;Only / Not&nbsp;Run) and near-instant collapses (Suspect) are excluded,
+      so these counts run below a raw &ldquo;any change&rdquo; tally by design.
     </div>`;
 
   // Top regressions / improvements side-by-side

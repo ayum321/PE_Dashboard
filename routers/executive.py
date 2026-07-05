@@ -754,10 +754,18 @@ def _build_breach_calendar(
             dow = dt.strftime("%a")
         except Exception:
             dow = ""
-        # Prefer elapsed_hrs (wall-clock); only fall back to total_hrs
-        _e = _f(w.get("elapsed_hrs"))
-        _t = _f(w.get("total_hrs"))
-        hrs = _e if _e > 0 else (_t if _t > 0 else 0.0)
+        # SLA-binding duration = effective_hrs (longest CONTIGUOUS batch block) —
+        # the SAME measure the breach flag and the Daily Batch Window chart bar use.
+        # The raw first→last elapsed span would read ~20h on spread/sequenced days
+        # (idle gaps + an OUTBOUND sub-app straddling the day) while that day's breach
+        # flag was judged on the 6–12h effective block: the bar, the ceiling delta and
+        # the red/green status must reconcile with the flag, so effective wins here.
+        # Elapsed span, then summed runtime, are legacy fallbacks only (older payloads
+        # or missing End_Time / block decomposition).
+        _eff = _f(w.get("effective_hrs"))
+        _e   = _f(w.get("elapsed_hrs"))
+        _t   = _f(w.get("total_hrs"))
+        hrs = _eff if _eff > 0 else (_e if _e > 0 else (_t if _t > 0 else 0.0))
 
         # Per-row contracted ceiling (Patch C key fix)
         _sa = str(w.get("sub_app") or w.get("Sub_Application") or "").upper()

@@ -220,6 +220,18 @@ BATCH_NOWORK_SEC: float          = 5.0    # new runtime < this ⇒ effectively n
 BATCH_COLLAPSE_MIN_OLD_SEC: float = 30.0  # only suspect when baseline did real work (>= this)
 BATCH_COLLAPSE_RATIO: float       = 0.05  # new <= old×this (>=95% drop) ⇒ implausible win
 
+# Runtime-comparison classification band (batch benchmark PROD→TEST/UAT).
+# A two-sided pair (both runtimes > 0, not a suspect collapse) is bucketed by its
+# percent delta so tiny measurement jitter is not mislabelled as a real movement:
+#   • delta > +benchmark_threshold_pct        ⇒ REGRESSION (slower)
+#   • delta < −BATCH_IMPROVE_MIN_PCT           ⇒ IMPROVEMENT (faster)
+#   • in between                               ⇒ NO CHANGE (within tolerance band)
+# The regression side reuses the per-file benchmark threshold; the improvement floor
+# is separate (a small win is easier to reach by noise than a large slowdown) and is
+# disclosed in the UI so the counts reconcile against a raw any-delta tally.
+BATCH_IMPROVE_MIN_PCT: float      = 5.0   # |delta| below this on the faster side ⇒ no-change
+
+
 # ── Suspect-collapse cause classification (Gap 1) ─────────────────────────────
 # A flagged collapse is not equally suspicious across job classes. Data-heavy
 # load/extract jobs (history transfers, SKU extracts) collapsing to seconds is
@@ -412,7 +424,7 @@ def reload() -> None:
     global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
     global PATTERN_MIN_OCCURRENCES, PATTERN_MIN_RATIO, PREDICT_MIN_R2
     global BASELINE_RETENTION_DAYS, MIN_BASELINE_PULLS, MIN_PRIOR_PULLS, REGIME_DRIFT_Z_THRESHOLD
-    global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO
+    global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO, BATCH_IMPROVE_MIN_PCT
     global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
     global BATCH_DATA_HEAVY_PATTERNS
     global SOW_DFU, SOW_SKU, SOW_ORDERS, SOW_BATCH_JOBS
@@ -493,6 +505,7 @@ def reload() -> None:
     BATCH_NOWORK_SEC           = _f("batch_nowork_sec",            5.0)
     BATCH_COLLAPSE_MIN_OLD_SEC = _f("batch_collapse_min_old_sec", 30.0)
     BATCH_COLLAPSE_RATIO       = _f("batch_collapse_ratio",        0.05)
+    BATCH_IMPROVE_MIN_PCT      = _f("batch_improve_min_pct",       5.0)
     BATCH_PROJECT_MIN_BASELINE_SEC   = _f("batch_project_min_baseline_sec",   60.0)
     BATCH_PROJECT_MAX_BASELINE_RATIO = _f("batch_project_max_baseline_ratio", 10.0)
     _dhp = _cfg("batch_data_heavy_patterns")

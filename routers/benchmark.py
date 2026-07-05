@@ -1296,6 +1296,7 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
     _min_old = float(getattr(_pc, "BATCH_COLLAPSE_MIN_OLD_SEC", 60.0))
     _ratio   = float(getattr(_pc, "BATCH_COLLAPSE_RATIO", 0.02))
     _proj_min = float(getattr(_pc, "BATCH_PROJECT_MIN_BASELINE_SEC", 60.0))
+    _impr_min = float(getattr(_pc, "BATCH_IMPROVE_MIN_PCT", 5.0))
 
     def _is_collapse(old: float, new: float) -> bool:
         # A substantial job (old >= _min_old) whose runtime either drops to a
@@ -1349,7 +1350,7 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
                 continue
             if delta_pct > threshold_pct:
                 regressions.append(entry)
-            elif delta_pct < -5:
+            elif delta_pct < -_impr_min:
                 improvements.append(entry)
             else:
                 no_change += 1
@@ -1389,6 +1390,11 @@ def _build_batch_perf_summary(rows: list[dict], threshold_pct: float) -> dict:
             "no_change":        no_change,
             "net_delta_secs":   round(net_delta, 1),
             "regression_rate":  regression_rate,
+            # Classification bands (disclosed so 150 regressions reconciles against a
+            # raw any-delta tally): slower by > regress_band_pct ⇒ regression; faster by
+            # > improve_band_pct ⇒ improvement; in between ⇒ no-change.
+            "regress_band_pct": round(float(threshold_pct), 1),
+            "improve_band_pct": round(_impr_min, 1),
             "top_regressions":  regressions[:10],
             "projectable_regressions": projectable[:10],
             "top_improvements": improvements[:10],
