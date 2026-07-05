@@ -385,6 +385,15 @@ COMPLIANCE_EXCLUDED_TYPES: set = {
     "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY", "QUARTERLY", "ANNUAL",
 }
 
+# When True, compute_window_compliance() logs every (sub_app, date) decision —
+# INCLUDED (with its resolved ceiling + verdict) or EXCLUDED (with its schedule
+# type) — to the "compliance_engine" logger. Off by default (would log one line
+# per sub-app-day on every upload); flip on via pe_config.json
+# ("compliance_debug_log": true) when a headline % needs to be traced against
+# the raw data row-by-row. The same trace is always available without logging,
+# in window_compliance["audit_windows"].
+COMPLIANCE_DEBUG_LOG: bool = False
+
 # ── Cyclic detection threshold ────────────────────────────────────────────────
 # Jobs with avg_runtime_hrs below this threshold are considered cyclic candidates.
 # (Combined with frequency guard: max runs/day > 5 AND median > 3)
@@ -415,6 +424,7 @@ def reload() -> None:
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT, SLA_STRUCTURAL_RATIO
     global SLA_COMPLIANCE_TARGET_PCT, SLA_COMPLIANCE_CRIT_PCT
+    global COMPLIANCE_DEBUG_LOG
     global BATCH_BLOCK_GAP_HRS, LONGPOLE_TOP_N, LONGPOLE_WINDOW_SHARE_PCT
     global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
     global FJ_PEN_WINDOW_CAP, FJ_PEN_FAILRATE_CAP, FJ_PEN_OVERRUN_CAP, FJ_PEN_REGRESSION_CAP
@@ -456,6 +466,7 @@ def reload() -> None:
     SLA_STRUCTURAL_RATIO = _f("sla_structural_ratio", 0.60)
     SLA_COMPLIANCE_TARGET_PCT = _f("sla_compliance_target_pct", 95.0)
     SLA_COMPLIANCE_CRIT_PCT   = _f("sla_compliance_crit_pct",   80.0)
+    COMPLIANCE_DEBUG_LOG = bool(_cfg("compliance_debug_log", False))
     BATCH_BLOCK_GAP_HRS = _f("batch_block_gap_hrs", 1.0)
     try:
         LONGPOLE_TOP_N = int(_cfg("longpole_top_n", 8))

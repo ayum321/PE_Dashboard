@@ -111,6 +111,7 @@ def compute_window_compliance(
     window_records: List[Dict[str, Any]],
     ceiling_map: Dict[str, Any],
     excluded_types: Optional[set] = None,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """Compute canonical daily batch-window compliance.
 
@@ -127,6 +128,17 @@ def compute_window_compliance(
     excluded_types:
         Set of schedule type strings that are NEVER counted in the denominator.
         Defaults to pe_config.COMPLIANCE_EXCLUDED_TYPES when None.
+    debug:
+        When True, logs every (sub_app, date) decision — INCLUDED (with its
+        resolved ceiling + breach verdict) or EXCLUDED (with its schedule type)
+        — to the "compliance_engine" logger at INFO level. This is the direct
+        answer to "is OUTBOUND/SEQ_DAILY silently dropped": turn it on for one
+        request and the log shows every row's fate. Off by default (audit-size
+        logs on every batch upload would be noise) — enable via
+        pe_config.COMPLIANCE_DEBUG_LOG=True or by passing debug=True directly.
+        Regardless of this flag, a compact ``audit_windows`` manifest (one row
+        per scored (sub_app, date) with its ceiling/effective/breach) is always
+        returned so the same trace is inspectable programmatically without logs.
 
     Returns
     -------
@@ -139,12 +151,16 @@ def compute_window_compliance(
         excluded_windows int   — rows skipped (CYCLIC, ADHOC, etc.)
         warnings         list[str] — data-shape guardrails
     """
+    import logging
+    _log = logging.getLogger("compliance_engine")
     try:
         from services import pe_config as _pc
         _excluded = excluded_types if excluded_types is not None else _pc.COMPLIANCE_EXCLUDED_TYPES
         _atrisk_pct = _pc.SLA_ATRISK_PCT
         _daily_default = _pc.SLA_DAILY_HRS
         _structural_ratio = getattr(_pc, "SLA_STRUCTURAL_RATIO", 0.60)
+        if not debug:
+            debug = bool(getattr(_pc, "COMPLIANCE_DEBUG_LOG", False))
     except Exception:
         _excluded = {"CYCLIC", "CYCLIC_INTERVAL", "ADHOC", "CALENDAR_BASED",
                      "OUTBOUND", "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY",
@@ -161,6 +177,10 @@ def compute_window_compliance(
     # all-pass count, so the consumer must be able to name them (e.g. "<SUB_APP> 23.7h
     # excluded as OUTBOUND") instead of presenting an opaque pass count.
     _excluded_detail: Dict[str, Dict[str, Any]] = {}
+    # Full (sub_app, date) audit trail — every row's fate, always populated (cheap:
+    # one dict per row) so "why is the headline number X" is answerable without
+    # re-running with debug logging on.
+    audit_windows: List[Dict[str, Any]] = []
 
     for rec in window_records:
         date_str = str(rec.get("run_date") or rec.get("date") or "").strip()
@@ -193,6 +213,17 @@ def compute_window_compliance(
             _ed["windows"] += 1
             if elapsed > _ed["worst_hrs"]:
                 _ed["worst_hrs"] = round(elapsed, 3)
+            audit_windows.append({
+                "sub_app": sub_app or _ek, "run_date": date_str,
+                "schedule_type": sched, "effective_hrs": round(elapsed, 3),
+                "included": False, "reason": f"excluded_type:{sched}",
+            })
+            if debug:
+                _log.info(
+                    "EXCLUDED sub_app=%s date=%s schedule=%s effective=%.2fh "
+                    "(schedule type is in COMPLIANCE_EXCLUDED_TYPES)",
+                    sub_app or _ek, date_str, sched, elapsed,
+                )
             continue
 
         # effective duration + sub_app already computed up-front above.
@@ -209,12 +240,34 @@ def compute_window_compliance(
         if ceil_f <= 0:
             excluded_windows += 1
             warnings.append(f"Skipped {date_str}: no usable SLA ceiling.")
+            audit_windows.append({
+                "sub_app": sub_app, "run_date": date_str, "schedule_type": sched,
+                "effective_hrs": round(elapsed, 3), "included": False,
+                "reason": "no_usable_ceiling",
+            })
+            if debug:
+                _log.info(
+                    "EXCLUDED sub_app=%s date=%s schedule=%s (no usable SLA ceiling resolved)",
+                    sub_app, date_str, sched,
+                )
             continue
 
         breach = rec.get("breach")
         if breach is None:
             breach = elapsed > ceil_f
         breach = bool(breach)
+
+        if debug:
+            _log.info(
+                "INCLUDED sub_app=%s date=%s schedule=%s effective=%.2fh ceiling=%.2fh "
+                "breach=%s",
+                sub_app, date_str, sched, elapsed, ceil_f, breach,
+            )
+        audit_windows.append({
+            "sub_app": sub_app, "run_date": date_str, "schedule_type": sched,
+            "effective_hrs": round(elapsed, 3), "ceiling_hrs": round(ceil_f, 3),
+            "breach": breach, "included": True,
+        })
 
         # ── Window unit key ──────────────────────────────────────────────
         # When a Sub_Application is present, each (sub_app, date) is its OWN
@@ -419,6 +472,10 @@ def compute_window_compliance(
         # silent rule; we publish the rule with it.
         "structural_ratio": _structural_ratio,
         "warnings":         warnings,
+        # Full row-level trace: one entry per (sub_app, date) with its verdict —
+        # answers "is X silently excluded / what ceiling did Y get judged against"
+        # without re-running with debug=True. See docstring.
+        "audit_windows":    audit_windows,
     }
 
 
