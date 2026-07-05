@@ -96,6 +96,21 @@ def _plural(n: int, one: str, many: str) -> str:
     return one if n == 1 else many
 
 
+def _pick(options: tuple, seed: str) -> str:
+    """Deterministically choose one of several equivalent phrasings.
+
+    Not random — same (situation, job) always yields the same sentence on
+    re-run, but different jobs/situations spread across the option set so a
+    multi-job finding doesn't read as the identical template with only the
+    job name swapped. Uses crc32 (not sum-of-ordinals) so similar-length
+    names/numbers don't collide onto the same bucket by coincidence.
+    """
+    if not options:
+        return ""
+    import zlib
+    return options[zlib.crc32(seed.encode("utf-8", "ignore")) % len(options)]
+
+
 def _base_job(name: str) -> str:
     """Strip an env prefix (PROD_/TEST_/UAT_/…) for module inference only."""
     import re
@@ -224,12 +239,20 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             continue
         fac = _factor(old, new)
         sev = "CRITICAL" if (new / old) >= 5 else "HIGH"
+        _seed = f"{job}#{old:.2f}#{new:.2f}"
+        question = _pick((
+            f"What caused this step-up, has a root-cause analysis been completed, and is "
+            f"it resolved now — confirmed in a clean re-run at the same data volume {tail}?",
+            f"Has this been traced to a specific code or config change, and is there a "
+            f"validated fix in place — not just a one-off clean re-run {tail}?",
+            f"Is the {fac} slowdown explained (data volume, code change, environment), and "
+            f"can a re-run at matched volume confirm it's resolved {tail}?",
+        ), _seed)
         out.append(_q(
             "Runtime & Regression", sev,
             f"{job} went from {_humanize_secs(old)} to {_humanize_secs(new)} on the new "
             f"release — a {fac} regression.",
-            f"What caused this step-up, has a root-cause analysis been completed, and is it "
-            f"resolved now — confirmed in a clean re-run at the same data volume {tail}?",
+            question,
             f"{job}: {_humanize_secs(old)} → {_humanize_secs(new)} ({fac})",
             root_cause="BATCH_RUNTIME_REGRESSION",
         ))
@@ -339,15 +362,16 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
             ]
             names_txt = job if not sibling_names else f"{job} and its {_plural(len(sibling_names), 'schedule sibling', 'schedule siblings')} ({', '.join(sibling_names)})"
 
-            # Deterministic phrasing rotation (not random) so multiple qualifying
-            # jobs in the same audit — or the same job type across customers —
-            # don't all read as the identical copy-pasted sentence.
-            _variant = (len(root) + int(round(z * 10))) % 3
+            # Deterministic phrasing rotation (not random, via _pick/crc32) so
+            # multiple qualifying jobs in the same audit — or the same job type
+            # across customers — don't all read as the identical copy-pasted
+            # sentence.
+            _seed = f"{root}#{z:.2f}#{buf if buf is not None else -1:.1f}"
 
             # A file-watcher/listener job's peak is upstream-file arrival latency,
             # not CPU/compute time — ask about the file source, not "code fix".
             if _is_file_watcher(job):
-                question = (
+                question = _pick((
                     "Did the upstream file arrive late that run, or is the watcher's "
                     "poll/timeout interval mis-tuned — has this been checked against the "
                     "source system's file-delivery SLA?",
@@ -356,11 +380,11 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                     "upstream schedule?",
                     "What does the upstream file-arrival log show for that run — a late "
                     "drop, or a watcher-side delay — and does the timeout need adjusting?",
-                )[_variant]
+                ), _seed)
             elif sev == "MEDIUM":
                 # Buffer is thin but not breaching/at-risk — a watch item, not an
                 # urgent root-cause demand.
-                question = (
+                question = _pick((
                     "Buffer is narrowing on this job — is this a one-off or the start "
                     "of a trend, and should it move onto the watch list before it "
                     "reaches the at-risk threshold?",
@@ -368,9 +392,9 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                     "worth a monitoring flag even though it's still inside its SLA window?",
                     "Nothing to fix urgently, but is this pattern being monitored so it "
                     "doesn't quietly erode further before the next review?",
-                )[_variant]
+                ), _seed)
             else:
-                question = (
+                question = _pick((
                     "Was another job or batch window running in parallel at that time, "
                     "or is this job dependent on an upstream step that ran long — has the "
                     "specific run been traced to a root cause?",
@@ -379,7 +403,7 @@ def _runtime_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
                     "that been confirmed?",
                     "Has this specific run been traced to a cause (parallel contention, "
                     "upstream delay, or data volume), or is it still unexplained?",
-                )[_variant]
+                ), _seed)
 
             if len(members) > 1:
                 observation = (
@@ -431,11 +455,19 @@ def _failure_questions(ctx: Dict[str, Any], tail: str) -> List[Dict[str, str]]:
         module = _infer_module(jn)
         mod_clause = f"the {module} module" if module else "this job"
         sev = "CRITICAL" if n >= 10 else "HIGH" if n >= 3 else "MEDIUM"
+        _seed = f"{jn}#{n}"
+        question = _pick((
+            f"Is this a known intermittent issue or a systematic defect in {mod_clause}, "
+            f"and is a fix committed {tail}?",
+            f"Has the failure pattern in {mod_clause} been root-caused, or is it still "
+            f"being investigated — what's the remediation timeline {tail}?",
+            f"Are these {n} failures linked to one common cause in {mod_clause}, or "
+            f"several unrelated issues that each need separate tracking {tail}?",
+        ), _seed)
         out.append(_q(
             "Execution Failures", sev,
             f"{jn} failed {n} {_plural(n, 'time', 'times')} in the window.",
-            f"Is this a known intermittent issue or a systematic defect in {mod_clause}, "
-            f"and is a fix committed {tail}?",
+            question,
             f"{jn}: {n} {_plural(n, 'failure', 'failures')}",
             root_cause="JOB_FAILURE",
         ))
