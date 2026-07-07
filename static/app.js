@@ -5768,11 +5768,10 @@ function renderResourceTable(servers) {
     const memGbAvail = r.mem_available !== false && r.mem_gb != null;
     const cpuAvgAvail = r.cpu_available !== false && r.cpu_avg_pct != null;
 
-    // Role-aware memory context tag (logic uses mem_pct = used%, display shows available%)
+    // Role-aware memory context tag (mem_pct = used% — same value now shown in the cell)
     let memContextTag = "";
     const rType = (r.type || "").toUpperCase();
     const rEnv = (r.environment || "").toUpperCase();
-    const memAvailPct = memAvail ? 100 - r.mem_pct : 0;
     if (memAvail) {
       if (_isDbMemExpected(rType, r.mem_pct)) {
         memContextTag = ` <span class="text-[8px] cursor-help px-1 py-0.5 rounded" style="color:${DB_EXPECTED_COLOR};background:${hexA(DB_EXPECTED_COLOR,0.12)}" title="DB expected allocation (SGA/PGA). ${(100 - RESOURCE_THRESHOLDS.db_mem_band_high)}–${(100 - RESOURCE_THRESHOLDS.db_mem_band_low)}% available is normal for DB servers.">DB expected</span>`;
@@ -5789,8 +5788,8 @@ function renderResourceTable(servers) {
     const _dbMemNormal = r.mem_status === "DB_NORMAL" || _isDbMemExpected(rType, r.mem_pct);
     const memColor = !memAvail ? ""
       : _dbMemNormal                                                     ? DB_EXPECTED_COLOR
-      : memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_warn)             ? THEME.red
-      : memAvailPct <= (100 - RESOURCE_THRESHOLDS.mem_ok)               ? THEME.amber
+      : r.mem_pct >= RESOURCE_THRESHOLDS.mem_warn                        ? THEME.red
+      : r.mem_pct >= RESOURCE_THRESHOLDS.mem_ok                         ? THEME.amber
       : THEME.green;
 
     // Environment badge
@@ -5804,7 +5803,7 @@ function renderResourceTable(servers) {
       <td class="py-2.5 pr-3">${envBadge}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!cpuAvail ? 'text-Cmuted' : ''}" style="color:${cpuColor}">${cpuAvail ? cpuVal + '%' + cpuExtra : '<span title="Data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${cpuAvgAvail ? r.cpu_avg_pct.toFixed(1) + '%' : '<span title="Insufficient data for period average">N/A</span>'}</td>
-      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memColor}">${memAvail ? memAvailPct.toFixed(1) + '%' + memContextTag : '<span title="Data unavailable">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memColor}">${memAvail ? r.mem_pct.toFixed(1) + '%' + memContextTag : '<span title="Data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${memGbAvail ? r.mem_gb.toFixed(1) : '<span title="Memory capacity not available from source">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${r.disk_pct == null ? 'text-Cmuted' : ''}" style="color:${r.disk_pct != null ? metricColor(r.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn) : ''}">${r.disk_pct != null ? (r.disk_pct).toFixed(1) + '%' : '<span title="Disk data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3">
