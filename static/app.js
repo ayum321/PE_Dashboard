@@ -5495,6 +5495,22 @@ function renderResourceHeatmap(servers) {
     - Math.max(a.cpu_pct||0, a.mem_pct||0, a.disk_pct||0)
   ).slice(0, 20);
 
+  // Update "Top N of M visualised" subtitle dynamically
+  const vizLabel = document.getElementById("resource-viz-count-label");
+  if (vizLabel) {
+    vizLabel.textContent = `Top ${top.length} of ${known.length} server${known.length !== 1 ? "s" : ""} visualised below · full searchable detail table further down.`;
+  }
+
+  // Disk unavailability banner — show once above the chart, not per row
+  const noDisk = top.filter(s => s.disk_pct == null).length;
+  const diskBanner = noDisk > 0
+    ? `<div class="flex items-center gap-2 mb-2 px-2 py-1.5 rounded-lg text-[9px]" style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25)">
+        <span style="color:#f59e0b">⚠</span>
+        <span class="font-semibold" style="color:#f59e0b">Disk I/O unavailable for ${noDisk}/${top.length} server${noDisk !== 1 ? "s" : ""}</span>
+        <span class="text-Cmuted">— metric not emitted by VM SKU/agent. Confirm OS disk monitoring is enabled in Azure.</span>
+       </div>`
+    : "";
+
   const trendArrow = (t) => {
     if (t == null) return `<span class="text-Cmuted text-[10px]" title="No trend — snapshot only">→</span>`;
     if (t > 5)  return `<span class="text-Cred text-[11px]" title="Up vs 7-day avg">↑</span>`;
@@ -5505,8 +5521,9 @@ function renderResourceHeatmap(servers) {
   const barCell = (val, ok = 60, warn = 80, opts = {}) => {
     if (val == null || isNaN(Number(val)) || val < 0) {
       if (opts.showGapWarning) {
-        return `<div class="metric-bar-track" title="Disk bandwidth % not emitted by this VM SKU/agent — metric absent, not idle. Confirm OS disk monitoring is enabled."><div class="metric-bar-fill" style="width:0%;background:${hexA(THEME.amber,0.25)}"></div></div>
-              <div class="text-[9px] text-right mt-0.5 font-semibold whitespace-nowrap" style="color:${THEME.amber};min-width:3rem" title="Disk bandwidth % not emitted by this VM SKU/agent — metric absent, not idle">⚠ no disk metric</div>`;
+        // Silent empty bar — the fleet-level disk unavailability banner handles disclosure
+        return `<div class="metric-bar-track" title="Disk I/O metric not emitted by this VM SKU/agent. See banner above for fleet-wide count."><div class="metric-bar-fill" style="width:0%;background:${hexA(THEME.amber,0.18)}"></div></div>
+              <div class="text-[10px] text-Cmuted text-right mt-0.5 font-mono" style="min-width:3rem">—</div>`;
       }
       return `<div class="metric-bar-track" title="No data"><div class="metric-bar-fill" style="width:0%;background:#475569"></div></div>
               <div class="text-[10px] text-Cmuted text-right mt-0.5 font-mono" style="min-width:3rem">N/A</div>`;
@@ -5587,6 +5604,7 @@ function renderResourceHeatmap(servers) {
       <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded" style="background:linear-gradient(135deg,${DB_EXPECTED_GRAD[0]},${DB_EXPECTED_GRAD[1]})"></span> DB expected</span>
       <span class="text-Cmuted/60 text-[8px]">| Memory = Available % (Azure native, lower = more pressure) · Disk = I/O BW consumed % (not storage space) · DB servers 8–20% mem available is expected SGA/PGA (shown purple)</span>
     </div>
+    ${diskBanner}
     <div class="grid items-center gap-4 pb-2 border-b border-Cborder/40 text-[10px] uppercase tracking-wider text-Cmuted font-bold px-1"
          style="grid-template-columns:minmax(140px,1.2fr) 1.5fr 1.5fr 1.5fr">
       <div>Server</div>
@@ -5602,6 +5620,49 @@ function renderResourceHeatmap(servers) {
     </div>
     ${rows}
   `;
+}
+
+// ── Per-server CPU sparkline (inline SVG from Azure timeseries data) ─────
+// Renders a 48×16 sparkline for the server's last 24h of CPU data.
+// Falls back gracefully to "—" when no deep-dive data is loaded.
+function _serverSparkline(r) {
+  if (!_deepDiveData?.vms) return '<span class="text-Cmuted text-[9px]" title="Load 30d metrics to see trends">—</span>';
+  const name = (r.server || r.host || "").toLowerCase().replace(/\..*/,"");
+  // Try exact match first, then prefix-substring (Azure names often drop domain suffix)
+  let vmData = _deepDiveData.vms[name];
+  if (!vmData) {
+    vmData = Object.entries(_deepDiveData.vms).find(([k]) =>
+      k.includes(name) || name.includes(k)
+    )?.[1];
+  }
+  if (!vmData) return '<span class="text-Cmuted text-[9px]" title="No Azure match for this server">—</span>';
+  const pts = vmData.series?.["Percentage CPU"];
+  if (!pts || pts.length < 3) return '<span class="text-Cmuted text-[9px]" title="Insufficient data points">—</span>';
+  // Take last 48 points (≈ 24h at 30-min resolution or 48h at 1h)
+  const sample = pts.slice(-48);
+  const vals = sample.map(p => p.v);
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const range = max - min || 1;
+  const W = 48, H = 16;
+  const step = W / (sample.length - 1);
+  const coords = vals.map((v, i) =>
+    `${(i * step).toFixed(1)},${(H - ((v - min) / range) * H).toFixed(1)}`
+  ).join(" ");
+  const last = vals[vals.length - 1];
+  const color = last >= RESOURCE_THRESHOLDS.cpu_warn ? THEME.red
+              : last >= RESOURCE_THRESHOLDS.cpu_ok   ? THEME.amber
+              : THEME.green;
+  const avgVal = (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1);
+  const trend  = vals.length >= 6
+    ? ((vals.slice(-3).reduce((s,v)=>s+v,0)/3) - (vals.slice(0,3).reduce((s,v)=>s+v,0)/3)).toFixed(1)
+    : null;
+  const trendTxt = trend != null ? (Number(trend) > 2 ? ` ↑${trend}%` : Number(trend) < -2 ? ` ↓${Math.abs(trend)}%` : " →") : "";
+  return `<span title="CPU sparkline · avg ${avgVal}%${trendTxt} · ${sample.length} pts">` +
+    `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:inline-block;vertical-align:middle;overflow:visible">` +
+    `<polyline points="${coords}" fill="none" stroke="${color}" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${(( sample.length-1)*step).toFixed(1)}" cy="${(H - ((last-min)/range)*H).toFixed(1)}" r="2" fill="${color}"/>` +
+    `</svg></span>`;
 }
 
 // ── Donut ring helper (used for fleet AVG CPU/MEM/DISK tiles) ─
@@ -5803,6 +5864,7 @@ function renderResourceTable(servers) {
       <td class="py-2.5 pr-3">${envBadge}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!cpuAvail ? 'text-Cmuted' : ''}" style="color:${cpuColor}">${cpuAvail ? cpuVal + '%' + cpuExtra : '<span title="Data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${cpuAvgAvail ? r.cpu_avg_pct.toFixed(1) + '%' : '<span title="Insufficient data for period average">N/A</span>'}</td>
+      <td class="py-2.5 pr-3 text-center">${_serverSparkline(r)}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${!memAvail ? 'text-Cmuted' : ''}" style="color:${memColor}">${memAvail ? r.mem_pct.toFixed(1) + '%' + memContextTag : '<span title="Data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${memGbAvail ? r.mem_gb.toFixed(1) : '<span title="Memory capacity not available from source">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${r.disk_pct == null ? 'text-Cmuted' : ''}" style="color:${r.disk_pct != null ? metricColor(r.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn) : ''}">${r.disk_pct != null ? (r.disk_pct).toFixed(1) + '%' : '<span title="Disk data unavailable">N/A</span>'}</td>
@@ -6052,6 +6114,8 @@ function loadMetricsDeepDive() {
         window.appData.deepDive = _buildDeepDiveSummary();
         _refreshExecResourceHealth();
         triggerGenerateFindings().catch(() => {});
+        // Refresh resource table sparklines now that timeseries data is available
+        if (window.appData?.resource?.servers) renderResourceTable(window.appData.resource.servers);
       },
     ];
     let _ddi = 0;
