@@ -1356,22 +1356,21 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
 
     # Use finer granularity for shorter time ranges; coarsen for long windows
     # to avoid large payloads and Azure Monitor throttling.
+    # Azure Monitor only accepts specific ISO-8601 granularities:
+    #   PT1M, PT5M, PT15M, PT30M, PT1H, PT6H, PT12H, P1D
+    # PT4H is NOT valid — queries return empty data silently; always pick from the list above.
     # 15-day (360h) PE audit window → 1h = 360 pts/metric/VM (nominal use case)
-    # 30-day (720h) → 4h = 180 pts;  60-day → 6h = 240 pts
+    # 30-day (720h) → 6h = 120 pts;  60-day → 6h = 240 pts
     if hours_back <= 1:
         granularity = timedelta(minutes=1)
     elif hours_back <= 6:
         granularity = timedelta(minutes=5)
     elif hours_back <= 24:
         granularity = timedelta(minutes=15)
-    elif hours_back <= 72:
-        granularity = timedelta(hours=1)
     elif hours_back <= 360:
-        granularity = timedelta(hours=1)   # 15-day nominal — 360 pts, within cap
-    elif hours_back <= 720:
-        granularity = timedelta(hours=4)   # 30-day — ~180 pts, faster query
+        granularity = timedelta(hours=1)   # up to 15-day — 360 pts max, within cap
     else:
-        granularity = timedelta(hours=6)   # 60-day+ — cap payload size
+        granularity = timedelta(hours=6)   # 30-day+ → PT6H (valid) = 120–240 pts
 
     if not resource_ids:
         return {"vms": {}, "patterns": [], "baseline": {}}
@@ -1485,7 +1484,25 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
     # ── Baseline analysis (15+ day context) ──
     baseline = _compute_baseline_analysis(result, hours_back)
 
-    return {"vms": result, "patterns": patterns, "baseline": baseline}
+    # Build a human-readable grain label for the chart subtitle
+    total_secs = int(granularity.total_seconds())
+    if total_secs < 3600:
+        _grain_label = f"{total_secs // 60}min avg"
+    elif total_secs == 3600:
+        _grain_label = "1h avg"
+    else:
+        _grain_label = f"{total_secs // 3600}h avg"
+
+    return {
+        "vms": result,
+        "patterns": patterns,
+        "baseline": baseline,
+        "window": {
+            "hours_back": hours_back,
+            "grain": _grain_label,
+            "timezone": "UTC",
+        },
+    }
 
 
 def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict[str, Any]:
