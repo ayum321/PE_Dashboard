@@ -2350,12 +2350,16 @@ function renderBatchSlaSourceTags(sla, kpis) {
       if (tag2) tag2.style.color = THEME.green;
     }
 
-    // Surface SLA warnings inline
+    // Surface SLA warnings inline. These are full explanatory sentences (e.g.
+    // ADAPTIVE_BASELINE_ACTIVE), not short badge labels, so let each chip wrap
+    // onto its own full-width line instead of hard-truncating mid-word —
+    // cutting an honesty warning off mid-sentence just creates a new, smaller
+    // trust problem.
     const warnEl = document.getElementById("chart-sla-warnings");
     if (warnEl && sla.warnings?.length) {
       warnEl.innerHTML = sla.warnings.slice(0, 3).map(w =>
-        `<span class="text-[9px] px-1.5 py-0.5 rounded border ${w.severity === "critical" ? "text-Cred border-Cred/30" : "text-Camber border-Camber/30"}">${escapeHtml(w.text || "").substring(0, 80)}</span>`
-      ).join(" ");
+        `<span class="block w-full whitespace-normal text-[10px] leading-snug px-1.5 py-1 rounded border ${w.severity === "critical" ? "text-Cred border-Cred/30" : "text-Camber border-Camber/30"}">${escapeHtml(w.text || "")}</span>`
+      ).join("");
       warnEl.classList.remove("hidden");
     } else if (warnEl) {
       // Clear any stale warning (e.g. the "No SLA matrix uploaded" box from a prior
