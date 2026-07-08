@@ -5785,7 +5785,7 @@ function _serverSparkline(r) {
   const min = Math.min(...vals);
   const max = Math.max(...vals);
   const range = max - min || 1;
-  const W = 48, H = 16;
+  const W = 56, H = 20;
   const step = W / (sample.length - 1);
   const coords = vals.map((v, i) =>
     `${(i * step).toFixed(1)},${(H - ((v - min) / range) * H).toFixed(1)}`
@@ -5795,11 +5795,16 @@ function _serverSparkline(r) {
               : last >= RESOURCE_THRESHOLDS.cpu_ok   ? THEME.amber
               : THEME.green;
   const avgVal = (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1);
+  const peakVal = Math.max(...vals);
+  const peakIdx = vals.indexOf(peakVal);
+  const latestTs = new Date(sample[sample.length - 1]?.t || Date.now()).getTime();
+  const peakTs = new Date(sample[peakIdx]?.t || latestTs).getTime();
+  const peakHrsAgo = Math.max(0, Math.round((latestTs - peakTs) / 3600000));
   const trend  = vals.length >= 6
     ? ((vals.slice(-3).reduce((s,v)=>s+v,0)/3) - (vals.slice(0,3).reduce((s,v)=>s+v,0)/3)).toFixed(1)
     : null;
   const trendTxt = trend != null ? (Number(trend) > 2 ? ` ↑${trend}%` : Number(trend) < -2 ? ` ↓${Math.abs(trend)}%` : " →") : "";
-  return `<span title="CPU sparkline · avg ${avgVal}%${trendTxt} · ${sample.length} pts">` +
+  return `<span title="30d CPU trend (recent slice) · avg ${avgVal}%${trendTxt} · peak ${peakVal.toFixed(1)}% ${peakHrsAgo}h ago · ${sample.length} pts">` +
     `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:inline-block;vertical-align:middle;overflow:visible">` +
     `<polyline points="${coords}" fill="none" stroke="${color}" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/>` +
     `<circle cx="${(( sample.length-1)*step).toFixed(1)}" cy="${(H - ((last-min)/range)*H).toFixed(1)}" r="2" fill="${color}"/>` +
@@ -5872,11 +5877,21 @@ function renderResourceTable(servers) {
   const sk = resourceTableState.sortKey;
   const sd = resourceTableState.sortDir;
   const statusOrder = { Critical: 0, Warning: 1, Healthy: 2, Unknown: 3 };
+  const envOrder = { PROD: 0, TEST: 1, UAT: 1, QA: 1, DEV: 2 };
   rows.sort((a, b) => {
+    // Ops-priority guardrail: within the same status tier, PROD must surface
+    // above TEST/DEV even when a TEST host has higher instantaneous CPU.
+    const sa = statusOrder[_resourceDisplayStatus(a)] ?? 9;
+    const sb = statusOrder[_resourceDisplayStatus(b)] ?? 9;
+    if (sa !== sb) return sa - sb;
+    const ea = envOrder[(a.environment || "").toUpperCase()] ?? 9;
+    const eb = envOrder[(b.environment || "").toUpperCase()] ?? 9;
+    if (ea !== eb) return ea - eb;
+
     let va = a[sk], vb = b[sk];
     if (sk === "status") {
-      va = statusOrder[va] ?? 9;
-      vb = statusOrder[vb] ?? 9;
+      va = statusOrder[_resourceDisplayStatus(a)] ?? 9;
+      vb = statusOrder[_resourceDisplayStatus(b)] ?? 9;
     } else if (typeof va === "string") {
       va = (va || "").toLowerCase();
       vb = (vb || "").toLowerCase();
@@ -6127,8 +6142,10 @@ let _deepDiveData = null;   // last fetched timeseries payload
 let _ddShowExtendedMetrics = false;
 
 // ── Deep Dive time range picker ──
-let _deepDiveHoursBack = 24;
+let _deepDiveHoursBack = 168;
 let _deepDiveCustomWindow = null; // {start_utc, end_utc} in ISO UTC
+let _deepDiveShowFullHeatmap = false; // false = fast 7d heatmap slice on long windows
+let _ddSelectedVm = null;             // preserve selected VM drilldown across re-renders
 
 // ── Spike row drill-down ──────────────────────────────────────
 // Called via onclick from spike table rows. Pads the spike window by 1h each
@@ -6148,7 +6165,7 @@ function openSpikeWindow(spikeStart, spikeEnd) {
 }
 
 function setDeepDiveHours(el) {
-  const hours = parseInt(el.dataset.ddHours) || 24;
+  const hours = parseInt(el.dataset.ddHours) || 168;
   _deepDiveHoursBack = hours;
   _deepDiveCustomWindow = null;
   // Update active pill styling
@@ -6178,7 +6195,7 @@ function setDeepDiveCustomRange() {
 
 function clearDeepDiveCustomRange() {
   _deepDiveCustomWindow = null;
-  const active = document.querySelector('.dd-time-pill[data-dd-hours="24"]');
+  const active = document.querySelector('.dd-time-pill[data-dd-hours="168"]');
   if (active) setDeepDiveHours(active);
 }
 
@@ -6239,6 +6256,10 @@ function loadMetricsDeepDive() {
   .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
   .then(data => {
     _deepDiveData = data;
+    // Performance-safe default: when user requests a long window (15d/30d/custom),
+    // render heatmaps in fast 7d mode first; full-range view is available on demand.
+    const _hh = Number(data?.window?.hours_back || hoursBack || 0);
+    _deepDiveShowFullHeatmap = _hh > 168 ? false : true;
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     loading.classList.add("hidden");
     btn.disabled = false;
@@ -6331,7 +6352,7 @@ function _renderDeepDiveWindowBadge(win) {
       `<button onclick="clearDeepDiveCustomRange()" class="ml-auto text-[9px] px-2 py-0.5 rounded border border-purple-400/40 text-purple-300 hover:bg-purple-500/10 transition">✕ Clear</button>`;
   } else {
     // Preset window — show which preset is active with data provenance
-    const hours = _deepDiveHoursBack || 24;
+    const hours = _deepDiveHoursBack || 168;
     const label = hours >= 720 ? "30 days" : hours >= 360 ? "15 days" : hours >= 168 ? "7 days" :
                   hours >= 72 ? "3 days" : hours >= 48 ? "48 hours" : hours >= 24 ? "24 hours" :
                   hours >= 12 ? "12 hours" : hours >= 6 ? "6 hours" : `${hours} hour${hours > 1 ? "s" : ""}`;
@@ -6376,6 +6397,28 @@ function _renderDeepDiveBanner(summary) {
     const w = _deepDiveData?.window || {};
     const tzNote = w.timezone ? ` Timezone source: ${w.timezone}.` : "";
     detail.textContent = `${summary.vm_count} VM(s) analyzed over ${summary.hours_back}h — all metrics within normal operating range.${blNote}${tzNote}`;
+  }
+
+  // Page-level baseline confidence disclosure (not buried per card).
+  // If any VM baseline is degraded (e.g., 1/3 pulls), surface one prominent
+  // warning so operators understand anomaly confidence is reduced globally.
+  const host = banner.parentNode;
+  host?.querySelector("#deepdive-baseline-warning")?.remove();
+  const vmEntries = Object.entries(_deepDiveData?.vms || {});
+  const degraded = vmEntries
+    .map(([vmName, vmData]) => ({ vmName, bc: vmData?.baseline_confidence }))
+    .filter(x => Number.isFinite(x.bc?.pulls) && x.bc.pulls < (x.bc.min_pulls || 3));
+  if (host && degraded.length) {
+    const worst = degraded.reduce((a, b) => (b.bc.pulls < a.bc.pulls ? b : a), degraded[0]);
+    const minP = worst.bc.min_pulls || 3;
+    const warn = document.createElement("div");
+    warn.id = "deepdive-baseline-warning";
+    warn.className = "mb-1 rounded-lg px-3 py-2 text-[10px]";
+    warn.style.background = hexA(THEME.amber, 0.10);
+    warn.style.border = `1px solid ${hexA(THEME.amber, 0.35)}`;
+    warn.style.color = THEME.amber;
+    warn.innerHTML = `⚠ Anomaly baseline built from partial data (${worst.bc.pulls}/${minP} pulls on at least one VM, ${degraded.length}/${vmEntries.length} affected). Confidence reduced — results may miss events or include false positives until more pulls are collected.`;
+    host.insertBefore(warn, banner);
   }
 }
 
@@ -6444,6 +6487,53 @@ function _renderSpikeAttribution(attr) {
     </div>${top}`;
   banner.parentNode.insertBefore(panel, banner);
 }
+
+function _sliceHeatmapToWindow(timestamps, zRows, hoursBack, showFull) {
+  if (!Array.isArray(timestamps) || !timestamps.length) return { timestamps, zRows, fastMode: false };
+  const useFast7d = Number(hoursBack) > 168 && !showFull;
+  if (!useFast7d) return { timestamps, zRows, fastMode: false };
+  const endMs = new Date(timestamps[timestamps.length - 1]).getTime();
+  const startMs = endMs - (168 * 60 * 60 * 1000);
+  let startIdx = timestamps.findIndex(t => new Date(t).getTime() >= startMs);
+  if (startIdx < 0) startIdx = Math.max(timestamps.length - 168, 0);
+  return {
+    timestamps: timestamps.slice(startIdx),
+    zRows: (zRows || []).map(r => r.slice(startIdx)),
+    fastMode: true,
+  };
+}
+
+function _renderHeatmapWindowToggle(hoursBack) {
+  const cpuWrap = document.getElementById("deepdive-heatmap-wrap");
+  if (!cpuWrap) return;
+  let row = document.getElementById("deepdive-heatmap-window-toggle");
+  if (Number(hoursBack) <= 168) {
+    row?.remove();
+    return;
+  }
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "deepdive-heatmap-window-toggle";
+    row.className = "mb-2 flex items-center justify-end";
+    cpuWrap.insertBefore(row, cpuWrap.firstChild);
+  }
+  const fullLabel = Number(hoursBack) >= 720 ? "30d" : Number(hoursBack) >= 360 ? "15d" : `${Math.round(Number(hoursBack) / 24)}d`;
+  const modeLabel = _deepDiveShowFullHeatmap ? `Full ${fullLabel} heatmaps` : "Fast 7d heatmaps (default)";
+  row.innerHTML = `
+    <button class="px-2 py-1 rounded border text-[10px] font-semibold transition"
+      style="color:${THEME.blue};border-color:${hexA(THEME.blue,0.45)};background:${hexA(THEME.blue,0.08)}"
+      title="Toggle heatmap rendering window for performance"
+      onclick="_toggleDeepDiveHeatmapWindow()">${modeLabel} · click to switch</button>
+  `;
+}
+
+function _toggleDeepDiveHeatmapWindow() {
+  _deepDiveShowFullHeatmap = !_deepDiveShowFullHeatmap;
+  if (!_deepDiveData) return;
+  _renderDeepDiveHeatmap(_deepDiveData.heatmap);
+  _renderDeepDiveMemoryHeatmap(_deepDiveData.vms);
+}
+
 // Reduces a time-axis heatmap to at most 120 display columns by averaging
 // adjacent bins and using the midpoint timestamp. For a 360h/1h-grain window
 // this cuts Plotly's rendering work from 360 columns to 90 (4h bins) — a 4×
@@ -6471,14 +6561,17 @@ function _renderDeepDiveHeatmap(heatmap) {
   if (!wrap || !container || !heatmap || !heatmap.vms.length) return;
 
   wrap.classList.remove("hidden");
+  const _hoursBack = Number(_deepDiveData?.window?.hours_back || _deepDiveHoursBack || 0);
+  _renderHeatmapWindowToggle(_hoursBack);
 
   const vmNames = heatmap.vms.map(v => v.name);
   const zRaw = heatmap.vms.map(v => v.values.map(x => x ?? 0));
+  const _sliced = _sliceHeatmapToWindow(heatmap.timestamps, zRaw, _hoursBack, _deepDiveShowFullHeatmap);
 
   // Bin to ≤120 display columns — reduces Plotly rendering work 3-6× on long windows
   const { tDates, zMatrix: z } = _binHeatmap(
-    heatmap.timestamps.map(t => new Date(t)),
-    zRaw
+    _sliced.timestamps.map(t => new Date(t)),
+    _sliced.zRows
   );
 
   const trace = {
@@ -6525,7 +6618,7 @@ function _renderDeepDiveHeatmap(heatmap) {
     margin: { l: 140, r: 60, t: 28, b: 40 },
     height: Math.max(160, vmNames.length * 30 + 70),
     title: {
-      text: `Fleet CPU Utilisation · Grain: ${_deepDiveData?.window?.grain || "1h avg"} · Source: Azure Monitor UTC`,
+      text: `Fleet CPU Utilisation${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Grain: ${_deepDiveData?.window?.grain || "1h avg"} · Source: Azure Monitor UTC`,
       font: { size: 9, color: THEME.muted },
       x: 0.01, xanchor: "left",
     },
@@ -6598,6 +6691,7 @@ function _renderDeepDiveMemoryHeatmap(vms) {
   if (!vmNames.length) return;
 
   wrap.classList.remove("hidden");
+  const _hoursBack = Number(_deepDiveData?.window?.hours_back || _deepDiveHoursBack || 0);
 
   // Build time buckets (use first VM's timestamps as reference)
   const refTimes = allSeries[0].map(p => p.t);
@@ -6608,19 +6702,20 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     const tsMap = new Map(series.map(p => [new Date(p.t).getTime(), p.v]));
     return refTimes.map(rt => tsMap.get(new Date(rt).getTime()) ?? 0);
   });
+  const _sliced = _sliceHeatmapToWindow(refTimes, z, _hoursBack, _deepDiveShowFullHeatmap);
 
   // Bin to ≤120 display columns for Plotly (full-res z kept for analysis + CSV)
   const { tDates, zMatrix: zPlotly } = _binHeatmap(
-    refTimes.map(t => new Date(t)),
-    z.map(row => [...row])
+    _sliced.timestamps.map(t => new Date(t)),
+    _sliced.zRows.map(row => [...row])
   );
 
   // Detect shared batch patterns: time slots where >50% VMs have high memory
   const nVms = vmNames.length;
   const batchFindings = [];
   for (const th of [{pct:80,label:"≥80%"},{pct:50,label:"≥50%"}]) {
-    const count = refTimes.filter((_, ti) => {
-      const highCount = z.filter(row => row[ti] >= th.pct).length;
+    const count = _sliced.timestamps.filter((_, ti) => {
+      const highCount = _sliced.zRows.filter(row => row[ti] >= th.pct).length;
       return highCount >= nVms * 0.5;
     }).length;
     if (count > 2) batchFindings.push({...th, count});
@@ -6660,7 +6755,7 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     margin: { l: 140, r: 60, t: 28, b: 40 },
     height: Math.max(160, vmNames.length * 30 + 70),
     title: {
-      text: `Fleet Avail Memory % · Teal = DB expected (8–20%) · Red = critical (<8%) · Grain: ${_deepDiveData?.window?.grain || "1h avg"}`,
+      text: `Fleet Avail Memory %${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Teal = DB expected (8–20%) · Red = critical (<8%) · Grain: ${_deepDiveData?.window?.grain || "1h avg"}`,
       font: { size: 9, color: THEME.muted },
       x: 0.01, xanchor: "left",
     },
@@ -6725,7 +6820,7 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     _addChartToolbar(wrap, container, () => {
       let csv = "VM,Timestamp,Mem_Avail_Pct\n";
       vmNames.forEach((vm, vi) => {
-        refTimes.forEach((t, ti) => { csv += `${vm},${t},${z[vi][ti]?.toFixed(1) ?? ""}\n`; });
+        _sliced.timestamps.forEach((t, ti) => { csv += `${vm},${t},${_sliced.zRows[vi][ti]?.toFixed(1) ?? ""}\n`; });
       });
       return csv;
     });
@@ -6890,6 +6985,7 @@ function _renderDeepDiveCharts(vms, summary) {
       <div class="flex items-center gap-1.5">
         <span class="text-[9px] text-Cmuted font-semibold">Sort</span>
         <select id="dd-sort-select" class="bg-Cbg border border-Cborder rounded-md px-2 py-0.5 text-[10px] text-Cwhite focus:outline-none focus:border-Cblue cursor-pointer">
+          <option value="priority">Ops Priority (default)</option>
           <option value="mem">MEM AVAIL % ↓</option>
           <option value="spikes">Spike Count ↓</option>
           <option value="latest">Latest Spike ↓</option>
@@ -6917,20 +7013,44 @@ function _renderDeepDiveCharts(vms, summary) {
     `;
     chartsDiv.appendChild(controls);
 
+    // Confidence disclosure at section-level (not repeated only on each card).
+    const _critBaseline = criticalVms
+      .map(([vmName, vmData]) => ({ vmName, bc: vmData?.baseline_confidence }))
+      .filter(x => Number.isFinite(x.bc?.pulls) && x.bc.pulls < (x.bc.min_pulls || 3));
+    if (_critBaseline.length) {
+      const worst = _critBaseline.reduce((a, b) => (b.bc.pulls < a.bc.pulls ? b : a), _critBaseline[0]);
+      const minP = worst.bc.min_pulls || 3;
+      const b = document.createElement("div");
+      b.className = "rounded-lg px-3 py-2 text-[10px] mb-2";
+      b.style.color = THEME.amber;
+      b.style.background = hexA(THEME.amber, 0.10);
+      b.style.border = `1px solid ${hexA(THEME.amber,0.35)}`;
+      b.textContent = `⚠ Anomaly baseline built from partial data (${worst.bc.pulls}/${minP} pulls on at least one critical VM). Confidence reduced; results may miss events or include false positives until more pulls are collected.`;
+      chartsDiv.appendChild(b);
+    }
+
     // Grid of summary cards
     const grid = document.createElement("div");
     grid.id = "dd-server-grid";
     grid.className = "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3";
     chartsDiv.appendChild(grid);
+    const gridHelp = document.createElement("div");
+    gridHelp.className = "text-[9px] text-Cmuted -mt-2";
+    gridHelp.textContent = "Tip: use 'Show detail' on any card to open that server's anomaly table and time-series panel.";
+    chartsDiv.appendChild(gridHelp);
 
     // Store card data for sort/filter
     const cardDataArr = criticalVms.map(([vmName, vmData]) => {
       const sp = vmData.spikes || {};
       const st = vmData.stats || {};
-      let spikeCount = 0, latestSpike = 0;
+      let spikeCount = 0, latestSpike = 0, criticalCrossings = 0, hasSustained = false;
       for (const arr of Object.values(sp)) {
         spikeCount += arr.length;
-        for (const s of arr) { latestSpike = Math.max(latestSpike, new Date(s.peak_time).getTime()); }
+        for (const s of arr) {
+          latestSpike = Math.max(latestSpike, new Date(s.peak_time).getTime());
+          if ((s.severity || "").includes("sustained")) hasSustained = true;
+          if ((s.severity || "").startsWith("critical") || s.detection === "absolute_threshold") criticalCrossings++;
+        }
       }
       const _memSt = st["Available Memory Percentage"];
       const memAvail = _memSt
@@ -6938,7 +7058,8 @@ function _renderDeepDiveCharts(vms, summary) {
         : 100;
       const memPressure = 100 - memAvail;  // for sort/filter comparison
       const role = _inferRole(vmName);
-      return { vmName, vmData, memAvail, memPressure, spikeCount, latestSpike, role };
+      const env = _inferEnv(vmName);
+      return { vmName, vmData, memAvail, memPressure, spikeCount, latestSpike, criticalCrossings, hasSustained, role, env };
     });
 
     function renderFilteredGrid() {
@@ -6958,6 +7079,16 @@ function _renderDeepDiveCharts(vms, summary) {
       }
 
       filtered.sort((a, b) => {
+        const envRank = { PROD: 0, TEST: 1, DEV: 2 };
+        if (sortBy === "priority") {
+          // Operational ranking: sustained severity -> PROD first -> anomaly evidence.
+          if ((a.hasSustained ? 1 : 0) !== (b.hasSustained ? 1 : 0)) return (b.hasSustained ? 1 : 0) - (a.hasSustained ? 1 : 0);
+          if ((envRank[a.env] ?? 9) !== (envRank[b.env] ?? 9)) return (envRank[a.env] ?? 9) - (envRank[b.env] ?? 9);
+          if (a.criticalCrossings !== b.criticalCrossings) return b.criticalCrossings - a.criticalCrossings;
+          if (a.spikeCount !== b.spikeCount) return b.spikeCount - a.spikeCount;
+          if (a.memAvail !== b.memAvail) return a.memAvail - b.memAvail;
+          return b.latestSpike - a.latestSpike;
+        }
         if (sortBy === "mem") return a.memAvail - b.memAvail;  // lowest available first (most pressure)
         if (sortBy === "spikes") return b.spikeCount - a.spikeCount;
         if (sortBy === "latest") return b.latestSpike - a.latestSpike;
@@ -6983,7 +7114,15 @@ function _renderDeepDiveCharts(vms, summary) {
         for (; _ci < end; _ci++) {
           _renderVmServerCard(filtered[_ci].vmName, filtered[_ci].vmData, activeMetricConfig, grid);
         }
-        if (_ci < filtered.length) requestAnimationFrame(_nextBatch);
+        if (_ci < filtered.length) {
+          requestAnimationFrame(_nextBatch);
+          return;
+        }
+        // Auto-open one card so PROD/highest-priority evidence is visible by default.
+        const _selVm = (_ddSelectedVm || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        const preferred = _ddSelectedVm ? grid.querySelector(`[data-vm-name="${_selVm}"]`) : null;
+        const first = preferred || grid.querySelector("[data-vm-name]");
+        first?.click();
       }
       requestAnimationFrame(_nextBatch);
     }
@@ -7052,11 +7191,16 @@ function _renderDeepDiveCharts(vms, summary) {
       const memS = stats["Available Memory Percentage"];
       const cpuText = cpuS ? `avg ${cpuS.mean}% · max ${cpuS.max}%` : "—";
       const memText = memS ? `avail ${memS.mean}% · min ${memS.min}%` : "—";
+      const cpuSpike = !!(cpuS && Number(cpuS.max) >= 95 && Number(cpuS.mean ?? 0) <= 30);
+      const statusText = cpuSpike
+        ? `✓ Normal ⚠ (${Number(cpuS.max).toFixed(0)}% spike)`
+        : "✓ Normal";
+      const statusColor = cpuSpike ? THEME.amber : THEME.green;
       return `<tr class="border-t border-Cborder/20">
         <td class="py-1.5 pr-3 text-[10px] font-semibold text-Cwhite">${escapeHtml(vmName)}</td>
         <td class="py-1.5 pr-3 text-[10px] text-Cblue">${cpuText}</td>
         <td class="py-1.5 pr-3 text-[10px] text-Ccyan">${memText}</td>
-        <td class="py-1.5 text-[10px] text-green-400">✓ Normal</td>
+        <td class="py-1.5 text-[10px]" style="color:${statusColor}" title="${cpuSpike ? "Single-point CPU saturation observed; average stayed low." : "No critical sustained anomalies in selected window."}">${statusText}</td>
       </tr>`;
     }).join("");
 
@@ -7131,16 +7275,18 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   const stats = vmData.stats || {};
   const metrics = vmData.series || {};
 
-  // Count critical events + severity
-  let criticalCount = 0;
+  // Count event types for explicit labeling (prevents "3 vs 5" ambiguity).
+  let spikeEventCount = 0;
+  let thresholdCrossCount = 0;
   let highestSev = 0;
   let hasSustained = false;
   let lastBreach = null;
   for (const [mk, arr] of Object.entries(spikes)) {
-    criticalCount += arr.length;
+    spikeEventCount += arr.length;
     for (const s of arr) {
       highestSev = Math.max(highestSev, s.z_score || 0);
       if ((s.severity || "").includes("sustained")) hasSustained = true;
+      if ((s.severity || "").startsWith("critical") || s.detection === "absolute_threshold") thresholdCrossCount++;
       const bt = new Date(s.peak_time);
       if (!lastBreach || bt > lastBreach) lastBreach = bt;
     }
@@ -7321,7 +7467,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
         </div>
         <div class="flex items-center gap-2 mt-1 flex-wrap">
           <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase cursor-help" title="${_severityHelpText(sevLabel)}" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
-          <span class="text-[9px] text-Cmuted">${criticalCount} anomal${criticalCount > 1 ? "ies" : "y"}</span>
+          <span class="text-[9px] text-Cmuted">${spikeEventCount} spike event${spikeEventCount > 1 ? "s" : ""} · ${thresholdCrossCount} threshold crossing${thresholdCrossCount !== 1 ? "s" : ""}</span>
           ${breachLabel ? `<span class="text-[8px] font-bold px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
           ${_baselineBadge(vmData.baseline_confidence, { compact: true })}
         </div>
@@ -7340,12 +7486,16 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     </div>
     <div class="flex items-center justify-between">
       ${sparkSvg}
-      <span class="text-[8px] text-Cmuted">${recentSeries.length > 4 ? "last 6h" : "full window"}</span>
+      <div class="flex items-center gap-2">
+        <span class="text-[8px] text-Cmuted">${recentSeries.length > 4 ? "last 6h" : "full window"}</span>
+        <button type="button" class="dd-open-detail-btn text-[8px] font-semibold px-1.5 py-0.5 rounded border border-Cblue/35 text-Cblue hover:bg-Cblue/10 transition">Show detail ▸</button>
+      </div>
     </div>
   `;
 
-  // Click → expand drilldown and smooth-scroll to it
-  card.addEventListener("click", () => {
+  card.dataset.vmName = vmName;
+  // Click (or explicit "Show detail") → expand drilldown and smooth-scroll to it
+  const _openDetail = () => {
     const detailArea = document.getElementById("deepdive-detail-area");
     if (!detailArea) return;
     // Destroy existing Chart.js instances before clearing DOM — prevents orphaned
@@ -7362,11 +7512,17 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     card.setAttribute("data-vm-selected", "1");
     card.style.borderColor = THEME.red;
     card.style.boxShadow = `0 0 0 2px ${hexA(THEME.red, 0.3)}`;
+    _ddSelectedVm = vmName;
     _renderVmDeepDiveCard(vmName, vmData, _ddShowExtendedMetrics ? metricConfig : metricConfig.filter(m => m.core), detailArea, true);
     // Smooth scroll directly to the drilldown
     requestAnimationFrame(() => {
       detailArea.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+  };
+  card.addEventListener("click", _openDetail);
+  card.querySelector(".dd-open-detail-btn")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    _openDetail();
   });
 
   container.appendChild(card);
@@ -7413,16 +7569,20 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   // Count by real severity so the badge matches the spike table exactly.
   // "critical" = critical + critical_sustained; everything else is a lesser
   // anomaly (warning/notable). Label the badge to whichever is the headline.
-  let critCount = 0, totalCount = 0;
+  let critCount = 0, totalCount = 0, thresholdCrossings = 0;
   for (const ms of Object.values(spikes)) {
     for (const s of ms) {
       totalCount++;
       if ((s.severity || "").startsWith("critical")) critCount++;
+      if ((s.severity || "").startsWith("critical") || s.detection === "absolute_threshold") thresholdCrossings++;
     }
   }
-  const sevBadge = critCount > 0
-    ? `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">${critCount} critical</span>`
-    : `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25">${totalCount} anomal${totalCount === 1 ? "y" : "ies"}</span>`;
+  const sevBadge = `
+    <span class="px-2 py-0.5 rounded-full text-[9px] font-bold border"
+      style="background:${hexA(critCount > 0 ? THEME.red : THEME.amber,0.18)};color:${critCount > 0 ? THEME.red : THEME.amber};border-color:${hexA(critCount > 0 ? THEME.red : THEME.amber,0.35)}"
+      title="Counts are split intentionally: spike events are raw detected windows; threshold crossings are critical/absolute crossings.">
+      ${totalCount} spike event${totalCount === 1 ? "" : "s"} · ${thresholdCrossings} threshold crossing${thresholdCrossings === 1 ? "" : "s"}
+    </span>`;
 
   const ddRole = _inferRole(vmName);
   const ddEnv = _inferEnv(vmName);
@@ -7536,8 +7696,15 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         // Bug 3+4: severity-aware labels (sustained, absolute threshold)
         const sev = (s.severity || "critical").toUpperCase().replace("_", " ");
         const sevColor = sev.includes("SUSTAINED") ? THEME.purple : sev === "WARNING" ? THEME.amber : sev === "NOTABLE" ? THEME.muted : THEME.red;
+        const _winEndMs = new Date(_deepDiveData?.window?.end_utc || 0).getTime();
+        const _endMs = new Date(s.end).getTime();
+        const _activeByWindow = Number.isFinite(_winEndMs) && Number.isFinite(_endMs) && (_winEndMs - _endMs) >= 0 && (_winEndMs - _endMs) <= (90 * 60 * 1000);
+        const _stillActive = sev.includes("SUSTAINED") && _activeByWindow;
+        const activeBadge = _stillActive
+          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[8px] font-extrabold" style="color:${THEME.red};background:${hexA(THEME.red,0.15)};border:1px solid ${hexA(THEME.red,0.45)}">STILL ACTIVE</span>`
+          : "";
         const durLabel = _humanizeDurationMin(s.duration_min, {
-          ongoing: sev.includes("SUSTAINED") && Number(s.duration_min) >= 1440,
+          ongoing: _stillActive,
         });
         const detectionTag = s.detection === "absolute_threshold"
           ? `<span class="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
@@ -7555,8 +7722,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${_severityInfoIcon(sev)}${detectionTag}${_confBadge(s.confidence)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite" title="${lineageTitle}">${escapeHtml(metricLabel)}${s.is_derived ? ' <span class="text-[7px] px-0.5 rounded" style="color:'+THEME.cyan+';background:'+hexA(THEME.cyan,0.12)+'">derived</span>' : ''}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s.metric, s.peak)}</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="${s.duration_min} min">${durLabel}</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}${activeBadge}</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="${s.duration_min} min">${durLabel}${activeBadge ? ` <span class="font-semibold" style="color:${THEME.red}">(open incident)</span>` : ""}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">peak @ ${peakTime}</td>
           <td class="py-1.5 text-[10px] text-Cmuted">${_formatDeviation(s)}</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
@@ -7601,6 +7768,11 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         </tr>` };
       }
     }).filter(Boolean);
+    const spikeEventCount = allCriticalSpikes.length;
+    const thresholdCrossingCount = allCriticalSpikes.filter(s =>
+      (s.severity || "").startsWith("critical") || s.detection === "absolute_threshold"
+    ).length;
+    const displayedRowsCount = rowObjs.length;
     const actionableRows = rowObjs.filter(r => !r.notable).map(r => r.html).join("");
     const notableRows = rowObjs.filter(r => r.notable).map(r => r.html).join("");
     const notableCount = rowObjs.filter(r => r.notable).length;
@@ -7689,7 +7861,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       : "";
 
     spikeTable.innerHTML = `
-      <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Anomaly & Spike Events</div>
+      <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Anomaly & Spike Events
+        <span class="ml-2 text-[9px] font-semibold normal-case tracking-normal" style="color:${THEME.muted}">${spikeEventCount} spike event${spikeEventCount === 1 ? "" : "s"} · ${thresholdCrossingCount} threshold crossing${thresholdCrossingCount === 1 ? "" : "s"}${displayedRowsCount !== spikeEventCount ? ` · ${displayedRowsCount} grouped row${displayedRowsCount === 1 ? "" : "s"} shown` : ""}</span>
+      </div>
       ${provLine}${insightBlock}${severityLegend}${sparseWarn}
       ${actionableBlock}${notableBlock}
     `;
