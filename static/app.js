@@ -2302,6 +2302,11 @@ function renderBatchSlaSourceTags(sla, kpis) {
       srcLabel = `From SLA Matrix (${sla.filename || "uploaded"})`;
     } else if (sla.type === "customer_fallback") {
       srcLabel = "From Customer Fallback";
+    } else if (sla.adaptive_active) {
+      // Trust fix: PATH C (adaptive per-job baseline) is driving the math —
+      // "Assumed (no SLA file)" implies a single generous shared ceiling,
+      // which is exactly what does NOT apply when jobs use their own history.
+      srcLabel = "Adaptive Baseline (no SLA file)";
     } else {
       srcLabel = "Assumed (no SLA file)";
     }
@@ -2315,6 +2320,8 @@ function renderBatchSlaSourceTags(sla, kpis) {
       modelTag = ` · ${_rcModel.length} windows ${Number(sla.resolved_ceiling_min).toFixed(1)}–${Number(sla.resolved_ceiling_max).toFixed(1)}h`;
     } else if (_rcModel.length === 1) {
       modelTag = ` · 1 window ${Number(_rcModel[0]).toFixed(1)}h`;
+    } else if (sla.adaptive_active) {
+      modelTag = ` · ${sla.adaptive_job_count}/${sla.adaptive_total_jobs} jobs adaptive`;
     } else if (sla.schema_type && sla.schema_type !== "none") {
       modelTag = ` · ${sla.schema_type.toUpperCase()} model`;
     }
@@ -2324,7 +2331,12 @@ function renderBatchSlaSourceTags(sla, kpis) {
       ? ` · ${matchStats.sla_matrix}/${matchStats.total_jobs} matched`
         + (matchStats.assumed > 0 ? ` (${matchStats.assumed} assumed)` : "")
       : "";
-    const label = `SLA: ${srcLabel}${modelTag}${validTag}${matchTag} · Daily ${Number(labelCeil).toFixed(1)}h`;
+    // Trailing ceiling tag: a flat "Daily Xh" is misleading when adaptive
+    // per-job baselines are active (each job uses its own number, not this one).
+    const ceilTag = sla.adaptive_active
+      ? " · per-job baseline (not flat)"
+      : ` · Daily ${Number(labelCeil).toFixed(1)}h`;
+    const label = `SLA: ${srcLabel}${modelTag}${validTag}${matchTag}${ceilTag}`;
 
     if (tag1) { tag1.textContent = label; tag1.classList.remove("hidden"); }
     if (tag2) { tag2.textContent = label; tag2.classList.remove("hidden"); }
@@ -2380,10 +2392,16 @@ function renderBatchSlaSourceTags(sla, kpis) {
         bannerDetail.textContent = `Per-job SLA contracts active. ${windowLine}${details ? "  ·  " + details : ""}`;
         banner.className = "mt-2 px-3 py-2 rounded-lg border border-Cgreen/40 bg-Cgreen/5 text-Cgreen text-[11px] flex items-start gap-2";
       } else {
-        // Amber: defaults only
+        // Amber: defaults only — but if PATH C (adaptive per-job baseline) is
+        // actually driving the compliance math, say so; "assumed defaults" is
+        // false when most jobs are scored against their OWN history instead.
         bannerIcon.textContent = "📐";
         bannerTitle.textContent = `SLA Baseline: System Defaults (Daily ${Number(dailyHrs).toFixed(1)}h · Weekly ${Number(weeklyHrs).toFixed(1)}h)`;
-        bannerDetail.textContent = "No customer SLA matrix uploaded. Compliance findings use PE assumed defaults — indicative only. Upload BatchSLA_info.xlsx to load per-job contract targets.";
+        if (sla.adaptive_active) {
+          bannerDetail.textContent = `No customer SLA matrix uploaded. ${sla.adaptive_job_count}/${sla.adaptive_total_jobs} job(s) are instead scored against their OWN historical baseline (p95/variance of past runs) — buffers can look tight for low-variance jobs even though the fleet default above is more generous. Upload BatchSLA_info.xlsx to load per-job contract targets.`;
+        } else {
+          bannerDetail.textContent = "No customer SLA matrix uploaded. Compliance findings use PE assumed defaults — indicative only. Upload BatchSLA_info.xlsx to load per-job contract targets.";
+        }
         banner.className = "mt-2 px-3 py-2 rounded-lg border border-Camber/40 bg-Camber/5 text-Camber text-[11px] flex items-start gap-2";
       }
     }
@@ -2683,7 +2701,13 @@ function renderBatchLayerCards(data) {
       wjEl.textContent = `${_n(wj.peak_hrs).toFixed(2)}h`;
       wjEl.style.color = _n(wj.buffer_pct) < 0 ? THEME.red : _n(wj.buffer_pct) < 15 ? THEME.amber : THEME.green;
       const jobName = (wj.job_name || "?").length > 25 ? wj.job_name.substring(0, 22) + "…" : wj.job_name;
-      setText("bk-worst-sub", `${jobName} · ${_n(wj.buffer_pct).toFixed(0)}% buffer`);
+      // Trust fix: say WHICH ceiling produced this buffer — an adaptive
+      // history-derived value (PATH C) reads very differently than a flat
+      // Tier 1-3 ceiling, so never let the two look interchangeable.
+      const _srcTag = wj.sla_source === "adaptive"
+        ? ` vs ${_n(wj.sla_hrs).toFixed(2)}h own baseline${wj.baseline_quality ? ` (${wj.baseline_quality.toLowerCase()})` : ""}`
+        : "";
+      setText("bk-worst-sub", `${jobName} · ${_n(wj.buffer_pct).toFixed(0)}% buffer${_srcTag}`);
     } else {
       wjEl.textContent = "—";
       setText("bk-worst-sub", "No runtime data");
@@ -2734,13 +2758,25 @@ function renderBatchLayerCards(data) {
       const tierHint = hasTier1 ? "Tier 1 loaded — rerun SLA Matrix to activate" :
                        hasTier2 ? "Tier 2 loaded — rerun SLA Matrix to activate" :
                        "Upload BatchSLA XLSX or SOW to improve accuracy";
-      slaEl.textContent = sla.blocked ? "BLOCKED" : "Tier 3 — Global Default";
-      slaEl.style.color = sla.blocked ? THEME.red : THEME.amber;
-      setText("bk-sla-source-sub",
-        sla.blocked
-          ? "Cannot produce green compliance — upload BatchSLA XLSX"
-          : `Daily ${sla.daily_hrs?.toFixed(1) || "6.0"}h · ${tierHint}`
-      );
+      // Trust fix: when PATH C (adaptive per-job baseline) is actually driving
+      // the compliance math, "BLOCKED — cannot produce green compliance" is
+      // FALSE (a real verdict IS being produced, just per-job/adaptive) and
+      // contradicts the Job SLA / Window SLA % tiles shown right next to it.
+      if (sla.adaptive_active) {
+        slaEl.textContent = "Tier 3 — Adaptive Baseline";
+        slaEl.style.color = THEME.amber;
+        setText("bk-sla-source-sub",
+          `${sla.adaptive_job_count}/${sla.adaptive_total_jobs} jobs on own history baseline (not Daily ${sla.daily_hrs?.toFixed(1) || "6.0"}h default) · ${tierHint}`
+        );
+      } else {
+        slaEl.textContent = sla.blocked ? "BLOCKED" : "Tier 3 — Global Default";
+        slaEl.style.color = sla.blocked ? THEME.red : THEME.amber;
+        setText("bk-sla-source-sub",
+          sla.blocked
+            ? "Cannot produce green compliance — upload BatchSLA XLSX"
+            : `Daily ${sla.daily_hrs?.toFixed(1) || "6.0"}h · ${tierHint}`
+        );
+      }
     } else {
       slaEl.textContent = "From SLA Matrix";
       slaEl.style.color = THEME.green;
@@ -3258,9 +3294,16 @@ function renderSlaBufferChart(k) {
   if (subEl) {
     if (buf) {
       const band = _bufferBand(buf.buffer_pct);
+      // Trust fix: when the worst job's ceiling came from PATH C (adaptive
+      // per-job history baseline) rather than a Tier 1-3 contracted/default
+      // ceiling, say so explicitly — otherwise this % silently contradicts
+      // the "SLA: Daily Xh" labels shown on the source banner right above it.
+      const _adaptiveNote = buf.sla_source === "adaptive"
+        ? ` Measured against this job's OWN historical baseline, not the flat default.`
+        : "";
       subEl.innerHTML = `Worst-job headroom before its SLA ceiling — <b style="color:${band.color}">`
         + `${_n(buf.buffer_pct).toFixed(0)}% buffer (${band.label})</b>. `
-        + `How much a job's runtime can grow before it breaches.`;
+        + `How much a job's runtime can grow before it breaches.${_adaptiveNote}`;
     } else {
       subEl.textContent = "Headroom between worst-job peak and the daily SLA limit";
     }

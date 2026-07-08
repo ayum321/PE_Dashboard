@@ -1041,6 +1041,11 @@ def build_top_jobs_df(df: pd.DataFrame,
                     _top_reset["is_short_job"] = _short_mask
                     _insuf_mask = _top_reset["baseline_quality"] == "INSUFFICIENT"
                     _top_reset.loc[_short_mask | _insuf_mask, "sla_hrs"] = global_ceil  # display only
+                    # Trust fix: once sla_hrs is overwritten back to the flat
+                    # global ceiling above, sla_source must say so too — leaving
+                    # it as "adaptive" would label a flat-default display value
+                    # as if it were a real history-derived number.
+                    _top_reset.loc[_short_mask | _insuf_mask, "sla_source"] = "default"
                 else:
                     _top_reset["is_short_job"] = False
                 # Carry is_high_variance column
@@ -2664,6 +2669,17 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         calculate_sla_buffer(worst_job_sla, worst_job_peak)
         if worst_job_peak > 0 else None
     )
+    # Trust fix: when no customer matrix is uploaded (PATH C), worst_job_sla can
+    # be an ADAPTIVE per-job baseline (history p95/variance) rather than the flat
+    # pe_config default — a tight, low-variance job can legitimately resolve to
+    # e.g. 0.26h instead of 6.0h, which then reads as a huge negative buffer even
+    # though the UI's "System Defaults (Daily 6h)" banner implies one generous
+    # shared ceiling. Carry the worst job's own sla_source/baseline_quality so
+    # the gauge + worst-job card can say WHICH ceiling actually drove the number
+    # instead of silently contradicting the banner.
+    if fleet_sla_buffer is not None and not _scope_jobs.empty:
+        fleet_sla_buffer["sla_source"] = str(worst_row.get("sla_source", "default"))
+        fleet_sla_buffer["baseline_quality"] = str(worst_row.get("baseline_quality", "")) or None
 
     # ── Data coverage / confidence (raw df — full picture) ──────────────────
     unique_dates = sorted(df["run_date"].unique())
@@ -3236,12 +3252,21 @@ def _build_worst_job(m: dict, top_jobs_df: "pd.DataFrame") -> dict:
     peak_hrs  = m.get("worst_job_peak", 0.0)
     # Try to pull per-job SLA from the top_jobs dataframe
     per_job_sla = m.get("sla_ceiling")   # default: global ceiling
+    sla_source  = "default"
+    baseline_quality = None
     if not top_jobs_df.empty and "sla_hrs" in top_jobs_df.columns and job_name:
         match = top_jobs_df[top_jobs_df["Job_Name"] == job_name]
         if not match.empty:
             val = float(match.iloc[0]["sla_hrs"])
             if val > 0:
                 per_job_sla = val
+            # Trust fix: surface WHICH ceiling actually drove this number —
+            # "adaptive" (history-derived, PATH C) vs "sla_matrix"/"default" —
+            # so the card can't silently contradict the SLA source banner.
+            if "sla_source" in match.columns:
+                sla_source = str(match.iloc[0].get("sla_source") or "default")
+            if "baseline_quality" in match.columns:
+                baseline_quality = str(match.iloc[0].get("baseline_quality") or "") or None
 
     buffer_pct = (
         round(((per_job_sla - peak_hrs) / per_job_sla * 100), 1)
@@ -3252,6 +3277,8 @@ def _build_worst_job(m: dict, top_jobs_df: "pd.DataFrame") -> dict:
         "peak_hrs":   peak_hrs,
         "sla_hrs":    per_job_sla,
         "buffer_pct": buffer_pct,
+        "sla_source": sla_source,
+        "baseline_quality": baseline_quality,
         "note": "Worst-job peak = single highest OK-run duration across all jobs.",
     }
 
@@ -3933,6 +3960,36 @@ def _build_sla_source_payload(m: dict) -> dict:
     sla_type  = sla_index.get("source") or m.get("sla_source", "default")
     job_sla   = sla_index.get("job_sla", {})
 
+    # ── Adaptive-baseline detection (PATH C trust fix) ──────────────────────
+    # When sla_type == "default" (no customer matrix uploaded), build_top_jobs_df
+    # still gives EVERY job with enough history its OWN adaptive ceiling
+    # (_compute_adaptive_sla: p95 / variance-based, PATH C) instead of the flat
+    # pe_config default. That's a deliberate, useful PE feature — but the old
+    # banner/warning text claimed "compliance uses assumed defaults" / a single
+    # "Daily Xh" ceiling while the ACTUAL gauge math for many jobs used a much
+    # tighter, job-specific number. Count how many jobs are on the adaptive path
+    # so the UI can describe reality instead of a stale flat-default assumption.
+    #
+    # Only count GENUINE adaptive tiers (STRONG/MODERATE/WEAK) — a job with
+    # sla_source=="adaptive" but baseline_quality in (SHORT_JOB, INSUFFICIENT)
+    # has no real history-derived signal (single/near-zero runs) and is already
+    # excluded from compliance (buffer_pct=None); it must not count toward
+    # "adaptive is really driving this dashboard" or the true no-data case would
+    # falsely flip into "adaptive_active".
+    _top_df = m.get("top_jobs")
+    _adaptive_job_count = 0
+    _adaptive_total_jobs = 0
+    if _top_df is not None and hasattr(_top_df, "empty") and not _top_df.empty \
+            and "sla_source" in _top_df.columns:
+        _adaptive_total_jobs = int(len(_top_df))
+        _is_adaptive = _top_df["sla_source"] == "adaptive"
+        if "baseline_quality" in _top_df.columns:
+            _is_adaptive = _is_adaptive & ~_top_df["baseline_quality"].isin(
+                ["SHORT_JOB", "INSUFFICIENT"]
+            )
+        _adaptive_job_count = int(_is_adaptive.sum())
+    _adaptive_active = sla_type == "default" and _adaptive_job_count > 0
+
     # Try to read rich SLA intelligence from config_store
     try:
         from services import config_store as _cs
@@ -3946,6 +4003,12 @@ def _build_sla_source_payload(m: dict) -> dict:
         "weekly_hrs":  pe_config.SLA_WEEKLY_HRS,
         "monthly_hrs": pe_config.SLA_MONTHLY_HRS,
         "custom_hrs":  pe_config.SLA_CUSTOM_HRS,
+        # Trust fix: expose adaptive-path facts so the frontend never has to
+        # guess or silently claim a flat default while PATH C is actually driving
+        # the compliance math for some/all jobs.
+        "adaptive_active":     _adaptive_active,
+        "adaptive_job_count":  _adaptive_job_count,
+        "adaptive_total_jobs": _adaptive_total_jobs,
     }
 
     # ── Contracted-window summary (honest multi-contract view) ─────────────────
@@ -4028,7 +4091,35 @@ def _build_sla_source_payload(m: dict) -> dict:
         # mislabeling a loaded matrix as "none / Default system values".
         _is_default = (sla_type == "default")
         base["contracts"] = []
-        if _is_default:
+        if _is_default and _adaptive_active:
+            # Trust fix: PATH C is engaged — most/all jobs are scored against
+            # THEIR OWN history-derived ceiling (p95/variance), not a single
+            # flat pe_config default. Saying "assumed defaults" here (as if one
+            # generous shared ceiling applies) contradicts the gauge/worst-job
+            # math and is exactly what produced the misleading -262% reading.
+            # "BLOCKED / cannot produce green compliance" is also false — a
+            # real (if provisional) compliance verdict IS being produced.
+            base["schema_type"]    = "adaptive"
+            base["detected_model"] = "Adaptive per-job baseline (history-derived)"
+            base["warnings"] = [{
+                "code": "ADAPTIVE_BASELINE_ACTIVE",
+                "text": (
+                    f"No SLA matrix uploaded — {_adaptive_job_count}/{_adaptive_total_jobs} "
+                    "job(s) are scored against their OWN historical baseline "
+                    "(p95/variance of past runs), not one flat default ceiling. "
+                    "Buffers can look tight or negative for low-variance jobs even "
+                    f"though the system default is {round(float(base['daily_hrs']), 1)}h. "
+                    "Upload a customer SLA matrix for contracted ceilings."
+                ),
+                "severity": "warning",
+            }]
+            base["blocked"] = False
+            base["note"] = (
+                f"{_adaptive_job_count}/{_adaptive_total_jobs} job(s) using adaptive "
+                "per-job baselines derived from Ctrl-M run history — no customer SLA "
+                "matrix uploaded. Upload BatchSLA_info.xlsx for contracted ceilings."
+            )
+        elif _is_default:
             base["schema_type"]    = "none"
             base["detected_model"] = "Default system values"
             base["warnings"] = [{
