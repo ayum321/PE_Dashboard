@@ -6657,8 +6657,9 @@ function _renderDeepDiveHeatmap(heatmap) {
     });
     _addChartToolbar(wrap, container, () => {
       let csv = "VM,Timestamp,CPU_Pct\n";
-      heatmap.vms.forEach(vm => {
-        heatmap.timestamps.forEach((t, ti) => { csv += `${vm.name},${t},${vm.values[ti] ?? ""}\n`; });
+      // Export matches what's displayed (sliced to 7d fast view unless "Full" toggle is on)
+      vmNames.forEach((vm, vi) => {
+        _sliced.timestamps.forEach((t, ti) => { csv += `${vm},${t},${_sliced.zRows[vi][ti] ?? ""}\n`; });
       });
       return csv;
     });
