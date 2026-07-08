@@ -4420,6 +4420,39 @@ function _resourceDisplayStatus(s) {
   return (dbNormal && s.status === "Healthy") ? "DB Normal" : (s.status || "Unknown");
 }
 
+// ── monitoring_note adapter (deterministic DATA CONFLICT safety net) ──────────
+// Maps a real resource row to the pure monitoringNote contract (interpretation_
+// formatters.js) and returns its result ONLY for the DB-expected memory surface,
+// which is where the net earns its keep. The net fires when the backend labelled
+// a DB server's memory EXPECTED (mem_status="DB_NORMAL") but the actual value
+// sits OUTSIDE the frontend DB band — i.e. backend and frontend thresholds have
+// drifted (stale cache / config skew). In normal operation the two agree, so
+// this returns a non-conflict note and the cell shows nothing extra.
+// Calls the NAMED formatter directly (never the throwing format() dispatcher)
+// and wraps it defensively so a single row can never blank the table.
+function _memMonitoringNote(r) {
+  if (!r || typeof window === "undefined" || !window.PEInterpret) return null;
+  if (r.mem_available === false || r.mem_pct == null) return null;
+  const rType = (r.type || "").toUpperCase();
+  if (!_isDbRole(rType)) return null;
+  const backendExpected  = r.mem_status === "DB_NORMAL";
+  const frontendExpected = _isDbMemExpected(rType, r.mem_pct);
+  if (!backendExpected && !frontendExpected) return null;
+  const t = RESOURCE_THRESHOLDS;
+  try {
+    return window.PEInterpret.monitoringNote({
+      metric: "Mem used",
+      current_pct: r.mem_pct,
+      expected_range_low: t.db_mem_band_low,
+      expected_range_high: t.db_mem_band_high,
+      classification: "EXPECTED",
+      reason_code: "DB_SGA_PGA",
+    });
+  } catch (_e) {
+    return null; // formatter is total, but stay defensive at the render site
+  }
+}
+
 const GRADE_COLORS = {
   A: THEME.green,
   B: THEME.cyan,
@@ -5858,6 +5891,14 @@ function renderResourceTable(servers) {
     const envColor = env === "PROD" ? THEME.red : env === "TEST" ? THEME.amber : env === "DEV" ? THEME.cyan : THEME.muted;
     const envBadge = env ? `<span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style="color:${envColor};background:${hexA(envColor,0.12)};border:1px solid ${hexA(envColor,0.3)}">${env}</span>` : '<span class="text-Cmuted">—</span>';
 
+    // DATA CONFLICT safety net (deterministic monitoringNote contract). Renders
+    // ONLY when the backend's DB-expected label disagrees with the actual value —
+    // it never replaces the real memory value or status pill.
+    const _memNote = _memMonitoringNote(r);
+    const _memConflictLine = (_memNote && _memNote.conflict)
+      ? `<div class="text-[8px] mt-0.5 leading-tight font-bold" style="color:${THEME.amber}" title="Backend labelled this DB memory EXPECTED (DB_NORMAL) but ${memAvail ? r.mem_pct.toFixed(1) : '?'}% is outside the DB expected band (${RESOURCE_THRESHOLDS.db_mem_band_low}–${RESOURCE_THRESHOLDS.db_mem_band_high}%). Thresholds disagree — recompute before trusting the label.">⚠ ${escapeHtml(_memNote.text)}</div>`
+      : "";
+
     tr.innerHTML = `
       <td class="py-2.5 pr-3 font-semibold text-Cwhite truncate max-w-[220px]" title="${escapeHtml(r.host || r.server)}">${escapeHtml(r.server)}${dualBadge}</td>
       <td class="py-2.5 pr-3 text-Cmuted">${escapeHtml(r.type || "")}</td>
@@ -5872,6 +5913,7 @@ function renderResourceTable(servers) {
         <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border cursor-help" title="${_buildStatusTooltip(r)}" style="${statusPillStyle(_dispStatus)}">${escapeHtml(_dispStatus)}</span>
         ${(r.status === "Warning" || r.status === "Critical") ? `<div class="text-[8px] text-Cmuted mt-0.5 leading-tight">${_statusDrivenBy(r)}</div>` : ""}
         ${_dispStatus === "DB Normal" ? `<div class="text-[8px] mt-0.5 leading-tight" style="color:${DB_EXPECTED_COLOR}">SGA/PGA steady — high memory by design</div>` : ""}
+        ${_memConflictLine}
       </td>
       <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[180px]" title="${escapeHtml(r.source_env || "")}">${escapeHtml(truncate(r.source_env || "", 28))}</td>
     `;
