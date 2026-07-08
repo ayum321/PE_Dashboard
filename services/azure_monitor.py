@@ -1354,23 +1354,21 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=hours_back)
 
-    # Use finer granularity for shorter time ranges; coarsen for long windows
-    # to avoid large payloads and Azure Monitor throttling.
+    # Use finer granularity for shorter time ranges; coarsen for long windows.
     # Azure Monitor only accepts specific ISO-8601 granularities:
     #   PT1M, PT5M, PT15M, PT30M, PT1H, PT6H, PT12H, P1D
-    # PT4H is NOT valid — queries return empty data silently; always pick from the list above.
-    # 15-day (360h) PE audit window → 1h = 360 pts/metric/VM (nominal use case)
-    # 30-day (720h) → 6h = 120 pts;  60-day → 6h = 240 pts
+    # PT4H is NOT valid — avoid it.  PT1H works for up to 93-day retention (all
+    # standard VM metrics) so use it all the way to 30d (720h = 720 pts/VM, fine).
     if hours_back <= 1:
         granularity = timedelta(minutes=1)
     elif hours_back <= 6:
         granularity = timedelta(minutes=5)
     elif hours_back <= 24:
         granularity = timedelta(minutes=15)
-    elif hours_back <= 360:
-        granularity = timedelta(hours=1)   # up to 15-day — 360 pts max, within cap
+    elif hours_back <= 720:
+        granularity = timedelta(hours=1)   # PT1H — valid, 360–720 pts; works for 15d & 30d
     else:
-        granularity = timedelta(hours=6)   # 30-day+ → PT6H (valid) = 120–240 pts
+        granularity = timedelta(hours=6)   # 60-day+ → PT6H (valid) = 240 pts
 
     if not resource_ids:
         return {"vms": {}, "patterns": [], "baseline": {}}

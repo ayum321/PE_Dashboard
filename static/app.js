@@ -6000,22 +6000,28 @@ function loadMetricsDeepDive() {
 
   const t0 = performance.now();
 
-  // 4-minute timeout — prevents infinite hang on slow Azure responses
-  const _ddController = new AbortController();
-  const _ddTimeout = setTimeout(() => _ddController.abort(), 240_000);
-
+  // Always bust the server-side cache before fetching so explicit Refresh
+  // never serves a stale result from a previous (potentially broken) call.
   const payload = { vm_ids: _lastFetchedVmIds, hours_back: hoursBack };
   if (_deepDiveCustomWindow?.start_utc && _deepDiveCustomWindow?.end_utc) {
     payload.start_utc = _deepDiveCustomWindow.start_utc;
     payload.end_utc = _deepDiveCustomWindow.end_utc;
   }
 
-  fetch("/api/azure/timeseries", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: _ddController.signal,
-  })
+  // 4-minute timeout — prevents infinite hang on slow Azure responses
+  const _ddController = new AbortController();
+  const _ddTimeout = setTimeout(() => _ddController.abort(), 240_000);
+
+  // Bust the in-process cache then fetch fresh data
+  fetch("/api/azure/clear-ts-cache", { method: "POST" })
+    .catch(() => {}) // non-blocking — if it fails the main fetch still proceeds
+    .finally(() => {
+      fetch("/api/azure/timeseries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: _ddController.signal,
+      })
   .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
   .then(data => {
     _deepDiveData = data;
@@ -6065,6 +6071,7 @@ function loadMetricsDeepDive() {
     toast("error", "Deep Dive Error", msg);
   })
   .finally(() => clearTimeout(_ddTimeout));
+    }); // end clear-ts-cache.finally
 }
 
 // ── Custom window badge: shows the active time range above charts ─────────

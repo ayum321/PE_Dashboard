@@ -865,6 +865,16 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
 
 # ── Time-series + spike detection endpoint ──────────────────────────────────
 
+@router.post("/azure/clear-ts-cache")
+def azure_clear_ts_cache() -> Dict[str, Any]:
+    """Clears the in-process time-series result cache (5-min TTL).
+    Call this after a code change when you want fresh Azure data without restarting."""
+    with _TS_CACHE_LOCK:
+        n = len(_TS_CACHE)
+        _TS_CACHE.clear()
+    return {"cleared": n, "message": f"Cleared {n} cached time-series result(s). Next fetch hits Azure Monitor fresh."}
+
+
 class TimeseriesRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     vm_ids: List[str]
