@@ -4984,7 +4984,7 @@ function renderResourceKpis(k) {
   const setMetric = (id, val, ok, warn) => {
     const el = document.getElementById(id);
     if (!el) return;
-    if (noResData) { el.textContent = "—"; el.style.color = THEME.muted; return; }
+    if (noResData || val == null) { el.textContent = "—"; el.style.color = THEME.muted; return; }
     el.textContent = `${(val ?? 0).toFixed(1)}%`;
     el.style.color = metricColor(val ?? 0, ok, warn);
   };
@@ -5028,6 +5028,28 @@ function renderResourceKpis(k) {
     memFleetDetailEl.style.color = belowFloor > 0 ? THEME.red : (minAvail != null && minAvail < floor ? THEME.amber : THEME.muted);
   }
   setMetric("rk-disk", k.avg_disk, t.disk_ok, t.disk_warn);
+
+  // Disk reporting transparency: Avg Disk is meaningless when few servers emit
+  // disk telemetry. Show "N/M reporting" so a partial average is never mistaken
+  // for a fleet-wide reading, and warn when coverage is incomplete.
+  const diskSubEl = document.getElementById("rk-disk-sub");
+  if (diskSubEl) {
+    const nKnown    = k.known_servers ?? 0;
+    const reporting = k.disk_reporting ?? 0;
+    if (noResData || nKnown === 0) {
+      diskSubEl.textContent = "Threshold 85%";
+      diskSubEl.style.color = THEME.muted;
+    } else if (reporting === 0) {
+      diskSubEl.textContent = `No disk telemetry (0/${nKnown} reporting)`;
+      diskSubEl.style.color = THEME.amber;
+    } else if (reporting < nKnown) {
+      diskSubEl.textContent = `${reporting}/${nKnown} reporting · threshold 85%`;
+      diskSubEl.style.color = THEME.amber;
+    } else {
+      diskSubEl.textContent = "Threshold 85%";
+      diskSubEl.style.color = THEME.muted;
+    }
+  }
 
   animateRing("rk-cpu-svg",  k.avg_cpu  ?? 0, t.cpu_ok,  t.cpu_warn,  "rk-cpu-status",  "rk-cpu-ring-label");
   // Memory ring: show available % with inverted fill (full ring = 100% available = healthy)

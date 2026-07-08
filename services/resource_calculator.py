@@ -402,11 +402,16 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
         cpu_vals  = [r["cpu_pct"]  for r in known if r["cpu_pct"]  is not None]
         mem_vals  = [r["mem_pct"]  for r in known if r["mem_pct"]  is not None]
         disk_vals = [r["disk_pct"] for r in known if r["disk_pct"] is not None]
-        avg_cpu  = round(sum(cpu_vals)  / max(len(cpu_vals), 1),  1)
-        avg_mem  = round(sum(mem_vals)  / max(len(mem_vals), 1),  1)
-        avg_disk = round(sum(disk_vals) / max(len(disk_vals), 1), 1)
+        # Average ONLY over servers that actually reported the metric. A pillar
+        # with zero reporting servers is None (→ "—" in the UI), never a fake 0.0
+        # that would misrepresent a non-reporting fleet as healthy/idle.
+        avg_cpu  = round(sum(cpu_vals)  / len(cpu_vals),  1) if cpu_vals  else None
+        avg_mem  = round(sum(mem_vals)  / len(mem_vals),  1) if mem_vals  else None
+        avg_disk = round(sum(disk_vals) / len(disk_vals), 1) if disk_vals else None
+        cpu_reporting, mem_reporting, disk_reporting = len(cpu_vals), len(mem_vals), len(disk_vals)
     else:
-        avg_cpu = avg_mem = avg_disk = 0.0
+        avg_cpu = avg_mem = avg_disk = None
+        cpu_reporting = mem_reporting = disk_reporting = 0
 
     n_crit = sum(1 for r in known if r["status"] == "Critical")
     n_warn = sum(1 for r in known if r["status"] == "Warning")
@@ -449,6 +454,9 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
             "avg_cpu":       avg_cpu,
             "avg_mem":       avg_mem,
             "avg_disk":      avg_disk,
+            "cpu_reporting":  cpu_reporting,
+            "mem_reporting":  mem_reporting,
+            "disk_reporting": disk_reporting,
             "n_critical":    n_crit,
             "n_warning":     n_warn,
             "n_healthy":     n_ok,

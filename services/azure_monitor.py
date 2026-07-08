@@ -2173,11 +2173,14 @@ def _build_server_records(credential, vms: List[dict],
             if sub_match and vm.get("vm_size"):
                 sku_needed.append((len(servers), sub_match.group(1), vm["vm_size"]))
 
-        disk_pct = round(
-            m.get("OS Disk Bandwidth Consumed Percentage",
-                   m.get("Data Disk Bandwidth Consumed Percentage", 0.0)),
-            2,
-        )
+        # Absent disk metric → None (not a fabricated 0.0). Emitting 0.0 here
+        # would let a server with no disk telemetry look like a genuine "0% disk"
+        # reading and drag the fleet Avg Disk toward zero. None flows through to
+        # disk_available=False → disk_pct=None so it is excluded from the mean.
+        _disk_raw = m.get("OS Disk Bandwidth Consumed Percentage")
+        if _disk_raw is None:
+            _disk_raw = m.get("Data Disk Bandwidth Consumed Percentage")
+        disk_pct = round(_disk_raw, 2) if _disk_raw is not None else None
 
         servers.append({
             "host":          name.lower(),

@@ -37,9 +37,12 @@ class ResourceKpis(BaseModel):
     image_only:    int = 0
     fleet_grade:   str = "?"
     fleet_score:   float = 0.0
-    avg_cpu:       float = 0.0
-    avg_mem:       float = 0.0
-    avg_disk:      float = 0.0
+    avg_cpu:       Optional[float] = 0.0
+    avg_mem:       Optional[float] = 0.0
+    avg_disk:      Optional[float] = 0.0
+    cpu_reporting:  int = 0
+    mem_reporting:  int = 0
+    disk_reporting: int = 0
     n_critical:    int = 0
     n_warning:     int = 0
     n_healthy:     int = 0
