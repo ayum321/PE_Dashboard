@@ -4453,6 +4453,45 @@ function _memMonitoringNote(r) {
   }
 }
 
+// ── server_row_status adapter (deterministic badge label contract) ───────────
+// Feeds the resource-table status pill through interpretation_formatters.js so
+// badge text is produced by the same deterministic contract layer as other
+// interpretation surfaces. Styling still follows the canonical display status.
+function _statusReasonCode(r, dispStatus, whyLine) {
+  if (!r) return null;
+  if (dispStatus === "DB Normal") return "DB_SGA_PGA";
+  if (r.dual_pressure) return "DUAL_PRESSURE";
+  if (r.agg_trap) return "BRIEF_SPIKE";
+  const cpu = r.effective_cpu ?? r.cpu_pct;
+  const cpuWarn = r.role_cpu_warn ?? RESOURCE_THRESHOLDS.cpu_warn;
+  if (typeof cpu === "number" && cpu >= cpuWarn) return "CPU_PRESSURE";
+  if (r.mem_pct != null && !_isDbMemExpected(r.type || "", r.mem_pct) && r.mem_pct >= RESOURCE_THRESHOLDS.mem_warn) {
+    return "MEM_PRESSURE";
+  }
+  if (r.disk_pct != null && r.disk_pct >= RESOURCE_THRESHOLDS.disk_warn) return "DISK_PRESSURE";
+  if (typeof whyLine === "string" && whyLine.trim().length) return "MULTI_FACTOR";
+  return null;
+}
+function _statusBadgeFromFormatter(r, dispStatus, whyLine) {
+  const fallback = dispStatus || r?.status || "Unknown";
+  if (!r || typeof window === "undefined" || !window.PEInterpret) return { badge: fallback };
+  try {
+    const reasonCode = _statusReasonCode(r, dispStatus, whyLine);
+    const out = window.PEInterpret.serverRowStatus([{
+      server: r.server,
+      cpu_pct: r.cpu_pct,
+      mem_used_pct: r.mem_pct,
+      disk_pct: r.disk_pct,
+      status_code: fallback,
+      reason_code: reasonCode,
+    }]);
+    const badge = out?.[0]?.badge;
+    return { badge: (badge && String(badge).trim()) ? String(badge) : fallback };
+  } catch (_e) {
+    return { badge: fallback };
+  }
+}
+
 const GRADE_COLORS = {
   A: THEME.green,
   B: THEME.cyan,
@@ -5917,6 +5956,8 @@ function renderResourceTable(servers) {
     // ONLY when the backend's DB-expected label disagrees with the actual value —
     // it never replaces the real memory value or status pill.
     const _memNote = _memMonitoringNote(r);
+    const _statusWhy = _statusDrivenBy(r);
+    const _statusFmt = _statusBadgeFromFormatter(r, _dispStatus, _statusWhy);
     const _memConflictLine = (_memNote && _memNote.conflict)
       ? `<div class="text-[8px] mt-0.5 leading-tight font-bold" style="color:${THEME.amber}" title="Backend labelled this DB memory EXPECTED (DB_NORMAL) but ${memAvail ? r.mem_pct.toFixed(1) : '?'}% is outside the DB expected band (${RESOURCE_THRESHOLDS.db_mem_band_low}–${RESOURCE_THRESHOLDS.db_mem_band_high}%). Thresholds disagree — recompute before trusting the label.">⚠ ${escapeHtml(_memNote.text)}</div>`
       : "";
@@ -5932,8 +5973,8 @@ function renderResourceTable(servers) {
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums text-Cmuted">${memGbAvail ? r.mem_gb.toFixed(1) : '<span title="Memory capacity not available from source">N/A</span>'}</td>
       <td class="py-2.5 pr-3 text-right font-mono tabular-nums ${r.disk_pct == null ? 'text-Cmuted' : ''}" style="color:${r.disk_pct != null ? metricColor(r.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn) : ''}">${r.disk_pct != null ? (r.disk_pct).toFixed(1) + '%' : '<span title="Disk data unavailable">N/A</span>'}</td>
       <td class="py-2.5 pr-3">
-        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border cursor-help" title="${_buildStatusTooltip(r)}" style="${statusPillStyle(_dispStatus)}">${escapeHtml(_dispStatus)}</span>
-        ${(r.status === "Warning" || r.status === "Critical") ? `<div class="text-[8px] text-Cmuted mt-0.5 leading-tight">${_statusDrivenBy(r)}</div>` : ""}
+        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border cursor-help" title="${_buildStatusTooltip(r)}" style="${statusPillStyle(_dispStatus)}">${escapeHtml(_statusFmt.badge)}</span>
+        ${(r.status === "Warning" || r.status === "Critical") ? `<div class="text-[8px] text-Cmuted mt-0.5 leading-tight">${_statusWhy}</div>` : ""}
         ${_dispStatus === "DB Normal" ? `<div class="text-[8px] mt-0.5 leading-tight" style="color:${DB_EXPECTED_COLOR}">SGA/PGA steady — high memory by design</div>` : ""}
         ${_memConflictLine}
       </td>
@@ -6687,6 +6728,28 @@ function _formatDeviation(spike) {
   return `${sevWord} deviation above baseline (avg ${spike.mean}%)`;
 }
 
+// Human-readable duration formatter for anomaly windows.
+// Keeps minutes available in tooltip, but surfaces user-friendly units in-table.
+function _humanizeDurationMin(minutes, opts = {}) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n) || n < 0) return "insufficient data";
+  if (n < 1) return "<1m";
+  const ongoing = !!opts.ongoing;
+  if (n >= 1440) {
+    const days = n / 1440;
+    const rounded = days >= 10 ? Math.round(days) : Math.round(days * 10) / 10;
+    const approx = days >= 2 ? "≈" : "";
+    const label = `${approx}${rounded} day${rounded === 1 ? "" : "s"}`;
+    return ongoing ? `${label} (ongoing)` : label;
+  }
+  if (n >= 60) {
+    const hours = n / 60;
+    const rounded = hours >= 10 ? Math.round(hours) : Math.round(hours * 10) / 10;
+    return `${rounded}h`;
+  }
+  return `${Math.round(n)}m`;
+}
+
 // Confidence tier badge
 function _confBadge(conf) {
   if (!conf) return "";
@@ -7426,6 +7489,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         // Bug 3+4: severity-aware labels (sustained, absolute threshold)
         const sev = (s.severity || "critical").toUpperCase().replace("_", " ");
         const sevColor = sev.includes("SUSTAINED") ? THEME.purple : sev === "WARNING" ? THEME.amber : sev === "NOTABLE" ? THEME.muted : THEME.red;
+        const durLabel = _humanizeDurationMin(s.duration_min, {
+          ongoing: sev.includes("SUSTAINED") && Number(s.duration_min) >= 1440,
+        });
         const detectionTag = s.detection === "absolute_threshold"
           ? `<span class="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
           : "";
@@ -7443,7 +7509,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite" title="${lineageTitle}">${escapeHtml(metricLabel)}${s.is_derived ? ' <span class="text-[7px] px-0.5 rounded" style="color:'+THEME.cyan+';background:'+hexA(THEME.cyan,0.12)+'">derived</span>' : ''}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s.metric, s.peak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${s.duration_min}min</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="${s.duration_min} min">${durLabel}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">peak @ ${peakTime}</td>
           <td class="py-1.5 text-[10px] text-Cmuted">${_formatDeviation(s)}</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
@@ -7454,7 +7520,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const s0 = group[0];
         const metricLabel = metricConfig.find(m => m.key === s0.metric)?.label || s0.metric;
         const maxPeak = Math.max(...group.map(g => g.peak));
-        const avgDur = (group.reduce((a, g) => a + g.duration_min, 0) / group.length).toFixed(0);
+        const avgDurMin = (group.reduce((a, g) => a + g.duration_min, 0) / group.length);
+        const avgDurLabel = _humanizeDurationMin(avgDurMin);
         const days = group.map(g => new Date(g.peak_time).toLocaleDateString([], { weekday: "short" }));
         const uniqueDays = [...new Set(days)];
         // Bug 2: "Daily" when ≥6 unique days, otherwise list them
@@ -7480,9 +7547,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite">${escapeHtml(metricLabel)} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">${group.length}×</span></td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s0.metric, maxPeak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${dayLabel} pattern</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted">~${avgDur}min each</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="avg ${Math.round(avgDurMin)} min each">${avgDurLabel} each</td>
           <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${patternColor}">${patternLabel} <span class="text-[8px] text-Cmuted">(${distinctDays}d)</span></td>
-          <td class="py-1.5 text-[10px] text-Cmuted">peak ${_formatPeak(s0.metric, maxPeak)}, avg duration ${avgDur}min</td>
+          <td class="py-1.5 text-[10px] text-Cmuted">peak ${_formatPeak(s0.metric, maxPeak)}, avg duration ${avgDurLabel}</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
         </tr>` };
       }

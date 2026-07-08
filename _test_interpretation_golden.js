@@ -26,6 +26,7 @@ function ok(name, cond) { cond ? pass++ : (fail++, console.error("  FAIL:", name
 const isDbRole = (role) => /\bDB\b/i.test(role || "");
 const isDbMemExpected = (role, mem) =>
   isDbRole(role) && mem >= DB_BAND_LOW && mem <= DB_BAND_HIGH;
+const RESOURCE_THRESHOLDS = { cpu_warn: 90, mem_warn: 90, disk_warn: 90 };
 
 // Exact mirror of static/app.js _memMonitoringNote(r).
 function memMonitoringNote(r) {
@@ -43,6 +44,37 @@ function memMonitoringNote(r) {
     classification: "EXPECTED",
     reason_code: "DB_SGA_PGA",
   });
+}
+
+// Exact mirror of static/app.js _statusReasonCode + _statusBadgeFromFormatter.
+function statusReasonCode(r, dispStatus, whyLine) {
+  if (!r) return null;
+  if (dispStatus === "DB Normal") return "DB_SGA_PGA";
+  if (r.dual_pressure) return "DUAL_PRESSURE";
+  if (r.agg_trap) return "BRIEF_SPIKE";
+  const cpu = (r.effective_cpu ?? r.cpu_pct);
+  const cpuWarn = (r.role_cpu_warn ?? RESOURCE_THRESHOLDS.cpu_warn);
+  if (typeof cpu === "number" && cpu >= cpuWarn) return "CPU_PRESSURE";
+  if (r.mem_pct != null && !isDbMemExpected(r.type || "", r.mem_pct) && r.mem_pct >= RESOURCE_THRESHOLDS.mem_warn) {
+    return "MEM_PRESSURE";
+  }
+  if (r.disk_pct != null && r.disk_pct >= RESOURCE_THRESHOLDS.disk_warn) return "DISK_PRESSURE";
+  if (typeof whyLine === "string" && whyLine.trim().length) return "MULTI_FACTOR";
+  return null;
+}
+function statusBadgeFromFormatter(r, dispStatus, whyLine) {
+  const fallback = dispStatus || r?.status || "Unknown";
+  const reasonCode = statusReasonCode(r, dispStatus, whyLine);
+  const out = P.serverRowStatus([{
+    server: r.server,
+    cpu_pct: r.cpu_pct,
+    mem_used_pct: r.mem_pct,
+    disk_pct: r.disk_pct,
+    status_code: fallback,
+    reason_code: reasonCode,
+  }]);
+  const badge = out?.[0]?.badge;
+  return (badge && String(badge).trim()) ? String(badge) : fallback;
 }
 
 // ── Authentic backend rows (exact field set from resource_calculator.py) ─────
@@ -112,6 +144,22 @@ ok("golden: DB frontend-expected in-band produces note", feo !== null);
 ok("golden: DB frontend-expected in-band no conflict", feo.conflict === false);
 
 ok("golden: DB with mem unavailable gets no note", memMonitoringNote(GOLDEN.dbMemUnavailable) === null);
+
+// server_row_status adapter checks (messy vocab + sparse/null rows)
+eq("golden: DB Normal badge gets deterministic reason suffix",
+  statusBadgeFromFormatter(GOLDEN.dbNormalInBand, "DB Normal", ""), "DB Normal (DB_SGA_PGA)");
+eq("golden: sparse row keeps fallback status (no crash, no drop)",
+  statusBadgeFromFormatter({ server: "x1", status: "Healthy", mem_pct: null, cpu_pct: null, disk_pct: null }, "Healthy", ""), "Healthy");
+eq("golden: critical CPU row maps to CPU_PRESSURE suffix",
+  statusBadgeFromFormatter({
+    server: "cpu-hot-01", type: "APP", status: "Critical", cpu_pct: 96, effective_cpu: 96, role_cpu_warn: 90,
+    mem_pct: 45, disk_pct: 20, dual_pressure: false, agg_trap: false,
+  }, "Critical", "↑ CPU 96%"), "Critical (CPU_PRESSURE)");
+eq("golden: messy unknown status vocab passes through verbatim",
+  statusBadgeFromFormatter({
+    server: "odd-01", type: "APP", status: "SRE Watch", cpu_pct: 55, mem_pct: 66, disk_pct: 10,
+    dual_pressure: false, agg_trap: false,
+  }, "SRE Watch", ""), "SRE Watch");
 
 // Shape-drift guard: if backend band constants ever diverge from the frontend
 // band assumed here, this assertion documents the coupling explicitly.
