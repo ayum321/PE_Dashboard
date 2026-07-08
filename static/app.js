@@ -6638,6 +6638,27 @@ function _confBadge(conf) {
   return `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded ml-1" style="color:${cc.c};background:${hexA(cc.bg,0.12)}">${conf}</span>`;
 }
 
+function _severityHelpText(sev) {
+  const s = (sev || "").toUpperCase();
+  if (s.includes("CRITICAL SUSTAINED")) {
+    return "CRITICAL SUSTAINED: anomaly stayed beyond critical bounds for an extended window and remained operationally meaningful.";
+  }
+  if (s.includes("CRITICAL")) {
+    return "CRITICAL: high-confidence anomaly with strong deviation from baseline and meaningful absolute pressure.";
+  }
+  if (s.includes("WARNING")) {
+    return "WARNING: elevated pressure versus baseline, but below critical impact level.";
+  }
+  if (s.includes("NOTABLE")) {
+    return "NOTABLE: statistical anomaly observed, but below action threshold.";
+  }
+  return "Severity is assigned using anomaly score + absolute pressure guardrails.";
+}
+
+function _severityInfoIcon(sev) {
+  return `<span class="ml-1 inline-flex items-center justify-center w-3 h-3 rounded-full text-[8px] font-bold cursor-help" title="${_esc(_severityHelpText(sev))}" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.12)}">i</span>`;
+}
+
 // ── Per-VM Time-Series Charts — grouped server cards (GAP 1) ──
 function _renderDeepDiveCharts(vms, summary) {
   const chartsDiv = document.getElementById("deepdive-charts");
@@ -7125,7 +7146,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           ${waveBadge}
         </div>
         <div class="flex items-center gap-2 mt-1 flex-wrap">
-          <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
+          <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase cursor-help" title="${_severityHelpText(sevLabel)}" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
           <span class="text-[9px] text-Cmuted">${criticalCount} anomal${criticalCount > 1 ? "ies" : "y"}</span>
           ${breachLabel ? `<span class="text-[8px] font-bold px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
           ${_baselineBadge(vmData.baseline_confidence, { compact: true })}
@@ -7354,7 +7375,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const sevReason = s.severity_reason || "";
         const isNotable = (s.severity || "") === "notable";
 
-        return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${detectionTag}${_confBadge(s.confidence)}</td>
+        return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${_severityInfoIcon(sev)}${detectionTag}${_confBadge(s.confidence)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite" title="${lineageTitle}">${escapeHtml(metricLabel)}${s.is_derived ? ' <span class="text-[7px] px-0.5 rounded" style="color:'+THEME.cyan+';background:'+hexA(THEME.cyan,0.12)+'">derived</span>' : ''}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s.metric, s.peak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}</td>
@@ -7391,7 +7412,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const maxEnd   = group.reduce((a, g) => g.end   > a ? g.end   : a, group[0].end);
         const isNotable = worstSev === "NOTABLE";
         return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" style="background:${hexA(THEME.amber, 0.04)}" title="Click to reload deep dive for this recurring pattern window" onclick="openSpikeWindow(${JSON.stringify(minStart)},${JSON.stringify(maxEnd)})">
-          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}">${worstSev} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">RECURRING</span>${_confBadge(confLabel)}</td>
+          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}">${worstSev}${_severityInfoIcon(worstSev)} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">RECURRING</span>${_confBadge(confLabel)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite">${escapeHtml(metricLabel)} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">${group.length}×</span></td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s0.metric, maxPeak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${dayLabel} pattern</td>
@@ -7424,6 +7445,49 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     }
     const provLine = `<div class="text-[8px] text-Cmuted mb-1">Source: Azure Monitor · Aggregation: Average · Grain: ${grainLabel || "auto"} · Datapoints: ${firstPts?.length || "?"}</div>`;
 
+    const recurringGroups = groups.filter(g => g.length > 1);
+    const topRecurring = recurringGroups.sort((a, b) => {
+      const ad = a.reduce((s, x) => s + (x.duration_min || 0), 0);
+      const bd = b.reduce((s, x) => s + (x.duration_min || 0), 0);
+      return bd - ad;
+    })[0];
+    const topSingle = groups
+      .filter(g => g.length === 1)
+      .map(g => g[0])
+      .sort((a, b) => (b.duration_min || 0) - (a.duration_min || 0))[0];
+    const topSignal = topRecurring?.[0] || topSingle;
+    let insightLine = "";
+    if (topSignal) {
+      const k = topSignal.metric || "";
+      const metricLabel = metricConfig.find(m => m.key === k)?.label || k;
+      const cpuP95 = stats["Percentage CPU"]?.p95 ?? stats["Percentage CPU"]?.mean ?? null;
+      const cpuContext = cpuP95 != null
+        ? (cpuP95 < 40 ? `minimal CPU impact (P95 ${cpuP95.toFixed(0)}%)` : `concurrent CPU pressure (P95 ${cpuP95.toFixed(0)}%)`)
+        : "CPU context unavailable";
+      if (k === "Available Memory Percentage") {
+        const peakAvail = topRecurring
+          ? Math.max(...topRecurring.map(x => Number(x.peak) || 0))
+          : Number(topSignal.peak) || 0;
+        const distinctDays = topRecurring ? [...new Set(topRecurring.map(x => new Date(x.peak_time).toDateString()))].length : 1;
+        const patternTxt = distinctDays >= 5 ? `recurring scheduled pattern (${distinctDays}d)` : distinctDays >= 3 ? `recurring pattern (${distinctDays}d)` : "localized window";
+        insightLine = `Likely root cause: ${patternTxt} with available memory around ${peakAvail.toFixed(1)}% on ${escapeHtml(vmName)}; ${cpuContext}.`;
+      } else {
+        insightLine = `Likely root cause: recurring pressure on ${escapeHtml(metricLabel)} for ${escapeHtml(vmName)}; ${cpuContext}.`;
+      }
+    }
+    const insightBlock = insightLine
+      ? `<div class="text-[9px] px-2.5 py-1.5 rounded mb-1.5" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)};border:1px solid ${hexA(THEME.cyan,0.25)}">
+          <span class="font-bold uppercase tracking-wider text-[8px] mr-1">Insight</span>${insightLine}
+         </div>`
+      : "";
+
+    const severityLegend = `<div class="text-[8px] text-Cmuted mb-1.5">
+      Severity rules:
+      <span class="mx-1 cursor-help" title="${_severityHelpText("CRITICAL SUSTAINED")}"><span style="color:${THEME.purple}">CRITICAL SUSTAINED</span>${_severityInfoIcon("CRITICAL SUSTAINED")}</span>
+      <span class="mx-1 cursor-help" title="${_severityHelpText("CRITICAL")}"><span style="color:${THEME.red}">CRITICAL</span>${_severityInfoIcon("CRITICAL")}</span>
+      <span class="mx-1 cursor-help" title="${_severityHelpText("WARNING")}"><span style="color:${THEME.amber}">WARNING</span>${_severityInfoIcon("WARNING")}</span>
+    </div>`;
+
     const tableHead = `<table class="w-full text-left"><thead>
         <tr class="text-[9px] text-Cmuted uppercase tracking-wider">
           <th class="pb-1 pr-3">Severity</th><th class="pb-1 pr-3">Metric</th>
@@ -7448,7 +7512,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
     spikeTable.innerHTML = `
       <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">⚡ Anomaly & Spike Events</div>
-      ${provLine}${sparseWarn}
+      ${provLine}${insightBlock}${severityLegend}${sparseWarn}
       ${actionableBlock}${notableBlock}
     `;
     card.appendChild(spikeTable);
