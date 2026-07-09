@@ -1726,9 +1726,40 @@ function _excludedJobNameSet() {
   return out;
 }
 
+/** Filter a job-keyed heatmap/matrix grid ({jobs, dates, cells, rows?, job_priority?,
+ *  priority_jobs?}) by the current exclusion set. Used for sla_heatmap and
+ *  longpole_matrix — both keyed by "job" name — so excluding a job from the Top-10
+ *  table / utility panel is reflected in those grids INSTANTLY, without waiting on
+ *  the server round-trip in _syncBatchExclusionsToServer(). */
+function _filterJobKeyedGrid(grid) {
+  if (!grid || !Array.isArray(grid.jobs) || !grid.jobs.length) return grid;
+  const excluded = _excludedJobNameSet();  // Set of UPPERCASE job names
+  if (!excluded.size) return grid;
+  const keepJob = (j) => !excluded.has(String(j || "").toUpperCase());
+  const jobs = grid.jobs.filter(keepJob);
+  if (jobs.length === grid.jobs.length) return grid;  // nothing excluded in this grid
+  const jobSet = new Set(jobs);
+  const out = { ...grid, jobs };
+  if (Array.isArray(grid.cells))         out.cells = grid.cells.filter(c => jobSet.has(c.job));
+  if (Array.isArray(grid.rows))          out.rows  = grid.rows.filter(r => jobSet.has(r.job));
+  if (Array.isArray(grid.priority_jobs)) out.priority_jobs = grid.priority_jobs.filter(p => jobSet.has(p.job));
+  if (grid.job_priority && typeof grid.job_priority === "object") {
+    const jp = {};
+    for (const j of jobs) if (grid.job_priority[j]) jp[j] = grid.job_priority[j];
+    out.job_priority = jp;
+  }
+  return out;
+}
+
 /** Filter excluded jobs from batch payload.
  *  Returns a shallow copy with filtered arrays. Also masks excluded job names
- *  from the window top_job field so the Daily Batch Window tooltip is clean. */
+ *  from the window top_job field so the Daily Batch Window tooltip is clean.
+ *  Also filters the job-keyed sla_heatmap/longpole_matrix grids so excluding a
+ *  job updates those charts immediately (see _filterJobKeyedGrid). Grids that
+ *  are Sub_Application-scoped (hour_heatmap, failure_grid) and the window bars'
+ *  runtime/breach values (which need server-side interval-union recompute)
+ *  cannot be correctly patched client-side — those become consistent once
+ *  _syncBatchExclusionsToServer()'s /api/batch/refresh round-trip completes. */
 function _filterBatchUtility(data) {
   const filteredJobs    = new Set((data.top_jobs || []).filter(j => !_isJobExcluded(j)).map(j => j.Job_Name));
   const filteredBreaches = new Set((data.top_breaches || []).filter(j => !_isJobExcluded(j)).map(j => j.Job_Name));
@@ -1745,7 +1776,54 @@ function _filterBatchUtility(data) {
     top_jobs:     (data.top_jobs || []).filter(j => !_isJobExcluded(j)),
     top_breaches: (data.top_breaches || []).filter(j => !_isJobExcluded(j)),
     window:       window2,
+    sla_heatmap:     _filterJobKeyedGrid(data.sla_heatmap),
+    longpole_matrix: _filterJobKeyedGrid(data.longpole_matrix),
   };
+}
+
+/** Debounced push of the current manual-exclusion set to the backend config
+ *  (persists per-engagement) + full server recompute via /api/batch/refresh.
+ *
+ *  WHY: client-side filtering (_filterBatchUtility) only patches job-keyed
+ *  arrays/grids (top_jobs, window tooltip, sla_heatmap, longpole_matrix). It
+ *  CANNOT correctly patch panels whose values depend on server-side interval-
+ *  union math over the raw runs — hour_heatmap and failure_grid (Sub_Application-
+ *  scoped, not job-scoped) and the Daily Batch Window bars themselves (bar
+ *  height = elapsed/effective_hrs, colour = breach flag — both computed from
+ *  the FULL day's interval union, which changes when a job's runs are removed
+ *  from that union). Only compute_metrics() on the backend can recompute those
+ *  correctly, so every manual exclude/include now also triggers this sync —
+ *  closing the gap where those charts silently kept showing pre-exclusion data.
+ *  Auto-detected utility jobs are intentionally NOT sent here — they only hide
+ *  from the Top-N ranking views by design (see build_batch_payload comment);
+ *  only explicit manual excludes change the SLA/compliance-scored dataset. */
+let _batchSyncDebounceTimer = null;
+async function _syncBatchExclusionsToServer() {
+  clearTimeout(_batchSyncDebounceTimer);
+  _batchSyncDebounceTimer = setTimeout(async () => {
+    try {
+      const excludeList = Array.from(_batchManualExclude);
+      const cfgRes = await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ exclude_jobs: excludeList }),
+      });
+      if (!cfgRes.ok) throw new Error(`config HTTP ${cfgRes.status}`);
+
+      const refRes = await fetch("/api/batch/refresh", { method: "POST" });
+      if (!refRes.ok) throw new Error(`refresh HTTP ${refRes.status}`);
+      const payload = await refRes.json();
+      if (payload.error) throw new Error(payload.message || "refresh error");
+
+      window.appData.batch = payload;
+      renderBatchReview(payload);
+      window._execCache     = null;
+      window._execCacheHash = null;
+      setTimeout(() => triggerGenerateFindings().catch(() => {}), 400);
+    } catch (e) {
+      console.warn("[pe-dashboard] batch exclusion server sync failed (charts may be stale until retried):", e);
+    }
+  }, 500);
 }
 
 /** Re-render batch review with current exclusion state.
@@ -1758,6 +1836,10 @@ function _reRenderBatch() {
   window._execCacheHash = null;
   // Propagate exclusion changes to PE Findings (debounced — avoids storm)
   setTimeout(() => triggerGenerateFindings().catch(() => {}), 600);
+  // Sync manual exclusions to the server + pull a fully recomputed payload so
+  // the panels client-side filtering can't safely patch (hour heatmap, failure
+  // grid, window bar heights/breach flags) become consistent too.
+  _syncBatchExclusionsToServer();
 }
 
 /**
@@ -2170,14 +2252,19 @@ function renderBatchReview(data) {
   // empty if we pass filtered — the chart needs ALL jobs to know which ones are excluded)
   renderWindowTrendChart(filtered.window || [], data.top_jobs || []);
   renderTopJobsChart(_filteredJobs, _displayKpis);
-  // Long-pole consistency heatmap (top jobs × day) — complements the window chart
-  try { renderLongpoleHeatmap(data.longpole_matrix || null); } catch (_) {}
+  // Long-pole consistency heatmap (top jobs × day) — complements the window chart.
+  // Uses filtered.longpole_matrix (job-keyed grid, pre-filtered by exclusion set —
+  // see _filterJobKeyedGrid) so excluding a job updates this chart immediately.
+  try { renderLongpoleHeatmap(filtered.longpole_matrix || null); } catch (_) {}
 
   // 3. Top 10 breaching jobs table
   renderTopBreachesTable(filtered.top_breaches || [], data.kpis);
 
   // 4. Heatmaps (only shown when data is present)
-  renderSlaHeatmap(data.sla_heatmap  || null);
+  // sla_heatmap is job-keyed and pre-filtered (see _filterJobKeyedGrid). hour_heatmap
+  // is Sub_Application-scoped, not job-scoped, so it can't be safely patched here —
+  // it becomes consistent once _syncBatchExclusionsToServer()'s backend recompute lands.
+  renderSlaHeatmap(filtered.sla_heatmap || null);
   renderHourHeatmap(data.hour_heatmap || null);
 
   // 5. Show amber banner if BatchSLA XLSX is loaded but not yet applied to KPIs

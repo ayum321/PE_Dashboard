@@ -2837,6 +2837,13 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # Out-of-scope sub_apps (user-excluded ∪ cyclic ∪ MONTHLY/OUTBOUND/…) —
         # exposed so build_batch_payload scopes the heatmaps identically.
         "out_of_scope_subs": sorted(str(s) for s in _out_of_scope_subs),
+        # BUG FIX: user-excluded JOB NAMES exposed separately from out_of_scope_subs
+        # (which is Sub_Application-keyed). Without this, build_batch_payload's
+        # _df_payload_scope only filtered by Sub_Application, so an individually
+        # excluded job (not a whole sub-app) silently kept appearing in every
+        # heatmap/gantt/hourly-density chart even though it was correctly removed
+        # from top_jobs/window/compliance. See build_batch_payload for the fix.
+        "user_excluded_job_names": sorted(_user_excl_jobs),
         # Sub-application rollup
         "sub_stats":        sub,
         "top_jobs":         top_jobs,
@@ -3343,12 +3350,27 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # In-scope frame for the heatmaps / gantt / hourly density — same exclusion
     # set used by the daily picture and window compliance, so every temporal
     # surface in the Ctrl-M review correlates against one coherent scope.
+    #
+    # BUG FIX: out_of_scope_subs is Sub_Application-keyed (cyclic/MONTHLY/
+    # OUTBOUND/…) so filtering on it alone silently ignored individually
+    # user-excluded JOB names — those jobs kept appearing in the SLA/hour
+    # heatmaps, failure grid, daily-jobs series and long-pole matrix even
+    # after being correctly dropped from top_jobs/window/compliance. Apply
+    # BOTH the sub-app scope AND the job-name exclusion so every temporal
+    # surface agrees with the Top-N table.
     _oos_subs = set(m.get("out_of_scope_subs", []))
+    _user_excl_names = set(m.get("user_excluded_job_names", []))
+    _df_payload_scope = df
     if _oos_subs and "Sub_Application" in df.columns:
-        _df_payload_scope = df[~df["Sub_Application"].astype(str).isin(_oos_subs)].copy()
-        if _df_payload_scope.empty:
-            _df_payload_scope = df
-    else:
+        _df_payload_scope = _df_payload_scope[
+            ~_df_payload_scope["Sub_Application"].astype(str).isin(_oos_subs)
+        ]
+    if _user_excl_names and "Job_Name" in df.columns:
+        _df_payload_scope = _df_payload_scope[
+            ~_df_payload_scope["Job_Name"].isin(_user_excl_names)
+        ]
+    _df_payload_scope = _df_payload_scope.copy()
+    if _df_payload_scope.empty:
         _df_payload_scope = df
 
     # Addition 4 — Multi-application-per-folder detection
@@ -3664,6 +3686,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         # OUTBOUND, MONTHLY, user-excluded …). Persisted so the SLA Matrix page
         # can reuse the IDENTICAL window scope and publish one shared denominator.
         "out_of_scope_subs":  sorted(str(s) for s in m.get("out_of_scope_subs", [])),
+        # Individually user-excluded job names (config_store["exclude_jobs"]) —
+        # distinct from out_of_scope_subs (Sub_Application-keyed). Lets the
+        # frontend confirm which per-job exclusions the server already applied.
+        "user_excluded_job_names": sorted(str(j) for j in m.get("user_excluded_job_names", [])),
         "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,
