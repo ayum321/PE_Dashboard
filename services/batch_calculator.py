@@ -295,6 +295,17 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
                     _sdf["_source_sheet"] = _sh   # tag origin for multi-sheet merges
                 _parts.append(_sdf)
             df = pd.concat(_parts, ignore_index=True) if len(_parts) > 1 else _parts[0]
+        except ImportError as e:
+            # pandas raises ImportError (not caught above) when the required Excel
+            # engine (openpyxl/xlrd) isn't installed in THIS python's env — happens
+            # when a customer's .venv was created/copied before dependencies were
+            # fully installed. Give an actionable fix instead of a raw traceback.
+            raise ValueError(
+                f"Cannot parse Ctrl-M file: the '{engine}' package required to read "
+                f"{ext} files is missing from this Python environment. "
+                f"Re-run start.bat to auto-install missing dependencies, or run: "
+                f"pip install {engine}. (Original error: {e})"
+            ) from e
         except Exception as e:
             raise ValueError(f"Cannot parse Ctrl-M file: {e}") from e
     else:
@@ -315,6 +326,13 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
             buf.seek(0)
             try:
                 df = pd.read_excel(buf, sheet_name=0, engine="openpyxl", dtype=str)
+            except ImportError as e:
+                raise ValueError(
+                    "Cannot parse Ctrl-M file: the 'openpyxl' package required to read "
+                    "Excel content is missing from this Python environment. "
+                    "Re-run start.bat to auto-install missing dependencies, or run: "
+                    f"pip install openpyxl. (Original error: {e})"
+                ) from e
             except Exception as e:
                 raise ValueError(f"Cannot parse Ctrl-M file: {e}") from e
 

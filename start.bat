@@ -404,6 +404,20 @@ if errorlevel 1 (
     )
 )
 
+!PY! -c "import openpyxl" >nul 2>&1
+if errorlevel 1 (
+    echo        openpyxl missing -- forcing reinstall...
+    call :pkg "openpyxl>=3.1.2" "xlrd>=2.0.1"
+    !PY! -c "import openpyxl" >nul 2>&1
+    if errorlevel 1 (
+        echo   [ERROR] openpyxl is still unavailable after reinstall.
+        echo          Ctrl-M / SLA Matrix .xlsx uploads will fail without it.
+        echo          Check internet/proxy and re-run start.bat.
+        pause
+        exit /b 1
+    )
+)
+
 !PY! -c "from azure.monitor.query import MetricsQueryClient" >nul 2>&1
 if errorlevel 1 (
     echo        Azure Monitor SDK incomplete -- forcing reinstall...
