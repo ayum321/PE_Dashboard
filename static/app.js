@@ -14643,6 +14643,16 @@ async function loadConfig() {
 /** Refresh the AI engine badge in the header (provider + model). */
 async function refreshAiStatus() {
   try {
+    // AI routers (/api/ai-status, /api/ai/*) are only mounted server-side
+    // when pe_config.AI_ENABLED is on (see main.py). Skip the call entirely
+    // when disabled instead of hitting a guaranteed 404 on every page load.
+    let cfg = window.appData.config;
+    if (!cfg) {
+      const cfgRes = await fetch("/api/config");
+      cfg = cfgRes.ok ? await cfgRes.json() : null;
+    }
+    if (cfg && cfg.ai_enabled === false) return;
+
     const res = await fetch("/api/ai-status");
     if (!res.ok) return;
     const s    = await res.json();

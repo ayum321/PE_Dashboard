@@ -68,8 +68,13 @@ def get_config() -> dict[str, Any]:
         from services import pe_config
         data.setdefault("sla_atrisk_pct",  float(pe_config.SLA_ATRISK_PCT))
         data.setdefault("sla_longjob_pct", float(pe_config.SLA_LONGJOB_PCT))
+        # AI routers (/api/ai-status, /api/ai/*) are only mounted when the
+        # kill-switch is on (main.py). Expose the flag so the frontend can
+        # skip calling those endpoints entirely instead of hitting a
+        # guaranteed 404 on every page load when AI is disabled.
+        data["ai_enabled"] = bool(pe_config.AI_ENABLED)
     except Exception:
-        pass
+        data.setdefault("ai_enabled", False)
     return data
 
 
