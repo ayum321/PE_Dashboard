@@ -1798,9 +1798,16 @@ function _filterBatchUtility(data) {
  *  from the Top-N ranking views by design (see build_batch_payload comment);
  *  only explicit manual excludes change the SLA/compliance-scored dataset. */
 let _batchSyncDebounceTimer = null;
+let _batchSyncRetryCount = 0;
 async function _syncBatchExclusionsToServer() {
   clearTimeout(_batchSyncDebounceTimer);
   _batchSyncDebounceTimer = setTimeout(async () => {
+    // Visible "syncing" cue on the dataset chip — without this, a slow or failed
+    // sync looks identical to the charts "not changing" since nothing tells the
+    // user a background recompute is even in flight.
+    const chip = document.getElementById("batch-dataset-chip");
+    const _origChipText = chip?.textContent || "";
+    if (chip) chip.textContent = "⟳ Applying exclusions…";
     try {
       const excludeList = Array.from(_batchManualExclude);
       const cfgRes = await fetch("/api/config", {
@@ -1811,7 +1818,12 @@ async function _syncBatchExclusionsToServer() {
       if (!cfgRes.ok) throw new Error(`config HTTP ${cfgRes.status}`);
 
       const refRes = await fetch("/api/batch/refresh", { method: "POST" });
-      if (!refRes.ok) throw new Error(`refresh HTTP ${refRes.status}`);
+      if (!refRes.ok) {
+        // 404 = session cache doesn't have job_runs_df (e.g. server restarted) —
+        // the client-side filtered view is all the user gets until re-upload.
+        const err = await refRes.json().catch(() => ({ detail: `HTTP ${refRes.status}` }));
+        throw new Error(err.detail || `refresh HTTP ${refRes.status}`);
+      }
       const payload = await refRes.json();
       if (payload.error) throw new Error(payload.message || "refresh error");
 
@@ -1819,9 +1831,22 @@ async function _syncBatchExclusionsToServer() {
       renderBatchReview(payload);
       window._execCache     = null;
       window._execCacheHash = null;
+      _batchSyncRetryCount = 0;
       setTimeout(() => triggerGenerateFindings().catch(() => {}), 400);
     } catch (e) {
-      console.warn("[pe-dashboard] batch exclusion server sync failed (charts may be stale until retried):", e);
+      console.warn("[pe-dashboard] batch exclusion server sync failed:", e);
+      if (chip) chip.textContent = _origChipText;
+      // Retry once automatically (transient network blip) before bothering the user.
+      if (_batchSyncRetryCount < 1) {
+        _batchSyncRetryCount++;
+        setTimeout(() => _syncBatchExclusionsToServer(), 1200);
+      } else {
+        _batchSyncRetryCount = 0;
+        toast("warning", "Exclusion sync incomplete",
+          "Job-level views (Top 10, heatmaps) reflect your exclusion, but the Daily "
+          + "Batch Window bars, hour heatmap and failure grid need a server recompute "
+          + "that just failed (" + e.message + "). Click Reset or re-toggle the job to retry.");
+      }
     }
   }, 500);
 }
@@ -2057,6 +2082,20 @@ function renderBatchReview(data) {
   const allJobs = data.top_jobs || [];
   const autoUtilJobs = allJobs.filter(j => j.is_utility);
   const excludedJobs = allJobs.filter(j => _isJobExcluded(j));
+  // BUG FIX: once a manually-excluded job's backend sync completes, the server
+  // drops it from df_analysis BEFORE ranking top_jobs — so it no longer appears
+  // ANYWHERE in `data.top_jobs`. That means the line above alone would silently
+  // lose track of it (filter finds nothing to exclude), the chip disappears, and
+  // the whole panel can even hide itself if nothing else is excluded — giving the
+  // false impression the exclusion was undone/forgotten. Re-add any manually
+  // excluded name missing from allJobs as a synthetic entry so it stays visible
+  // and re-includable even though it's no longer in the (already-filtered) list.
+  const _visibleNames = new Set(allJobs.map(j => j.Job_Name));
+  for (const name of _batchManualExclude) {
+    if (!_visibleNames.has(name)) {
+      excludedJobs.push({ Job_Name: name, is_utility: false, _goneFromAnalysis: true });
+    }
+  }
   const includedBackJobs = autoUtilJobs.filter(j => _batchManualInclude.has(j.Job_Name));
 
   let utilPanel = document.getElementById("batch-utility-panel");
