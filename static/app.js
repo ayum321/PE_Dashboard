@@ -2699,6 +2699,18 @@ function renderBatchKpis(k) {
     compEl.style.color =
       jsc >= 95 ? THEME.green :
       jsc >= 80 ? THEME.amber : THEME.red;
+    // Job SLA and Window SLA use the SAME resolved SLA ceiling but apply it to
+    // different "actual" values — job SLA checks each job's own peak runtime
+    // against its ceiling; Window SLA checks the aggregate batch span (first
+    // job start → last job end that day) against the same ceiling. A job can
+    // individually be fast (100% Job SLA) while the whole day's concurrent
+    // span still overruns (low Window SLA) — that gap is real, not a bug.
+    compEl.title =
+      "Job SLA = % of jobs whose OWN peak runtime stayed within their SLA ceiling.\n"
+      + "Window SLA (tile to the right) = % of days the FULL batch window "
+      + "(first job start → last job end) stayed within the same ceiling.\n"
+      + "These can diverge: fast individual jobs can still overlap into a "
+      + "window that overruns.";
   }
 
   // Show both compliance types in subtitle
@@ -19365,8 +19377,11 @@ function _renderSlaIntelligenceDetail(intel) {
     html += '<th class="text-left px-2 py-1">Health</th>';
     html += '<th class="text-left px-2 py-1">Reason</th>';
     html += '</tr></thead><tbody>';
+    // ACK gets its own colour (cyan), distinct from a genuine OK pass (green) —
+    // an acknowledged breach/near-miss is a known exception, not a clean result,
+    // and must not visually blend in as "everything is fine" at a glance.
     const _healthColor = (s) => s === "OK" ? THEME.green
-      : s === "ACK"     ? THEME.green
+      : s === "ACK"     ? THEME.cyan
       : s === "AT_RISK" ? THEME.amber
       : s === "BREACH"  ? THEME.red
       : s === "CYCLIC"  ? THEME.blue

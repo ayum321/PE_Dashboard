@@ -1243,6 +1243,15 @@ def _derive_health(window_hrs: Optional[float],
                    is_cyclic: bool
                    ) -> Tuple[str, str]:
     """Decide the traffic-light status. Returns (status, reason)."""
+    # Single source of truth for the AT_RISK cutoff — must match the threshold
+    # batch_calculator.py uses for every other job/window status label
+    # (pe_config.SLA_ATRISK_PCT, 15%). This used to be a hardcoded local 10%
+    # here, which meant the same buffer_pct could render AT_RISK in one panel
+    # (batch_calculator-driven Top 10 / gauge) but OK in another (this SLA
+    # Matrix contract table) for jobs whose buffer fell between 10-15%.
+    from services import pe_config
+    _at_risk_pct = float(getattr(pe_config, "SLA_ATRISK_PCT", 15.0))
+
     if is_cyclic:
         return "CYCLIC", "Cyclic / intraday — SLA window not applicable"
     if actual_window_hrs is None or window_hrs is None:
@@ -1253,7 +1262,7 @@ def _derive_health(window_hrs: Optional[float],
         overrun = actual_window_hrs - window_hrs
         return "BREACH", f"Overran SLA by {overrun:.1f}h"
     # within window
-    if buffer_pct is not None and buffer_pct < 10.0:
+    if buffer_pct is not None and buffer_pct <= _at_risk_pct:
         return "AT_RISK", f"Only {buffer_pct:.0f}% buffer remaining"
     if business_ack:
         return "ACK", "Within SLA — business note acknowledged"
