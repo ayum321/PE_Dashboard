@@ -19380,8 +19380,13 @@ function _renderSlaIntelligenceDetail(intel) {
     // ACK gets its own colour (cyan), distinct from a genuine OK pass (green) —
     // an acknowledged breach/near-miss is a known exception, not a clean result,
     // and must not visually blend in as "everything is fine" at a glance.
+    // REVIEW is a breach where a free-text comment exists but didn't match a
+    // known ACK phrase (e.g. "OK per business") — distinct from both BREACH
+    // (no explanation at all) and ACK (recognised waiver), so a reviewer
+    // knows to actually read the comment instead of assuming either extreme.
     const _healthColor = (s) => s === "OK" ? THEME.green
       : s === "ACK"     ? THEME.cyan
+      : s === "REVIEW"  ? THEME.orange || "#f97316"
       : s === "AT_RISK" ? THEME.amber
       : s === "BREACH"  ? THEME.red
       : s === "CYCLIC"  ? THEME.blue
@@ -19400,13 +19405,16 @@ function _renderSlaIntelligenceDetail(intel) {
       const bufTxt   = _fmtBuf(c);
       const bufColor = (c.buffer_hrs !== null && c.buffer_hrs !== undefined && c.buffer_hrs < 0)
                        ? THEME.red : THEME.muted;
+      const noteFlag = (c.has_unmatched_comment && c.health_status !== "REVIEW")
+        ? `<span title="Comment present but not recognised as an acknowledgement — check manually" class="ml-1" style="color:${THEME.orange || '#f97316'}">💬</span>`
+        : "";
       html += `<tr class="border-b border-Cborder/30 hover:bg-Cblue/5">
         <td class="px-2 py-1 font-semibold text-Cwhite truncate max-w-[180px]">${escapeHtml(c.batch_name || "")}</td>
         <td class="px-2 py-1 text-Cmuted truncate max-w-[160px]">${escapeHtml((c.schedule_raw || c.schedule_type || "").substring(0, 32))}</td>
         <td class="px-2 py-1 text-right font-mono">${winTxt}</td>
         <td class="px-2 py-1 text-right font-mono">${_fmtHrs(c.actual_window_hrs)}</td>
         <td class="px-2 py-1 text-right font-mono" style="color:${bufColor}">${bufTxt}</td>
-        <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="color:${hColor};background:${hexA(hColor, 0.12)};border:1px solid ${hexA(hColor, 0.4)}">${escapeHtml(c.health_status || "—")}</span></td>
+        <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="color:${hColor};background:${hexA(hColor, 0.12)};border:1px solid ${hexA(hColor, 0.4)}">${escapeHtml(c.health_status || "—")}</span>${noteFlag}</td>
         <td class="px-2 py-1 text-Cmuted truncate max-w-[260px]" title="${escapeHtml(c.health_reason || "")}">${escapeHtml(c.health_reason || "")}</td>
       </tr>`;
     }

@@ -1212,6 +1212,20 @@ def _detect_business_ack(comments: str) -> bool:
     return bool(_ACK_PATTERNS.search(comments or ""))
 
 
+def _has_unmatched_comment(comments: str, business_ack: bool) -> bool:
+    """True when a business/analyst left free-text comment context on this
+    row that the ACK regex did NOT recognise (e.g. "OK per business",
+    "cleared with ops" — real phrasing an ACK match will miss). Used to
+    render a distinct "flagged for review" state instead of silently
+    treating the row as a plain, unexplained BREACH — the comment exists
+    and was clearly meant to provide context, it just didn't match a known
+    ACK phrase, so a reviewer should see that a note is there to check."""
+    text = (comments or "").strip()
+    if not text or text.lower() in ("nan", "none"):
+        return False
+    return not business_ack
+
+
 def _detect_cyclic(*texts: str) -> bool:
     blob = " ".join(t for t in texts if t)
     return bool(_CYCLIC_PATTERNS.search(blob))
@@ -1240,7 +1254,8 @@ def _derive_health(window_hrs: Optional[float],
                    actual_window_hrs: Optional[float],
                    buffer_pct: Optional[float],
                    business_ack: bool,
-                   is_cyclic: bool
+                   is_cyclic: bool,
+                   has_unmatched_comment: bool = False,
                    ) -> Tuple[str, str]:
     """Decide the traffic-light status. Returns (status, reason)."""
     # Single source of truth for the AT_RISK cutoff — must match the threshold
@@ -1260,6 +1275,17 @@ def _derive_health(window_hrs: Optional[float],
         if business_ack:
             return "ACK", "Overrun acknowledged in comments"
         overrun = actual_window_hrs - window_hrs
+        # A free-text comment exists on this row but didn't match a known ACK
+        # phrase — someone tried to leave context ("OK per business", "cleared
+        # with ops", etc.) and the regex missed it. Rendering this identically
+        # to an unexplained BREACH would silently drop that context. REVIEW
+        # keeps the numeric breach visible but flags it distinctly so a PE
+        # reviewer checks the comment instead of assuming no explanation exists.
+        if has_unmatched_comment:
+            return "REVIEW", (
+                f"Overran SLA by {overrun:.1f}h — comment present but not "
+                "recognised as an acknowledgement; verify manually"
+            )
         return "BREACH", f"Overran SLA by {overrun:.1f}h"
     # within window
     if buffer_pct is not None and buffer_pct <= _at_risk_pct:
@@ -1321,8 +1347,9 @@ class SlaContract:
     buffer_pct: Optional[float] = None        # buffer_hrs / window * 100
     business_acknowledged: bool = False       # comments waive breach (no breach / agreed)
     is_cyclic: bool = False                   # cyclic / intraday / every Nmin
-    health_status: str = "NO_DATA"            # OK | AT_RISK | BREACH | ACK | CYCLIC | NO_DATA
+    health_status: str = "NO_DATA"            # OK | AT_RISK | BREACH | ACK | REVIEW | CYCLIC | NO_DATA
     health_reason: str = ""                   # human-readable explanation
+    has_unmatched_comment: bool = False        # comment present but didn't match ACK regex
     # Two-tier SLA classification:
     #   JOB_SPECIFIC  — row has a real job/workflow name (not just a schedule-type word)
     #                   → this is an operational target, buffer is the decision factor
@@ -1361,6 +1388,7 @@ class SlaContract:
             "is_cyclic": self.is_cyclic,
             "health_status": self.health_status,
             "health_reason": self.health_reason,
+            "has_unmatched_comment": self.has_unmatched_comment,
             "sla_source_type": self.sla_source_type,
         }
 
@@ -1721,8 +1749,10 @@ def _ingest_sla_sheet(df_raw, sheet_name: str, result: "SlaIngestResult") -> int
         buffer_hrs, buffer_pct = _compute_buffer(window_hrs, actual_window_hrs, buffer_min)
         is_cyclic_flag        = _detect_cyclic(comments, schedule_raw, batch_name)
         business_ack_flag     = _detect_business_ack(comments)
+        unmatched_comment_flag = _has_unmatched_comment(comments, business_ack_flag)
         health_status, health_reason = _derive_health(
             window_hrs, actual_window_hrs, buffer_pct, business_ack_flag, is_cyclic_flag,
+            unmatched_comment_flag,
         )
         contract.actual_end           = actual_end_t
         contract.actual_window_hrs    = actual_window_hrs
@@ -1732,6 +1762,7 @@ def _ingest_sla_sheet(df_raw, sheet_name: str, result: "SlaIngestResult") -> int
         contract.is_cyclic            = is_cyclic_flag
         contract.health_status        = health_status
         contract.health_reason        = health_reason
+        contract.has_unmatched_comment = unmatched_comment_flag
 
         # ── Two-tier SLA classification per contract ────────────────────────────
         # SOW_SCHEDULE: batch_name is ONLY a schedule-type word (even with env prefix)

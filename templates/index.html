@@ -1846,6 +1846,17 @@
               </div>
             </div>
 
+            <!-- Always-visible caption for the Job SLA / Window SLA pair — this exact
+                 confusion (two different % figures next to each other) was the single
+                 most-repeated point of confusion across every review of this dashboard,
+                 so it gets a permanent on-page line, not just a hover tooltip. -->
+            <div class="text-[10.5px] text-Cmuted/90 -mt-1 px-1 flex items-start gap-1.5">
+              <span class="text-Cblue">ℹ</span>
+              <span><span class="text-Cwhite font-semibold">Job SLA</span> = % of jobs whose own peak runtime beat its SLA ceiling.
+              <span class="text-Cwhite font-semibold">Window SLA</span> = % of days the full batch window (first start → last end) beat the same ceiling.
+              Both use the same SLA value — they can legitimately diverge when fast individual jobs still overlap into a window that overruns.</span>
+            </div>
+
             <!-- ── KPI Drill-through panels (toggled by clicking KPI cards) ── -->
             <div id="window-sla-drill" class="hidden rounded-2xl border border-Camber/30 bg-gradient-to-br from-Camber/5 via-Ccard to-Ccard2 p-4">
               <div class="flex items-center justify-between mb-3">
