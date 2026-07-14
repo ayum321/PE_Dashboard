@@ -216,7 +216,17 @@ def _payload_to_response(
                 session_cache.ac_set("window_out_of_scope_subs", payload.get("out_of_scope_subs") or [])
             except Exception:
                 pass
-            sla_mx_dict = _compute_sla_matrix(df, sla_mode, custom).model_dump()
+            # The SLA Matrix must analyze the exact same manually-scoped job set
+            # as Batch Review. build_batch_payload exposes this list after applying
+            # config_store["exclude_jobs"]; using raw cached rows here previously
+            # reintroduced excluded jobs only on the Matrix page after refresh.
+            matrix_df = df
+            excluded_job_names = set(payload.get("user_excluded_job_names") or [])
+            if excluded_job_names and "Job_Name" in matrix_df.columns:
+                matrix_df = matrix_df[
+                    ~matrix_df["Job_Name"].astype(str).isin(excluded_job_names)
+                ].copy()
+            sla_mx_dict = _compute_sla_matrix(matrix_df, sla_mode, custom).model_dump()
 
             # Store a slim copy of the full run dataframe so /api/sla-matrix/json
             # can always re-compute with the latest XLSX/SOW config (not just the

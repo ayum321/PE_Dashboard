@@ -487,6 +487,28 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
 
         # Per-job SLA resolution — returns (hours, source_label)
         sla_hrs, sla_source = _resolve_job_sla(job, sub_app)
+        # Match confidence is provenance, not a second SLA calculation. Surface
+        # it alongside the ceiling so reviewers can distinguish an exact contract
+        # resolution from a safe fallback or a medium-confidence name match.
+        sla_match_confidence = ""
+        sla_match_detail = ""
+        if sla_source == "sla_matrix":
+            try:
+                from services.sla_engine import resolve_sla
+                resolved_match = resolve_sla(job, sub_app, contracts, ceilings)
+                sla_match_confidence = resolved_match.confidence or ""
+                sla_match_detail = resolved_match.source_detail or ""
+            except Exception:
+                sla_match_confidence = "unknown"
+        elif sla_source in ("batch_sla_xlsx", "batch_sla_xlsx_anchor"):
+            sla_match_confidence = "high"
+            sla_match_detail = "Exact BatchSLA workflow or anchor-job match"
+        elif sla_source == "batch_sla_xlsx_tokens":
+            sla_match_confidence = "medium"
+            sla_match_detail = "BatchSLA token-overlap match; verify workflow mapping"
+        elif sla_source in ("sow_extracted", "global", "assumed"):
+            sla_match_confidence = "low"
+            sla_match_detail = "Schedule-level fallback; no job-specific contract match"
 
         # Skip excluded batch types (CYCLIC, OUTBOUND, …)
         if sla_source == "excluded":
@@ -560,6 +582,8 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
             "reason_code":       reason_code,        # None | SLA_MISSING | FAILED | RUNTIME_ZERO
             "status":            st_label,
             "sla_source":        sla_source,         # sla_matrix | batch_sla_xlsx | sow_extracted | assumed | global
+            "sla_match_confidence": sla_match_confidence,
+            "sla_match_detail":   sla_match_detail,
         })
 
     rdf = pd.DataFrame(results) if results else pd.DataFrame()
@@ -605,6 +629,8 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
             avg_hrs         = ("run_hrs", "mean"),
             sla_limit       = ("sla_limit_hrs", "min"),   # min = tightest SLA (most conservative)
             sla_source      = ("sla_source", "first"),
+            sla_match_confidence = ("sla_match_confidence", "first"),
+            sla_match_detail = ("sla_match_detail", "first"),
             sub_application = ("sub_application", "first"),  # pass-through for JS rollup
             breach_runs     = ("status", lambda x: (x == "BREACH").sum()),
             atrisk_runs     = ("status", lambda x: (x == "AT_RISK").sum()),

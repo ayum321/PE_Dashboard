@@ -1083,11 +1083,16 @@ def build_top_jobs_df(df: pd.DataFrame,
         top_jobs["is_high_variance"] = False
         top_jobs["baseline_quality"] = "CONTRACTED"
 
-    # Gap 3 — pre-agreed buffer from SLA contract (contractual, from SLA file)
-    def _get_pre_agreed(r):
-        entry = (job_sla_map.get(
+    # Centralize lookup so every per-job SLA provenance field comes from the
+    # same resolved contract entry, including its match confidence.
+    def _job_sla_entry(r):
+        return (job_sla_map.get(
             f"{r.get('Sub_Application','') if 'Sub_Application' in r.index else ''}|{r.get('Job_Name','')}",
             job_sla_map.get(str(r.get("Job_Name", "")), {})) or {})
+
+    # Gap 3 — pre-agreed buffer from SLA contract (contractual, from SLA file)
+    def _get_pre_agreed(r):
+        entry = _job_sla_entry(r)
         # Prefer explicit pre_agreed_buffer_hrs, fall back to buffer_minutes/60
         pab = entry.get("pre_agreed_buffer_hrs")
         if pab is not None:
@@ -1101,12 +1106,15 @@ def build_top_jobs_df(df: pd.DataFrame,
 
     # Two-tier SLA contract type per job (JOB_SPECIFIC | SOW_SCHEDULE | INFERRED)
     def _get_contract_type(r):
-        entry = (job_sla_map.get(
-            f"{r.get('Sub_Application','') if 'Sub_Application' in r.index else ''}|{r.get('Job_Name','')}",
-            job_sla_map.get(str(r.get("Job_Name", "")), {})) or {})
-        return entry.get("sla_contract_type", "INFERRED")
+        return _job_sla_entry(r).get("sla_contract_type", "INFERRED")
 
     top_jobs["sla_contract_type"] = top_jobs.apply(_get_contract_type, axis=1)
+    top_jobs["sla_match_confidence"] = top_jobs.apply(
+        lambda r: _job_sla_entry(r).get("confidence", "low"), axis=1
+    )
+    top_jobs["sla_match_detail"] = top_jobs.apply(
+        lambda r: _job_sla_entry(r).get("detail", ""), axis=1
+    )
 
     # F3 — observed SLA Buffer from Ctrl-M data (sla_hrs - peak_hrs)
     # Guard against sla_hrs=0 (SLA_MISSING rows) — produces inf/NaN without the guard.
@@ -3510,6 +3518,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # confidence tier and correctly label the "BASELINE" column in adaptive mode
     _job_cols = [c for c in ["Sub_Application", "Job_Name", "peak_hrs", "avg_hrs",
                               "total_hrs", "sla_hrs", "sla_source", "sla_path",
+                              "sla_match_confidence", "sla_match_detail",
                               "buffer_pct", "sla_used_pct", "buffer_status",
                               "baseline_quality", "is_high_variance",
                               "fail_count", "is_utility", "utility_reason"]

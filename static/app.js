@@ -1799,6 +1799,16 @@ function _filterBatchUtility(data) {
  *  only explicit manual excludes change the SLA/compliance-scored dataset. */
 let _batchSyncDebounceTimer = null;
 let _batchSyncRetryCount = 0;
+
+function _applyRefreshedBatchPayload(payload) {
+  window.appData.batch = payload;
+  if (payload.sla_matrix) {
+    window.appData.slaMatrix = payload.sla_matrix;
+    _renderSlaMatrix(payload.sla_matrix);
+  }
+  renderBatchReview(payload);
+}
+
 async function _syncBatchExclusionsToServer() {
   clearTimeout(_batchSyncDebounceTimer);
   _batchSyncDebounceTimer = setTimeout(async () => {
@@ -1827,8 +1837,7 @@ async function _syncBatchExclusionsToServer() {
       const payload = await refRes.json();
       if (payload.error) throw new Error(payload.message || "refresh error");
 
-      window.appData.batch = payload;
-      renderBatchReview(payload);
+      _applyRefreshedBatchPayload(payload);
       window._execCache     = null;
       window._execCacheHash = null;
       _batchSyncRetryCount = 0;
@@ -1951,8 +1960,7 @@ async function _refreshBatchReview() {
     const payload = await res.json();
     if (payload.error) throw new Error(payload.message || "refresh error");
 
-    window.appData.batch = payload;
-    renderBatchReview(payload);
+    _applyRefreshedBatchPayload(payload);
     document.getElementById("sla-stale-banner")?.remove();
     toast("success", "Batch Review updated",
       "Window SLA compliance and gauge now reflect BatchSLA XLSX contracts.");
@@ -17465,7 +17473,17 @@ function _renderSlaMatrix(data) {
                        : "text-Cmuted";
         const _srcMap  = { sla_matrix: "SLA File", batch_sla_xlsx: "XLSX T1", sow_extracted: "SOW T2",
                            assumed: "Assumed", global: "Global" };
-        const srcCell  = `<td class="py-2 text-right ${srcColor} font-semibold text-[10px]" title="${_esc(src)}">${_srcMap[src] || src}</td>`;
+        const matchConfidence = String(j.sla_match_confidence || "").toLowerCase();
+        const confidenceLabel = matchConfidence === "high" ? "Exact / high match"
+          : matchConfidence === "medium" ? "Medium match — review mapping"
+          : matchConfidence === "low" ? "Fallback / low match" : "";
+        const confidenceColor = matchConfidence === "high" ? "text-Cgreen"
+          : matchConfidence === "medium" ? "text-Camber" : "text-Cmuted";
+        const sourceTitle = [src, confidenceLabel, j.sla_match_detail].filter(Boolean).join(" · ");
+        const srcCell  = `<td class="py-2 text-right ${srcColor} font-semibold text-[10px]" title="${_esc(sourceTitle)}">`
+          + `${_srcMap[src] || src}`
+          + (confidenceLabel ? `<span class="ml-1 ${confidenceColor}">(${confidenceLabel})</span>` : "")
+          + `</td>`;
         return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
           <td class="py-2 pr-4 font-mono text-Cwhite text-[11px]">${_esc(j.job_name)}</td>
           <td class="py-2 pr-4 text-right text-Cmuted" title="${j.runs} runs in dataset">${j.runs}</td>
