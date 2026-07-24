@@ -229,6 +229,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
     #   _bsla_tokens:  [(frozenset_of_tokens, sla_hours, workflow_name)]
     _bsla_exact:  dict[str, tuple[float, str]] = {}
     _bsla_by_job: dict[str, tuple[float, str]] = {}   # first_job / last_job anchors
+    _bsla_anchor_wf: dict[str, str] = {}   # first/last job anchor -> owning workflow's norm key
     _bsla_tokens: list[tuple[frozenset, float, str]] = []
     # Track which secondary keys are produced by multiple workflows (collision detection).
     # When two XLSX workflows share a secondary stripped key (e.g. "DAILY_BATCH" from
@@ -284,10 +285,18 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 _bsla_tokens.append((tokens, sla_f, wf_raw))
         # Index by first_job + last_job so we can match even when Sub_Application
         # is missing from the Ctrl-M export (defaults to "UNKNOWN").
+        _primary_wf_norm = _wf_forms[0] if _wf_forms else _norm(wf_raw)
         for fld in ("first_job", "last_job"):
             anchor = _norm(row.get(fld) or "")
             if anchor and anchor not in ("UNKNOWN", ""):
                 _bsla_by_job[anchor] = (sla_f, "batch_sla_xlsx")
+                # Remember which XLSX workflow this anchor belongs to, so a group
+                # decomposed by anchor job name can be re-keyed to the workflow's
+                # OWN name (e.g. "scpo_d1(spd)") instead of the raw job name —
+                # collapsing first_job + last_job of the same workflow into ONE
+                # synthetic row instead of two duplicate rows.
+                if _primary_wf_norm:
+                    _bsla_anchor_wf[anchor] = _primary_wf_norm
 
     # ── Also index first_job / last_job from _sla_intelligence contracts ──────
     # Dawn Foods-style SLA matrices (window model, no WESCO-style workflow rows)
@@ -689,400 +698,448 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         # run_date: group jobs that belong to the same workflow execution
         tdf["_run_date"] = tdf["_start"].dt.strftime("%Y-%m-%d").fillna("unknown")
 
+        def _decompose_subgroup(_sa: str, _sa_unknown: bool, _g):
+            """Return list of (workflow_key, dataframe) pairs to process for one
+            Ctrl-M Sub_Application group.
+
+            Normally a Ctrl-M Sub_Application maps 1:1 to one XLSX workflow row,
+            so this returns [(sub_app, grp)] unchanged. Two real-world situations
+            need anchor-based decomposition instead:
+
+              1. Sub_Application is missing entirely ("UNKNOWN") -- every row in
+                 the Ctrl-M export lacks that column.
+              2. Sub_Application IS present, but is a broad umbrella label that
+                 does not literally match any XLSX Batch_Name (e.g. Ctrl-M logs
+                 everything under one app name like "SCPO_PROD" while the XLSX
+                 contract defines several distinct batch windows -- SCPO_D1,
+                 SCPO_D2(Clear CRTD), SCPO_W1(1st Sun), etc. -- each identified
+                 only by its own first_job/last_job chain).
+
+            Without this, case 2 silently falls through to the Tier-3 global
+            default for every job in the group, even though each one has a real
+            XLSX-contracted SLA -- the Active SLA Commitments panel then shows
+            "DEFAULT" / flat system-default hours instead of "CONTRACT" / the
+            real per-workflow value, for every affected row.
+
+            We scan every distinct Job_Name present in the group against the
+            first_job/last_job anchor index (_bsla_by_job) and bucket by each
+            DISTINCT matched XLSX workflow, so ONE Ctrl-M group can expand into
+            several synthetic workflows, each keeping the full group so its own
+            anchor-narrowing (first_job start -> last_job end) still applies.
+            """
+            if not _sa_unknown:
+                if _bulk_lookup_bsla(_sa, _sa):
+                    return [(_sa, _g)]
+            if "Job_Name" not in _g.columns:
+                return [] if _sa_unknown else [(_sa, _g)]
+            _seen: dict[str, None] = {}
+            for _jn in _g["Job_Name"].dropna().str.upper().unique():
+                _jn_norm = _norm(_jn)
+                if _jn_norm not in _bsla_by_job:
+                    continue
+                # Re-key to the OWNING workflow's own normalized name (e.g.
+                # "scpo_d1(spd)") rather than the raw job name, so first_job
+                # and last_job of the SAME workflow collapse into one entry
+                # instead of two duplicate synthetic rows.
+                _wf_key = _bsla_anchor_wf.get(_jn_norm, _jn_norm)
+                _seen.setdefault(_wf_key, None)
+            if not _seen:
+                return [] if _sa_unknown else [(_sa, _g)]
+            return [(_wf_key, _g) for _wf_key in _seen]
+
         for sub_app_raw, grp in tdf.groupby("_sub"):
             sub_app = str(sub_app_raw or "").strip()
             sub_app_is_unknown = not sub_app or sub_app.upper() in ("UNKNOWN", "NAN", "NONE", "—", "")
 
-            # Fix #12: instead of skipping UNKNOWN sub_app entirely, try anchor-job
-            # fallback. When the Ctrl-M export has no Sub_Application column, all rows
-            # have sub_app="UNKNOWN". The _bsla_by_job dict (indexed by first_job/last_job)
-            # was designed exactly for this case.
-            if sub_app_is_unknown:
-                # Try to synthesize a workflow name from anchor-job matching.
-                # Look for any job in this group that matches a known first_job anchor.
-                _synth_wf: str | None = None
-                _synth_sla: tuple | None = None
-                if "Job_Name" in grp.columns:
-                    for _jn in grp["Job_Name"].dropna().str.upper().unique():
-                        _jn_norm = _norm(_jn)
-                        if _jn_norm in _bsla_by_job:
-                            _synth_sla = _bsla_by_job[_jn_norm]
-                            _synth_wf = _jn_norm
-                            break
-                if _synth_wf is None:
-                    continue  # no anchor found → truly unknown, skip
-                # Proceed with synthetic workflow name from the anchor job
-                sub_app = _synth_wf
-                # Don't override sub_app_is_unknown — continue processing below
+            # Determine which (workflow_key, dataframe) pairs to process from this
+            # one Ctrl-M Sub_Application group. See _decompose_subgroup docstring --
+            # usually exactly one pair, but anchor-based decomposition can split ONE
+            # Ctrl-M group into MULTIPLE synthetic XLSX-matched workflows.
+            _subgroups = _decompose_subgroup(sub_app, sub_app_is_unknown, grp)
+            if not _subgroups:
+                continue  # no anchor found anywhere -> truly unknown, skip
 
-            norm_sub = _norm(sub_app)
+            for sub_app, grp in _subgroups:
+                # sub_app here is already the resolved workflow key from
+                # _decompose_subgroup — either the original Sub_Application
+                # (when it matched directly) or a synthesized anchor-based
+                # workflow key. Do NOT re-derive it from sub_app_raw.
+                norm_sub = _norm(sub_app)
 
-            # ── Pre-resolve BSLA hit BEFORE per-run loop (reference script approach) ──
-            # We need first_job / last_job anchors to narrow the Ctrl-M rows that
-            # define each workflow's actual start and end time, exactly as the
-            # reference audit script does (first_job min(Start_Time) →
-            # last_job max(End_Time) per run date).
-            _bsla_pre = _bulk_lookup_bsla(sub_app, sub_app)
-            _anchor_row: dict = {}
-            if _bsla_pre:
-                _pre_wf_raw = _bsla_pre[2]
-                _anchor_row = (
-                    _bsla_full.get(_norm(_pre_wf_raw))
-                    or _bsla_full.get(norm_sub)
-                    or {}
-                )
-            _first_anchor = (_anchor_row.get("first_job") or "").strip().upper()
-            _last_anchor  = (_anchor_row.get("last_job")  or "").strip().upper()
-
-            # ── Per-run elapsed window (wall-clock, anchor-aware) ─────────
-            # Group by run_date so each daily/weekly execution is measured
-            # independently. Within each run, narrow to first_job start →
-            # last_job end when XLSX anchor names are available (reference
-            # script first_job/last_job matching logic). Fall back to
-            # min(all starts) → max(all ends) when no anchors exist.
-            per_run_elapsed: list[float] = []
-            per_run_windows: list[tuple] = []  # (start_ts, end_ts)
-            per_run_dates:   list[str]   = []  # run date strings
-            per_run_end_clk: list[int | None] = []  # end minute-of-day for clock-SLA check
-
-            for _rd, rg in grp.groupby("_run_date"):
-                if _rd == "unknown":
-                    continue
-
-                # ── Single-job workflow guard (fix #1 — runtime-attribution bug) ──
-                # When first_job == last_job (e.g. a lone "clear" job like
-                # SCPO_D2(Clear CRTD)), the workflow IS that one job — its elapsed
-                # time must come from that job's OWN Start_Time→End_Time, never a
-                # min(start)→max(end) span across the whole date group. If the same
-                # job name runs more than once on the same calendar day (retry, or
-                # an unrelated later invocation), spanning min→max would silently
-                # attribute a multi-hour gap between unrelated runs as "runtime" —
-                # producing implausible results like a 10-minute SLA showing 6+
-                # hours of "elapsed" time. Measure each matching execution's own
-                # duration instead and take the worst (longest) single execution.
-                _single_job_wf = bool(_first_anchor) and _first_anchor == _last_anchor
-                if _single_job_wf and "Job_Name" in rg.columns:
-                    _jnames = rg["Job_Name"].str.upper()
-                    _sm = _anchor_job_mask(_jnames, _first_anchor)
-                    _single_rows = rg.loc[_sm & rg["_start"].notna() & rg["_end"].notna()]
-                    if not _single_rows.empty:
-                        _durs = (_single_rows["_end"] - _single_rows["_start"]).dt.total_seconds() / 3600
-                        _durs = _durs[_durs >= 0]
-                    else:
-                        _durs = pd.Series(dtype=float)
-                    if not _durs.empty:
-                        _worst_idx = _durs.idxmax()
-                        _rs = _single_rows.loc[_worst_idx, "_start"]
-                        _re = _single_rows.loc[_worst_idx, "_end"]
-                        elapsed = float(_durs.loc[_worst_idx])
-                    else:
-                        rg_starts = pd.Series(dtype="datetime64[ns]")
-                        rg_ends   = pd.Series(dtype="datetime64[ns]")
-                        elapsed   = None
-                else:
-                    rg_starts = rg["_start"].dropna()
-                    rg_ends   = rg["_end"].dropna()
-
-                    # Anchor narrowing — exact → underscore-insensitive exact → substring.
-                    # _anchor_job_mask keeps the precise EXACT-first ordering (str.contains
-                    # was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc., inflating the
-                    # window) while also catching XLSX-vs-Ctrl-M underscore mismatches.
-                    if _first_anchor and "Job_Name" in rg.columns:
-                        _jnames = rg["Job_Name"].str.upper()
-                        _fm = _anchor_job_mask(_jnames, _first_anchor)
-                        if _fm.any():
-                            rg_starts = rg.loc[_fm, "_start"].dropna()
-
-                    if _last_anchor and "Job_Name" in rg.columns:
-                        _jnames = rg["Job_Name"].str.upper()
-                        _lm = _anchor_job_mask(_jnames, _last_anchor)
-                        if _lm.any():
-                            rg_ends = rg.loc[_lm, "_end"].dropna()
-
-                    elapsed = None
-                    if not rg_starts.empty and not rg_ends.empty:
-                        _rs = rg_starts.min()
-                        _re = rg_ends.max()
-                        elapsed = (_re - _rs).total_seconds() / 3600
-
-                if elapsed is not None:
-
-                    # ── Run-cluster guard (#21): if elapsed > 4× expected SLA,
-                    # the date group likely contains two independent executions
-                    # (e.g. month-end run + manual retry run). Cluster by job-chain
-                    # continuity (gap > 2h between consecutive jobs = new cluster).
-                    # Take the worst (longest) cluster, not the full span.
-                    # Skipped for single-job workflows — the guard above already
-                    # measures each execution's own duration directly.
-                    if not _single_job_wf and elapsed > 12 and not rg_starts.empty and not rg_ends.empty:
-                        try:
-                            _cluster_starts = rg["_start"].dropna().sort_values()
-                            _cluster_ends   = rg["_end"].dropna()
-                            _sorted_jobs    = rg.dropna(subset=["_start"]).sort_values("_start")
-                            # Build clusters: new cluster when gap from last end to next start > 2h
-                            _clusters: list[tuple] = []
-                            _c_start = _sorted_jobs.iloc[0]["_start"]
-                            _c_end   = _sorted_jobs.iloc[0]["_end"] if pd.notna(_sorted_jobs.iloc[0]["_end"]) else _sorted_jobs.iloc[0]["_start"]
-                            for _idx in range(1, len(_sorted_jobs)):
-                                _row = _sorted_jobs.iloc[_idx]
-                                _gap_h = (_row["_start"] - _c_end).total_seconds() / 3600 if pd.notna(_row["_start"]) and pd.notna(_c_end) else 0
-                                if _gap_h > 2.0:  # new cluster
-                                    _clusters.append((_c_start, _c_end))
-                                    _c_start = _row["_start"]
-                                _c_end = max(
-                                    _c_end if pd.notna(_c_end) else _row["_start"],
-                                    _row["_end"] if pd.notna(_row["_end"]) else _c_end or _row["_start"],
-                                )
-                            _clusters.append((_c_start, _c_end))
-                            # Worst cluster = longest duration
-                            _best_elapsed = max(
-                                ((_ce - _cs).total_seconds() / 3600 for _cs, _ce in _clusters if pd.notna(_cs) and pd.notna(_ce)),
-                                default=elapsed,
-                            )
-                            if 0 <= _best_elapsed <= elapsed:
-                                elapsed = _best_elapsed
-                                # Recalculate _rs / _re from the worst cluster
-                                _worst_c = max(_clusters, key=lambda c: (c[1] - c[0]).total_seconds() if pd.notna(c[0]) and pd.notna(c[1]) else 0)
-                                _rs, _re = _worst_c
-                        except Exception:
-                            pass  # keep original elapsed on any cluster-detection error
-
-                    # Batch-type-aware sanity cap (fix #7):
-                    # DAILY ≤ 48h, WEEKLY ≤ 200h, MONTHLY/BIWEEKLY ≤ 400h.
-                    # Old fixed 48h cap silently dropped valid 50h+ monthly batches,
-                    # reporting RUNTIME_MISSING instead of an actionable AT_RISK finding.
-                    # Detect inline — batch_type_wf is assigned later in this loop, so
-                    # referencing it here would be unbound (first sub_app) or stale.
-                    try:
-                        from services.sla_merger import detect_batch_type as _dbt_cap
-                        _bt_cap = _dbt_cap(sub_app, "") or "DAILY"
-                    except Exception:
-                        _bt_cap = "DAILY"
-                    _MAX_ELAPSED: dict[str, float] = {
-                        "DAILY": 48.0, "WEEKLY": 200.0,
-                        "BIWEEKLY": 400.0, "MONTHLY": 400.0,
-                    }
-                    _cap = _MAX_ELAPSED.get(_bt_cap, 48.0)
-                    if 0 <= elapsed <= _cap:
-                        per_run_elapsed.append(elapsed)
-                        per_run_windows.append((_rs, _re))
-                        per_run_dates.append(str(_rd))
-                        per_run_end_clk.append(
-                            _re.hour * 60 + _re.minute if pd.notna(_re) else None
-                        )
-                    elif elapsed > _cap:
-                        # Include but tag as anomalous — do not silently discard
-                        per_run_elapsed.append(elapsed)
-                        per_run_windows.append((_rs, _re))
-                        per_run_dates.append(str(_rd))
-                        per_run_end_clk.append(
-                            _re.hour * 60 + _re.minute if pd.notna(_re) else None
-                        )
-
-            if per_run_elapsed:
-                # Worst-case (max elapsed) run as representative runtime
-                max_idx   = per_run_elapsed.index(max(per_run_elapsed))
-                runtime_h = round(per_run_elapsed[max_idx], 4)
-                wf_start  = per_run_windows[max_idx][0]
-                wf_end    = per_run_windows[max_idx][1]
-                wf_start_s = wf_start.strftime("%Y-%m-%d %H:%M") if pd.notna(wf_start) else None
-                wf_end_s   = wf_end.strftime("%Y-%m-%d %H:%M")   if pd.notna(wf_end)   else None
-                anchor_tag = "anchored" if (_first_anchor or _last_anchor) else "all_jobs"
-                runtime_src = f"per_run_max_elapsed/{anchor_tag} ({len(per_run_elapsed)} runs)"
-            elif "run_time_hrs" in grp.columns:
-                runtime_h    = round(float(grp["run_time_hrs"].fillna(0).max()), 4)
-                wf_start_s   = wf_end_s = None
-                runtime_src  = "max_run_hrs"
-            else:
-                runtime_h    = 0.0
-                wf_start_s   = wf_end_s = None
-                runtime_src  = "none"
-
-            # ── SLA resolution — single unified resolver, all tiers ──────
-            sla_h_wf:          float | None = None
-            raw_batch_name_wf: str   | None = None
-            join_hit  = False
-            sla_src_wf = "none"
-
-            # Tier 1 — use the pre-computed hit (already resolved above for anchors).
-            # Reuse avoids a second pass through _bulk_lookup_bsla.
-            if _bsla_pre:
-                sla_h_wf, sla_src_wf, raw_batch_name_wf = _bsla_pre
-                join_hit = True
-
-            # Tier 2 — SOW-extracted batch-type ceiling
-            if sla_h_wf is None and _sow_windows:
-                try:
-                    from services.sla_merger import detect_batch_type as _dbt
-                    _bt2 = _dbt(sub_app, "")
-                    if _bt2 and _bt2 in _sow_windows:
-                        _e2 = _sow_windows[_bt2]
-                        _c2 = float(_e2.get("limit_hours", 0)) if isinstance(_e2, dict) else float(_e2)
-                        if _c2 > 0:
-                            sla_h_wf   = _c2
-                            sla_src_wf = "sow_extracted"
-                except Exception:
-                    pass
-
-            # Tier 3 — batch-type-aware global default (UI mode must NOT override)
-            if sla_h_wf is None:
-                _WF_DEFAULTS: dict[str, float] = {
-                    "DAILY": 6.0, "WEEKLY": 8.0, "BIWEEKLY": 12.0, "MONTHLY": 10.0,
-                }
-                try:
-                    from services.sla_merger import detect_batch_type as _dbt3
-                    _bt3 = _dbt3(sub_app, "")
-                    sla_h_wf   = _WF_DEFAULTS.get(_bt3, global_sla_hrs)
-                    sla_src_wf = f"global_default_{_bt3}" if _bt3 else "global_fallback"
-                except Exception:
-                    sla_h_wf   = global_sla_hrs
-                    sla_src_wf = "global_fallback"
-
-            # Detect batch type
-            try:
-                from services.sla_merger import detect_batch_type as _dbt_wf
-                batch_type_wf = _dbt_wf(sub_app, "")
-            except Exception:
-                batch_type_wf = "UNKNOWN"
-
-            # ── Buffer formula (workflow level) ───────────────────────
-            if runtime_h <= 0:
-                buf_wf    = None
-                status_wf = "RUNTIME_MISSING"
-                buf_rsn   = "No valid Start_Time/End_Time in Ctrl-M export for this workflow"
-            elif not sla_h_wf or sla_h_wf <= 0:
-                buf_wf    = None
-                status_wf = "SLA_MISSING"
-                buf_rsn   = "No SLA resolved from Tier 1 (XLSX) / Tier 2 (SOW) / Tier 3 (defaults)"
-            else:
-                buf_wf  = round((sla_h_wf - runtime_h) / sla_h_wf * 100, 2)
-                buf_rsn = (f"(SLA {sla_h_wf}h − runtime {runtime_h:.3f}h) / "
-                           f"SLA {sla_h_wf}h × 100")
-                _at  = pe_config.SLA_ATRISK_PCT
-                _lj  = pe_config.SLA_LONGJOB_PCT
-                if buf_wf <= 0:
-                    status_wf = "BREACH"
-                elif buf_wf <= _at:
-                    status_wf = "AT_RISK"
-                elif buf_wf <= _lj:
-                    status_wf = "LONG_JOB"
-                else:
-                    status_wf = "OK"
-
-            # ── Per-run breach dates (matches reference script runs[] list) ──
-            # Identify which run dates individually exceeded the SLA window.
-            breach_run_dates: list[str] = []
-            if sla_h_wf and sla_h_wf > 0:
-                for _i_r, (_elap_r, _rd_r) in enumerate(
-                    zip(per_run_elapsed, per_run_dates)
-                ):
-                    if _elap_r > sla_h_wf:
-                        breach_run_dates.append(_rd_r)
-
-            # ── Failed job count per workflow (reference script any_failed) ──
-            # Counts Ctrl-M jobs in this workflow whose status is NOT a success.
-            failed_job_count = 0
-            try:
-                from services.pe_utils import SUCCESS_STATUSES as _SS
-                if "Status" in grp.columns:
-                    failed_job_count = int(
-                        (~grp["Status"].str.strip().str.upper().isin(_SS)).sum()
+                # ── Pre-resolve BSLA hit BEFORE per-run loop (reference script approach) ──
+                # We need first_job / last_job anchors to narrow the Ctrl-M rows that
+                # define each workflow's actual start and end time, exactly as the
+                # reference audit script does (first_job min(Start_Time) →
+                # last_job max(End_Time) per run date).
+                _bsla_pre = _bulk_lookup_bsla(sub_app, sub_app)
+                _anchor_row: dict = {}
+                if _bsla_pre:
+                    _pre_wf_raw = _bsla_pre[2]
+                    _anchor_row = (
+                        _bsla_full.get(_norm(_pre_wf_raw))
+                        or _bsla_full.get(norm_sub)
+                        or {}
                     )
-            except Exception:
-                pass
+                _first_anchor = (_anchor_row.get("first_job") or "").strip().upper()
+                _last_anchor  = (_anchor_row.get("last_job")  or "").strip().upper()
+                # Real XLSX Schedule-column text (e.g. "1st Sunday", "Last Sunday of
+                # Month", "Sun to Fri") when a Tier-1 hit resolved an anchor row.
+                # detect_batch_type() classifies far more accurately with this real
+                # cadence text than with an empty string — passing "" forces it to
+                # guess purely from the workflow NAME, which is what caused the
+                # tighter/extended banner (and the Type column) to disagree with
+                # the actual per-row Schedule semantics for MONTHLY/nth-weekday rows.
+                _sched_txt = str(_anchor_row.get("schedule") or "")
 
-            # ── Clock-time SLA buffer (reference script midnight_diff logic) ──
-            # When the XLSX stored a fixed SLA deadline (e.g. "07:00"), compute
-            # how many minutes before/after that deadline the batch actually ended.
-            # Positive = within SLA; negative = breach.
-            clock_sla_end_m:   int | None = None
-            clock_buffer_mins: int | None = None
-            clock_sla_status:  str | None = None
-            _sla_end_t = _anchor_row.get("sla_end_time")
-            if _sla_end_t:
+                # ── Per-run elapsed window (wall-clock, anchor-aware) ─────────
+                # Group by run_date so each daily/weekly execution is measured
+                # independently. Within each run, narrow to first_job start →
+                # last_job end when XLSX anchor names are available (reference
+                # script first_job/last_job matching logic). Fall back to
+                # min(all starts) → max(all ends) when no anchors exist.
+                per_run_elapsed: list[float] = []
+                per_run_windows: list[tuple] = []  # (start_ts, end_ts)
+                per_run_dates:   list[str]   = []  # run date strings
+                per_run_end_clk: list[int | None] = []  # end minute-of-day for clock-SLA check
+
+                for _rd, rg in grp.groupby("_run_date"):
+                    if _rd == "unknown":
+                        continue
+
+                    # ── Single-job workflow guard (fix #1 — runtime-attribution bug) ──
+                    # When first_job == last_job (e.g. a lone "clear" job like
+                    # SCPO_D2(Clear CRTD)), the workflow IS that one job — its elapsed
+                    # time must come from that job's OWN Start_Time→End_Time, never a
+                    # min(start)→max(end) span across the whole date group. If the same
+                    # job name runs more than once on the same calendar day (retry, or
+                    # an unrelated later invocation), spanning min→max would silently
+                    # attribute a multi-hour gap between unrelated runs as "runtime" —
+                    # producing implausible results like a 10-minute SLA showing 6+
+                    # hours of "elapsed" time. Measure each matching execution's own
+                    # duration instead and take the worst (longest) single execution.
+                    _single_job_wf = bool(_first_anchor) and _first_anchor == _last_anchor
+                    if _single_job_wf and "Job_Name" in rg.columns:
+                        _jnames = rg["Job_Name"].str.upper()
+                        _sm = _anchor_job_mask(_jnames, _first_anchor)
+                        _single_rows = rg.loc[_sm & rg["_start"].notna() & rg["_end"].notna()]
+                        if not _single_rows.empty:
+                            _durs = (_single_rows["_end"] - _single_rows["_start"]).dt.total_seconds() / 3600
+                            _durs = _durs[_durs >= 0]
+                        else:
+                            _durs = pd.Series(dtype=float)
+                        if not _durs.empty:
+                            _worst_idx = _durs.idxmax()
+                            _rs = _single_rows.loc[_worst_idx, "_start"]
+                            _re = _single_rows.loc[_worst_idx, "_end"]
+                            elapsed = float(_durs.loc[_worst_idx])
+                        else:
+                            rg_starts = pd.Series(dtype="datetime64[ns]")
+                            rg_ends   = pd.Series(dtype="datetime64[ns]")
+                            elapsed   = None
+                    else:
+                        rg_starts = rg["_start"].dropna()
+                        rg_ends   = rg["_end"].dropna()
+
+                        # Anchor narrowing — exact → underscore-insensitive exact → substring.
+                        # _anchor_job_mask keeps the precise EXACT-first ordering (str.contains
+                        # was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc., inflating the
+                        # window) while also catching XLSX-vs-Ctrl-M underscore mismatches.
+                        if _first_anchor and "Job_Name" in rg.columns:
+                            _jnames = rg["Job_Name"].str.upper()
+                            _fm = _anchor_job_mask(_jnames, _first_anchor)
+                            if _fm.any():
+                                rg_starts = rg.loc[_fm, "_start"].dropna()
+
+                        if _last_anchor and "Job_Name" in rg.columns:
+                            _jnames = rg["Job_Name"].str.upper()
+                            _lm = _anchor_job_mask(_jnames, _last_anchor)
+                            if _lm.any():
+                                rg_ends = rg.loc[_lm, "_end"].dropna()
+
+                        elapsed = None
+                        if not rg_starts.empty and not rg_ends.empty:
+                            _rs = rg_starts.min()
+                            _re = rg_ends.max()
+                            elapsed = (_re - _rs).total_seconds() / 3600
+
+                    if elapsed is not None:
+
+                        # ── Run-cluster guard (#21): if elapsed > 4× expected SLA,
+                        # the date group likely contains two independent executions
+                        # (e.g. month-end run + manual retry run). Cluster by job-chain
+                        # continuity (gap > 2h between consecutive jobs = new cluster).
+                        # Take the worst (longest) cluster, not the full span.
+                        # Skipped for single-job workflows — the guard above already
+                        # measures each execution's own duration directly.
+                        if not _single_job_wf and elapsed > 12 and not rg_starts.empty and not rg_ends.empty:
+                            try:
+                                _cluster_starts = rg["_start"].dropna().sort_values()
+                                _cluster_ends   = rg["_end"].dropna()
+                                _sorted_jobs    = rg.dropna(subset=["_start"]).sort_values("_start")
+                                # Build clusters: new cluster when gap from last end to next start > 2h
+                                _clusters: list[tuple] = []
+                                _c_start = _sorted_jobs.iloc[0]["_start"]
+                                _c_end   = _sorted_jobs.iloc[0]["_end"] if pd.notna(_sorted_jobs.iloc[0]["_end"]) else _sorted_jobs.iloc[0]["_start"]
+                                for _idx in range(1, len(_sorted_jobs)):
+                                    _row = _sorted_jobs.iloc[_idx]
+                                    _gap_h = (_row["_start"] - _c_end).total_seconds() / 3600 if pd.notna(_row["_start"]) and pd.notna(_c_end) else 0
+                                    if _gap_h > 2.0:  # new cluster
+                                        _clusters.append((_c_start, _c_end))
+                                        _c_start = _row["_start"]
+                                    _c_end = max(
+                                        _c_end if pd.notna(_c_end) else _row["_start"],
+                                        _row["_end"] if pd.notna(_row["_end"]) else _c_end or _row["_start"],
+                                    )
+                                _clusters.append((_c_start, _c_end))
+                                # Worst cluster = longest duration
+                                _best_elapsed = max(
+                                    ((_ce - _cs).total_seconds() / 3600 for _cs, _ce in _clusters if pd.notna(_cs) and pd.notna(_ce)),
+                                    default=elapsed,
+                                )
+                                if 0 <= _best_elapsed <= elapsed:
+                                    elapsed = _best_elapsed
+                                    # Recalculate _rs / _re from the worst cluster
+                                    _worst_c = max(_clusters, key=lambda c: (c[1] - c[0]).total_seconds() if pd.notna(c[0]) and pd.notna(c[1]) else 0)
+                                    _rs, _re = _worst_c
+                            except Exception:
+                                pass  # keep original elapsed on any cluster-detection error
+
+                        # Batch-type-aware sanity cap (fix #7):
+                        # DAILY ≤ 48h, WEEKLY ≤ 200h, MONTHLY/BIWEEKLY ≤ 400h.
+                        # Old fixed 48h cap silently dropped valid 50h+ monthly batches,
+                        # reporting RUNTIME_MISSING instead of an actionable AT_RISK finding.
+                        # Detect inline — batch_type_wf is assigned later in this loop, so
+                        # referencing it here would be unbound (first sub_app) or stale.
+                        try:
+                            from services.sla_merger import detect_batch_type as _dbt_cap
+                            _bt_cap = _dbt_cap(sub_app, _sched_txt) or "DAILY"
+                        except Exception:
+                            _bt_cap = "DAILY"
+                        _MAX_ELAPSED: dict[str, float] = {
+                            "DAILY": 48.0, "WEEKLY": 200.0,
+                            "BIWEEKLY": 400.0, "MONTHLY": 400.0,
+                        }
+                        _cap = _MAX_ELAPSED.get(_bt_cap, 48.0)
+                        if 0 <= elapsed <= _cap:
+                            per_run_elapsed.append(elapsed)
+                            per_run_windows.append((_rs, _re))
+                            per_run_dates.append(str(_rd))
+                            per_run_end_clk.append(
+                                _re.hour * 60 + _re.minute if pd.notna(_re) else None
+                            )
+                        elif elapsed > _cap:
+                            # Include but tag as anomalous — do not silently discard
+                            per_run_elapsed.append(elapsed)
+                            per_run_windows.append((_rs, _re))
+                            per_run_dates.append(str(_rd))
+                            per_run_end_clk.append(
+                                _re.hour * 60 + _re.minute if pd.notna(_re) else None
+                            )
+
+                if per_run_elapsed:
+                    # Worst-case (max elapsed) run as representative runtime
+                    max_idx   = per_run_elapsed.index(max(per_run_elapsed))
+                    runtime_h = round(per_run_elapsed[max_idx], 4)
+                    wf_start  = per_run_windows[max_idx][0]
+                    wf_end    = per_run_windows[max_idx][1]
+                    wf_start_s = wf_start.strftime("%Y-%m-%d %H:%M") if pd.notna(wf_start) else None
+                    wf_end_s   = wf_end.strftime("%Y-%m-%d %H:%M")   if pd.notna(wf_end)   else None
+                    anchor_tag = "anchored" if (_first_anchor or _last_anchor) else "all_jobs"
+                    runtime_src = f"per_run_max_elapsed/{anchor_tag} ({len(per_run_elapsed)} runs)"
+                elif "run_time_hrs" in grp.columns:
+                    runtime_h    = round(float(grp["run_time_hrs"].fillna(0).max()), 4)
+                    wf_start_s   = wf_end_s = None
+                    runtime_src  = "max_run_hrs"
+                else:
+                    runtime_h    = 0.0
+                    wf_start_s   = wf_end_s = None
+                    runtime_src  = "none"
+
+                # ── SLA resolution — single unified resolver, all tiers ──────
+                sla_h_wf:          float | None = None
+                raw_batch_name_wf: str   | None = None
+                join_hit  = False
+                sla_src_wf = "none"
+
+                # Tier 1 — use the pre-computed hit (already resolved above for anchors).
+                # Reuse avoids a second pass through _bulk_lookup_bsla.
+                if _bsla_pre:
+                    sla_h_wf, sla_src_wf, raw_batch_name_wf = _bsla_pre
+                    join_hit = True
+
+                # Tier 2 — SOW-extracted batch-type ceiling
+                if sla_h_wf is None and _sow_windows:
+                    try:
+                        from services.sla_merger import detect_batch_type as _dbt
+                        _bt2 = _dbt(sub_app, _sched_txt)
+                        if _bt2 and _bt2 in _sow_windows:
+                            _e2 = _sow_windows[_bt2]
+                            _c2 = float(_e2.get("limit_hours", 0)) if isinstance(_e2, dict) else float(_e2)
+                            if _c2 > 0:
+                                sla_h_wf   = _c2
+                                sla_src_wf = "sow_extracted"
+                    except Exception:
+                        pass
+
+                # Tier 3 — batch-type-aware global default (UI mode must NOT override)
+                if sla_h_wf is None:
+                    _WF_DEFAULTS: dict[str, float] = {
+                        "DAILY": 6.0, "WEEKLY": 8.0, "BIWEEKLY": 12.0, "MONTHLY": 10.0,
+                    }
+                    try:
+                        from services.sla_merger import detect_batch_type as _dbt3
+                        _bt3 = _dbt3(sub_app, _sched_txt)
+                        sla_h_wf   = _WF_DEFAULTS.get(_bt3, global_sla_hrs)
+                        sla_src_wf = f"global_default_{_bt3}" if _bt3 else "global_fallback"
+                    except Exception:
+                        sla_h_wf   = global_sla_hrs
+                        sla_src_wf = "global_fallback"
+
+                # Detect batch type
                 try:
-                    _cet = pd.Timestamp(str(_sla_end_t))
-                    clock_sla_end_m = _cet.hour * 60 + _cet.minute
-                    _valid_clks = [c for c in per_run_end_clk if c is not None]
-                    if _valid_clks:
-                        # Worst = furthest past the deadline (reference: midnight_diff)
-                        def _mdiff(actual_m: int) -> int:
-                            d = clock_sla_end_m - actual_m
-                            if d > 720:  d -= 1440
-                            if d < -720: d += 1440
-                            return d
-                        clock_buffer_mins = min(_mdiff(m) for m in _valid_clks)
-                        clock_sla_status = "OK" if clock_buffer_mins >= 0 else "BREACH"
+                    from services.sla_merger import detect_batch_type as _dbt_wf
+                    batch_type_wf = _dbt_wf(sub_app, _sched_txt)
                 except Exception:
-                    pass
+                    batch_type_wf = "UNKNOWN"
 
-            # ── SOW tier check (reference script sow_check dict) ──────────
-            # When SOW is the SLA source, also surface the raw SOW window and
-            # average actual duration so the UI can show e.g.
-            # "SOW says 8h · avg actual 6.3h · +1.7h buffer".
-            sow_window_hrs:      float | None = None
-            sow_avg_runtime_hrs: float | None = None
-            sow_buffer_hrs:      float | None = None
-            sow_status_wf:       str   | None = None
-            if sla_src_wf == "sow_extracted" and _sow_windows:
+                # ── Buffer formula (workflow level) ───────────────────────
+                if runtime_h <= 0:
+                    buf_wf    = None
+                    status_wf = "RUNTIME_MISSING"
+                    buf_rsn   = "No valid Start_Time/End_Time in Ctrl-M export for this workflow"
+                elif not sla_h_wf or sla_h_wf <= 0:
+                    buf_wf    = None
+                    status_wf = "SLA_MISSING"
+                    buf_rsn   = "No SLA resolved from Tier 1 (XLSX) / Tier 2 (SOW) / Tier 3 (defaults)"
+                else:
+                    buf_wf  = round((sla_h_wf - runtime_h) / sla_h_wf * 100, 2)
+                    buf_rsn = (f"(SLA {sla_h_wf}h − runtime {runtime_h:.3f}h) / "
+                               f"SLA {sla_h_wf}h × 100")
+                    _at  = pe_config.SLA_ATRISK_PCT
+                    _lj  = pe_config.SLA_LONGJOB_PCT
+                    if buf_wf <= 0:
+                        status_wf = "BREACH"
+                    elif buf_wf <= _at:
+                        status_wf = "AT_RISK"
+                    elif buf_wf <= _lj:
+                        status_wf = "LONG_JOB"
+                    else:
+                        status_wf = "OK"
+
+                # ── Per-run breach dates (matches reference script runs[] list) ──
+                # Identify which run dates individually exceeded the SLA window.
+                breach_run_dates: list[str] = []
+                if sla_h_wf and sla_h_wf > 0:
+                    for _i_r, (_elap_r, _rd_r) in enumerate(
+                        zip(per_run_elapsed, per_run_dates)
+                    ):
+                        if _elap_r > sla_h_wf:
+                            breach_run_dates.append(_rd_r)
+
+                # ── Failed job count per workflow (reference script any_failed) ──
+                # Counts Ctrl-M jobs in this workflow whose status is NOT a success.
+                failed_job_count = 0
                 try:
-                    _bt_sw = batch_type_wf or "DAILY"
-                    _sw_e  = _sow_windows.get(_bt_sw) or {}
-                    _sw_h  = float(
-                        _sw_e.get("limit_hours", 0) if isinstance(_sw_e, dict) else _sw_e
-                    ) or None
-                    if _sw_h and per_run_elapsed:
-                        sow_window_hrs      = _sw_h
-                        sow_avg_runtime_hrs = round(
-                            sum(per_run_elapsed) / len(per_run_elapsed), 3
+                    from services.pe_utils import SUCCESS_STATUSES as _SS
+                    if "Status" in grp.columns:
+                        failed_job_count = int(
+                            (~grp["Status"].str.strip().str.upper().isin(_SS)).sum()
                         )
-                        sow_buffer_hrs = round(sow_window_hrs - sow_avg_runtime_hrs, 3)
-                        sow_status_wf  = "OK" if sow_buffer_hrs >= 0 else "BREACH"
                 except Exception:
                     pass
 
-            workflow_summary.append({
-                # ── Canonical columns ──
-                "workflow_key":    norm_sub,
-                "workflow_name":   raw_batch_name_wf or sub_app,
-                "sub_application": sub_app,
-                "batch_type":      batch_type_wf or "UNKNOWN",
-                "workflow_start":  wf_start_s,
-                "workflow_end":    wf_end_s,
-                "runtime_h":       runtime_h,
-                "sla_h":           round(float(sla_h_wf), 4) if sla_h_wf else None,
-                "sla_source":      sla_src_wf,
-                "buffer_pct":      buf_wf,
-                "status":          status_wf,
-                "job_count":       int(len(grp)),
-                # ── Multi-run analysis (matches reference script three-tier logic) ──
-                "total_runs":       len(per_run_elapsed),
-                "breach_run_count": len(breach_run_dates),
-                "breach_run_dates": breach_run_dates,
-                "failed_job_count": failed_job_count,
-                # ── Anchor metadata ──────────────────────────────────────────
-                "first_job_anchor": _first_anchor or None,
-                "last_job_anchor":  _last_anchor  or None,
-                "anchor_used":      bool(_first_anchor or _last_anchor),
-                # ── Clock-time SLA (reference midnight_diff check) ───────────
-                "clock_sla_end_m":   clock_sla_end_m,
-                "clock_buffer_mins": clock_buffer_mins,
-                "clock_sla_status":  clock_sla_status,
-                # ── SOW tier check ────────────────────────────────────────────
-                "sow_window_hrs":      sow_window_hrs,
-                "sow_avg_runtime_hrs": sow_avg_runtime_hrs,
-                "sow_buffer_hrs":      sow_buffer_hrs,
-                "sow_status":          sow_status_wf,
-                # ── Debug columns (always included — hidden in UI by default) ──
-                "debug_raw_subapp":        sub_app,
-                "debug_raw_batch_name":    raw_batch_name_wf,
-                "debug_normalized_subapp": norm_sub,
-                "debug_normalized_batch":  _norm(raw_batch_name_wf) if raw_batch_name_wf else None,
-                "debug_join_hit":          join_hit,
-                "debug_sla_source":        sla_src_wf,
-                "debug_runtime_source":    runtime_src,
-                "debug_buffer_reason":     buf_rsn,
-            })
+                # ── Clock-time SLA buffer (reference script midnight_diff logic) ──
+                # When the XLSX stored a fixed SLA deadline (e.g. "07:00"), compute
+                # how many minutes before/after that deadline the batch actually ended.
+                # Positive = within SLA; negative = breach.
+                clock_sla_end_m:   int | None = None
+                clock_buffer_mins: int | None = None
+                clock_sla_status:  str | None = None
+                _sla_end_t = _anchor_row.get("sla_end_time")
+                if _sla_end_t:
+                    try:
+                        _cet = pd.Timestamp(str(_sla_end_t))
+                        clock_sla_end_m = _cet.hour * 60 + _cet.minute
+                        _valid_clks = [c for c in per_run_end_clk if c is not None]
+                        if _valid_clks:
+                            # Worst = furthest past the deadline (reference: midnight_diff)
+                            def _mdiff(actual_m: int) -> int:
+                                d = clock_sla_end_m - actual_m
+                                if d > 720:  d -= 1440
+                                if d < -720: d += 1440
+                                return d
+                            clock_buffer_mins = min(_mdiff(m) for m in _valid_clks)
+                            clock_sla_status = "OK" if clock_buffer_mins >= 0 else "BREACH"
+                    except Exception:
+                        pass
+
+                # ── SOW tier check (reference script sow_check dict) ──────────
+                # When SOW is the SLA source, also surface the raw SOW window and
+                # average actual duration so the UI can show e.g.
+                # "SOW says 8h · avg actual 6.3h · +1.7h buffer".
+                sow_window_hrs:      float | None = None
+                sow_avg_runtime_hrs: float | None = None
+                sow_buffer_hrs:      float | None = None
+                sow_status_wf:       str   | None = None
+                if sla_src_wf == "sow_extracted" and _sow_windows:
+                    try:
+                        _bt_sw = batch_type_wf or "DAILY"
+                        _sw_e  = _sow_windows.get(_bt_sw) or {}
+                        _sw_h  = float(
+                            _sw_e.get("limit_hours", 0) if isinstance(_sw_e, dict) else _sw_e
+                        ) or None
+                        if _sw_h and per_run_elapsed:
+                            sow_window_hrs      = _sw_h
+                            sow_avg_runtime_hrs = round(
+                                sum(per_run_elapsed) / len(per_run_elapsed), 3
+                            )
+                            sow_buffer_hrs = round(sow_window_hrs - sow_avg_runtime_hrs, 3)
+                            sow_status_wf  = "OK" if sow_buffer_hrs >= 0 else "BREACH"
+                    except Exception:
+                        pass
+
+                workflow_summary.append({
+                    # ── Canonical columns ──
+                    "workflow_key":    norm_sub,
+                    "workflow_name":   raw_batch_name_wf or sub_app,
+                    "sub_application": sub_app,
+                    "batch_type":      batch_type_wf or "UNKNOWN",
+                    "workflow_start":  wf_start_s,
+                    "workflow_end":    wf_end_s,
+                    "runtime_h":       runtime_h,
+                    "sla_h":           round(float(sla_h_wf), 4) if sla_h_wf else None,
+                    "sla_source":      sla_src_wf,
+                    "buffer_pct":      buf_wf,
+                    "status":          status_wf,
+                    "job_count":       int(len(grp)),
+                    # ── Multi-run analysis (matches reference script three-tier logic) ──
+                    "total_runs":       len(per_run_elapsed),
+                    "breach_run_count": len(breach_run_dates),
+                    "breach_run_dates": breach_run_dates,
+                    "failed_job_count": failed_job_count,
+                    # ── Anchor metadata ──────────────────────────────────────────
+                    "first_job_anchor": _first_anchor or None,
+                    "last_job_anchor":  _last_anchor  or None,
+                    "anchor_used":      bool(_first_anchor or _last_anchor),
+                    # ── Clock-time SLA (reference midnight_diff check) ───────────
+                    "clock_sla_end_m":   clock_sla_end_m,
+                    "clock_buffer_mins": clock_buffer_mins,
+                    "clock_sla_status":  clock_sla_status,
+                    # ── SOW tier check ────────────────────────────────────────────
+                    "sow_window_hrs":      sow_window_hrs,
+                    "sow_avg_runtime_hrs": sow_avg_runtime_hrs,
+                    "sow_buffer_hrs":      sow_buffer_hrs,
+                    "sow_status":          sow_status_wf,
+                    # ── Debug columns (always included — hidden in UI by default) ──
+                    "debug_raw_subapp":        sub_app,
+                    "debug_raw_batch_name":    raw_batch_name_wf,
+                    "debug_normalized_subapp": norm_sub,
+                    "debug_normalized_batch":  _norm(raw_batch_name_wf) if raw_batch_name_wf else None,
+                    "debug_join_hit":          join_hit,
+                    "debug_sla_source":        sla_src_wf,
+                    "debug_runtime_source":    runtime_src,
+                    "debug_buffer_reason":     buf_rsn,
+                })
     except Exception as _wf_exc:
         import logging as _log_wf
         _log_wf.getLogger("pe_dashboard.sla_matrix").warning(
