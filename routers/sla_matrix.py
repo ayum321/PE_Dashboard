@@ -1073,6 +1073,45 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     except Exception:
                         pass
 
+                # ── Start-time compliance (coverage gap fix) ──────────────────
+                # Duration compliance alone (elapsed <= sla_h) says nothing about
+                # whether the batch STARTED on time. A batch that starts hours
+                # late but finishes inside its allotted duration still delivers
+                # stale downstream data. When the XLSX contract has a fixed
+                # Start_Time, compare it against the actual first-job clock time
+                # for the worst (latest-starting) run and flag lateness.
+                contract_start_m: int | None = None
+                start_delay_mins: int | None = None
+                start_time_status: str | None = None
+                _sla_start_t = _anchor_row.get("sla_start_time")
+                if _sla_start_t:
+                    try:
+                        _cst = pd.Timestamp(str(_sla_start_t))
+                        contract_start_m = _cst.hour * 60 + _cst.minute
+                        _valid_starts = [
+                            (rs.hour * 60 + rs.minute) for rs, _re in per_run_windows
+                            if pd.notna(rs)
+                        ]
+                        if _valid_starts:
+                            # Worst = furthest AFTER the contracted start (overnight-aware,
+                            # same +/-1440 wraparound logic as the clock-time SLA check above).
+                            def _sdiff(actual_m: int) -> int:
+                                d = actual_m - contract_start_m
+                                if d > 720:  d -= 1440
+                                if d < -720: d += 1440
+                                return d
+                            start_delay_mins = max(_sdiff(m) for m in _valid_starts)
+                            _atrisk_m = int(getattr(pe_config, "SLA_START_ATRISK_MINS", 30))
+                            _severe_m = int(getattr(pe_config, "SLA_START_LATE_MINS", 120))
+                            if start_delay_mins <= _atrisk_m:
+                                start_time_status = "ON_TIME"
+                            elif start_delay_mins <= _severe_m:
+                                start_time_status = "LATE_START"
+                            else:
+                                start_time_status = "SEVERELY_LATE"
+                    except Exception:
+                        pass
+
                 # ── SOW tier check (reference script sow_check dict) ──────────
                 # When SOW is the SLA source, also surface the raw SOW window and
                 # average actual duration so the UI can show e.g.
@@ -1125,6 +1164,10 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     "clock_sla_end_m":   clock_sla_end_m,
                     "clock_buffer_mins": clock_buffer_mins,
                     "clock_sla_status":  clock_sla_status,
+                    # ── Start-time compliance (coverage gap fix) ──────────────────
+                    "contract_start_time": _sla_start_t or None,
+                    "start_delay_mins":    start_delay_mins,
+                    "start_time_status":   start_time_status,
                     # ── SOW tier check ────────────────────────────────────────────
                     "sow_window_hrs":      sow_window_hrs,
                     "sow_avg_runtime_hrs": sow_avg_runtime_hrs,

@@ -16533,6 +16533,19 @@ function _renderSlaCommitmentsPanel() {
     });
   }
 
+  // ── Keep the "no SLA file loaded" banner (owned by _renderSlaMatrix, further
+  // down the page) in sync with what THIS panel just proved is true. That banner
+  // only repaints when _renderSlaMatrix() itself re-runs, which is gated behind
+  // "if (window.appData.batch) triggerSlaMatrix()" in the BatchSLA upload handler
+  // — so uploading BatchSLA/SOW before any Ctrl-M batch data exists left the
+  // banner showing a stale "No customer SLA file loaded" directly under a top
+  // panel that already says "N workflow(s) loaded". Force it hidden immediately
+  // whenever a Tier 1/2 source is confirmed present, so the two can never
+  // contradict each other on the same page render.
+  if (hasBatch || hasSOW) {
+    document.getElementById("sla-assumed-banner")?.classList.add("hidden");
+  }
+
   if (!hasSOW && !hasBatch) return; // nothing to show in commitments panel
   panel.classList.remove("hidden");
 
@@ -16728,6 +16741,7 @@ function _renderSlaCommitmentsPanel() {
               <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Ctrl-M peak runtime: worst-case elapsed time per run across the observation period. XLSX tag = last-known run snapshot (not live Ctrl-M data).">Runtime</th>
               <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
               <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
+              <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="Did the batch START on time? Duration compliance alone doesn't catch a late start that still finishes inside its window — downstream data is stale even though the run 'passed'. Compares the XLSX contracted Start_Time against the actual worst-case (latest) observed start clock time. Requires a Start_Time column in the SLA matrix file.">Start Time</th>
             </tr></thead>
             <tbody>
               ${topWfs.map(w => {
@@ -16811,6 +16825,28 @@ function _renderSlaCommitmentsPanel() {
                   ? `<span class="ml-0.5 text-[8px] font-bold text-Cred bg-Cred/10 px-1 rounded">${_severeBuf ? "SEVERE BREACH" : (buf < 0 ? "BREACH" : "LOW")}</span>` : "";
                 const name  = w.workflow || w.sub_application || "—";
                 const btype = w.batch_type || "—";
+                // ── Start-time compliance cell ──────────────────────────────
+                // entry.start_time_status is only populated when the XLSX has a
+                // fixed Start_Time AND at least one observed Ctrl-M run for this
+                // workflow — otherwise show a neutral "no data" state instead of
+                // silently implying compliance.
+                const _stStatus = entry?.start_time_status || null;
+                const _stDelay  = entry?.start_delay_mins;
+                const _stContract = entry?.contract_start_time;
+                const startTimeCell = (() => {
+                  if (!_stStatus) {
+                    return `<span class="text-Cmuted italic" title="No contracted Start_Time in the SLA matrix, or no matching Ctrl-M run observed for this workflow.">—</span>`;
+                  }
+                  const _delayStr = typeof _stDelay === "number"
+                    ? (_stDelay <= 0 ? `${Math.abs(_stDelay)}m early` : `+${_stDelay}m late`)
+                    : "";
+                  const _title = `Contracted start: ${_esc(_stContract || "—")}. Worst observed start was ${_delayStr || "on time"} vs contract.`;
+                  if (_stStatus === "ON_TIME")
+                    return `<span class="text-Cteal font-semibold" title="${_title}">ON TIME</span>`;
+                  if (_stStatus === "LATE_START")
+                    return `<span class="text-Camber font-semibold" title="${_title}">${_delayStr}</span>`;
+                  return `<span class="text-Cred font-bold" title="${_title}">${_delayStr}</span>`;
+                })();
                 return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/30 ${status === 'BREACH' ? 'bg-Cred/5' : ''}">
                   <td class="py-1.5 px-2 text-Cwhite/80 font-mono truncate max-w-[160px]" title="${_esc(name)}">${_esc(name)}</td>
                   <td class="py-1.5 px-2 text-Cmuted">${_esc(btype)}</td>
@@ -16818,9 +16854,10 @@ function _renderSlaCommitmentsPanel() {
                   <td class="py-1.5 px-2 text-right font-mono text-Cwhite/70">${rtStr}</td>
                   <td class="py-1.5 px-2 text-right ${bCol}" title="${_esc(bufTitle)}">${bufStr}${lowFlag}</td>
                   <td class="py-1.5 px-2 text-center font-semibold text-[9px] ${cCol}">${status}</td>
+                  <td class="py-1.5 px-2 text-center text-[9px]">${startTimeCell}</td>
                 </tr>`;
               }).join("")}
-              ${more > 0 ? `<tr><td colspan="6" class="py-1.5 px-2 text-[10px] text-Cmuted italic text-center">+ ${more} more workflows not shown</td></tr>` : ""}
+              ${more > 0 ? `<tr><td colspan="7" class="py-1.5 px-2 text-[10px] text-Cmuted italic text-center">+ ${more} more workflows not shown</td></tr>` : ""}
             </tbody>
           </table>
         </div>

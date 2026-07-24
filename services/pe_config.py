@@ -54,6 +54,15 @@ MEM_CRIT:  float = 80.0
 DISK_WARN: float = 70.0
 DISK_CRIT: float = 85.0
 
+# ── DB memory thresholds (%) ──────────────────────────────────────────────────
+# Oracle/DB servers pre-allocate SGA/PGA — steady usage in the 80-92% band is
+# NORMAL, not pressure. Distinguishes expected DB allocation from genuine memory
+# pressure in routers/redflags.py. Override: db_mem_band_low/high, db_mem_warn/crit.
+DB_MEM_BAND_LOW:  float = 80.0   # below this, DB memory usage isn't even in the expected band
+DB_MEM_BAND_HIGH: float = 92.0   # up to this, high DB memory usage is expected allocation
+DB_MEM_WARN:      float = 88.0   # above this within the band, watch for upward trend
+DB_MEM_CRIT:      float = 95.0   # genuine DB memory pressure regardless of band
+
 # ── Resource capture window (days) ────────────────────────────────────────────
 # How many days of resource-utilisation history a PE review is expected to cover.
 # Surfaced in the export checklist label and kept here so the frontend, export,
@@ -97,6 +106,14 @@ SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
 # than INTERMITTENT (occasional regression). Pure methodology ratio — NOT a
 # customer value; applies identically to every uploaded dataset.
 SLA_STRUCTURAL_RATIO: float = 0.60
+
+# ── Start-time compliance thresholds (minutes late vs contracted Start_Time) ──
+# Duration compliance alone doesn't catch a batch that starts hours late but
+# still finishes inside its window — downstream data is stale even though the
+# duration check reports healthy. These are generic tolerance bands, not
+# customer-specific values. Override via config_store keys below.
+SLA_START_ATRISK_MINS: float = 30.0    # minutes late → ON_TIME below this
+SLA_START_LATE_MINS:   float = 120.0   # minutes late → LATE_START below this, else SEVERELY_LATE
 
 # ── Window/SLA compliance bands (day-level %) ─────────────────────────────────
 # The share of measured days a batch must finish inside its SLA window. These
@@ -420,9 +437,11 @@ def reload() -> None:
             return default
 
     global CPU_WARN, CPU_CRIT, MEM_WARN, MEM_CRIT, DISK_WARN, DISK_CRIT
+    global DB_MEM_BAND_LOW, DB_MEM_BAND_HIGH, DB_MEM_WARN, DB_MEM_CRIT
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT, SLA_STRUCTURAL_RATIO
+    global SLA_START_ATRISK_MINS, SLA_START_LATE_MINS
     global SLA_COMPLIANCE_TARGET_PCT, SLA_COMPLIANCE_CRIT_PCT
     global COMPLIANCE_DEBUG_LOG
     global BATCH_BLOCK_GAP_HRS, LONGPOLE_TOP_N, LONGPOLE_WINDOW_SHARE_PCT
@@ -449,6 +468,10 @@ def reload() -> None:
     MEM_CRIT          = _f("mem_critical",      80.0)
     DISK_WARN         = _f("disk_warning",      70.0)
     DISK_CRIT         = _f("disk_critical",     85.0)
+    DB_MEM_BAND_LOW   = _f("db_mem_band_low",   80.0)
+    DB_MEM_BAND_HIGH  = _f("db_mem_band_high",  92.0)
+    DB_MEM_WARN       = _f("db_mem_warn",       88.0)
+    DB_MEM_CRIT       = _f("db_mem_crit",       95.0)
     BATCH_FAIL_RATE   = _f("batch_fail_rate",   5.0)
     ZERO_DUR_FLAG     = bool (_cfg("zero_dur_flag",     True))
     try:
@@ -464,6 +487,8 @@ def reload() -> None:
     SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
     SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
     SLA_STRUCTURAL_RATIO = _f("sla_structural_ratio", 0.60)
+    SLA_START_ATRISK_MINS = _f("sla_start_atrisk_mins", 30.0)
+    SLA_START_LATE_MINS   = _f("sla_start_late_mins",   120.0)
     SLA_COMPLIANCE_TARGET_PCT = _f("sla_compliance_target_pct", 95.0)
     SLA_COMPLIANCE_CRIT_PCT   = _f("sla_compliance_crit_pct",   80.0)
     COMPLIANCE_DEBUG_LOG = bool(_cfg("compliance_debug_log", False))

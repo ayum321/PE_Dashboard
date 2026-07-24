@@ -458,6 +458,23 @@ if errorlevel 1 (
 )
 echo        All files and imports verified.
 
+echo.
+echo        Validating JavaScript...
+!PY! _validate_js.py
+if errorlevel 1 (
+    echo   [ERROR] Fix JavaScript errors above before shipping/starting.
+    pause
+    exit /b 1
+)
+
+echo        Validating pe_config references...
+!PY! _check_pe_config_refs.py
+if errorlevel 1 (
+    echo   [ERROR] Fix undefined pe_config references above before shipping/starting.
+    pause
+    exit /b 1
+)
+
 
 REM ================================================================
 REM  STEP 5 -- Seed config

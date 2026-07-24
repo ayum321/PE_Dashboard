@@ -807,6 +807,25 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             except Exception:
                 pass
 
+        # ── Contracted Start Time (Gap fix: start-time compliance) ──────────
+        # The SLA Matrix historically only measured DURATION (did the batch finish
+        # within its window once started) and never checked whether it STARTED on
+        # time. A batch that starts hours late but finishes within its allotted
+        # duration looked healthy even though downstream data arrives stale. Parse
+        # the contracted Start_Time here (generic, any customer's clock format via
+        # parse_start_time) so routers/sla_matrix.py can compare it against the
+        # actual first-job start observed in Ctrl-M.
+        contract_start_raw = start_series.iloc[idx] if start_series is not None else None
+        try:
+            _cst = parse_start_time(contract_start_raw)
+            # A cell can hold two start times (twice-daily batch) — keep the
+            # first for the single-value comparison, list stays available via raw.
+            if isinstance(_cst, list):
+                _cst = _cst[0] if _cst else None
+            contract_start_time = _cst.strftime("%H:%M:%S") if _cst else None
+        except Exception:
+            contract_start_time = None
+
         # Actual runtime from XLSX own timestamps (optional)
         # Uses overnight-aware delta so batches crossing midnight are handled correctly.
         actual_h: Optional[float] = None
@@ -905,6 +924,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             "sla_hours":          sla_h,
             "sla_source":         sla_source,
             "sla_end_time":       sla_end_time_raw,   # clock-time deadline ("07:00") or None
+            "sla_start_time":     contract_start_time, # contracted start-of-window clock time ("14:00:00") or None
             "last_run_hours_xlsx": actual_h,
             "compliance":         compliance_label(actual_h, sla_h),
             "source":             "BATCH_SLA_XLSX",

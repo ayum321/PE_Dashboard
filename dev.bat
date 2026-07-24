@@ -40,6 +40,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM ── Validate pe_config references (catches AttributeError before runtime) ──
+echo   Validating pe_config references...
+!PY! _check_pe_config_refs.py
+if errorlevel 1 (
+    echo.
+    echo   [ERROR] Fix undefined pe_config references above before starting.
+    pause
+    exit /b 1
+)
+
 REM ── Self-heal: reap stale PE Dashboard processes from prior runs ──
 REM Catches orphaned --reload workers and ephemeral-port servers that the
 REM port scan below misses. Attributes by folder; never blocks startup.
