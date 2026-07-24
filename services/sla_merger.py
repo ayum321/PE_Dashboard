@@ -214,6 +214,30 @@ def detect_batch_type(batch_name: str, schedule: str = "") -> str:
         _sched_norm = _sched_up.replace("-", "").replace("_", "").replace(" ", "")
         if _sched_norm in _EXACT_SCHEDULE_MAP:
             return _EXACT_SCHEDULE_MAP[_sched_norm]
+        # Monthly / nth-weekday-of-month phrasing MUST be checked BEFORE the
+        # generic day-name shortcut below. Otherwise schedules like
+        # "Last Sunday of Month" or "1st Sunday" / "2nd Sunday" / "Other Sunday"
+        # (genuinely once-per-month cadences) get misclassified as WEEKLY just
+        # because they contain a weekday name — silently applying the wrong
+        # SLA default and mislabeling the Type column for any customer whose
+        # BatchSLA_info.xlsx uses nth-weekday-of-month scheduling.
+        if re.search(r"\bOF\s+(?:EACH\s+|THE\s+)?MONTH\b", _sched_up):
+            return "MONTHLY"
+        if re.search(
+            r"\b(?:1ST|2ND|3RD|4TH|5TH|FIRST|SECOND|THIRD|FOURTH|FIFTH|LAST|OTHER)\s+"
+            r"(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b",
+            _sched_up,
+        ):
+            return "MONTHLY"
+        # Multi-day range spanning >1 weekday (e.g. "Sun to Fri", "Mon to Sat")
+        # is a DAILY cadence (runs most days of the week), not a once-a-week
+        # WEEKLY schedule — must be checked before the single-day-name shortcut.
+        if re.search(
+            r"\b(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\s*(?:TO|[\-–])\s*"
+            r"(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b",
+            _sched_up,
+        ):
+            return "DAILY"
         # "Runs Every Saturday/Sunday" → WEEKLY; "Mon-Fri" → DAILY
         if any(d in _sched_up for d in ("SATURDAY", "SUNDAY", "SAT", "SUN")):
             return "WEEKLY"

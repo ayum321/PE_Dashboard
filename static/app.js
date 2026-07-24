@@ -8950,6 +8950,17 @@ function _buildSlaComparison() {
 
   const defaultDaily  = Number(peDefaults.daily_hrs  || 6.0);
   const defaultWeekly = Number(peDefaults.weekly_hrs || 8.0);
+  // Full per-type default map (fix #5) — mirrors the backend's _WF_DEFAULTS
+  // in routers/sla_matrix.py. The prior binary WEEKLY-vs-DAILY fallback
+  // silently compared MONTHLY/BIWEEKLY workflows against the DAILY default,
+  // producing tighter/looser counts that could never reconcile against a
+  // per-row Type-column comparison.
+  const DEFAULT_HRS_BY_TYPE = {
+    DAILY:    defaultDaily,
+    WEEKLY:   defaultWeekly,
+    BIWEEKLY: Number(peDefaults.biweekly_hrs || 12.0),
+    MONTHLY:  Number(peDefaults.monthly_hrs  || 10.0),
+  };
 
   // ── A: SLA matrix expected-completion vs pe_config defaults ──────────────
   // Find workflows where the contracted SLA is significantly different from
@@ -8957,11 +8968,29 @@ function _buildSlaComparison() {
   const VARIANCE_THRESHOLD_PCT = 25; // flag when >25% difference
   const defaultDeltas = [];
   const wfSource = wfSummary.length > 0 ? wfSummary : batchSlaWfs;
+  // Fix #5 (continued): workflow_summary's batch_type is derived from the
+  // Ctrl-M sub_application NAME ONLY (Ctrl-M has no Schedule-cadence column),
+  // while batchSlaWfs (BatchSLA_info.xlsx) carries the real Schedule column
+  // text (e.g. "1st Sunday", "Last Sunday of Month") and classifies far more
+  // accurately. When both are loaded, prefer the XLSX-derived type per
+  // workflow so the banner doesn't fall back to a name-only guess.
+  const _cmpNorm = (n) => {
+    const pfxs = ["prod_", "test_", "uat_", "dev_", "stg_"];
+    let s = (n || "").toLowerCase().trim();
+    for (const p of pfxs) { if (s.startsWith(p)) { s = s.slice(p.length); break; } }
+    return s;
+  };
+  const _xlsxTypeByName = {};
+  for (const bwf of batchSlaWfs) {
+    const k = _cmpNorm(bwf.workflow || "");
+    if (k && bwf.batch_type) _xlsxTypeByName[k] = String(bwf.batch_type).toUpperCase();
+  }
   for (const wf of wfSource) {
     const slaHrs  = Number(wf.sla_hours || wf.sla_h || 0);
     if (slaHrs <= 0) continue;
-    const btype   = (wf.batch_type || "DAILY").toUpperCase();
-    const defHrs  = btype === "WEEKLY" ? defaultWeekly : defaultDaily;
+    const _wfKey  = _cmpNorm(wf.workflow || wf.sub_application || wf.workflow_name || "");
+    const btype   = _xlsxTypeByName[_wfKey] || (wf.batch_type || "DAILY").toUpperCase();
+    const defHrs  = DEFAULT_HRS_BY_TYPE[btype] ?? defaultDaily;
     const diffPct = ((slaHrs - defHrs) / defHrs) * 100;
     if (Math.abs(diffPct) >= VARIANCE_THRESHOLD_PCT) {
       defaultDeltas.push({
@@ -16752,8 +16781,17 @@ function _renderSlaCommitmentsPanel() {
                       : `${rt.toFixed(3)}h`)
                   : "—";
                 // Buffer cell: typed failure state, never bare "—" (Standard 5)
+                // Fix #6: for very short SLA windows, a modest absolute overrun can
+                // produce a huge/meaningless percentage (e.g. -3713% on a 10-minute
+                // SLA). Show absolute overage hours alongside the percentage once the
+                // magnitude passes a sanity threshold, and tag it SEVERE BREACH
+                // instead of a plain BREACH so it isn't mistaken for a normal breach.
+                const _severeBuf = buf != null && buf < -100;
+                const _overageH  = (buf != null && rt != null && _slaVal != null) ? (rt - _slaVal) : null;
                 const bufStr    = buf != null
-                  ? (buf < 0 ? `${buf.toFixed(1)}%` : `+${buf.toFixed(1)}%`)
+                  ? (_severeBuf && _overageH != null
+                      ? `${buf.toFixed(0)}% <span class="text-[8px] opacity-70">(+${_overageH.toFixed(1)}h over ${_slaVal}h)</span>`
+                      : (buf < 0 ? `${buf.toFixed(1)}%` : `+${buf.toFixed(1)}%`))
                   : (status === "SLA_MISSING"     ? "SLA_MISSING"
                   :  status === "RUNTIME_MISSING" ? "RT_MISSING"
                   :  status === "FAILED"           ? "FAILED"
@@ -16770,7 +16808,7 @@ function _renderSlaCommitmentsPanel() {
                               : buf < 40   ? "text-Camber font-semibold"
                               : "text-Cteal";
                 const lowFlag = buf != null && buf < 15
-                  ? `<span class="ml-0.5 text-[8px] font-bold text-Cred bg-Cred/10 px-1 rounded">${buf < 0 ? "BREACH" : "LOW"}</span>` : "";
+                  ? `<span class="ml-0.5 text-[8px] font-bold text-Cred bg-Cred/10 px-1 rounded">${_severeBuf ? "SEVERE BREACH" : (buf < 0 ? "BREACH" : "LOW")}</span>` : "";
                 const name  = w.workflow || w.sub_application || "—";
                 const btype = w.batch_type || "—";
                 return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/30 ${status === 'BREACH' ? 'bg-Cred/5' : ''}">
@@ -16866,7 +16904,7 @@ function _renderSlaCommitmentsPanel() {
           <summary class="text-[9px] text-Cmuted cursor-pointer hover:text-Cwhite/60 select-none py-1">
             🔬 SLA Debug — ${debugWfRows.length} sub-application(s) resolved from live Ctrl-M elapsed runtime
             ${breaches.length > 0 ? `· <span class="text-Cred font-bold" title="Live elapsed wall-clock (max End − min Start) exceeded the resolved ceiling. This is the authoritative window verdict and may differ from the XLSX last-run samples in the contract table above.">${breaches.length} BREACH (elapsed vs ceiling)</span>` : ""}
-            ${misses.length > 0 ? `· <span class="text-Camber" title="Sub-application did not join to a Tier-1 contract row by name — its ceiling came from a Tier 2/3 fallback.">${misses.length} unjoined (Tier 2/3 fallback)</span>` : ""}
+            ${misses.length > 0 ? `· <span class="text-Camber" title="Sub-application did not join to a Tier-1 contract row by name — its ceiling came from ${hasSOW ? "a Tier 2 (SOW) or Tier 3 (system default) fallback." : "the Tier 3 system default (no SOW contract uploaded, so Tier 2 is empty)."}">${misses.length} unjoined (${hasSOW ? "Tier 2/3" : "Tier 3 only"} fallback)</span>` : ""}
           </summary>
           <div class="mt-1.5 overflow-x-auto rounded border border-Cborder/30 bg-Cbg/60">
             <table class="w-full text-[9px]">

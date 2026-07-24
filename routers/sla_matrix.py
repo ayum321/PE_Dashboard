@@ -748,36 +748,73 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
             for _rd, rg in grp.groupby("_run_date"):
                 if _rd == "unknown":
                     continue
-                rg_starts = rg["_start"].dropna()
-                rg_ends   = rg["_end"].dropna()
 
-                # Anchor narrowing — exact → underscore-insensitive exact → substring.
-                # _anchor_job_mask keeps the precise EXACT-first ordering (str.contains
-                # was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc., inflating the
-                # window) while also catching XLSX-vs-Ctrl-M underscore mismatches.
-                if _first_anchor and "Job_Name" in rg.columns:
+                # ── Single-job workflow guard (fix #1 — runtime-attribution bug) ──
+                # When first_job == last_job (e.g. a lone "clear" job like
+                # SCPO_D2(Clear CRTD)), the workflow IS that one job — its elapsed
+                # time must come from that job's OWN Start_Time→End_Time, never a
+                # min(start)→max(end) span across the whole date group. If the same
+                # job name runs more than once on the same calendar day (retry, or
+                # an unrelated later invocation), spanning min→max would silently
+                # attribute a multi-hour gap between unrelated runs as "runtime" —
+                # producing implausible results like a 10-minute SLA showing 6+
+                # hours of "elapsed" time. Measure each matching execution's own
+                # duration instead and take the worst (longest) single execution.
+                _single_job_wf = bool(_first_anchor) and _first_anchor == _last_anchor
+                if _single_job_wf and "Job_Name" in rg.columns:
                     _jnames = rg["Job_Name"].str.upper()
-                    _fm = _anchor_job_mask(_jnames, _first_anchor)
-                    if _fm.any():
-                        rg_starts = rg.loc[_fm, "_start"].dropna()
+                    _sm = _anchor_job_mask(_jnames, _first_anchor)
+                    _single_rows = rg.loc[_sm & rg["_start"].notna() & rg["_end"].notna()]
+                    if not _single_rows.empty:
+                        _durs = (_single_rows["_end"] - _single_rows["_start"]).dt.total_seconds() / 3600
+                        _durs = _durs[_durs >= 0]
+                    else:
+                        _durs = pd.Series(dtype=float)
+                    if not _durs.empty:
+                        _worst_idx = _durs.idxmax()
+                        _rs = _single_rows.loc[_worst_idx, "_start"]
+                        _re = _single_rows.loc[_worst_idx, "_end"]
+                        elapsed = float(_durs.loc[_worst_idx])
+                    else:
+                        rg_starts = pd.Series(dtype="datetime64[ns]")
+                        rg_ends   = pd.Series(dtype="datetime64[ns]")
+                        elapsed   = None
+                else:
+                    rg_starts = rg["_start"].dropna()
+                    rg_ends   = rg["_end"].dropna()
 
-                if _last_anchor and "Job_Name" in rg.columns:
-                    _jnames = rg["Job_Name"].str.upper()
-                    _lm = _anchor_job_mask(_jnames, _last_anchor)
-                    if _lm.any():
-                        rg_ends = rg.loc[_lm, "_end"].dropna()
+                    # Anchor narrowing — exact → underscore-insensitive exact → substring.
+                    # _anchor_job_mask keeps the precise EXACT-first ordering (str.contains
+                    # was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc., inflating the
+                    # window) while also catching XLSX-vs-Ctrl-M underscore mismatches.
+                    if _first_anchor and "Job_Name" in rg.columns:
+                        _jnames = rg["Job_Name"].str.upper()
+                        _fm = _anchor_job_mask(_jnames, _first_anchor)
+                        if _fm.any():
+                            rg_starts = rg.loc[_fm, "_start"].dropna()
 
-                if not rg_starts.empty and not rg_ends.empty:
-                    _rs = rg_starts.min()
-                    _re = rg_ends.max()
-                    elapsed = (_re - _rs).total_seconds() / 3600
+                    if _last_anchor and "Job_Name" in rg.columns:
+                        _jnames = rg["Job_Name"].str.upper()
+                        _lm = _anchor_job_mask(_jnames, _last_anchor)
+                        if _lm.any():
+                            rg_ends = rg.loc[_lm, "_end"].dropna()
+
+                    elapsed = None
+                    if not rg_starts.empty and not rg_ends.empty:
+                        _rs = rg_starts.min()
+                        _re = rg_ends.max()
+                        elapsed = (_re - _rs).total_seconds() / 3600
+
+                if elapsed is not None:
 
                     # ── Run-cluster guard (#21): if elapsed > 4× expected SLA,
                     # the date group likely contains two independent executions
                     # (e.g. month-end run + manual retry run). Cluster by job-chain
                     # continuity (gap > 2h between consecutive jobs = new cluster).
                     # Take the worst (longest) cluster, not the full span.
-                    if elapsed > 12 and not rg_starts.empty and not rg_ends.empty:
+                    # Skipped for single-job workflows — the guard above already
+                    # measures each execution's own duration directly.
+                    if not _single_job_wf and elapsed > 12 and not rg_starts.empty and not rg_ends.empty:
                         try:
                             _cluster_starts = rg["_start"].dropna().sort_values()
                             _cluster_ends   = rg["_end"].dropna()
