@@ -526,6 +526,16 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     out["customer_name"] = ac.get("customer_name") or payload.get("customer_name") or ""
+    # Products/Modules reviewed — manual LOV selection from the SOW Contract tab
+    # (services/product_taxonomy.py). Generic across all customers; empty when
+    # the reviewer hasn't made a selection yet. Surfaced here so the AI narrative
+    # and the deterministic fallback can both state audit scope explicitly.
+    try:
+        from services.product_taxonomy import labels_for
+        _rp_values = ac.get("reviewed_products") or []
+        out["reviewed_products"] = labels_for(_rp_values)
+    except Exception:
+        out["reviewed_products"] = []
     return out
 
 
@@ -770,6 +780,15 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             "tone": "muted",
             "note": "No SOW contract or manual volume figures loaded yet.",
         }
+
+    # Products/Modules Reviewed — manual LOV selection prefixed onto the Data
+    # Volume section so every generated report states audit scope explicitly.
+    _reviewed_products = digest.get("reviewed_products") or []
+    if _reviewed_products:
+        dv_prose = (
+            f"Products/modules reviewed in this engagement: {', '.join(_reviewed_products)}. "
+            + dv_prose
+        )
 
     sections.append({
         "id": "data_volume", "title": "Data Volume Analysis",
@@ -1540,6 +1559,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         "sections": sections,
         "model":    "deterministic",
         "customer": customer,
+        "reviewed_products": digest.get("reviewed_products") or [],
     }
 
 

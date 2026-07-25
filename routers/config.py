@@ -220,6 +220,7 @@ def clear_session(body: ClearSessionRequest = ClearSessionRequest()) -> dict:
         _cs.set("_sla_intelligence", {})
         _cs.set("_sla_source_type",  "")
         _cs.set("_batch_sla_xlsx",   {})
+        _cs.set("reviewed_products", [])
         # Reload pe_config from defaults
         pe_config.reload()
         return {"status": "ok", "cleared": "all"}

@@ -172,6 +172,56 @@ def get_sow_sla_windows() -> dict:
         "contract_meta":  config_store.get("_sow_contract_meta") or {},
     }
 
+
+# ── Products / Modules Reviewed (manual multi-select LOV) ────────────────────
+# Generic catalogue of Blue Yonder planning modules (Demand / ESP / Fulfillment /
+# Platform families) — see services/product_taxonomy.py. The PE reviewer picks
+# which subset was actually in scope for THIS engagement. The selection is
+# engagement-specific (like sow_baseline) — persisted in config_store and
+# mirrored into the shared audit context so every screen (Executive, Findings,
+# Narrative/Export) can show "which product(s) were reviewed" consistently.
+_REVIEWED_PRODUCTS_KEY = "reviewed_products"
+
+
+class ReviewedProductsRequest(BaseModel):
+    products: List[str] = []
+
+
+@router.get("/sow/product-taxonomy")
+def get_product_taxonomy() -> dict:
+    from services.product_taxonomy import taxonomy_payload
+    return taxonomy_payload()
+
+
+@router.get("/sow/reviewed-products")
+def get_reviewed_products() -> dict:
+    values = config_store.get(_REVIEWED_PRODUCTS_KEY) or []
+    from services.product_taxonomy import labels_for
+    return {"products": values, "labels": labels_for(values)}
+
+
+@router.post("/sow/reviewed-products")
+def set_reviewed_products(body: ReviewedProductsRequest) -> dict:
+    # De-dupe, preserve selection order, drop blanks
+    seen: set[str] = set()
+    values: List[str] = []
+    for p in body.products or []:
+        p = (p or "").strip()
+        if p and p not in seen:
+            seen.add(p)
+            values.append(p)
+    config_store.set(_REVIEWED_PRODUCTS_KEY, values)
+    # Mirror into the shared audit context so Executive/Findings/Narrative
+    # screens read the same value without a second round-trip.
+    try:
+        from services import session_cache
+        session_cache.ac_set(_REVIEWED_PRODUCTS_KEY, values)
+    except Exception:
+        pass
+    from services.product_taxonomy import labels_for
+    return {"ok": True, "products": values, "labels": labels_for(values)}
+
+
 class ManualSlaWindowsRequest(BaseModel):
     daily_hrs:   Optional[float] = None
     weekly_hrs:  Optional[float] = None

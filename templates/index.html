@@ -1282,6 +1282,7 @@
                   <div class="text-[10px] uppercase tracking-[0.18em] text-Cmuted font-bold">Customer</div>
                   <div id="exec-customer-name" class="text-2xl sm:text-3xl font-black text-Cwhite leading-tight truncate">—</div>
                   <div id="exec-customer-source" class="text-[11px] text-Cmuted mt-0.5">Sourced from Ctrl-M filename</div>
+                  <div id="exec-products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1 mt-1.5"></div>
                 </div>
               </div>
               <!-- Audit Pulse — sparkline + date range + audit id + live status -->
@@ -1702,6 +1703,7 @@
             <span class="text-[10px] uppercase tracking-wider text-Cmuted">Customer</span>
             <span id="customer-name-text" class="text-Cwhite">—</span>
           </div>
+          <div id="batch-products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1.5 mt-2"></div>
 
           <!-- Hidden before first dataset arrives -->
           <div id="batch-review-body" class="hidden space-y-6">
@@ -2569,6 +2571,8 @@
              VIEW · GOVERNANCE & APPROVAL (Phase 6)
              ════════════════════════════════════════════════════ -->
         <section data-view-panel="findings" class="hidden space-y-5">
+
+          <div id="findings-products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1.5"></div>
 
           <!-- Known Issues banner -->
           <div class="rounded-xl border border-Camber/40 bg-Camber/10 px-5 py-3 flex items-center gap-3">
@@ -3583,12 +3587,34 @@
               <h2 class="text-sm font-bold text-Cwhite">SOW Contract Intelligence</h2>
               <p class="text-[11px] text-Cmuted mt-0.5">Contracted commitments, SLA ceilings, volume ramp and operational standards — all cross-wired to the PE Narrative.</p>
             </div>
-            <button onclick="saveSowBaseline()"
-                    class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-Ccyan/20 to-Cblue/20 border border-Ccyan/40 text-Cwhite hover:opacity-90 transition flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
-              Compare vs Actuals
-            </button>
+            <div class="flex items-center gap-2">
+              <div class="relative">
+                <button id="products-reviewed-btn" onclick="toggleProductsReviewedMenu()"
+                        class="px-4 py-2 rounded-xl text-xs font-bold bg-Ccard border border-Cborder text-Cwhite hover:border-Ccyan/50 transition flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                  <span id="products-reviewed-btn-label">Products Reviewed</span>
+                </button>
+                <!-- Multi-select LOV dropdown: grouped checkboxes by product family, populated
+                     dynamically from GET /api/sow/product-taxonomy (services/product_taxonomy.py) -->
+                <div id="products-reviewed-menu" class="hidden absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-Cborder bg-Ccard shadow-2xl z-50 p-3 space-y-3">
+                  <p class="text-[10px] text-Cmuted">Select the Blue Yonder product(s)/module(s) in scope for this engagement. Shown in Executive, Findings and the final report.</p>
+                  <div id="products-reviewed-groups" class="space-y-3"></div>
+                  <div class="flex items-center justify-between pt-2 border-t border-Cborder">
+                    <span id="products-reviewed-status" class="text-[10px] text-Cmuted"></span>
+                    <button onclick="saveReviewedProducts()" class="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-Ccyan/20 border border-Ccyan/40 text-Cwhite hover:opacity-90">Save</button>
+                  </div>
+                </div>
+              </div>
+              <button onclick="saveSowBaseline()"
+                      class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-Ccyan/20 to-Cblue/20 border border-Ccyan/40 text-Cwhite hover:opacity-90 transition flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                Compare vs Actuals
+              </button>
+            </div>
           </div>
+
+          <!-- Products Reviewed badge strip (mirrors selection made in the dropdown above) -->
+          <div id="products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1.5"></div>
 
           <!-- Empty state (hidden when contract or manual panel loaded) -->
           <div id="sow-empty" class="rounded-2xl border border-dashed border-Cborder bg-Ccard/30 p-10 text-center space-y-4">

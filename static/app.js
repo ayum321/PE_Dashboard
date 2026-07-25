@@ -10959,6 +10959,11 @@ async function refreshAuditContext() {
           }
         } catch {}
       }
+      // Restore Products Reviewed selection (manual LOV, engagement-scoped)
+      if (slots.reviewed_products) {
+        ad.reviewedProducts = slots.reviewed_products;
+        try { _renderReviewedProductsBadges(); } catch (e) { console.warn("[pe-dashboard] restore reviewed products:", e); }
+      }
       // ── Re-render panels with restored data so user sees results on reload ──
       // Stagger across animation frames so the browser can paint between phases
       // and avoid triggering Firefox's "page is slowing down" warning.
@@ -21012,6 +21017,121 @@ function _updateSowTargetCount() {
   el.textContent = `${set} of 5 set`;
   el.classList.remove("hidden");
 }
+
+// ── Products / Modules Reviewed (manual multi-select LOV) ──────────────────
+// Grouped checkbox dropdown, populated dynamically from GET /api/sow/product-taxonomy
+// (services/product_taxonomy.py) so the catalogue is defined once, server-side.
+// Selection is engagement-scoped (persisted via config_store, mirrored into the
+// shared audit context) and painted as badges across SOW / Executive / Batch /
+// Findings so the reviewer's product scope is visible everywhere it matters.
+let _productTaxonomyCache = null;
+
+async function _ensureProductTaxonomy() {
+  if (_productTaxonomyCache) return _productTaxonomyCache;
+  try {
+    const res = await fetch("/api/sow/product-taxonomy");
+    if (res.ok) _productTaxonomyCache = await res.json();
+  } catch (e) { console.warn("[pe-dashboard] product taxonomy fetch:", e); }
+  return _productTaxonomyCache || { groups: [] };
+}
+
+function _selectedReviewedProducts() {
+  const boxes = document.querySelectorAll('#products-reviewed-groups input[type="checkbox"]:checked');
+  return Array.from(boxes).map(b => b.value);
+}
+
+async function toggleProductsReviewedMenu() {
+  const menu = document.getElementById("products-reviewed-menu");
+  if (!menu) return;
+  const opening = menu.classList.contains("hidden");
+  if (opening) {
+    await _renderProductTaxonomyMenu();
+  }
+  menu.classList.toggle("hidden");
+}
+
+async function _renderProductTaxonomyMenu() {
+  const host = document.getElementById("products-reviewed-groups");
+  if (!host) return;
+  const taxonomy = await _ensureProductTaxonomy();
+  const selected = new Set(window.appData?.reviewedProducts || []);
+  const groups = taxonomy.groups || [];
+  host.innerHTML = groups.map(g => `
+    <div>
+      <div class="text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1">${escapeHtml(g.label)}</div>
+      <div class="space-y-1">
+        ${(g.items || []).map(item => `
+          <label class="flex items-center gap-2 text-xs text-Cwhite/90 cursor-pointer hover:text-Cwhite">
+            <input type="checkbox" value="${escapeHtml(item.value)}" ${selected.has(item.value) ? "checked" : ""}
+                   class="rounded border-Cborder bg-Cbg text-Ccyan focus:ring-Ccyan/40" />
+            ${escapeHtml(item.label)}
+          </label>`).join("")}
+      </div>
+    </div>`).join("");
+}
+
+async function saveReviewedProducts() {
+  const products = _selectedReviewedProducts();
+  const statusEl = document.getElementById("products-reviewed-status");
+  try {
+    const res = await fetch("/api/sow/reviewed-products", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ products }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    window.appData = window.appData || {};
+    window.appData.reviewedProducts = data.products || products;
+    _renderReviewedProductsBadges();
+    if (statusEl) statusEl.textContent = "Saved";
+    toast("success", "Products reviewed saved", `${products.length} product(s) marked in scope.`);
+    document.getElementById("products-reviewed-menu")?.classList.add("hidden");
+  } catch (e) {
+    console.warn("[pe-dashboard] save reviewed products:", e);
+    toast("error", "Save failed", "Could not save products reviewed selection.");
+  }
+}
+
+// Paints the current reviewedProducts selection as chips into every registered
+// badge container (SOW tab, Executive banner, Batch Review, Findings header).
+function _renderReviewedProductsBadges() {
+  const products = window.appData?.reviewedProducts || [];
+  const containerIds = [
+    "products-reviewed-badges",
+    "exec-products-reviewed-badges",
+    "batch-products-reviewed-badges",
+    "findings-products-reviewed-badges",
+  ];
+  const btnLabel = document.getElementById("products-reviewed-btn-label");
+  if (btnLabel) {
+    btnLabel.textContent = products.length
+      ? `Products Reviewed (${products.length})`
+      : "Products Reviewed";
+  }
+  const chipsHtml = products.map(p => `
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-Cpurple/15 border border-Cpurple/40 text-Cpurple">${escapeHtml(p)}</span>
+  `).join("");
+  containerIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!products.length) {
+      el.classList.add("hidden");
+      el.innerHTML = "";
+      return;
+    }
+    el.classList.remove("hidden");
+    el.innerHTML = chipsHtml;
+  });
+}
+
+// Close the dropdown when clicking outside of it
+document.addEventListener("click", (ev) => {
+  const menu = document.getElementById("products-reviewed-menu");
+  const btn  = document.getElementById("products-reviewed-btn");
+  if (!menu || menu.classList.contains("hidden")) return;
+  if (menu.contains(ev.target) || btn?.contains(ev.target)) return;
+  menu.classList.add("hidden");
+});
 
 async function saveSowBaseline() {
   const baseline = {};
