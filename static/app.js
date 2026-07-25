@@ -21025,49 +21025,251 @@ function _updateSowTargetCount() {
 // shared audit context) and painted as badges across SOW / Executive / Batch /
 // Findings so the reviewer's product scope is visible everywhere it matters.
 let _productTaxonomyCache = null;
+let _productLabelMap = {};
+// Live selection state for the open picker. Kept in a Set (not read off the DOM)
+// so filtering / switching category rails never loses a selection that scrolled
+// out of the rendered list.
+let _prSelected = new Set();
+let _prActiveGroup = "__ALL__";
+let _prCursor = 0;
+const _PR_RECENT_KEY = "pe_reviewed_products_recent";
+const _PR_RECENT_MAX = 8;
 
 async function _ensureProductTaxonomy() {
   if (_productTaxonomyCache) return _productTaxonomyCache;
   try {
     const res = await fetch("/api/sow/product-taxonomy");
-    if (res.ok) _productTaxonomyCache = await res.json();
+    if (res.ok) {
+      _productTaxonomyCache = await res.json();
+      _productLabelMap = {};
+      (_productTaxonomyCache.groups || []).forEach(g => {
+        (g.items || []).forEach(item => { _productLabelMap[item.value] = item.label; });
+      });
+    }
   } catch (e) { console.warn("[pe-dashboard] product taxonomy fetch:", e); }
   return _productTaxonomyCache || { groups: [] };
 }
 
 function _selectedReviewedProducts() {
-  const boxes = document.querySelectorAll('#products-reviewed-groups input[type="checkbox"]:checked');
-  return Array.from(boxes).map(b => b.value);
+  return Array.from(_prSelected);
+}
+
+function _prRecentList() {
+  try {
+    const raw = localStorage.getItem(_PR_RECENT_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter(v => typeof v === "string") : [];
+  } catch { return []; }
+}
+
+function _prPushRecent(values) {
+  try {
+    const merged = [...values, ..._prRecentList()];
+    const out = [];
+    merged.forEach(v => { if (v && !out.includes(v)) out.push(v); });
+    localStorage.setItem(_PR_RECENT_KEY, JSON.stringify(out.slice(0, _PR_RECENT_MAX)));
+  } catch { /* localStorage unavailable — recent list is a nicety, not critical */ }
+}
+
+// Flat list of items currently visible given the active rail group + search text.
+function _prVisibleItems() {
+  const q = (document.getElementById("products-reviewed-search")?.value || "").trim().toLowerCase();
+  const groups = (_productTaxonomyCache?.groups) || [];
+  const out = [];
+  groups.forEach(g => {
+    if (_prActiveGroup !== "__ALL__" && g.key !== _prActiveGroup) return;
+    (g.items || []).forEach(item => {
+      if (q && !`${item.value} ${item.label} ${g.label}`.toLowerCase().includes(q)) return;
+      out.push({ value: item.value, label: item.label, groupKey: g.key, groupLabel: g.label });
+    });
+  });
+  return out;
 }
 
 async function toggleProductsReviewedMenu() {
-  const menu = document.getElementById("products-reviewed-menu");
-  if (!menu) return;
-  const opening = menu.classList.contains("hidden");
-  if (opening) {
-    await _renderProductTaxonomyMenu();
-  }
-  menu.classList.toggle("hidden");
+  const overlay = document.getElementById("products-reviewed-overlay");
+  if (!overlay) return;
+  if (!overlay.classList.contains("hidden")) { closeProductsReviewedMenu(); return; }
+
+  await _ensureProductTaxonomy();
+  // Seed the working set from the last saved selection — Cancel/Esc discards
+  // any changes made in this session of the dialog.
+  _prSelected = new Set(window.appData?.reviewedProducts || []);
+  _prActiveGroup = "__ALL__";
+  _prCursor = 0;
+  const search = document.getElementById("products-reviewed-search");
+  if (search) search.value = "";
+  const statusEl = document.getElementById("products-reviewed-status");
+  if (statusEl) statusEl.textContent = "";
+
+  await _renderProductTaxonomyMenu();
+  overlay.classList.remove("hidden");
+  if (search) search.focus();
+}
+
+function closeProductsReviewedMenu() {
+  document.getElementById("products-reviewed-overlay")?.classList.add("hidden");
+}
+
+function _prCheckIcon() {
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3 h-3 text-Cbg"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" /></svg>';
+}
+
+function _renderReviewedProductsRail() {
+  const rail = document.getElementById("products-reviewed-rail");
+  if (!rail) return;
+  const groups = (_productTaxonomyCache?.groups) || [];
+  const totalAll = groups.reduce((n, g) => n + (g.items || []).length, 0);
+  const selAll = _prSelected.size;
+
+  const row = (key, label, sel, total) => {
+    const active = _prActiveGroup === key;
+    return `
+      <button type="button" onclick="setReviewedProductsGroup('${escapeHtml(key)}')"
+              class="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border text-left transition ${
+                active ? "border-Ccyan/50 bg-Ccyan/10" : "border-transparent hover:border-Cborder hover:bg-Cbg/40"}">
+        <span class="text-xs font-bold ${active ? "text-Cwhite" : "text-Cmuted"} truncate">${escapeHtml(label)}</span>
+        <span class="text-[10px] font-mono shrink-0 ${sel ? "text-Ccyan" : "text-Cmuted"}">${sel}/${total}</span>
+      </button>`;
+  };
+
+  rail.innerHTML =
+    `<div class="text-[9px] uppercase tracking-[0.16em] font-bold text-Cmuted px-2 pb-1">Families</div>` +
+    row("__ALL__", "All products", selAll, totalAll) +
+    groups.map(g => {
+      const items = g.items || [];
+      const sel = items.filter(i => _prSelected.has(i.value)).length;
+      return row(g.key, g.label, sel, items.length);
+    }).join("");
+}
+
+function setReviewedProductsGroup(key) {
+  _prActiveGroup = key;
+  _prCursor = 0;
+  _renderProductTaxonomyMenu().catch(() => {});
+}
+
+function _renderReviewedProductsRecent() {
+  const wrap = document.getElementById("products-reviewed-recent-wrap");
+  const host = document.getElementById("products-reviewed-recent");
+  if (!wrap || !host) return;
+  const recent = _prRecentList().filter(v => _productLabelMap[v]);
+  if (!recent.length) { wrap.classList.add("hidden"); host.innerHTML = ""; return; }
+  wrap.classList.remove("hidden");
+  host.innerHTML = recent.map(v => {
+    const on = _prSelected.has(v);
+    return `<button type="button" onclick="toggleReviewedProduct('${escapeHtml(v)}')"
+              class="px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
+                on ? "bg-Ccyan/20 border-Ccyan/50 text-Ccyan" : "bg-Cbg/50 border-Cborder text-Cmuted hover:text-Cwhite hover:border-Cblue/40"}">
+              ${on ? "✓ " : "+ "}${escapeHtml(_productLabelMap[v] || v)}</button>`;
+  }).join("");
+}
+
+function _renderReviewedProductsTray() {
+  const wrap = document.getElementById("products-reviewed-tray-wrap");
+  const host = document.getElementById("products-reviewed-tray");
+  if (!wrap || !host) return;
+  const vals = Array.from(_prSelected);
+  if (!vals.length) { wrap.classList.add("hidden"); host.innerHTML = ""; return; }
+  wrap.classList.remove("hidden");
+  host.innerHTML = vals.map(v => `
+    <span class="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-full text-[10px] font-semibold bg-Cpurple/15 border border-Cpurple/40 text-Cpurple">
+      ${escapeHtml(_productLabelMap[v] || v)}
+      <button type="button" onclick="toggleReviewedProduct('${escapeHtml(v)}')"
+              title="Remove from scope"
+              class="w-3.5 h-3.5 rounded-full flex items-center justify-center hover:bg-Cpurple/30 text-Cpurple">×</button>
+    </span>`).join("");
 }
 
 async function _renderProductTaxonomyMenu() {
   const host = document.getElementById("products-reviewed-groups");
   if (!host) return;
-  const taxonomy = await _ensureProductTaxonomy();
-  const selected = new Set(window.appData?.reviewedProducts || []);
-  const groups = taxonomy.groups || [];
-  host.innerHTML = groups.map(g => `
-    <div>
-      <div class="text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1">${escapeHtml(g.label)}</div>
-      <div class="space-y-1">
-        ${(g.items || []).map(item => `
-          <label class="flex items-center gap-2 text-xs text-Cwhite/90 cursor-pointer hover:text-Cwhite">
-            <input type="checkbox" value="${escapeHtml(item.value)}" ${selected.has(item.value) ? "checked" : ""}
-                   class="rounded border-Cborder bg-Cbg text-Ccyan focus:ring-Ccyan/40" />
-            ${escapeHtml(item.label)}
-          </label>`).join("")}
-      </div>
-    </div>`).join("");
+  await _ensureProductTaxonomy();
+
+  const visible = _prVisibleItems();
+  if (_prCursor >= visible.length) _prCursor = Math.max(0, visible.length - 1);
+
+  // Group the flat visible list back into sections for display
+  const sections = [];
+  visible.forEach((it, idx) => {
+    let sec = sections.find(s => s.key === it.groupKey);
+    if (!sec) { sec = { key: it.groupKey, label: it.groupLabel, rows: [] }; sections.push(sec); }
+    sec.rows.push({ ...it, idx });
+  });
+
+  if (!sections.length) {
+    host.innerHTML = `
+      <div class="rounded-xl border border-dashed border-Cborder bg-Cbg/30 px-6 py-10 text-center">
+        <p class="text-sm text-Cwhite font-semibold">No products match your search</p>
+        <p class="text-[11px] text-Cmuted mt-1">Try a different term, or switch family in the left rail.</p>
+      </div>`;
+  } else {
+    host.innerHTML = sections.map(sec => `
+      <section>
+        <div class="flex items-center gap-2 mb-2 px-0.5">
+          <span class="text-[9px] uppercase tracking-[0.16em] font-bold text-Cmuted">${escapeHtml(sec.label)}</span>
+          <span class="h-px flex-1 bg-Cborder/60"></span>
+          <span class="text-[9px] font-mono text-Cmuted">${sec.rows.length}</span>
+        </div>
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-1.5">
+          ${sec.rows.map(r => {
+            const sel = _prSelected.has(r.value);
+            const cur = r.idx === _prCursor;
+            return `
+            <button type="button" data-pr-idx="${r.idx}"
+                    onclick="toggleReviewedProduct('${escapeHtml(r.value)}')"
+                    class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition ${
+                      sel ? "border-Ccyan/50 bg-Ccyan/10" : "border-Cborder/60 bg-Cbg/30 hover:border-Cblue/40"} ${
+                      cur ? "ring-2 ring-Ccyan/50" : ""}">
+              <span class="w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                sel ? "bg-Ccyan border-Ccyan" : "border-Cmuted/70"}">${sel ? _prCheckIcon() : ""}</span>
+              <span class="text-sm font-semibold ${sel ? "text-Cwhite" : "text-Cwhite/85"} truncate">${escapeHtml(r.label)}</span>
+            </button>`;
+          }).join("")}
+        </div>
+      </section>`).join("");
+  }
+
+  _renderReviewedProductsRail();
+  _renderReviewedProductsRecent();
+  _renderReviewedProductsTray();
+  _updateReviewedProductsUiMeta();
+  _prScrollCursorIntoView();
+}
+
+function _prScrollCursorIntoView() {
+  const el = document.querySelector(`[data-pr-idx="${_prCursor}"]`);
+  if (el) el.scrollIntoView({ block: "nearest" });
+}
+
+function _updateReviewedProductsUiMeta() {
+  const cntEl = document.getElementById("products-reviewed-count");
+  if (cntEl) {
+    const n = _prSelected.size;
+    cntEl.textContent = `${n} selected`;
+    cntEl.classList.toggle("opacity-50", n === 0);
+  }
+}
+
+function toggleReviewedProduct(value) {
+  if (_prSelected.has(value)) _prSelected.delete(value);
+  else _prSelected.add(value);
+  _renderProductTaxonomyMenu().catch(() => {});
+}
+
+function filterReviewedProducts() {
+  _prCursor = 0;
+  _renderProductTaxonomyMenu().catch(() => {});
+}
+
+function selectAllReviewedProducts() {
+  _prVisibleItems().forEach(it => _prSelected.add(it.value));
+  _renderProductTaxonomyMenu().catch(() => {});
+}
+
+function clearReviewedProducts() {
+  _prSelected.clear();
+  _renderProductTaxonomyMenu().catch(() => {});
 }
 
 async function saveReviewedProducts() {
@@ -21082,10 +21284,12 @@ async function saveReviewedProducts() {
     const data = await res.json();
     window.appData = window.appData || {};
     window.appData.reviewedProducts = data.products || products;
+    _prPushRecent(products);
     _renderReviewedProductsBadges();
     if (statusEl) statusEl.textContent = "Saved";
-    toast("success", "Products reviewed saved", `${products.length} product(s) marked in scope.`);
-    document.getElementById("products-reviewed-menu")?.classList.add("hidden");
+    toast("success", "Products reviewed saved",
+          products.length ? `${products.length} module(s) marked in scope.` : "Product scope cleared.");
+    closeProductsReviewedMenu();
   } catch (e) {
     console.warn("[pe-dashboard] save reviewed products:", e);
     toast("error", "Save failed", "Could not save products reviewed selection.");
@@ -21096,21 +21300,30 @@ async function saveReviewedProducts() {
 // badge container (SOW tab, Executive banner, Batch Review, Findings header).
 function _renderReviewedProductsBadges() {
   const products = window.appData?.reviewedProducts || [];
+  // Labels come from the taxonomy — fetch it once if a restore painted badges
+  // before the catalogue was loaded, then repaint with friendly names.
+  if (products.length && !Object.keys(_productLabelMap).length) {
+    _ensureProductTaxonomy().then(() => _renderReviewedProductsBadges()).catch(() => {});
+  }
   const containerIds = [
     "products-reviewed-badges",
     "exec-products-reviewed-badges",
     "batch-products-reviewed-badges",
     "findings-products-reviewed-badges",
   ];
-  const btnLabel = document.getElementById("products-reviewed-btn-label");
-  if (btnLabel) {
-    btnLabel.textContent = products.length
-      ? `Products Reviewed (${products.length})`
-      : "Products Reviewed";
+  const btnSub = document.getElementById("products-reviewed-btn-subtitle");
+  const btn = document.getElementById("products-reviewed-btn");
+  if (btnSub) {
+    btnSub.textContent = products.length ? `${products.length} module(s) in scope` : "Choose modules in scope";
   }
-  const chipsHtml = products.map(p => `
-    <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-Cpurple/15 border border-Cpurple/40 text-Cpurple">${escapeHtml(p)}</span>
-  `).join("");
+  if (btn) {
+    btn.classList.toggle("border-Ccyan/60", products.length > 0);
+    btn.classList.toggle("shadow-[0_0_24px_rgba(56,189,248,0.35)]", products.length > 0);
+  }
+  const chipsHtml = products.map(p => {
+    const label = _productLabelMap[p] || p;
+    return `<span class="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-Cpurple/15 border border-Cpurple/40 text-Cpurple">${escapeHtml(label)}</span>`;
+  }).join("");
   containerIds.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -21124,13 +21337,58 @@ function _renderReviewedProductsBadges() {
   });
 }
 
-// Close the dropdown when clicking outside of it
+// Click on the dimmed backdrop (not the panel itself) closes the picker
 document.addEventListener("click", (ev) => {
-  const menu = document.getElementById("products-reviewed-menu");
-  const btn  = document.getElementById("products-reviewed-btn");
-  if (!menu || menu.classList.contains("hidden")) return;
-  if (menu.contains(ev.target) || btn?.contains(ev.target)) return;
-  menu.classList.add("hidden");
+  const overlay = document.getElementById("products-reviewed-overlay");
+  if (!overlay || overlay.classList.contains("hidden")) return;
+  if (ev.target === overlay) closeProductsReviewedMenu();
+});
+
+// Keyboard-first navigation while the picker is open
+document.addEventListener("keydown", (ev) => {
+  const overlay = document.getElementById("products-reviewed-overlay");
+  const open = overlay && !overlay.classList.contains("hidden");
+
+  if (ev.key === "Escape") {
+    if (open) closeProductsReviewedMenu();
+    return;
+  }
+  if (!open) return;
+
+  const search = document.getElementById("products-reviewed-search");
+  const inSearch = document.activeElement === search;
+
+  // "/" focuses search from anywhere in the dialog
+  if (ev.key === "/" && !inSearch) {
+    ev.preventDefault();
+    search?.focus();
+    return;
+  }
+  // Ctrl/Cmd+Enter saves from anywhere
+  if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+    ev.preventDefault();
+    saveReviewedProducts();
+    return;
+  }
+
+  const visible = _prVisibleItems();
+  if (!visible.length) return;
+
+  if (ev.key === "ArrowDown") {
+    ev.preventDefault();
+    _prCursor = Math.min(_prCursor + 1, visible.length - 1);
+    _renderProductTaxonomyMenu().catch(() => {});
+  } else if (ev.key === "ArrowUp") {
+    ev.preventDefault();
+    _prCursor = Math.max(_prCursor - 1, 0);
+    _renderProductTaxonomyMenu().catch(() => {});
+  } else if (ev.key === " " || (ev.key === "Enter" && !inSearch)) {
+    // Space toggles the cursor row; inside the search box Enter also toggles so
+    // the user can type-then-select without leaving the keyboard.
+    ev.preventDefault();
+    const item = visible[_prCursor];
+    if (item) toggleReviewedProduct(item.value);
+  }
 });
 
 async function saveSowBaseline() {

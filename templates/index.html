@@ -3588,28 +3588,117 @@
               <p class="text-[11px] text-Cmuted mt-0.5">Contracted commitments, SLA ceilings, volume ramp and operational standards — all cross-wired to the PE Narrative.</p>
             </div>
             <div class="flex items-center gap-2">
-              <div class="relative">
-                <button id="products-reviewed-btn" onclick="toggleProductsReviewedMenu()"
-                        class="px-4 py-2 rounded-xl text-xs font-bold bg-Ccard border border-Cborder text-Cwhite hover:border-Ccyan/50 transition flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
-                  <span id="products-reviewed-btn-label">Products Reviewed</span>
-                </button>
-                <!-- Multi-select LOV dropdown: grouped checkboxes by product family, populated
-                     dynamically from GET /api/sow/product-taxonomy (services/product_taxonomy.py) -->
-                <div id="products-reviewed-menu" class="hidden absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-Cborder bg-Ccard shadow-2xl z-50 p-3 space-y-3">
-                  <p class="text-[10px] text-Cmuted">Select the Blue Yonder product(s)/module(s) in scope for this engagement. Shown in Executive, Findings and the final report.</p>
-                  <div id="products-reviewed-groups" class="space-y-3"></div>
-                  <div class="flex items-center justify-between pt-2 border-t border-Cborder">
-                    <span id="products-reviewed-status" class="text-[10px] text-Cmuted"></span>
-                    <button onclick="saveReviewedProducts()" class="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-Ccyan/20 border border-Ccyan/40 text-Cwhite hover:opacity-90">Save</button>
-                  </div>
-                </div>
-              </div>
+              <button id="products-reviewed-btn" onclick="toggleProductsReviewedMenu()"
+                      class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-Cpurple/20 via-Cblue/20 to-Ccyan/20 border border-Cpurple/40 text-Cwhite hover:opacity-95 hover:border-Ccyan/60 transition flex items-center gap-3 shadow-[0_0_18px_rgba(56,189,248,0.2)]">
+                <span class="w-8 h-8 rounded-lg bg-Cpurple/25 border border-Cpurple/50 flex items-center justify-center shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                </span>
+                <span class="flex flex-col items-start leading-tight">
+                  <span id="products-reviewed-btn-title" class="text-sm font-extrabold">Products Reviewed</span>
+                  <span id="products-reviewed-btn-subtitle" class="text-[10px] text-Cmuted">Choose modules in scope</span>
+                </span>
+              </button>
               <button onclick="saveSowBaseline()"
                       class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-Ccyan/20 to-Cblue/20 border border-Ccyan/40 text-Cwhite hover:opacity-90 transition flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
                 Compare vs Actuals
               </button>
+            </div>
+          </div>
+
+          <!-- Products Reviewed picker — enterprise two-pane selector (v2).
+               Left rail = product families with live selected/total counts.
+               Right pane = keyboard-navigable item rows. Selected scope tray at
+               the bottom. Catalogue comes from GET /api/sow/product-taxonomy. -->
+          <div id="products-reviewed-overlay" class="hidden fixed inset-0 z-[80] bg-Cbg/80 backdrop-blur-md p-3 sm:p-6">
+            <div class="mx-auto w-full max-w-6xl h-[86vh] rounded-2xl border border-Cblue/40 bg-gradient-to-br from-Ccard to-Ccard2 shadow-[0_24px_70px_rgba(2,6,23,0.8)] overflow-hidden flex flex-col">
+
+              <!-- Header -->
+              <div class="px-6 py-4 border-b border-Cborder/70 bg-Ccard/70 flex items-start justify-between gap-4 shrink-0">
+                <div class="flex items-center gap-3 min-w-0">
+                  <div class="w-11 h-11 rounded-xl bg-Cpurple/20 border border-Cpurple/45 flex items-center justify-center shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-6 h-6 text-Cpurple"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 6A2.25 2.25 0 0 1 15.75 3.75H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" /></svg>
+                  </div>
+                  <div class="min-w-0">
+                    <h3 class="text-lg font-black text-Cwhite leading-tight">Products / Modules Reviewed</h3>
+                    <p class="text-[11px] text-Cmuted mt-0.5">Defines audit scope — flows into SOW, Executive Dashboard, PE Findings and the final report.</p>
+                  </div>
+                </div>
+                <button type="button" onclick="closeProductsReviewedMenu()"
+                        class="px-3 py-1.5 rounded-lg text-[11px] font-bold border border-Cborder text-Cmuted hover:text-Cwhite hover:border-Ccyan/50 shrink-0">
+                  Close · Esc
+                </button>
+              </div>
+
+              <!-- Toolbar -->
+              <div class="px-6 py-3 border-b border-Cborder/60 bg-Cbg/20 flex flex-col lg:flex-row lg:items-center gap-3 shrink-0">
+                <div class="relative w-full lg:max-w-md">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 text-Cmuted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+                  <input id="products-reviewed-search" type="text" oninput="filterReviewedProducts()"
+                         placeholder="Search products, modules or aliases…"
+                         class="w-full bg-Cbg border border-Cborder rounded-xl pl-9 pr-14 py-2.5 text-sm text-Cwhite placeholder-Cmuted focus:outline-none focus:border-Ccyan" />
+                  <kbd class="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-mono text-Cmuted border border-Cborder rounded px-1.5 py-0.5">/</kbd>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button type="button" onclick="selectAllReviewedProducts()"
+                          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-Cblue/15 border border-Cblue/40 text-Cwhite hover:bg-Cblue/25 transition">
+                    Select visible
+                  </button>
+                  <button type="button" onclick="clearReviewedProducts()"
+                          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-Ccard border border-Cborder text-Cmuted hover:text-Cwhite hover:border-Cred/40 transition">
+                    Clear all
+                  </button>
+                </div>
+                <div class="lg:ml-auto flex items-center gap-2 shrink-0">
+                  <span id="products-reviewed-count"
+                        class="px-3 py-1.5 rounded-lg text-xs font-black bg-Ccyan/15 border border-Ccyan/40 text-Ccyan">0 selected</span>
+                </div>
+              </div>
+
+              <!-- Recently used quick-add (hidden until there is history) -->
+              <div id="products-reviewed-recent-wrap" class="hidden px-6 py-2.5 border-b border-Cborder/50 bg-Cbg/10 shrink-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-[9px] uppercase tracking-[0.16em] font-bold text-Cmuted shrink-0">Recently used</span>
+                  <div id="products-reviewed-recent" class="flex flex-wrap gap-1.5"></div>
+                </div>
+              </div>
+
+              <!-- Body: category rail + item list -->
+              <div class="flex-1 min-h-0 flex">
+                <aside id="products-reviewed-rail"
+                       class="w-52 sm:w-60 shrink-0 border-r border-Cborder/60 bg-Cbg/25 overflow-y-auto p-3 space-y-1.5"></aside>
+                <div id="products-reviewed-menu" class="flex-1 min-w-0 overflow-y-auto p-4">
+                  <div id="products-reviewed-groups" class="space-y-4"></div>
+                </div>
+              </div>
+
+              <!-- Selected scope tray -->
+              <div id="products-reviewed-tray-wrap" class="hidden px-6 py-3 border-t border-Cborder/60 bg-Cbg/40 shrink-0">
+                <div class="text-[9px] uppercase tracking-[0.16em] font-bold text-Cmuted mb-2">Selected scope</div>
+                <div id="products-reviewed-tray" class="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto"></div>
+              </div>
+
+              <!-- Footer -->
+              <div class="px-6 py-3.5 border-t border-Cborder/70 bg-Ccard/70 flex items-center justify-between gap-4 shrink-0">
+                <div class="flex items-center gap-3 min-w-0">
+                  <span id="products-reviewed-status" class="text-[11px] text-Cmuted truncate"></span>
+                  <span class="hidden sm:flex items-center gap-1.5 text-[10px] text-Cmuted shrink-0">
+                    <kbd class="font-mono border border-Cborder rounded px-1.5 py-0.5">↑↓</kbd> move
+                    <kbd class="font-mono border border-Cborder rounded px-1.5 py-0.5">Space</kbd> toggle
+                    <kbd class="font-mono border border-Cborder rounded px-1.5 py-0.5">Ctrl+↵</kbd> save
+                  </span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <button type="button" onclick="closeProductsReviewedMenu()"
+                          class="px-4 py-2 rounded-lg text-xs font-bold border border-Cborder text-Cmuted hover:text-Cwhite">
+                    Cancel
+                  </button>
+                  <button onclick="saveReviewedProducts()"
+                          class="px-5 py-2 rounded-lg text-sm font-black bg-gradient-to-r from-Ccyan/30 to-Cblue/30 border border-Ccyan/50 text-Cwhite hover:opacity-90 transition">
+                    Save scope
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
