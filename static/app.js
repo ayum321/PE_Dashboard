@@ -20448,6 +20448,16 @@ const _SOW_FIELDS = [
   { key: "peak_users",   baseId: "sow-users",     label: "Peak Concurrent Users" },
 ];
 
+function _readSowNumericInput(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const raw = String(el.value ?? "").trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/,/g, "");
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+}
+
 // ── Open the standalone manual SOW entry panel ───────────────────────────
 function openSowManualEntry() {
   document.getElementById("sow-empty")?.classList.add("hidden");
@@ -20474,7 +20484,13 @@ async function clearSowManual() {
   window._execCacheHash = null;
   document.getElementById("sow-chart-wrap")?.classList.add("hidden");
   document.getElementById("sow-table-wrap")?.classList.add("hidden");
+  document.getElementById("sow-overconsumption")?.classList.add("hidden");
+  document.getElementById("sow-overconsumption") && (document.getElementById("sow-overconsumption").innerHTML = "");
+  document.getElementById("sow-summary-banner")?.classList.add("hidden");
   document.getElementById("sow-save-msg")?.classList.add("hidden");
+  document.getElementById("sow-volume-comparison")?.classList.add("hidden");
+  document.getElementById("volume-scale-banner")?.classList.add("hidden");
+  document.getElementById("volume-scale-banner") && (document.getElementById("volume-scale-banner").innerHTML = "");
   toast("info", "SOW data cleared", "All manual targets and comparison results removed.");
 }
 
@@ -20617,8 +20633,9 @@ function _renderSowContractPanel(contract) {
   // ── Wire manual input changes back to appData.sowContract ────────────
   _bindSowManualInputs();
 
-  // Render volume comparison bars if actuals already saved
-  _renderSowVolumeComparison();
+  // Render volume comparison (single unified panel — no separate live-typing bars)
+  _syncSowCompareFromManual();
+  _renderSowComparison(window.appData.sowCompare || { metrics: [] });
 
   // Store contract in appData so final judgment can use it
   window.appData = window.appData || {};
@@ -20639,18 +20656,18 @@ function _bindSowManualInputs() {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", () => {
-      const val = parseFloat(el.value);
+      const val = _readSowNumericInput(id);
       window.appData = window.appData || {};
       window.appData.sowContract = window.appData.sowContract || {};
-      if (!isNaN(val) && val > 0) {
+      if (val != null && val > 0) {
         window.appData.sowContract[key] = val;
       } else {
         delete window.appData.sowContract[key];
       }
       if (metricId) _updateSowMetricCard(metricId);
       _updateSowTargetCount();
-      _renderSowVolumeComparison();
       _syncSowCompareFromManual();
+      _renderSowComparison(window.appData.sowCompare || { metrics: [] });
       window._execCacheHash = null;
       if (_sowSaveDebounce) clearTimeout(_sowSaveDebounce);
       _sowSaveDebounce = setTimeout(() => {
@@ -20676,15 +20693,20 @@ function _bindSowManualInputs() {
 
 // ── Sync sowCompare from all manual inputs ────────────────────────────────
 function _syncSowCompareFromManual() {
-  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
+  const _n = (id) => _readSowNumericInput(id);
+  const _pick = (id, fallback) => {
+    const fromInput = _n(id);
+    if (fromInput != null) return fromInput;
+    return (typeof fallback === "number" && Number.isFinite(fallback)) ? fallback : 0;
+  };
   const sc = window.appData?.sowContract || {};
 
   const fields = [
-    { key: "daily_dfu",    label: "Daily DFU",              base: _n("sow-dfu-baseline")      || sc.manual_dfu_baseline      || 0, act: _n("sow-dfu-actual")       || sc.manual_dfu_actual       || 0 },
-    { key: "daily_sku",    label: "Daily SKU Count",        base: _n("sow-sku-baseline")      || sc.manual_sku_baseline      || 0, act: _n("sow-sku-actual")       || sc.manual_sku_actual       || 0 },
-    { key: "daily_orders", label: "Daily Orders",           base: _n("sow-orders-baseline")   || sc.manual_orders_baseline   || 0, act: _n("sow-orders-actual")    || sc.manual_orders_actual    || 0 },
-    { key: "batch_jobs",   label: "Batch Jobs / Day",       base: _n("sow-batchjobs-baseline")|| sc.manual_batchjobs_baseline|| 0, act: _n("sow-batchjobs-actual") || sc.manual_batchjobs_actual || 0 },
-    { key: "peak_users",   label: "Peak Concurrent Users",  base: _n("sow-users-baseline")    || sc.manual_users_baseline    || 0, act: _n("sow-users-actual")     || sc.manual_users_actual     || 0 },
+    { key: "daily_dfu",    label: "Daily DFU",              base: _pick("sow-dfu-baseline", sc.manual_dfu_baseline),             act: _pick("sow-dfu-actual", sc.manual_dfu_actual) },
+    { key: "daily_sku",    label: "Daily SKU Count",        base: _pick("sow-sku-baseline", sc.manual_sku_baseline),             act: _pick("sow-sku-actual", sc.manual_sku_actual) },
+    { key: "daily_orders", label: "Daily Orders",           base: _pick("sow-orders-baseline", sc.manual_orders_baseline),        act: _pick("sow-orders-actual", sc.manual_orders_actual) },
+    { key: "batch_jobs",   label: "Batch Jobs / Day",       base: _pick("sow-batchjobs-baseline", sc.manual_batchjobs_baseline),  act: _pick("sow-batchjobs-actual", sc.manual_batchjobs_actual) },
+    { key: "peak_users",   label: "Peak Concurrent Users",  base: _pick("sow-users-baseline", sc.manual_users_baseline),          act: _pick("sow-users-actual", sc.manual_users_actual) },
   ];
   const metrics = fields
     .filter(f => f.base > 0)
@@ -20705,7 +20727,7 @@ function _syncSowCompareFromManual() {
 
 // ── Persist baseline to backend (fire-and-forget) ────────────────────────
 async function _persistSowBaseline() {
-  const _n = (id) => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? null : v; };
+  const _n = (id) => _readSowNumericInput(id);
   const baseline = {};
 
   // Volume targets
@@ -20751,15 +20773,20 @@ async function _persistSowBaseline() {
 
 // ── Build sow_compare from manual inputs (used by exec + findings payloads) ──
 function _buildSowCompareFromManual() {
-  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
+  const _n = (id) => _readSowNumericInput(id);
+  const _pick = (id, fallback) => {
+    const fromInput = _n(id);
+    if (fromInput != null) return fromInput;
+    return (typeof fallback === "number" && Number.isFinite(fallback)) ? fallback : 0;
+  };
   const sc = window.appData?.sowContract || {};
 
   const fields = [
-    { key: "daily_dfu",    label: "Daily DFU",             base: _n("sow-dfu-baseline")       || sc.manual_dfu_baseline       || 0, act: _n("sow-dfu-actual")        || sc.manual_dfu_actual        || 0 },
-    { key: "daily_sku",    label: "Daily SKU Count",       base: _n("sow-sku-baseline")       || sc.manual_sku_baseline       || 0, act: _n("sow-sku-actual")        || sc.manual_sku_actual        || 0 },
-    { key: "daily_orders", label: "Daily Orders",          base: _n("sow-orders-baseline")    || sc.manual_orders_baseline    || 0, act: _n("sow-orders-actual")     || sc.manual_orders_actual     || 0 },
-    { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _n("sow-batchjobs-baseline") || sc.manual_batchjobs_baseline || 0, act: _n("sow-batchjobs-actual")  || sc.manual_batchjobs_actual  || 0 },
-    { key: "peak_users",   label: "Peak Concurrent Users", base: _n("sow-users-baseline")     || sc.manual_users_baseline     || 0, act: _n("sow-users-actual")      || sc.manual_users_actual      || 0 },
+    { key: "daily_dfu",    label: "Daily DFU",             base: _pick("sow-dfu-baseline", sc.manual_dfu_baseline),             act: _pick("sow-dfu-actual", sc.manual_dfu_actual) },
+    { key: "daily_sku",    label: "Daily SKU Count",       base: _pick("sow-sku-baseline", sc.manual_sku_baseline),             act: _pick("sow-sku-actual", sc.manual_sku_actual) },
+    { key: "daily_orders", label: "Daily Orders",          base: _pick("sow-orders-baseline", sc.manual_orders_baseline),        act: _pick("sow-orders-actual", sc.manual_orders_actual) },
+    { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _pick("sow-batchjobs-baseline", sc.manual_batchjobs_baseline),  act: _pick("sow-batchjobs-actual", sc.manual_batchjobs_actual) },
+    { key: "peak_users",   label: "Peak Concurrent Users", base: _pick("sow-users-baseline", sc.manual_users_baseline),          act: _pick("sow-users-actual", sc.manual_users_actual) },
   ];
   const metrics = fields.filter(f => f.base > 0).map(f => ({
     key: f.key, label: f.label, sow: f.base, actual: f.act > 0 ? f.act : null,
@@ -20776,15 +20803,20 @@ function _buildVolumeAnalysis() {
   const sowCmp = ad.sowCompare   || {};
   const bk    = ad.batch?.kpis   || {};
   const batchCov = ad.batch?.data_coverage || {};
-  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
+  const _n = (id) => _readSowNumericInput(id);
+  const _pick = (id, fallback) => {
+    const fromInput = _n(id);
+    if (fromInput != null) return fromInput;
+    return (typeof fallback === "number" && Number.isFinite(fallback)) ? fallback : 0;
+  };
 
   // All manual baseline/actual fields
   const manualFields = [
-    { key: "daily_dfu",    label: "Daily DFU",             base: _n("sow-dfu-baseline")       || sc.manual_dfu_baseline       || 0, act: _n("sow-dfu-actual")        || sc.manual_dfu_actual        || 0 },
-    { key: "daily_sku",    label: "Daily SKU Count",       base: _n("sow-sku-baseline")       || sc.manual_sku_baseline       || 0, act: _n("sow-sku-actual")        || sc.manual_sku_actual        || 0 },
-    { key: "daily_orders", label: "Daily Orders",          base: _n("sow-orders-baseline")    || sc.manual_orders_baseline    || 0, act: _n("sow-orders-actual")     || sc.manual_orders_actual     || 0 },
-    { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _n("sow-batchjobs-baseline") || sc.manual_batchjobs_baseline || 0, act: _n("sow-batchjobs-actual")  || sc.manual_batchjobs_actual  || 0 },
-    { key: "peak_users",   label: "Peak Concurrent Users", base: _n("sow-users-baseline")     || sc.manual_users_baseline     || 0, act: _n("sow-users-actual")      || sc.manual_users_actual      || 0 },
+    { key: "daily_dfu",    label: "Daily DFU",             base: _pick("sow-dfu-baseline", sc.manual_dfu_baseline),             act: _pick("sow-dfu-actual", sc.manual_dfu_actual) },
+    { key: "daily_sku",    label: "Daily SKU Count",       base: _pick("sow-sku-baseline", sc.manual_sku_baseline),             act: _pick("sow-sku-actual", sc.manual_sku_actual) },
+    { key: "daily_orders", label: "Daily Orders",          base: _pick("sow-orders-baseline", sc.manual_orders_baseline),        act: _pick("sow-orders-actual", sc.manual_orders_actual) },
+    { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _pick("sow-batchjobs-baseline", sc.manual_batchjobs_baseline),  act: _pick("sow-batchjobs-actual", sc.manual_batchjobs_actual) },
+    { key: "peak_users",   label: "Peak Concurrent Users", base: _pick("sow-users-baseline", sc.manual_users_baseline),          act: _pick("sow-users-actual", sc.manual_users_actual) },
   ];
 
   const hasPdfItems = !!(sowCmp.items?.length);
@@ -20867,51 +20899,12 @@ function _buildVolumeAnalysis() {
   };
 }
 
-// ── SOW Volume Comparison: visual red/green % achievement bars ──────────
-function _renderSowVolumeComparison() {
-  const panel = document.getElementById("sow-volume-comparison");
-  if (!panel) return;
-
-  const _n = (id) => parseFloat(document.getElementById(id)?.value) || 0;
-  const sc  = window.appData?.sowContract || {};
-  const metrics = [
-    { label: "Daily DFU",             unit: "items",   baseline: _n("sow-dfu-baseline")       || sc.manual_dfu_baseline       || 0, actual: _n("sow-dfu-actual")        || sc.manual_dfu_actual        || 0 },
-    { label: "Daily SKU Count",       unit: "SKUs",    baseline: _n("sow-sku-baseline")       || sc.manual_sku_baseline       || 0, actual: _n("sow-sku-actual")        || sc.manual_sku_actual        || 0 },
-    { label: "Daily Orders",          unit: "orders",  baseline: _n("sow-orders-baseline")    || sc.manual_orders_baseline    || 0, actual: _n("sow-orders-actual")     || sc.manual_orders_actual     || 0 },
-    { label: "Batch Jobs / Day",      unit: "jobs",    baseline: _n("sow-batchjobs-baseline") || sc.manual_batchjobs_baseline || 0, actual: _n("sow-batchjobs-actual")  || sc.manual_batchjobs_actual  || 0 },
-    { label: "Peak Concurrent Users", unit: "users",   baseline: _n("sow-users-baseline")     || sc.manual_users_baseline     || 0, actual: _n("sow-users-actual")      || sc.manual_users_actual      || 0 },
-  ];
-
-  const rows = metrics.filter(m => m.baseline > 0 || m.actual > 0);
-  if (!rows.length) { panel.classList.add("hidden"); return; }
-
-  panel.classList.remove("hidden");
-  panel.innerHTML = rows.map(m => {
-    if (!m.baseline) return "";
-    const pct     = m.actual > 0 ? Math.min((m.actual / m.baseline) * 100, 200) : 0;
-    const achPct  = m.actual > 0 ? ((m.actual / m.baseline) * 100).toFixed(1) : "—";
-    const over    = m.actual > m.baseline;
-    const ok      = m.actual >= m.baseline * 0.9;
-    const barCol  = over ? "bg-Camber" : ok ? "bg-Cgreen" : "bg-Cred";
-    const textCol = over ? "text-Camber" : ok ? "text-Cgreen" : "text-Cred";
-    const label   = over ? `+${(((m.actual/m.baseline)-1)*100).toFixed(1)}% over SOW` :
-                    ok   ? `✅ ${achPct}% of SOW target` :
-                           `⚠ ${achPct}% — below target`;
-    const barW = Math.min(pct, 100);
-    return `
-      <div class="mb-3">
-        <div class="flex items-center justify-between mb-1">
-          <span class="text-[11px] font-semibold text-Cwhite">${_esc(m.label)}</span>
-          <span class="text-[11px] font-bold ${textCol}">${m.actual > 0 ? m.actual.toLocaleString() : "—"} / ${m.baseline.toLocaleString()} ${m.unit}</span>
-        </div>
-        <div class="h-2 rounded-full bg-Cborder/30 overflow-hidden">
-          <div class="h-2 rounded-full transition-all duration-300 ${barCol}" style="width:${barW}%"></div>
-        </div>
-        <div class="text-[10px] ${textCol} mt-0.5 font-medium">${label}</div>
-        ${over ? `<div class="text-[9px] text-Camber/70 italic mt-0.5">Exceeding SOW commitment — verify capacity headroom</div>` : ""}
-      </div>`;
-  }).join("");
-}
+// NOTE: the old _renderSowVolumeComparison() (a second, "live while typing"
+// achievement-bar panel targeting #sow-volume-comparison) has been retired.
+// It duplicated the exact same metrics as the unified panel rendered by
+// _renderSowComparison() below (that panel now updates live on every manual
+// input change too — see _bindSowManualInputs), so there is a single source
+// of bars/status/buffer%/findings regardless of manual entry vs upload.
 
 // ── Restore from API on page load ─────────────────────────────────────────
 async function loadSowBaseline() {
@@ -20976,8 +20969,8 @@ function _autoFillSowActuals() {
 
 // ── Update a single volume metric card's progress bar, % label, and badge ──
 function _updateSowMetricCard(metricId) {
-  const base = parseFloat(document.getElementById(`sow-${metricId}-baseline`)?.value) || 0;
-  const act  = parseFloat(document.getElementById(`sow-${metricId}-actual`)?.value)   || 0;
+  const base = _readSowNumericInput(`sow-${metricId}-baseline`) || 0;
+  const act  = _readSowNumericInput(`sow-${metricId}-actual`) || 0;
   const barEl   = document.getElementById(`sow-bar-${metricId}`);
   const pctEl   = document.getElementById(`sow-pct-${metricId}`);
   const badgeEl = document.getElementById(`sow-badge-${metricId}`);
@@ -21005,19 +20998,31 @@ function _updateSowMetricCard(metricId) {
   }
 
   const pct = (act / base) * 100;
+  const cmpBands = _sowBands(window.appData?.sowCompare || {});
+  const UNDER = cmpBands.under;
+  const OVER = cmpBands.over;
+  const CRIT = cmpBands.crit;
   let color, gradStart, gradEnd, label;
-  if (pct >= 100) {
+  if (pct > CRIT) {
+    color = "#dc2626"; gradStart = "rgba(220,38,38,0.55)"; gradEnd = "rgba(220,38,38,0.9)";
+    label = "CRITICAL OVER";
+    if (cardEl) { cardEl.style.borderColor = "rgba(220,38,38,0.5)"; }
+  } else if (pct > OVER) {
+    color = "#f43f5e"; gradStart = "rgba(244,63,94,0.5)"; gradEnd = "rgba(244,63,94,0.85)";
+    label = "OVER";
+    if (cardEl) { cardEl.style.borderColor = "rgba(244,63,94,0.42)"; }
+  } else if (pct >= 90) {
     color = "#10b981"; gradStart = "rgba(16,185,129,0.55)"; gradEnd = "rgba(16,185,129,0.9)";
-    label = "ON TARGET";
+    label = "OPTIMAL";
     if (cardEl) { cardEl.style.borderColor = "rgba(16,185,129,0.32)"; }
-  } else if (pct >= 80) {
-    color = "#f59e0b"; gradStart = "rgba(245,158,11,0.55)"; gradEnd = "rgba(245,158,11,0.9)";
-    label = "NEAR TARGET";
-    if (cardEl) { cardEl.style.borderColor = "rgba(245,158,11,0.32)"; }
+  } else if (pct >= UNDER) {
+    color = "#22d3ee"; gradStart = "rgba(34,211,238,0.45)"; gradEnd = "rgba(34,211,238,0.8)";
+    label = "ACCEPTABLE";
+    if (cardEl) { cardEl.style.borderColor = "rgba(34,211,238,0.35)"; }
   } else {
-    color = "#f87171"; gradStart = "rgba(248,113,113,0.55)"; gradEnd = "rgba(248,113,113,0.9)";
-    label = "UNDER";
-    if (cardEl) { cardEl.style.borderColor = "rgba(248,113,113,0.32)"; }
+    color = "#f59e0b"; gradStart = "rgba(245,158,11,0.55)"; gradEnd = "rgba(245,158,11,0.9)";
+    label = "LOW";
+    if (cardEl) { cardEl.style.borderColor = "rgba(245,158,11,0.36)"; }
   }
 
   if (barEl) {
@@ -21040,8 +21045,8 @@ function _updateSowMetricCard(metricId) {
 // ── Update the "N of 5 set" count badge in the SOW panel header ─────────────
 function _updateSowTargetCount() {
   const set = ["dfu","sku","orders","batchjobs","users"].filter(m => {
-    const v = parseFloat(document.getElementById(`sow-${m}-baseline`)?.value);
-    return !isNaN(v) && v > 0;
+    const v = _readSowNumericInput(`sow-${m}-baseline`);
+    return v != null && v > 0;
   }).length;
   const el = document.getElementById("sow-target-count");
   if (!el) return;
@@ -21448,10 +21453,10 @@ async function saveSowBaseline() {
   const baseline = {};
   const actuals  = {};
   _SOW_FIELDS.forEach(({ key, baseId }) => {
-    const bVal = parseFloat(document.getElementById(`${baseId}-baseline`)?.value || "");
-    const aVal = parseFloat(document.getElementById(`${baseId}-actual`)?.value   || "");
-    if (!isNaN(bVal) && bVal > 0) baseline[key] = bVal;
-    if (!isNaN(aVal) && aVal > 0) actuals[key]  = aVal;
+    const bVal = _readSowNumericInput(`${baseId}-baseline`);
+    const aVal = _readSowNumericInput(`${baseId}-actual`);
+    if (bVal != null && bVal > 0) baseline[key] = bVal;
+    if (aVal != null && aVal > 0) actuals[key]  = aVal;
   });
 
   if (Object.keys(baseline).length === 0) {
@@ -21460,14 +21465,16 @@ async function saveSowBaseline() {
   }
   const msgEl = document.getElementById("sow-save-msg");
   try {
-    await fetch("/api/sow/baseline", {
+    const baselineRes = await fetch("/api/sow/baseline", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(baseline),
     });
+    if (!baselineRes.ok) throw new Error(`SOW baseline save failed (${baselineRes.status})`);
     const res  = await fetch("/api/sow/compare", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ actuals }),
     });
+    if (!res.ok) throw new Error(`SOW comparison failed (${res.status})`);
     const data = await res.json();
     window.appData = window.appData || {};
     window.appData.sowCompare = data;
@@ -21490,16 +21497,31 @@ async function saveSowBaseline() {
 }
 
 function _renderSowComparison(data) {
-  // Always show grid (contains chart-wrap + table-wrap) and hide empty state
+  // Consolidated single-panel render: one panel shows contracted vs actual,
+  // achievement %, buffer % toward the next threshold, status, whether this
+  // triggers a PE finding, and the exact disclaimer for the current band.
+  // (Previously this was split across three panels — a caution table, a bar
+  // chart, and a plain metrics table — all restating the same numbers.)
   document.getElementById("sow-empty")?.classList.add("hidden");
+  // Legacy separate matrix table is superseded by the unified panel below —
+  // keep it permanently hidden so it can never show duplicate data again.
+  document.getElementById("sow-table-wrap")?.classList.add("hidden");
+
+  if (!data || !data.metrics?.length) {
+    // Nothing to compare yet (e.g. baseline set but no actuals) — don't show
+    // an empty/stale panel.
+    document.getElementById("sow-chart-wrap")?.classList.add("hidden");
+    document.getElementById("sow-overconsumption")?.classList.add("hidden");
+    return;
+  }
+
   document.getElementById("sow-contract-grid")?.classList.remove("hidden");
   document.getElementById("sow-chart-wrap")?.classList.remove("hidden");
-  document.getElementById("sow-table-wrap")?.classList.remove("hidden");
   document.getElementById("sow-summary-banner")?.classList.remove("hidden");
 
   setText("sow-summary-text", data.summary || "");
 
-  // Consumption bands — server-supplied (from services/pe_config.py) so the
+  // Consumption bands \u2014 server-supplied (from services/pe_config.py) so the
   // dashboard can never disagree with the findings engine or the report.
   const B      = _sowBands(data);
   const UNDER  = B.under, OVER = B.over, CRIT = B.crit;
@@ -21509,42 +21531,78 @@ function _renderSowComparison(data) {
   const badge = document.getElementById("sow-overall-badge");
   if (badge) {
     const cfg = {
-      OPTIMAL:       { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen", icon: "✅" },
-      ACCEPTABLE:    { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen", icon: "✅" },
-      MODERATE:      { bg: "bg-Camber/20 border-Camber/40 text-Camber", icon: "⚠️" },
-      LOW:           { bg: "bg-Camber/20 border-Camber/40 text-Camber", icon: "📉" },
-      OVER:          { bg: "bg-Cred/20 border-Cred/50 text-Cred",       icon: "🔴", label: "OVERCONSUMPTION" },
-      CRITICAL_OVER: { bg: "bg-Cred/30 border-Cred/70 text-Cred animate-pulse", icon: "🛑", label: "CRITICAL OVERCONSUMPTION" },
-      "N/A":         { bg: "bg-Cmuted/20 border-Cborder text-Cmuted",   icon: "—"  },
+      OPTIMAL:       { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen", icon: "\u2705" },
+      ACCEPTABLE:    { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen", icon: "\u2705" },
+      MODERATE:      { bg: "bg-Camber/20 border-Camber/40 text-Camber", icon: "\u26a0\ufe0f" },
+      LOW:           { bg: "bg-Camber/20 border-Camber/40 text-Camber", icon: "\U0001F4C9" },
+      OVER:          { bg: "bg-Cred/20 border-Cred/50 text-Cred",       icon: "\U0001F534", label: "OVERCONSUMPTION" },
+      CRITICAL_OVER: { bg: "bg-Cred/30 border-Cred/70 text-Cred animate-pulse", icon: "\U0001F6D1", label: "CRITICAL OVERCONSUMPTION" },
+      "N/A":         { bg: "bg-Cmuted/20 border-Cborder text-Cmuted",   icon: "\u2014"  },
     }[data.overall_status] || { bg: "bg-Cmuted/20 border-Cborder text-Cmuted", icon: "?" };
     const lbl = cfg.label || data.overall_status;
     badge.innerHTML = `<span class="text-[11px] font-bold px-3 py-1 rounded-full border ${cfg.bg}">${cfg.icon} ${_esc(lbl)}</span>`;
   }
 
-  // ── Over-consumption caution block ────────────────────────────────────
-  // Only rendered when actual volume exceeds the contracted ceiling. States
-  // contracted vs actual vs overage per metric so the reviewer can paste the
-  // numbers straight into a customer conversation.
+  // \u2500\u2500 Aggregate top-line caution (single sentence, not a repeated table) \u2500\u2500
   _renderSowOverconsumption(data, B);
 
-  // Bar chart
+  // \u2500\u2500 Unified per-metric panel: bar + numbers + buffer% + status + PE finding tag \u2500\u2500
   const barsEl = document.getElementById("sow-bars-container");
   if (barsEl && data.metrics?.length) {
     barsEl.innerHTML = data.metrics.map((m) => {
       const pct    = Math.min(m.pct, AXIS);
       const barPct = (pct / AXIS * 100).toFixed(1);
-      const color  = m.pct > CRIT  ? "#dc2626"   // severe over-consumption
-                   : m.pct > OVER  ? "#f43f5e"   // over-consumption
+      const isCrit  = m.pct > CRIT;
+      const isOver  = m.pct > OVER;
+      const isLow   = m.pct < UNDER;
+      const color  = isCrit  ? "#dc2626"   // severe over-consumption
+                   : isOver  ? "#f43f5e"   // over-consumption
                    : m.pct >= UNDER ? "#22d3ee"  // inside standard window
                    : "#f59e0b";                  // below the contracted floor
-      const statusBg = m.pct > OVER                 ? "bg-Cred/20 text-Cred"
-                     : m.pct >= UNDER               ? "bg-Ccyan/20 text-Ccyan"
+      const statusBg = isOver                    ? "bg-Cred/20 text-Cred"
+                     : m.pct >= UNDER             ? "bg-Ccyan/20 text-Ccyan"
                      : "bg-Camber/20 text-Camber";
       const over = _sowOverBy(m);
-      return `<div class="space-y-1.5">
-        <div class="flex items-center justify-between text-[11px]">
+
+      // Buffer % \u2014 same convention as the SLA buffer metric: positive = safe
+      // headroom before the next threshold, negative = amount past it.
+      const bufferPct = +(OVER - m.pct).toFixed(1);
+      let bufferLabel, bufferColor;
+      if (isOver) {
+        bufferLabel = `${bufferPct.toFixed(1)}% (over ceiling by ${Math.abs(bufferPct).toFixed(1)}pp)`;
+        bufferColor = "text-Cred";
+      } else if (isLow) {
+        const shortfall = +(UNDER - m.pct).toFixed(1);
+        bufferLabel = `+${(OVER - UNDER).toFixed(1)}% to ceiling \u2014 ${shortfall.toFixed(1)}pp below floor`;
+        bufferColor = "text-Camber";
+      } else {
+        bufferLabel = `+${bufferPct.toFixed(1)}% to ceiling`;
+        bufferColor = "text-Cgreen";
+      }
+
+      // PE Finding tag \u2014 mirrors routers/findings.py root_cause wording exactly
+      // so the panel never disagrees with what actually gets reported.
+      let findingTag;
+      if (isCrit) {
+        findingTag = `<span class="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-Cred/25 border border-Cred/60 text-Cred uppercase tracking-wide">\u26a0 PE Finding \u00b7 CRITICAL \u00b7 SOW_VOLUME_OVER</span>`;
+      } else if (isOver) {
+        findingTag = `<span class="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-Cred/15 border border-Cred/40 text-Cred uppercase tracking-wide">\u26a0 PE Finding \u00b7 CRITICAL \u00b7 SOW_VOLUME_OVER</span>`;
+      } else if (isLow) {
+        findingTag = `<span class="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-Camber/15 border border-Camber/40 text-Camber uppercase tracking-wide">\u26a0 PE Finding \u00b7 WARNING \u00b7 SOW_VOLUME_UNDER</span>`;
+      } else {
+        findingTag = `<span class="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-Cgreen/15 border border-Cgreen/35 text-Cgreen uppercase tracking-wide">\u2713 No PE finding \u00b7 within standard window</span>`;
+      }
+
+      const disclaimer = isCrit
+        ? `\U0001F6D1 CRITICAL OVERCONSUMPTION \u2014 ${_fmt(m.actual)} against a contracted ${_fmt(m.sow)}, exceeding contract by ${_fmt(over)}. Must be commercially resolved before PE sign-off (NO GO until amended or brought back inside contract).`
+        : isOver ? `\U0001F534 Overconsumption \u2014 exceeding contracted scope by ${_fmt(over)} (${m.pct.toFixed(1)}% of SOW). Formal review &amp; written customer acknowledgment required before sign-off.`
+        : isLow  ? `\u26a0 Below the ${UNDER}%\u2013${OVER}% standard process window \u2014 findings below are validated at this tested volume only, not at full contracted scale.`
+        : `Within the ${UNDER}%\u2013${OVER}% standard process window \u2014 no formal review required.`;
+
+      return `<div class="space-y-1.5 rounded-xl border border-Cborder/40 bg-Cbg/20 p-3">
+        <div class="flex items-center justify-between text-[11px] flex-wrap gap-y-1">
           <span class="font-semibold text-Cwhite">${_esc(m.label)}</span>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
             <span class="text-Cmuted font-mono text-[10px]">${_fmt(m.actual)} / ${_fmt(m.sow)}</span>
             <span class="font-bold" style="color:${color}">${m.pct.toFixed(1)}%</span>
             <span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase ${statusBg}">${_esc(_sowStatusLabel(m.status))}</span>
@@ -21561,40 +21619,18 @@ function _renderSowComparison(data) {
         <div class="flex justify-between text-[9px] text-Cmuted font-mono">
           <span>0</span><span class="text-Camber">${UNDER}%</span><span>100%</span><span class="text-Cred">${OVER}%</span><span class="text-Cred font-bold">${CRIT}%</span><span>${AXIS}%+</span>
         </div>
-        ${m.pct > CRIT ? `<div class="text-[9px] text-Cred font-bold">🛑 CRITICAL OVERCONSUMPTION — ${_fmt(m.actual)} against a contracted ${_fmt(m.sow)}, exceeding contract by ${_fmt(over)}. Must be commercially resolved before PE sign-off.</div>`
-          : m.pct > OVER ? `<div class="text-[9px] text-Cred font-semibold">🔴 Overconsumption — exceeding contracted scope by ${_fmt(over)} (${m.pct.toFixed(1)}% of SOW). Formal review &amp; acknowledgment required.</div>`
-          : m.pct < UNDER ? `<div class="text-[9px] text-Camber font-semibold">⚠ Below the ${UNDER}%–${OVER}% standard process window — findings validated at this volume only.</div>` : ""}
+        <div class="flex items-center justify-between flex-wrap gap-2 pt-0.5">
+          <span class="text-[10px] font-semibold ${bufferColor}">Buffer: ${bufferLabel}</span>
+          ${findingTag}
+        </div>
+        <div class="text-[9px] ${isCrit || isOver ? "text-Cred font-semibold" : isLow ? "text-Camber font-semibold" : "text-Cmuted"}">${disclaimer}</div>
       </div>`;
-    }).join("");
-  }
-
-  // Table
-  const tbody = document.getElementById("sow-table-tbody");
-  if (tbody && data.metrics?.length) {
-    tbody.innerHTML = data.metrics.map((m) => {
-      const isOver = m.pct > OVER;
-      const stBg = m.status === "CRITICAL_OVER" ? "bg-Cred/30 text-Cred" :
-                   isOver                        ? "bg-Cred/20 text-Cred" :
-                   m.status === "LOW"            ? "bg-Camber/20 text-Camber" :
-                                                   "bg-Ccyan/15 text-Ccyan";
-      const pctColor = isOver                      ? "text-Cred font-bold" :
-                       m.pct >= UNDER              ? "text-Ccyan font-bold" :
-                                                     "text-Camber font-semibold";
-      const over = _sowOverBy(m);
-      return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40 ${m.status === "CRITICAL_OVER" ? "bg-Cred/5" : ""}">
-        <td class="py-2.5 pr-4 font-semibold text-Cwhite">${_esc(m.label)}</td>
-        <td class="py-2.5 pr-4 text-right text-Cmuted font-mono">${_fmt(m.sow)}</td>
-        <td class="py-2.5 pr-4 text-right font-mono text-Cwhite">${_fmt(m.actual)}${over ? `<span class="text-Cred font-bold"> (+${_fmt(over)})</span>` : ""}</td>
-        <td class="py-2.5 pr-4 text-right ${pctColor}">${m.pct.toFixed(1)}%</td>
-        <td class="py-2.5 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${stBg}">${_esc(_sowStatusLabel(m.status))}</span></td>
-      </tr>`;
     }).join("");
   }
 
   // Keep the coverage strip + volume-scale banner in step with this render
   try { _renderVolumeScaleBanner(); } catch (e) { /* strip not on screen */ }
 }
-
 /** Consumption bands — server payload first, then config, then PE defaults. */
 function _sowBands(data) {
   const cfg = (window.appData && window.appData.config) || {};
@@ -21627,6 +21663,9 @@ function _sowStatusLabel(st) {
  * Renders only when at least one metric exceeds the contracted ceiling.
  */
 function _renderSowOverconsumption(data, bands) {
+  // Slim aggregate caution \u2014 a single top-line summary, not a repeated
+  // per-metric table (per-metric detail, buffer% and PE finding tags now live
+  // in the one unified panel rendered by _renderSowComparison()).
   const host = document.getElementById("sow-overconsumption");
   if (!host) return;
   const B  = bands || _sowBands(data);
@@ -21640,58 +21679,33 @@ function _renderSowOverconsumption(data, bands) {
   if (!items.length) { host.classList.add("hidden"); host.innerHTML = ""; return; }
 
   const critical = items.some(i => Number(i.pct) > B.crit);
+  const worst = items.reduce((a, b) => (Number(b.pct) > Number(a.pct) ? b : a));
   const tone = critical
-    ? { border: "border-Cred/70", bg: "bg-Cred/10", text: "text-Cred",
-        icon: "🛑", head: "CRITICAL OVERCONSUMPTION VS SOW CONTRACT" }
-    : { border: "border-Cred/45", bg: "bg-Cred/5", text: "text-Cred",
-        icon: "🔴", head: "OVERCONSUMPTION VS SOW CONTRACT" };
+    ? { border: "border-Cred/70", bg: "bg-Cred/10", text: "text-Cred", icon: "\U0001F6D1" }
+    : { border: "border-Cred/45", bg: "bg-Cred/5",  text: "text-Cred", icon: "\U0001F534" };
 
-  const rows = items.map(i => `
-    <tr class="border-b border-Cred/15">
-      <td class="py-1.5 pr-4 font-semibold text-Cwhite">${_esc(i.label)}</td>
-      <td class="py-1.5 pr-4 text-right font-mono text-Cmuted">${_fmt(i.sow)}</td>
-      <td class="py-1.5 pr-4 text-right font-mono text-Cwhite">${_fmt(i.actual)}</td>
-      <td class="py-1.5 pr-4 text-right font-mono font-bold text-Cred">+${_fmt(i.over_by)}</td>
-      <td class="py-1.5 text-right font-bold text-Cred">${Number(i.pct).toFixed(1)}%</td>
-    </tr>`).join("");
+  const head = critical ? "CRITICAL OVERCONSUMPTION VS SOW CONTRACT" : "OVERCONSUMPTION VS SOW CONTRACT";
+  const body = critical
+    ? `${items.length} metric(s) exceed ${B.crit}% of contracted scope. Worst: <strong class="text-Cwhite">${_esc(worst.label)}</strong>
+       at ${Number(worst.pct).toFixed(1)}% (contracted ${_fmt(worst.sow)}, consuming ${_fmt(worst.actual)},
+       exceeding by ${_fmt(worst.over_by || _sowOverBy(worst))}). This is a commercial deviation, not a tuning issue \u2014
+       must be raised with the customer and formally resolved <strong>before final PE sign-off (NO GO)</strong>.
+       Full detail per metric is in the panel below.`
+    : `${items.length} metric(s) exceed ${B.over}% of contracted scope \u2014 outside the ${B.under}%\u2013${B.over}%
+       standard process window. Worst: <strong class="text-Cwhite">${_esc(worst.label)}</strong> at ${Number(worst.pct).toFixed(1)}%.
+       Formal review and written customer acknowledgment required before sign-off. Full detail per metric is in the panel below.`;
 
-  const caution = critical
-    ? `Consumption exceeds ${B.crit}% of the contracted scope. This is a commercial
-       deviation, not a tuning issue — it must be raised with the customer and
-       formally resolved <strong>before final PE sign-off</strong>. Treat sign-off as
-       <strong>NO GO</strong> from the PE end until the contracted volume is
-       amended or consumption is brought back inside contract.`
-    : `Consumption exceeds ${B.over}% of the contracted scope — outside the
-       ${B.under}%–${B.over}% standard process window. Formal review and written
-       customer acknowledgment are required before sign-off. Infrastructure sized
-       to the contracted volume may not hold at the consumed volume.`;
-
-  host.className = `rounded-xl border ${tone.border} ${tone.bg} p-4 space-y-3`;
+  host.className = `rounded-xl border ${tone.border} ${tone.bg} p-3`;
   host.innerHTML = `
     <div class="flex items-start gap-3">
       <span class="text-lg leading-none">${tone.icon}</span>
       <div class="min-w-0">
-        <p class="text-[11px] font-black uppercase tracking-wider ${tone.text}">${tone.head}</p>
-        <p class="text-[11px] text-Cmuted mt-1 leading-relaxed">${caution}</p>
+        <p class="text-[11px] font-black uppercase tracking-wider ${tone.text}">${head}</p>
+        <p class="text-[11px] text-Cmuted mt-1 leading-relaxed">${body}</p>
       </div>
-    </div>
-    <div class="overflow-x-auto">
-      <table class="w-full text-[11px]">
-        <thead>
-          <tr class="text-[9px] uppercase tracking-wider text-Cmuted border-b border-Cred/25">
-            <th class="text-left py-1.5 pr-4 font-bold">Solution / Metric</th>
-            <th class="text-right py-1.5 pr-4 font-bold">Contracted Scope</th>
-            <th class="text-right py-1.5 pr-4 font-bold">Consumption</th>
-            <th class="text-right py-1.5 pr-4 font-bold">Exceeding By</th>
-            <th class="text-right py-1.5 font-bold">% of SOW</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
     </div>`;
   host.classList.remove("hidden");
 }
-
 /**
  * Volume-scale banner rendered directly under the PE Audit Coverage strip.
  *

@@ -3988,7 +3988,7 @@
             </div><!-- /grid -->
 
             <!-- Footer: CTA + save message -->
-            <div class="flex flex-wrap items-center gap-3 px-5 py-4"
+            <div class="flex flex-wrap items-center gap-3 px-5 py-4 mb-2"
                  style="border-top:1px solid rgba(255,255,255,0.04)">
               <button onclick="saveSowBaseline()"
                       class="flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold transition-all duration-200 active:scale-[0.98]"
@@ -4004,13 +4004,11 @@
             </div>
 
             <!-- Over-consumption caution (populated by _renderSowOverconsumption) -->
-            <div id="sow-overconsumption" class="hidden mx-5 mb-4"></div>
-
-            <!-- Volume achievement comparison (populated by _renderSowComparison) -->
-            <div id="sow-volume-comparison" class="hidden px-5 pb-5 pt-3 space-y-2"
-                 style="border-top:1px solid rgba(255,255,255,0.04)">
-              <p class="text-[10px] font-bold uppercase tracking-wider" style="color:#475569">Volume Achievement vs SOW Commitment</p>
-            </div>
+            <div id="sow-overconsumption" class="hidden mx-5 mt-2 mb-4"></div>
+            <!-- Note: the separate "live while typing" achievement-bar panel that
+                 used to sit here (#sow-volume-comparison) has been retired — it
+                 duplicated #sow-chart-wrap below. That single panel now updates
+                 live on every manual input change as well as after Save & Compare. -->
 
           </div>
 
@@ -4040,24 +4038,9 @@
               <div id="sow-bars-container" class="space-y-3"></div>
             </div>
 
-            <!-- ROW 4: Metrics table -->
-            <div id="sow-table-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5">
-              <h3 class="text-xs font-bold text-Cwhite uppercase tracking-wider mb-3">Volume Comparison Matrix</h3>
-              <div class="overflow-x-auto">
-                <table class="w-full text-xs">
-                  <thead>
-                    <tr class="border-b border-Cborder">
-                      <th class="text-left py-2 pr-4 text-Cmuted font-semibold">Metric</th>
-                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">SOW Target</th>
-                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Actual</th>
-                      <th class="text-right py-2 pr-4 text-Cmuted font-semibold">Achievement %</th>
-                      <th class="text-center py-2 text-Cmuted font-semibold">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody id="sow-table-tbody"></tbody>
-                </table>
-              </div>
-            </div>
+            <!-- Volume Comparison Matrix table retired \u2014 folded into the unified
+                 per-metric panel above (ROW 3) so the same numbers are never
+                 shown twice. #sow-table-wrap kept out of the DOM intentionally. -->
 
             <!-- Manual entry now in standalone sow-manual-panel above -->
 
