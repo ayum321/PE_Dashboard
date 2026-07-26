@@ -606,7 +606,7 @@
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-[18px] h-[18px]">
             <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
           </svg>
-          <span>DFU/SKU vs SOW Contract Details</span>
+          <span>SOW Contract &amp; Volume Compliance</span>
         </button>
 
         <div class="px-3 pt-3 py-2 text-[9px] font-bold nav-section-label tracking-widest">Intelligence</div>
@@ -1722,6 +1722,12 @@
               <span id="cov-waivers" class="text-[10px] font-semibold px-2 py-0.5 rounded border"></span>
               <span id="cov-sow" class="text-[10px] font-semibold px-2 py-0.5 rounded border"></span>
             </div>
+
+            <!-- ── Volume scale banner (over-consumption / below-scale) ──
+                 Auto-rendered by _renderVolumeScaleBanner() from the live SOW
+                 compare data. Red when actual exceeds the contracted ceiling,
+                 amber when findings are validated below contracted scale. -->
+            <div id="volume-scale-banner" class="hidden"></div>
 
             <!-- ── Data Warnings ────────────────────────────── -->
             <div id="batch-data-warnings" class="hidden space-y-1"></div>
@@ -3588,20 +3594,41 @@
               <p class="text-[11px] text-Cmuted mt-0.5">Contracted commitments, SLA ceilings, volume ramp and operational standards — all cross-wired to the PE Narrative.</p>
             </div>
             <div class="flex items-center gap-2">
+              <span id="sow-scope-pill"
+                    class="hidden text-[10px] font-bold px-3 py-1.5 rounded-full border border-Cpurple/40 bg-Cpurple/10 text-Cpurple"></span>
+            </div>
+          </div>
+
+          <!-- ── AUDIT SCOPE CARD ────────────────────────────────────────
+               Products/modules under review. Set once per engagement, read
+               everywhere (Executive, Batch, Findings, final report), so it
+               gets a permanent home at the top of the tab rather than a
+               button tucked into the header. -->
+          <div class="rounded-2xl border border-Cpurple/30 bg-gradient-to-br from-Ccard to-Ccard2 p-4">
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+              <div class="flex items-start gap-3 min-w-0">
+                <div class="w-10 h-10 rounded-xl bg-Cpurple/20 border border-Cpurple/45 flex items-center justify-center shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-5 h-5 text-Cpurple"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 6A2.25 2.25 0 0 1 15.75 3.75H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" /></svg>
+                </div>
+                <div class="min-w-0">
+                  <p class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Audit Scope</p>
+                  <h3 class="text-sm font-black text-Cwhite leading-tight">Products / Modules Reviewed</h3>
+                  <p id="sow-scope-empty" class="text-[11px] text-Cmuted mt-0.5">
+                    No modules selected yet — set the scope so every panel and the final
+                    report state exactly what was reviewed.
+                  </p>
+                  <div id="products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1.5 mt-2"></div>
+                </div>
+              </div>
               <button id="products-reviewed-btn" onclick="toggleProductsReviewedMenu()"
-                      class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-Cpurple/20 via-Cblue/20 to-Ccyan/20 border border-Cpurple/40 text-Cwhite hover:opacity-95 hover:border-Ccyan/60 transition flex items-center gap-3 shadow-[0_0_18px_rgba(56,189,248,0.2)]">
+                      class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-Cpurple/25 via-Cblue/20 to-Ccyan/20 border border-Cpurple/45 text-Cwhite hover:opacity-95 hover:border-Ccyan/60 transition flex items-center gap-3 shrink-0 shadow-[0_0_18px_rgba(56,189,248,0.18)]">
                 <span class="w-8 h-8 rounded-lg bg-Cpurple/25 border border-Cpurple/50 flex items-center justify-center shrink-0">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
                 </span>
                 <span class="flex flex-col items-start leading-tight">
-                  <span id="products-reviewed-btn-title" class="text-sm font-extrabold">Products Reviewed</span>
+                  <span id="products-reviewed-btn-title" class="text-sm font-extrabold">Select Products</span>
                   <span id="products-reviewed-btn-subtitle" class="text-[10px] text-Cmuted">Choose modules in scope</span>
                 </span>
-              </button>
-              <button onclick="saveSowBaseline()"
-                      class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-Ccyan/20 to-Cblue/20 border border-Ccyan/40 text-Cwhite hover:opacity-90 transition flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
-                Compare vs Actuals
               </button>
             </div>
           </div>
@@ -3701,9 +3728,6 @@
               </div>
             </div>
           </div>
-
-          <!-- Products Reviewed badge strip (mirrors selection made in the dropdown above) -->
-          <div id="products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1.5"></div>
 
           <!-- Empty state (hidden when contract or manual panel loaded) -->
           <div id="sow-empty" class="rounded-2xl border border-dashed border-Cborder bg-Ccard/30 p-10 text-center space-y-4">
@@ -3978,6 +4002,9 @@
               </button>
               <p id="sow-save-msg" class="hidden text-[11px] font-semibold" style="color:#10b981"></p>
             </div>
+
+            <!-- Over-consumption caution (populated by _renderSowOverconsumption) -->
+            <div id="sow-overconsumption" class="hidden mx-5 mb-4"></div>
 
             <!-- Volume achievement comparison (populated by _renderSowComparison) -->
             <div id="sow-volume-comparison" class="hidden px-5 pb-5 pt-3 space-y-2"

@@ -2983,8 +2983,40 @@ function renderBatchCoverageStrip(dc) {
   }
 
   badge("cov-waivers", "Waivers", "missing");
-  const hasSow = !!(window.appData.sowCompare || window.appData.sow);
-  badge("cov-sow", "Volume vs SOW", hasSow ? "loaded" : "missing");
+
+  // Volume vs SOW — state the achievement % rather than a bare LOADED/MISSING.
+  // MISSING is reserved for genuinely absent SOW data; once a contract and an
+  // actual are present the badge reports the number and colours by band.
+  const _sowCmp  = window.appData.sowCompare || null;
+  const _sowMets = ((_sowCmp && _sowCmp.metrics) || [])
+    .filter(m => Number(m.sow) > 0 && Number(m.actual) > 0);
+  const hasSow = !!(_sowCmp || window.appData.sow);
+
+  if (_sowMets.length) {
+    const _b     = _sowBands(_sowCmp);
+    // Drive the badge off the metric furthest from contract in either direction,
+    // so an over-consuming metric can never be masked by a compliant one.
+    const worst  = _sowMets.reduce((a, b) =>
+      Math.abs(Number(b.pct) - 100) > Math.abs(Number(a.pct) - 100) ? b : a);
+    const pct    = Number(worst.pct);
+    const el     = document.getElementById("cov-sow");
+    if (el) {
+      const isCrit = pct > _b.crit, isOver = pct > _b.over, isUnder = pct < _b.under;
+      const col = (isCrit || isOver) ? THEME.red : isUnder ? THEME.amber
+                : pct < 100 ? THEME.amber : THEME.green;
+      el.textContent = `Volume vs SOW: ${pct.toFixed(0)}% of contract` +
+                       (isCrit ? " — CRITICAL OVER" : isOver ? " — OVER" : "");
+      el.style.color       = col;
+      el.style.borderColor = hexA(col, 0.4);
+      el.style.background  = hexA(col, 0.1);
+      el.title = `${worst.label}: ${_fmt(worst.actual)} against a contracted ${_fmt(worst.sow)}. ` +
+                 `Standard process window ${_b.under}%–${_b.over}% of contract.`;
+    }
+  } else {
+    badge("cov-sow", "Volume vs SOW", hasSow ? "loaded" : "missing");
+  }
+
+  try { _renderVolumeScaleBanner(); } catch (e) { /* banner not mounted */ }
 }
 
 
@@ -21313,12 +21345,33 @@ function _renderReviewedProductsBadges() {
   ];
   const btnSub = document.getElementById("products-reviewed-btn-subtitle");
   const btn = document.getElementById("products-reviewed-btn");
+  const btnTitle = document.getElementById("products-reviewed-btn-title");
   if (btnSub) {
     btnSub.textContent = products.length ? `${products.length} module(s) in scope` : "Choose modules in scope";
+  }
+  if (btnTitle) {
+    btnTitle.textContent = products.length ? "Edit Scope" : "Select Products";
   }
   if (btn) {
     btn.classList.toggle("border-Ccyan/60", products.length > 0);
     btn.classList.toggle("shadow-[0_0_24px_rgba(56,189,248,0.35)]", products.length > 0);
+  }
+
+  // Audit-scope card: swap the "nothing selected" hint for the badge strip.
+  const scopeEmpty = document.getElementById("sow-scope-empty");
+  if (scopeEmpty) scopeEmpty.classList.toggle("hidden", products.length > 0);
+
+  // Compact count pill in the SOW tab header.
+  const scopePill = document.getElementById("sow-scope-pill");
+  if (scopePill) {
+    if (products.length) {
+      scopePill.textContent = `${products.length} module(s) in scope`;
+      scopePill.title = products.map(p => _productLabelMap[p] || p).join(", ");
+      scopePill.classList.remove("hidden");
+    } else {
+      scopePill.classList.add("hidden");
+      scopePill.textContent = "";
+    }
   }
   const chipsHtml = products.map(p => {
     const label = _productLabelMap[p] || p;
@@ -21446,53 +21499,71 @@ function _renderSowComparison(data) {
 
   setText("sow-summary-text", data.summary || "");
 
+  // Consumption bands — server-supplied (from services/pe_config.py) so the
+  // dashboard can never disagree with the findings engine or the report.
+  const B      = _sowBands(data);
+  const UNDER  = B.under, OVER = B.over, CRIT = B.crit;
+  const AXIS   = Math.max(150, Math.ceil(CRIT * 1.25 / 10) * 10);
+
   // Overall badge
   const badge = document.getElementById("sow-overall-badge");
   if (badge) {
     const cfg = {
-      OPTIMAL:  { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen",  icon: "✅" },
-      MODERATE: { bg: "bg-Camber/20 border-Camber/40 text-Camber",  icon: "⚠️" },
-      LOW:      { bg: "bg-Cred/20 border-Cred/40 text-Cred",        icon: "🔴" },
-      HIGH:     { bg: "bg-Cred/20 border-Cred/40 text-Cred",        icon: "🔴" },
-      "N/A":    { bg: "bg-Cmuted/20 border-Cborder text-Cmuted",     icon: "—"  },
+      OPTIMAL:       { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen", icon: "✅" },
+      ACCEPTABLE:    { bg: "bg-Cgreen/20 border-Cgreen/40 text-Cgreen", icon: "✅" },
+      MODERATE:      { bg: "bg-Camber/20 border-Camber/40 text-Camber", icon: "⚠️" },
+      LOW:           { bg: "bg-Camber/20 border-Camber/40 text-Camber", icon: "📉" },
+      OVER:          { bg: "bg-Cred/20 border-Cred/50 text-Cred",       icon: "🔴", label: "OVERCONSUMPTION" },
+      CRITICAL_OVER: { bg: "bg-Cred/30 border-Cred/70 text-Cred animate-pulse", icon: "🛑", label: "CRITICAL OVERCONSUMPTION" },
+      "N/A":         { bg: "bg-Cmuted/20 border-Cborder text-Cmuted",   icon: "—"  },
     }[data.overall_status] || { bg: "bg-Cmuted/20 border-Cborder text-Cmuted", icon: "?" };
-    badge.innerHTML = `<span class="text-[11px] font-bold px-3 py-1 rounded-full border ${cfg.bg}">${cfg.icon} ${data.overall_status}</span>`;
+    const lbl = cfg.label || data.overall_status;
+    badge.innerHTML = `<span class="text-[11px] font-bold px-3 py-1 rounded-full border ${cfg.bg}">${cfg.icon} ${_esc(lbl)}</span>`;
   }
+
+  // ── Over-consumption caution block ────────────────────────────────────
+  // Only rendered when actual volume exceeds the contracted ceiling. States
+  // contracted vs actual vs overage per metric so the reviewer can paste the
+  // numbers straight into a customer conversation.
+  _renderSowOverconsumption(data, B);
 
   // Bar chart
   const barsEl = document.getElementById("sow-bars-container");
   if (barsEl && data.metrics?.length) {
     barsEl.innerHTML = data.metrics.map((m) => {
-      const pct    = Math.min(m.pct, 150);
-      const barPct = (pct / 150 * 100).toFixed(1);
-      // Standard: 70-110% = acceptable (green). <70% = amber, >110% = red.
-      const color  = m.pct > 110                     ? "#f43f5e"  // exceeds
-                   : m.pct >= 70                     ? "#22d3ee"  // within 70-110% window
-                   : "#f59e0b";                                   // below 70% floor
-      const statusBg = m.pct > 110                   ? "bg-Cred/20 text-Cred"
-                     : m.pct >= 70                   ? "bg-Ccyan/20 text-Ccyan"
+      const pct    = Math.min(m.pct, AXIS);
+      const barPct = (pct / AXIS * 100).toFixed(1);
+      const color  = m.pct > CRIT  ? "#dc2626"   // severe over-consumption
+                   : m.pct > OVER  ? "#f43f5e"   // over-consumption
+                   : m.pct >= UNDER ? "#22d3ee"  // inside standard window
+                   : "#f59e0b";                  // below the contracted floor
+      const statusBg = m.pct > OVER                 ? "bg-Cred/20 text-Cred"
+                     : m.pct >= UNDER               ? "bg-Ccyan/20 text-Ccyan"
                      : "bg-Camber/20 text-Camber";
+      const over = _sowOverBy(m);
       return `<div class="space-y-1.5">
         <div class="flex items-center justify-between text-[11px]">
           <span class="font-semibold text-Cwhite">${_esc(m.label)}</span>
           <div class="flex items-center gap-2">
             <span class="text-Cmuted font-mono text-[10px]">${_fmt(m.actual)} / ${_fmt(m.sow)}</span>
             <span class="font-bold" style="color:${color}">${m.pct.toFixed(1)}%</span>
-            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase ${statusBg}">${m.status}</span>
+            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase ${statusBg}">${_esc(_sowStatusLabel(m.status))}</span>
           </div>
         </div>
         <div class="relative h-4 rounded-lg overflow-hidden bg-Cbg border border-Cborder">
-          <!-- Zone bands: <70% amber, 70-110% green (full standard window), >110% red -->
-          <div class="absolute inset-y-0 left-0 bg-Camber/20" style="width:${(70/150*100).toFixed(1)}%"></div>
-          <div class="absolute inset-y-0 bg-Cgreen/15" style="left:${(70/150*100).toFixed(1)}%;width:${((110-70)/150*100).toFixed(1)}%"></div>
-          <div class="absolute inset-y-0 bg-Cred/15" style="left:${(110/150*100).toFixed(1)}%;right:0"></div>
-          <div class="absolute inset-y-0 w-px bg-white/30" style="left:${(100/150*100).toFixed(1)}%"></div>
-          <div class="absolute inset-y-0 left-0 rounded-lg transition-all duration-700" style="width:${barPct}%;background:${color};opacity:0.8"></div>
+          <div class="absolute inset-y-0 left-0 bg-Camber/20" style="width:${(UNDER/AXIS*100).toFixed(1)}%"></div>
+          <div class="absolute inset-y-0 bg-Cgreen/15" style="left:${(UNDER/AXIS*100).toFixed(1)}%;width:${((OVER-UNDER)/AXIS*100).toFixed(1)}%"></div>
+          <div class="absolute inset-y-0 bg-Cred/15" style="left:${(OVER/AXIS*100).toFixed(1)}%;width:${((CRIT-OVER)/AXIS*100).toFixed(1)}%"></div>
+          <div class="absolute inset-y-0 bg-Cred/30" style="left:${(CRIT/AXIS*100).toFixed(1)}%;right:0"></div>
+          <div class="absolute inset-y-0 w-px bg-white/30" style="left:${(100/AXIS*100).toFixed(1)}%"></div>
+          <div class="absolute inset-y-0 left-0 rounded-lg transition-all duration-700" style="width:${barPct}%;background:${color};opacity:0.85"></div>
         </div>
         <div class="flex justify-between text-[9px] text-Cmuted font-mono">
-          <span>0</span><span class="text-Camber">70%</span><span>90%</span><span>100%</span><span class="text-Cred">110%</span><span>150%+</span>
+          <span>0</span><span class="text-Camber">${UNDER}%</span><span>100%</span><span class="text-Cred">${OVER}%</span><span class="text-Cred font-bold">${CRIT}%</span><span>${AXIS}%+</span>
         </div>
-        ${m.pct > 110 || m.pct < 70 ? `<div class="text-[9px] text-Camber font-semibold">⚠ Outside 70%–110% standard process window — formal review &amp; acknowledgment required</div>` : ""}
+        ${m.pct > CRIT ? `<div class="text-[9px] text-Cred font-bold">🛑 CRITICAL OVERCONSUMPTION — ${_fmt(m.actual)} against a contracted ${_fmt(m.sow)}, exceeding contract by ${_fmt(over)}. Must be commercially resolved before PE sign-off.</div>`
+          : m.pct > OVER ? `<div class="text-[9px] text-Cred font-semibold">🔴 Overconsumption — exceeding contracted scope by ${_fmt(over)} (${m.pct.toFixed(1)}% of SOW). Formal review &amp; acknowledgment required.</div>`
+          : m.pct < UNDER ? `<div class="text-[9px] text-Camber font-semibold">⚠ Below the ${UNDER}%–${OVER}% standard process window — findings validated at this volume only.</div>` : ""}
       </div>`;
     }).join("");
   }
@@ -21501,21 +21572,185 @@ function _renderSowComparison(data) {
   const tbody = document.getElementById("sow-table-tbody");
   if (tbody && data.metrics?.length) {
     tbody.innerHTML = data.metrics.map((m) => {
-      const stBg = (m.status === "OPTIMAL" || m.status === "ACCEPTABLE") ? "bg-Ccyan/15 text-Ccyan" :
-                   m.status === "LOW"                                     ? "bg-Camber/20 text-Camber" :
-                   "bg-Cred/20 text-Cred";
-      // Standard: 70-110% = green/cyan. <70% = amber, >110% = red.
-      const pctColor = m.pct >= 70 && m.pct <= 110 ? "text-Ccyan font-bold" :
-                       m.pct >= 70                  ? "text-Cred font-bold" : "text-Camber font-semibold";
-      return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40">
+      const isOver = m.pct > OVER;
+      const stBg = m.status === "CRITICAL_OVER" ? "bg-Cred/30 text-Cred" :
+                   isOver                        ? "bg-Cred/20 text-Cred" :
+                   m.status === "LOW"            ? "bg-Camber/20 text-Camber" :
+                                                   "bg-Ccyan/15 text-Ccyan";
+      const pctColor = isOver                      ? "text-Cred font-bold" :
+                       m.pct >= UNDER              ? "text-Ccyan font-bold" :
+                                                     "text-Camber font-semibold";
+      const over = _sowOverBy(m);
+      return `<tr class="border-b border-Cborder/40 hover:bg-Ccard/40 ${m.status === "CRITICAL_OVER" ? "bg-Cred/5" : ""}">
         <td class="py-2.5 pr-4 font-semibold text-Cwhite">${_esc(m.label)}</td>
         <td class="py-2.5 pr-4 text-right text-Cmuted font-mono">${_fmt(m.sow)}</td>
-        <td class="py-2.5 pr-4 text-right font-mono text-Cwhite">${_fmt(m.actual)}</td>
+        <td class="py-2.5 pr-4 text-right font-mono text-Cwhite">${_fmt(m.actual)}${over ? `<span class="text-Cred font-bold"> (+${_fmt(over)})</span>` : ""}</td>
         <td class="py-2.5 pr-4 text-right ${pctColor}">${m.pct.toFixed(1)}%</td>
-        <td class="py-2.5 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${stBg}">${m.status}</span></td>
+        <td class="py-2.5 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${stBg}">${_esc(_sowStatusLabel(m.status))}</span></td>
       </tr>`;
     }).join("");
   }
+
+  // Keep the coverage strip + volume-scale banner in step with this render
+  try { _renderVolumeScaleBanner(); } catch (e) { /* strip not on screen */ }
+}
+
+/** Consumption bands — server payload first, then config, then PE defaults. */
+function _sowBands(data) {
+  const cfg = (window.appData && window.appData.config) || {};
+  const b   = (data && data.bands) || {};
+  const n   = (v, d) => (typeof v === "number" && !isNaN(v) ? v : d);
+  return {
+    under: n(b.under, n(cfg.sow_under_pct, 70)),
+    over:  n(b.over,  n(cfg.sow_over_pct,  110)),
+    crit:  n(b.crit,  n(cfg.sow_over_crit_pct, 120)),
+  };
+}
+
+/** Absolute overage above contract — server-computed when available. */
+function _sowOverBy(m) {
+  if (!m) return 0;
+  if (typeof m.over_by === "number" && m.over_by > 0) return m.over_by;
+  const sow = Number(m.sow) || 0, act = Number(m.actual) || 0;
+  return sow > 0 && act > sow ? act - sow : 0;
+}
+
+/** Human label for a band status. */
+function _sowStatusLabel(st) {
+  return st === "CRITICAL_OVER" ? "CRITICAL OVER"
+       : st === "OVER" || st === "HIGH" || st === "EXCEEDS" ? "OVER"
+       : st || "—";
+}
+
+/**
+ * Over-consumption caution block for the SOW tab.
+ * Renders only when at least one metric exceeds the contracted ceiling.
+ */
+function _renderSowOverconsumption(data, bands) {
+  const host = document.getElementById("sow-overconsumption");
+  if (!host) return;
+  const B  = bands || _sowBands(data);
+  const oc = data && data.overconsumption;
+  const items = oc?.items?.length
+    ? oc.items
+    : (data?.metrics || []).filter(m => Number(m.pct) > B.over)
+        .map(m => ({ label: m.label, sow: m.sow, actual: m.actual, pct: m.pct,
+                     over_by: _sowOverBy(m), status: m.status }));
+
+  if (!items.length) { host.classList.add("hidden"); host.innerHTML = ""; return; }
+
+  const critical = items.some(i => Number(i.pct) > B.crit);
+  const tone = critical
+    ? { border: "border-Cred/70", bg: "bg-Cred/10", text: "text-Cred",
+        icon: "🛑", head: "CRITICAL OVERCONSUMPTION VS SOW CONTRACT" }
+    : { border: "border-Cred/45", bg: "bg-Cred/5", text: "text-Cred",
+        icon: "🔴", head: "OVERCONSUMPTION VS SOW CONTRACT" };
+
+  const rows = items.map(i => `
+    <tr class="border-b border-Cred/15">
+      <td class="py-1.5 pr-4 font-semibold text-Cwhite">${_esc(i.label)}</td>
+      <td class="py-1.5 pr-4 text-right font-mono text-Cmuted">${_fmt(i.sow)}</td>
+      <td class="py-1.5 pr-4 text-right font-mono text-Cwhite">${_fmt(i.actual)}</td>
+      <td class="py-1.5 pr-4 text-right font-mono font-bold text-Cred">+${_fmt(i.over_by)}</td>
+      <td class="py-1.5 text-right font-bold text-Cred">${Number(i.pct).toFixed(1)}%</td>
+    </tr>`).join("");
+
+  const caution = critical
+    ? `Consumption exceeds ${B.crit}% of the contracted scope. This is a commercial
+       deviation, not a tuning issue — it must be raised with the customer and
+       formally resolved <strong>before final PE sign-off</strong>. Treat sign-off as
+       <strong>NO GO</strong> from the PE end until the contracted volume is
+       amended or consumption is brought back inside contract.`
+    : `Consumption exceeds ${B.over}% of the contracted scope — outside the
+       ${B.under}%–${B.over}% standard process window. Formal review and written
+       customer acknowledgment are required before sign-off. Infrastructure sized
+       to the contracted volume may not hold at the consumed volume.`;
+
+  host.className = `rounded-xl border ${tone.border} ${tone.bg} p-4 space-y-3`;
+  host.innerHTML = `
+    <div class="flex items-start gap-3">
+      <span class="text-lg leading-none">${tone.icon}</span>
+      <div class="min-w-0">
+        <p class="text-[11px] font-black uppercase tracking-wider ${tone.text}">${tone.head}</p>
+        <p class="text-[11px] text-Cmuted mt-1 leading-relaxed">${caution}</p>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-[11px]">
+        <thead>
+          <tr class="text-[9px] uppercase tracking-wider text-Cmuted border-b border-Cred/25">
+            <th class="text-left py-1.5 pr-4 font-bold">Solution / Metric</th>
+            <th class="text-right py-1.5 pr-4 font-bold">Contracted Scope</th>
+            <th class="text-right py-1.5 pr-4 font-bold">Consumption</th>
+            <th class="text-right py-1.5 pr-4 font-bold">Exceeding By</th>
+            <th class="text-right py-1.5 font-bold">% of SOW</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  host.classList.remove("hidden");
+}
+
+/**
+ * Volume-scale banner rendered directly under the PE Audit Coverage strip.
+ *
+ * Two mutually exclusive states, both auto-triggered from the live SOW data:
+ *   • over-consumption  → red caution (actual above the contracted ceiling)
+ *   • below-scale       → amber caveat (findings validated at tested volume only)
+ */
+function _renderVolumeScaleBanner() {
+  const host = document.getElementById("volume-scale-banner");
+  if (!host) return;
+
+  const cmp = (window.appData && window.appData.sowCompare) || null;
+  const metrics = (cmp && cmp.metrics) || [];
+  const withActual = metrics.filter(m => Number(m.sow) > 0 && Number(m.actual) > 0);
+  if (!withActual.length) { host.classList.add("hidden"); host.innerHTML = ""; return; }
+
+  const B = _sowBands(cmp);
+  const over  = withActual.filter(m => Number(m.pct) > B.over);
+  const under = withActual.filter(m => Number(m.pct) < 100);
+
+  const line = (m) =>
+    `${_fmt(m.actual)}/${_fmt(m.sow)} ${_esc(m.label)} (${Number(m.pct).toFixed(1)}% of SOW)`;
+
+  if (over.length) {
+    const critical = over.some(m => Number(m.pct) > B.crit);
+    const worst = over.reduce((a, b) => (Number(b.pct) > Number(a.pct) ? b : a));
+    host.className = `rounded-xl border ${critical ? "border-Cred/70 bg-Cred/10" : "border-Cred/45 bg-Cred/5"} p-3`;
+    host.innerHTML = `
+      <p class="text-[10px] font-black uppercase tracking-wider text-Cred">
+        ${critical ? "🛑 Critical overconsumption vs contracted scope" : "🔴 Overconsumption vs contracted scope"}
+      </p>
+      <p class="text-[11px] text-Cmuted mt-1 leading-relaxed">
+        ${over.map(line).join(" · ")}. Worst is <strong class="text-Cred">${_esc(worst.label)}</strong>,
+        exceeding the contracted amount by <strong class="text-Cred">${_fmt(_sowOverBy(worst))}</strong>.
+        Consumption above ${B.over}% of contract is outside the ${B.under}%–${B.over}% standard process
+        window${critical ? ` and above the ${B.crit}% critical ceiling` : ""} — it requires formal review
+        and written customer acknowledgment${critical ? ", and is a NO GO for final PE sign-off until resolved" : ""}.
+      </p>`;
+    host.classList.remove("hidden");
+    return;
+  }
+
+  if (under.length) {
+    host.className = "rounded-xl border border-Camber/40 bg-Camber/5 p-3";
+    host.innerHTML = `
+      <p class="text-[10px] font-black uppercase tracking-wider text-Camber">
+        ⚠ Volume below contracted scale
+      </p>
+      <p class="text-[11px] text-Cmuted mt-1 leading-relaxed">
+        Findings reflect ${under.map(line).join(" and ")}. Runtime, SLA buffer and resource
+        metrics below are validated at the current volume only — not at full contracted scale.
+        Re-validate at higher volume before treating LONG_JOB / tight-buffer jobs as production-ready.
+      </p>`;
+    host.classList.remove("hidden");
+    return;
+  }
+
+  host.classList.add("hidden");
+  host.innerHTML = "";
 }
 
 // ── Also wire Zone F uploads into the contract panel ─────────────────────

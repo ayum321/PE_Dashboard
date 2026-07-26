@@ -2770,6 +2770,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         cov.sow = True
         # Support both canonical shape {metrics:[{key,label,sow,actual,pct,status}]}
         # (from /api/sow/compare and manual entry) and legacy {items:[...]} shape.
+        from services import pe_config as _pec_sow
         _raw_items = sow_cmp.get("metrics") or sow_cmp.get("items") or []
         # Normalise: canonical shape uses {status} directly; legacy may use {zone}.
         items: list = []
@@ -2780,13 +2781,16 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             # Compute status from pct when not already set
             if not _status and _m.get("pct") is not None:
                 _pct = _f(_m["pct"])
-                _status = ("HIGH" if _pct > 110
-                           else "OPTIMAL" if _pct >= 90
-                           else "ACCEPTABLE" if _pct >= 70
+                # Bands from pe_config — mirrors routers/sow.py _status().
+                _status = ("CRITICAL_OVER" if _pct > _pec_sow.SOW_OVER_CRIT_PCT
+                           else "OVER"       if _pct > _pec_sow.SOW_OVER_PCT
+                           else "OPTIMAL"    if _pct >= 90
+                           else "ACCEPTABLE" if _pct >= _pec_sow.SOW_UNDER_PCT
                            else "LOW")
             items.append({**_m, "status": _status, "label": _m.get("label") or _m.get("key") or "?"})
         # Standard: 70%-110% = acceptable window. Only outside this needs review.
-        exceeded = [i for i in items if i.get("status") in ("HIGH", "EXCEEDS")]
+        exceeded = [i for i in items
+                    if i.get("status") in ("OVER", "CRITICAL_OVER", "HIGH", "EXCEEDS")]
         low_util = [i for i in items if i.get("status") in ("LOW", "UNDER")]
         in_range = [i for i in items if i.get("status") in ("OPTIMAL", "ACCEPTABLE")]
 

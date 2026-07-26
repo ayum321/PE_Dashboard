@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 from services import config_store
+from services import pe_config as _pc
 
 router = APIRouter()
 _SOW_KEY = "sow_baseline"
@@ -36,7 +37,11 @@ class SowMetric(BaseModel):
     sow:    float
     actual: float
     pct:    float   # actual/sow*100
-    status: str     # OPTIMAL | MODERATE | LOW | HIGH
+    status: str     # LOW | ACCEPTABLE | OPTIMAL | OVER | CRITICAL_OVER
+    # Over-consumption provenance — set only when actual exceeds the contracted
+    # ceiling, so every consumer states the same overage without recomputing it.
+    over_by:     float = 0.0   # absolute units above contracted volume
+    over_by_pct: float = 0.0   # percentage points above 100% of contract
 
 class SowCompareRequest(BaseModel):
     actuals: Dict[str, float] = {}
@@ -45,6 +50,10 @@ class SowCompareResponse(BaseModel):
     metrics:        List[SowMetric]
     overall_status: str
     summary:        str
+    # Populated whenever one or more metrics exceed the contracted ceiling.
+    # Drives the red over-consumption caution banner and the report wording.
+    overconsumption: Optional[Dict[str, Any]] = None
+    bands:           Optional[Dict[str, float]] = None
     ai_narrative:   Optional[str] = None
     ai_model:       Optional[str] = None
 
@@ -64,20 +73,36 @@ _LABELS = {
 }
 
 def _status(pct: float) -> str:
-    """Classify SOW consumption against the 70%–110% standard process window.
+    """Classify SOW consumption against the PE standard process window.
 
-    Standard: consumption at UAT must remain within 70%-110% of approved SOW
-    limits. Anything outside this range requires formal review and acknowledgment.
+    Bands come from services/pe_config.py — never hardcode them here, the
+    window is customer-tunable via config_store.
 
-    LOW       < 70%    — below standard floor, formal acknowledgment required
-    ACCEPTABLE 70–90%  — within 70-110% acceptable window (lower end)
-    OPTIMAL   90–110%  — preferred zone within 70-110% window
-    HIGH      > 110%   — above standard ceiling, formal acknowledgment required
+    LOW           < SOW_UNDER_PCT      — below the contracted floor. Findings are
+                                         only validated at the tested volume.
+    ACCEPTABLE    floor .. 90%         — inside the standard window, lower end.
+    OPTIMAL       90% .. SOW_OVER_PCT  — preferred zone.
+    OVER          > SOW_OVER_PCT       — over-consumption vs contracted scope.
+    CRITICAL_OVER > SOW_OVER_CRIT_PCT  — severe over-consumption; blocks PE
+                                         sign-off until commercially resolved.
     """
-    if pct < 70:   return "LOW"        # deviation — below 70% floor
-    if pct < 90:   return "ACCEPTABLE" # within standard 70-110% window
-    if pct <= 110: return "OPTIMAL"    # preferred zone within standard window
-    return "HIGH"                      # deviation — above 110% ceiling
+    if pct > _pc.SOW_OVER_CRIT_PCT: return "CRITICAL_OVER"
+    if pct > _pc.SOW_OVER_PCT:      return "OVER"
+    if pct < _pc.SOW_UNDER_PCT:     return "LOW"
+    if pct < 90:                    return "ACCEPTABLE"
+    return "OPTIMAL"
+
+
+def _overage(sow: float, actual: float) -> tuple:
+    """Absolute + percentage-point overage above the contracted volume.
+
+    Returns (0.0, 0.0) when at or under contract, so callers can branch on a
+    plain truthiness check without worrying about negative values.
+    """
+    if sow <= 0 or actual <= sow:
+        return 0.0, 0.0
+    return round(actual - sow, 2), round((actual - sow) / sow * 100, 1)
+
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -270,8 +295,10 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
         _label = label
         if key == "daily_dfu" and _dfu_is_ilc:
             _label = _LABELS.get("item_location_customer", label)
+        _ov, _ovp = _overage(sow_f, act_f)
         metrics.append(SowMetric(key=key, label=_label, sow=sow_f,
-                                 actual=act_f, pct=pct, status=_status(pct)))
+                                 actual=act_f, pct=pct, status=_status(pct),
+                                 over_by=_ov, over_by_pct=_ovp))
 
     # Custom metrics
     for cm in (baseline.get("custom") or []):
@@ -282,38 +309,99 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
         label = cm.get("label", key)
         act_f = float(actuals.get(key, 0))
         pct   = round((act_f / sow_f) * 100, 1)
+        _ov, _ovp = _overage(sow_f, act_f)
         metrics.append(SowMetric(key=key, label=label, sow=sow_f,
-                                 actual=act_f, pct=pct, status=_status(pct)))
+                                 actual=act_f, pct=pct, status=_status(pct),
+                                 over_by=_ov, over_by_pct=_ovp))
 
     if not metrics:
         return SowCompareResponse(metrics=[], overall_status="N/A",
                                   summary="No SOW baseline values set. Enter targets in the form above.")
 
-    highs       = sum(1 for m in metrics if m.status == "HIGH")
+    crit_over   = [m for m in metrics if m.status == "CRITICAL_OVER"]
+    over        = [m for m in metrics if m.status == "OVER"]
+    exceeded    = crit_over + over
     lows        = sum(1 for m in metrics if m.status == "LOW")
     optimals    = sum(1 for m in metrics if m.status == "OPTIMAL")
     acceptables = sum(1 for m in metrics if m.status == "ACCEPTABLE")
-    in_range    = optimals + acceptables  # 70-110% = within standard window
+    in_range    = optimals + acceptables
 
-    if highs > 0:
-        overall = "HIGH"
-        summary = (f"⚠️ {highs} metric(s) above 110% of SOW — outside 70%-110% standard process window. "
-                   f"Formal review and acknowledgment required per PE standard process.")
+    _fmt = lambda v: f"{v:,.0f}" if abs(v) >= 1 else f"{v:g}"
+
+    overconsumption = None
+    if exceeded:
+        worst = max(exceeded, key=lambda m: m.pct)
+        overconsumption = {
+            "count":          len(exceeded),
+            "critical_count": len(crit_over),
+            "severity":       "CRITICAL_OVER" if crit_over else "OVER",
+            "worst_label":    worst.label,
+            "worst_pct":      worst.pct,
+            "worst_sow":      worst.sow,
+            "worst_actual":   worst.actual,
+            "worst_over_by":  worst.over_by,
+            "items": [
+                {"label": m.label, "sow": m.sow, "actual": m.actual,
+                 "pct": m.pct, "over_by": m.over_by, "status": m.status}
+                for m in sorted(exceeded, key=lambda m: m.pct, reverse=True)
+            ],
+        }
+
+    if crit_over:
+        overall = "CRITICAL_OVER"
+        _names  = ", ".join(m.label for m in crit_over)
+        summary = (
+            f"\U0001F534 OVERCONSUMPTION \u2014 {len(crit_over)} metric(s) above "
+            f"{_pc.SOW_OVER_CRIT_PCT:g}% of contracted scope ({_names}). "
+            f"Worst: {worst.label} contracted {_fmt(worst.sow)}, actual "
+            f"{_fmt(worst.actual)} \u2014 exceeding the contracted amount by "
+            f"{_fmt(worst.over_by)} ({worst.pct:.1f}% of SOW). This must be "
+            f"commercially addressed and acknowledged before final PE sign-off."
+        )
+    elif over:
+        overall = "OVER"
+        summary = (
+            f"\u26A0\uFE0F OVERCONSUMPTION \u2014 {len(over)} metric(s) above "
+            f"{_pc.SOW_OVER_PCT:g}% of contracted scope. Worst: {worst.label} "
+            f"contracted {_fmt(worst.sow)}, actual {_fmt(worst.actual)} "
+            f"\u2014 exceeding the contracted amount by {_fmt(worst.over_by)} "
+            f"({worst.pct:.1f}% of SOW). Outside the "
+            f"{_pc.SOW_UNDER_PCT:g}%\u2013{_pc.SOW_OVER_PCT:g}% standard process "
+            f"window \u2014 formal review and acknowledgment required."
+        )
     elif lows > len(metrics) // 2:
         overall = "LOW"
-        summary = (f"📉 {lows}/{len(metrics)} metrics below 70% of SOW — outside 70%-110% standard process window. "
-                   f"Verify test scenarios are representative. Formal acknowledgment required.")
+        summary = (
+            f"\U0001F4C9 {lows}/{len(metrics)} metrics below {_pc.SOW_UNDER_PCT:g}% "
+            f"of SOW \u2014 outside the {_pc.SOW_UNDER_PCT:g}%\u2013"
+            f"{_pc.SOW_OVER_PCT:g}% standard process window. Findings are validated "
+            f"at the tested volume only, not at full contracted scale."
+        )
     elif in_range >= len(metrics) * 0.7:
         overall = "OPTIMAL"
-        summary = (f"✅ {in_range}/{len(metrics)} metrics within 70%-110% SOW standard process window "
-                   f"({optimals} in preferred 90-110% zone, {acceptables} in 70-90% acceptable range). "
-                   f"Go-live confidence HIGH.")
+        summary = (
+            f"\u2705 {in_range}/{len(metrics)} metrics within the "
+            f"{_pc.SOW_UNDER_PCT:g}%\u2013{_pc.SOW_OVER_PCT:g}% SOW standard process "
+            f"window ({optimals} in preferred 90\u2013{_pc.SOW_OVER_PCT:g}% zone, "
+            f"{acceptables} in the lower acceptable range). Go-live confidence HIGH."
+        )
     else:
         overall = "MODERATE"
-        summary = (f"🟡 Mixed results — {in_range} within 70-110% window, {lows} below 70%, {highs} above 110%. "
-                   f"Deviations require formal review and acknowledgment.")
+        summary = (
+            f"\U0001F7E1 Mixed results \u2014 {in_range} within the standard window, "
+            f"{lows} below {_pc.SOW_UNDER_PCT:g}%, {len(exceeded)} above "
+            f"{_pc.SOW_OVER_PCT:g}%. Deviations require formal review and acknowledgment."
+        )
 
-    resp = SowCompareResponse(metrics=metrics, overall_status=overall, summary=summary)
+    resp = SowCompareResponse(
+        metrics=metrics, overall_status=overall, summary=summary,
+        overconsumption=overconsumption,
+        bands={
+            "under": _pc.SOW_UNDER_PCT,
+            "over":  _pc.SOW_OVER_PCT,
+            "crit":  _pc.SOW_OVER_CRIT_PCT,
+        },
+    )
     try:
         from services.ai_narrator import narrate
         text, model = narrate("sow", {

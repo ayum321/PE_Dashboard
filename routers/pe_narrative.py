@@ -637,6 +637,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     if sw and isinstance(sw, dict):
         # Shape A (canonical): {"metrics": [{key,label,sow,actual,pct,status}, ...]}
         # — produced by /api/sow/compare and the manual SOW entry form.
+        from services import pe_config as _pec_sow
         _sw_metrics = sw.get("metrics")
         if isinstance(_sw_metrics, list):
             for m in _sw_metrics:
@@ -656,9 +657,11 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                     except (TypeError, ValueError):
                         pct = None
                 if status is None and pct is not None:
-                    status = ("HIGH" if pct > 110
-                              else "OPTIMAL" if pct >= 90
-                              else "ACCEPTABLE" if pct >= 70
+                    # Bands from pe_config — mirrors routers/sow.py _status().
+                    status = ("CRITICAL_OVER" if pct > _pec_sow.SOW_OVER_CRIT_PCT
+                              else "OVER"       if pct > _pec_sow.SOW_OVER_PCT
+                              else "OPTIMAL"    if pct >= 90
+                              else "ACCEPTABLE" if pct >= _pec_sow.SOW_UNDER_PCT
                               else "LOW")
                 util_s = (f"{pct:.1f}% ({status})" if pct is not None and status
                           else str(status) if status else "Target only — no actual")
