@@ -2820,11 +2820,29 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         # Per-metric consultative question — names the real percentage and the
         # actual-vs-target volumes, then asks the specific "why / confirm with
         # customer" question a reviewer would raise before sign-off.
+        # Buffer % — same convention the dashboard's SOW Compliance panel uses:
+        # positive = headroom before the next threshold, negative = amount past
+        # it. Kept identical to the frontend's _renderSowComparison() formula
+        # (bufferPct = OVER - pct) so the finding text and the panel never
+        # disagree on the same number.
+        def _buffer_phrase(pct: float) -> str:
+            over_ceiling = _pec_sow.SOW_OVER_PCT
+            under_floor  = _pec_sow.SOW_UNDER_PCT
+            buffer_pct   = round(over_ceiling - pct, 1)
+            if pct > over_ceiling:
+                return f"buffer {buffer_pct:+.1f}% (over the {over_ceiling:.0f}% ceiling by {abs(buffer_pct):.1f}pp)"
+            if pct < under_floor:
+                shortfall = round(under_floor - pct, 1)
+                return (f"buffer +{(over_ceiling - under_floor):.1f}% to ceiling, "
+                        f"{shortfall:.1f}pp below the {under_floor:.0f}% floor")
+            return f"buffer +{buffer_pct:.1f}% to the {over_ceiling:.0f}% ceiling"
+
         def _low_question(m) -> str:
             label = m.get("label") or m.get("key") or m.get("metric") or "Volume metric"
             pct   = _f(m.get("pct"))
             act   = _fmt_vol(m.get("actual"))
             sow   = _fmt_vol(m.get("sow"))
+            buf   = _buffer_phrase(pct)
             _lbl_l = label.lower()
             if "sku" in _lbl_l:
                 tail = ("has the customer confirmed this represents the full item master "
@@ -2835,14 +2853,15 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             else:
                 tail = ("why is production volume below the contracted floor — has the forecast "
                         "changed, or is upstream data incomplete?")
-            return f"{label} is only {pct:.1f}% of SOW target ({act} vs {sow}) — {tail}"
+            return f"{label} is only {pct:.1f}% of SOW target ({act} vs {sow}, {buf}) — {tail}"
 
         def _high_question(m) -> str:
             label = m.get("label") or m.get("key") or m.get("metric") or "Volume metric"
             pct   = _f(m.get("pct"))
             act   = _fmt_vol(m.get("actual"))
             sow   = _fmt_vol(m.get("sow"))
-            return (f"{label} is at {pct:.1f}% of SOW target ({act} vs {sow}) — above the 110% "
+            buf   = _buffer_phrase(pct)
+            return (f"{label} is at {pct:.1f}% of SOW target ({act} vs {sow}, {buf}) — above the 110% "
                     f"ceiling; confirm with the customer whether the volume forecast and "
                     f"commercials need revision before sign-off.")
 
