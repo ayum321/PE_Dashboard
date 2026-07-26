@@ -714,6 +714,20 @@ function applyCustomerName(name, opts = {}) {
       exBanner.classList.remove("flex");
     }
   }
+
+  // 4. PE Findings hero badge — same pill treatment as decision/grade badges
+  //    so the audited customer is unmistakable, not buried in muted text.
+  const custTag = document.getElementById("findings-customer-tag");
+  if (custTag) {
+    if (cust) {
+      custTag.textContent = `🏢 ${cust}`;
+      custTag.classList.remove("hidden");
+      custTag.classList.add("flex");
+    } else {
+      custTag.classList.add("hidden");
+      custTag.classList.remove("flex");
+    }
+  }
 }
 
 // ── Audit Pulse ── Grafana-style multi-tile strip with sparkline + audit id
@@ -9900,9 +9914,20 @@ function renderFindings(findings) {
     gradePill.style.cssText = `color:${gc};border-color:${hexA(gc,.5)};background:${hexA(gc,.12)}`;
   }
 
-  // Customer tag
+  // Customer tag — pill badge (matches decision/grade pill treatment) so the
+  // audited customer is unmistakable at a glance, not buried in muted text.
   const custTag = document.getElementById("findings-customer-tag");
-  if (custTag) custTag.textContent = window.appData.customerName ? `Customer: ${window.appData.customerName}` : "";
+  if (custTag) {
+    const cust = window.appData.customerName;
+    if (cust) {
+      custTag.textContent = `🏢 ${cust}`;
+      custTag.classList.remove("hidden");
+      custTag.classList.add("flex");
+    } else {
+      custTag.classList.add("hidden");
+      custTag.classList.remove("flex");
+    }
+  }
 
   // Severity counts in hero
   setText("hero-crit", critCount);
