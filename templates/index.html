@@ -4019,23 +4019,18 @@
             <div id="sow-chart-wrap" class="hidden rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-5 space-y-4">
               <div class="flex items-center justify-between">
                 <div>
-                  <h3 class="text-sm font-bold text-Cwhite">Volume Achievement vs SOW Target</h3>
-                  <p class="text-[10px] text-Cmuted mt-0.5">Actual measured metrics against contracted baseline</p>
-                </div>
-                <div id="sow-overall-badge"></div>
-              </div>
-              <div id="sow-summary-banner" class="hidden rounded-lg border border-Cborder/50 bg-Cbg/40 px-4 py-2.5">
-                <p id="sow-summary-text" class="text-[11px] text-Cwhite/90 font-semibold"></p>
-              </div>
-              <!-- Color legend -->
-              <div class="flex flex-wrap items-center gap-3 text-[10px] font-semibold">
-                <span class="text-Cmuted uppercase tracking-wider">Zones:</span>
-                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Cred/70"></span>Under &lt;70%</span>
-                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Camber/70"></span>Moderate 70–90%</span>
-                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Cgreen/70"></span>Optimal 90–110%</span>
-                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Cred/40"></span>Exceeds &gt;110%</span>
-              </div>
-              <div id="sow-bars-container" class="space-y-3"></div>
+                  <h3 class="text-sm font-bold text-Cwhite">Volume Compliance vs SOW Contract</h3>
+                      <p class="text-[10px] text-Cmuted mt-0.5">Contracted vs actual, buffer to threshold, status and PE finding \u2014 per metric</p>
+                    </div>
+                    <div id="sow-overall-badge"></div>
+                  </div>
+                  <div id="sow-summary-banner" class="hidden rounded-lg border border-Cborder/50 bg-Cbg/40 px-4 py-2.5">
+                    <p id="sow-summary-text" class="text-[11px] text-Cwhite/90 font-semibold"></p>
+                  </div>
+                  <!-- Color legend \u2014 rendered by JS from live pe_config bands so it can
+                       never drift from the actual per-metric zone thresholds below. -->
+                  <div id="sow-zone-legend" class="flex flex-wrap items-center gap-3 text-[10px] font-semibold"></div>
+                  <div id="sow-bars-container" class="space-y-3"></div>
             </div>
 
             <!-- Volume Comparison Matrix table retired \u2014 folded into the unified

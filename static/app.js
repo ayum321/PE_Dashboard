@@ -21527,6 +21527,8 @@ function _renderSowComparison(data) {
   const UNDER  = B.under, OVER = B.over, CRIT = B.crit;
   const AXIS   = Math.max(150, Math.ceil(CRIT * 1.25 / 10) * 10);
 
+  _renderSowZoneLegend(B);
+
   // Overall badge
   const badge = document.getElementById("sow-overall-badge");
   if (badge) {
@@ -21641,6 +21643,24 @@ function _sowBands(data) {
     over:  n(b.over,  n(cfg.sow_over_pct,  110)),
     crit:  n(b.crit,  n(cfg.sow_over_crit_pct, 120)),
   };
+}
+
+/**
+ * Zone legend for the unified Volume Compliance panel — driven entirely by
+ * the live bands (server → pe_config → hardcoded PE default, same order as
+ * _sowBands), so it can never drift from the actual per-row thresholds or
+ * show a customer's contract-specific bands as if they were fixed numbers.
+ */
+function _renderSowZoneLegend(bands) {
+  const host = document.getElementById("sow-zone-legend");
+  if (!host) return;
+  const B = bands || _sowBands();
+  host.innerHTML = `
+    <span class="text-Cmuted uppercase tracking-wider">Zones:</span>
+    <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Camber/70"></span>Below floor &lt;${B.under}%</span>
+    <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Cgreen/70"></span>Standard window ${B.under}\u2013${B.over}%</span>
+    <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Cred/50"></span>Overconsumption ${B.over}\u2013${B.crit}%</span>
+    <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded bg-Cred"></span>Critical &gt;${B.crit}%</span>`;
 }
 
 /** Absolute overage above contract — server-computed when available. */
