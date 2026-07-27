@@ -145,9 +145,10 @@ flowchart TD
 
 ## The Buffer Formula (used everywhere)
 
-$$
-\text{bufferPct} = \frac{\text{SLA hours} - \text{runtime hours}}{\text{SLA hours}} \times 100
-$$
+> **bufferPct = (SLA hours − runtime hours) ÷ SLA hours × 100**
+
+**Worked example**: SLA = 6h, job actually ran 4.5h
+→ `(6 − 4.5) / 6 × 100` = **25% buffer** → LONG_JOB (see table below)
 
 | Condition | Status |
 |---|---|
@@ -228,34 +229,38 @@ tool can do, because it needs both Ctrl-M **and** Azure Monitor data:
 
 ## Formula Detail (with the clamps that actually ship)
 
-$$
-\text{RFCS} = \min\Big(100, \text{failureRate} \times \frac{0.6\cdot\text{avgCPU} + 0.4\cdot\text{avgMem}}{100} \times \big(1 + 0.15 \times \min(\text{criticalServers},10)\big)\Big)
-$$
-`failureRate` is passed in as a **percentage** (`100 - compliance_pct`), not a
-fraction — raw value can reach ~250 before the `min(100, …)` clamp caps it.
+**RFCS** — Resource-Failure Correlation Score
+> `RFCS = cap100( failureRate × (0.6×avgCPU + 0.4×avgMem)/100 × (1 + 0.15×min(criticalServers,10)) )`
+- `failureRate` is a **percentage** (`100 − compliance_pct`), not a fraction.
+- Example: 20% failure rate, avgCPU=85, avgMem=70, 3 critical servers
+  → weighted pressure = `0.6×85 + 0.4×70 = 79` → `20 × 79/100 = 15.8` →
+  amplifier `1 + 0.15×3 = 1.45` → `15.8 × 1.45 = 22.9` → **RFCS ≈ 23**
+- Raw value can reach ~250 before the `cap100(...)` clamp caps it at 100.
 
-$$
-\text{SRI} = \frac{\text{peakHours}}{\text{slaCeilingHours}} \times \Big(1 + \max\big(0, \tfrac{\text{avgCPU}-70}{100}\big)\Big) \quad (>1.0 = \text{breach})
-$$
-`peakHours / slaCeilingHours` is algebraically `1 - bufferPct/100` — SRI
-deliberately **reuses** the same buffer fact (amplified by CPU pressure), it
-is not a second independent computation that could silently disagree.
+**SRI** — SLA Risk Index (per job)
+> `SRI = (peakHours / slaCeilingHours) × (1 + max(0, (avgCPU−70)/100))` — `>1.0` = breach
+- `peakHours / slaCeilingHours` is algebraically `1 − bufferPct/100` — SRI
+  deliberately **reuses** the same buffer fact (amplified by CPU pressure),
+  it is not a second independent computation that could silently disagree.
+- Example: job ran 5h against a 6h ceiling, avgCPU=85
+  → `5/6 = 0.833` × `(1 + max(0,0.15)) = 1.15` → **SRI ≈ 0.96** (still under 1.0)
 
-$$
-\text{CRS} = \min\Big(1, \text{failedFlag} \times \frac{\text{downstreamCount}}{\text{downstreamCount}+5} \times \big(1 - \text{clamp}(\text{slaBuffer},0,100)/100\big)\Big)
-$$
-`slaBuffer` is clamped to `[0,100]` **before** use — a −200% (deep breach)
-buffer becomes `0`, not a negative that would push CRS past 1. Result is
-clamped again to `≤1`.
+**CRS** — Cascade Risk Score (per job)
+> `CRS = cap1( failedFlag × (downstreamCount/(downstreamCount+5)) × (1 − clamp(slaBuffer,0,100)/100) )`
+- `slaBuffer` is clamped to `[0,100]` **before** use — a −200% (deep breach)
+  buffer becomes `0`, not a negative that would push CRS past 1. The final
+  result is clamped again to `≤ 1`.
+- Example: job failed, 8 downstream jobs, buffer was −200% (deep breach)
+  → chain factor `8/13 = 0.615` × buffer risk `1 − 0/100 = 1.0` → **CRS ≈ 0.62**
 
-$$
-\text{OSHS} = 0.40\cdot\text{batchScore} + 0.35\cdot\text{slaScore} + 0.25\cdot\text{resourceScore}
-$$
-Weights re-normalize over batch+SLA only (0.40/0.35 → proportional) when no
-resource data exists — never fabricates a resource score.
+**OSHS** — Overall System Health Score (executive grade)
+> `OSHS = 0.40×batchScore + 0.35×slaScore + 0.25×resourceScore`
+- Weights re-normalize over batch+SLA only (→ 0.53/0.47 proportional) when
+  no resource data exists — **never fabricates** a resource score.
 
 *Talk track: every formula here is clamped at both ends in code — the deck
-now states the clamps explicitly instead of leaving them implicit.*
+now states the clamps and a worked example for each, instead of leaving the
+math abstract.*
 
 ---
 
@@ -289,9 +294,10 @@ flowchart LR
   are rejected, never silently accepted).
 - Actual volume (from Batch/manual entry) compared against the SOW baseline:
 
-$$
-\text{pct} = \frac{\text{actual}}{\text{SOW contracted}} \times 100
-$$
+> **pct = actual ÷ SOW contracted × 100**
+
+**Worked example**: SOW contracted = 500,000 DFU/day, actual = 265,000
+→ `265,000 / 500,000 × 100` = **53% → LOW**, under-utilized vs. contract
 
 Evaluated in strict order (first match wins — never double-fires):
 
