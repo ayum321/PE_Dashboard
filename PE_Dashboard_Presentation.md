@@ -146,7 +146,7 @@ flowchart TD
 ## The Buffer Formula (used everywhere)
 
 $$
-\text{buffer\_pct} = \frac{\text{SLA}_h - \text{runtime}_h}{\text{SLA}_h} \times 100
+\text{bufferPct} = \frac{\text{SLA hours} - \text{runtime hours}}{\text{SLA hours}} \times 100
 $$
 
 | Condition | Status |
@@ -227,19 +227,19 @@ tool can do, because it needs both Ctrl-M **and** Azure Monitor data:
 ## Formula Detail
 
 $$
-\text{RFCS} = \text{failure\_rate} \times \frac{0.6\cdot\text{avgCPU} + 0.4\cdot\text{avgMem}}{100} \times \big(1 + 0.15 \times \min(\text{critical\_servers},10)\big)
+\text{RFCS} = \text{failureRate} \times \frac{0.6\cdot\text{avgCPU} + 0.4\cdot\text{avgMem}}{100} \times \big(1 + 0.15 \times \min(\text{criticalServers},10)\big)
 $$
 
 $$
-\text{SRI} = \frac{\text{peak\_hrs}}{\text{sla\_ceiling\_hrs}} \times \Big(1 + \max\big(0, \tfrac{\text{avgCPU}-70}{100}\big)\Big) \quad (>1.0 = \text{breach})
+\text{SRI} = \frac{\text{peakHours}}{\text{slaCeilingHours}} \times \Big(1 + \max\big(0, \tfrac{\text{avgCPU}-70}{100}\big)\Big) \quad (>1.0 = \text{breach})
 $$
 
 $$
-\text{CRS} = \text{failed\_flag} \times \frac{\text{downstream\_count}}{\text{downstream\_count}+5} \times \Big(1 - \tfrac{\text{sla\_buffer}}{100}\Big)
+\text{CRS} = \text{failedFlag} \times \frac{\text{downstreamCount}}{\text{downstreamCount}+5} \times \Big(1 - \tfrac{\text{slaBuffer}}{100}\Big)
 $$
 
 $$
-\text{OSHS} = 0.40\cdot\text{batch\_score} + 0.35\cdot\text{sla\_score} + 0.25\cdot\text{resource\_score}
+\text{OSHS} = 0.40\cdot\text{batchScore} + 0.35\cdot\text{slaScore} + 0.25\cdot\text{resourceScore}
 $$
 
 *Talk track: these feed the Executive Dashboard's letter grade — the one
