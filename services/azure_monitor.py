@@ -151,6 +151,57 @@ _VM_METRICS_DISK = [
 
 _VM_METRICS = _VM_METRICS_PLATFORM + _VM_METRICS_DISK
 
+# ── Throughput / availability metrics (Azure Portal "Platform Metrics" parity) ─
+# These mirror the panels an Azure/Grafana VM dashboard shows: disk bytes, disk
+# ops/sec, network in/out, and the availability indicator.
+#
+# IMPORTANT: these are NOT percentages. They have no meaningful warn/crit band,
+# so they are deliberately CHART-ONLY — excluded from spike classification and
+# from findings. Feeding a byte counter through _classify_severity (whose
+# fallback band is warn=80/crit=90) would grade every single datapoint
+# "critical_sustained" because bytes are numerically enormous. Grading stays on
+# the percentage metrics that have real thresholds in pe_config.
+_VM_METRICS_THROUGHPUT = [
+    "Disk Read Bytes",
+    "Disk Write Bytes",
+    "Disk Read Operations/Sec",
+    "Disk Write Operations/Sec",
+    "Network In Total",
+    "Network Out Total",
+]
+_VM_METRICS_AVAILABILITY = [
+    "VmAvailabilityMetric",   # "Availability (Preview)" in the Azure portal
+]
+
+# Metrics that are displayed but never spike-classified or graded.
+_CHART_ONLY_METRICS = set(_VM_METRICS_THROUGHPUT) | set(_VM_METRICS_AVAILABILITY) | {
+    "Available Memory Bytes",   # byte-scale twin of Available Memory Percentage
+}
+
+# Display units for the chart-only metrics, so the frontend can label axes
+# without string-sniffing metric names.
+_METRIC_UNITS = {
+    "Disk Read Bytes":            "bytes",
+    "Disk Write Bytes":           "bytes",
+    "Network In Total":           "bytes",
+    "Network Out Total":          "bytes",
+    "Available Memory Bytes":     "bytes",
+    "Disk Read Operations/Sec":   "ops",
+    "Disk Write Operations/Sec":  "ops",
+    "VmAvailabilityMetric":       "availability",
+}
+
+# Query groups. Azure fails the ENTIRE query_resource call if any one metric in
+# the list is unsupported for that VM, so metrics are requested in small groups
+# and each group is failure-isolated — a VM without AMA still returns CPU, and a
+# VM that does not expose the availability metric still returns everything else.
+_TS_METRIC_GROUPS = [
+    _VM_METRICS_PLATFORM,
+    _VM_METRICS_DISK,
+    _VM_METRICS_THROUGHPUT,
+    _VM_METRICS_AVAILABILITY,
+]
+
 # Aggregation type for each metric
 _METRIC_AGG = {
     "Percentage CPU":                         "Average",
@@ -615,11 +666,21 @@ _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
     """Query metrics for a single VM. Returns (rid, metrics_dict).
-    
-    Each metric returns:
+
+    Each metric returns (all from ONE API call — Azure Monitor accepts multiple
+    aggregation types per request, so this costs nothing extra over Average-only):
       metric_name          → overall period average (for CPU AVG column)
-      metric_name__recent  → last data point / most recent hour (for CPU% column)
-    
+      metric_name__recent   → last data point / most recent hour (for CPU% column)
+      metric_name__max      → true period MAXIMUM — the worst single bucket in the
+                              whole window. A job that spikes CPU/mem/disk for 30min
+                              out of a 15-day window gets averaged away to nothing;
+                              this is what surfaces it so a PE lead can pick "Max"
+                              instead of "Avg" and see the real peak, the same
+                              Avg/Min/Max/Count choice Azure Metrics Explorer offers.
+      metric_name__min      → true period MINIMUM — the best single bucket (for
+                              memory, this is the highest-pressure point since the
+                              raw metric is 'available %', inverted from used %).
+
     Strategy: try ALL metrics in a single API call first (fastest).
     If that fails, fall back to platform-only + individual disk queries.
     """
@@ -628,13 +689,20 @@ def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
     t0 = _t.perf_counter()
     vm_label = rid.split("/")[-1]
     metrics = {}
+    _AGGS = [MetricAggregationType.AVERAGE, MetricAggregationType.MAXIMUM, MetricAggregationType.MINIMUM]
 
     def _extract(response):
         for m in response.metrics:
-            vals = [dp.average for ts in m.timeseries for dp in ts.data if dp.average is not None]
-            if vals:
-                metrics[m.name] = sum(vals) / len(vals)        # period average
-                metrics[m.name + "__recent"] = vals[-1]         # most recent data point
+            avgs = [dp.average for ts in m.timeseries for dp in ts.data if dp.average is not None]
+            maxs = [dp.maximum for ts in m.timeseries for dp in ts.data if dp.maximum is not None]
+            mins = [dp.minimum for ts in m.timeseries for dp in ts.data if dp.minimum is not None]
+            if avgs:
+                metrics[m.name] = sum(avgs) / len(avgs)        # period average
+                metrics[m.name + "__recent"] = avgs[-1]         # most recent data point
+            if maxs:
+                metrics[m.name + "__max"] = max(maxs)            # true period max
+            if mins:
+                metrics[m.name + "__min"] = min(mins)            # true period min
 
     # Fast path: all metrics in one call
     try:
@@ -643,7 +711,7 @@ def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
             metric_names=list(_VM_METRICS),
             timespan=(start_time, end_time),
             granularity=granularity,
-            aggregations=[MetricAggregationType.AVERAGE],
+            aggregations=_AGGS,
         )
         _extract(response)
         logger.info("Metrics for %s (single call, %.1fs): %s", vm_label, _t.perf_counter() - t0, {k: v for k, v in metrics.items() if '__' not in k} or "EMPTY")
@@ -658,7 +726,7 @@ def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
             metric_names=list(_VM_METRICS_PLATFORM),
             timespan=(start_time, end_time),
             granularity=granularity,
-            aggregations=[MetricAggregationType.AVERAGE],
+            aggregations=_AGGS,
         )
         _extract(response)
     except Exception as exc:
@@ -672,7 +740,7 @@ def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
                 metric_names=[disk_metric],
                 timespan=(start_time, end_time),
                 granularity=granularity,
-                aggregations=[MetricAggregationType.AVERAGE],
+                aggregations=_AGGS,
             )
             _extract(response)
         except Exception:
@@ -748,63 +816,94 @@ def _query_metrics(
 
 def _query_single_vm_timeseries(client, rid, start_time, end_time, granularity):
     """Query metrics time-series for a single VM.
-    Returns (rid, {metric_name: [{t: iso_str, v: float}, ...], ...}, {metric_name: {true_max, true_min}}).
-    The third element contains true Max/Min aggregation values for accurate header stats.
+
+    Returns ``(rid, series, true_extremes, series_max)``:
+      - ``series``        {metric: [{t, v}]}  — AVERAGE aggregation, the chart line
+      - ``true_extremes`` {metric: {true_max, true_min}} — accurate header stats
+      - ``series_max``    {metric: [{t, v}]}  — MAXIMUM aggregation, per timestamp,
+        retained for the "Average AND Maximum" overlay (graded metrics only)
+
+    Metrics are requested in FAILURE-ISOLATED GROUPS (_TS_METRIC_GROUPS). Azure
+    rejects the whole query_resource call if a single requested metric is not
+    supported on that VM, so a flat one-shot request meant one unsupported disk
+    or availability metric silently returned an EMPTY series dict for the VM —
+    the deep dive would render nothing for it with only a log warning.
     """
     from azure.monitor.query import MetricAggregationType
     vm_label = rid.split("/")[-1]
     series = {}
     true_extremes = {}
+    series_max = {}
 
-    try:
-        # Primary query: Average aggregation for chart line rendering
-        response = client.query_resource(
-            resource_uri=rid,
-            metric_names=list(_VM_METRICS),
-            timespan=(start_time, end_time),
-            granularity=granularity,
-            aggregations=[MetricAggregationType.AVERAGE],
-        )
-        for m in response.metrics:
-            points = []
-            for ts in m.timeseries:
-                for dp in ts.data:
-                    if dp.average is not None:
-                        points.append({
-                            "t": dp.timestamp.isoformat(),
-                            "v": round(dp.average, 4),
-                        })
-            if points:
-                series[m.name] = points
-    except Exception as exc:
-        logger.warning("Time-series query failed for %s: %s", vm_label, exc)
+    for group in _TS_METRIC_GROUPS:
+        if not group:
+            continue
+        try:
+            # Primary query: Average aggregation for chart line rendering
+            response = client.query_resource(
+                resource_uri=rid,
+                metric_names=list(group),
+                timespan=(start_time, end_time),
+                granularity=granularity,
+                aggregations=[MetricAggregationType.AVERAGE],
+            )
+            for m in response.metrics:
+                points = []
+                for ts in m.timeseries:
+                    for dp in ts.data:
+                        if dp.average is not None:
+                            points.append({
+                                "t": dp.timestamp.isoformat(),
+                                "v": round(dp.average, 4),
+                            })
+                if points:
+                    series[m.name] = points
+        except Exception as exc:
+            logger.warning("Time-series query failed for %s [%s]: %s",
+                           vm_label, ", ".join(group), exc)
 
-    try:
-        # Secondary query: Max/Min aggregation for accurate header stats
-        extremes_response = client.query_resource(
-            resource_uri=rid,
-            metric_names=list(_VM_METRICS),
-            timespan=(start_time, end_time),
-            granularity=granularity,
-            aggregations=[MetricAggregationType.MAXIMUM, MetricAggregationType.MINIMUM],
-        )
-        for m in extremes_response.metrics:
-            max_val = None
-            min_val = None
-            for ts in m.timeseries:
-                for dp in ts.data:
-                    if dp.maximum is not None:
-                        max_val = max(max_val, dp.maximum) if max_val is not None else dp.maximum
-                    if dp.minimum is not None:
-                        min_val = min(min_val, dp.minimum) if min_val is not None else dp.minimum
-            true_extremes[m.name] = {
-                "true_max": round(max_val, 4) if max_val is not None else None,
-                "true_min": round(min_val, 4) if min_val is not None else None,
-            }
-    except Exception as exc:
-        logger.warning("Max/Min aggregation query failed for %s: %s", vm_label, exc)
+        try:
+            # Secondary query: Max/Min aggregation for accurate header stats
+            extremes_response = client.query_resource(
+                resource_uri=rid,
+                metric_names=list(group),
+                timespan=(start_time, end_time),
+                granularity=granularity,
+                aggregations=[MetricAggregationType.MAXIMUM, MetricAggregationType.MINIMUM],
+            )
+            for m in extremes_response.metrics:
+                max_val = None
+                min_val = None
+                # The MAXIMUM aggregate is already per-timestamp. It was being
+                # collapsed straight to a scalar, discarding the series — which
+                # is exactly the "Average AND Maximum" overlay the Azure
+                # Platform Metrics dashboard draws. Retain it for the graded
+                # percentage metrics so the chart can show how far the peak
+                # inside each bucket ran above the bucket average; a 30-min
+                # average of 55% hiding a 98% max is the single most common way
+                # a real saturation event disappears from an averaged chart.
+                max_points = []
+                for ts in m.timeseries:
+                    for dp in ts.data:
+                        if dp.maximum is not None:
+                            max_val = max(max_val, dp.maximum) if max_val is not None else dp.maximum
+                            max_points.append({
+                                "t": dp.timestamp.isoformat(),
+                                "v": round(dp.maximum, 4),
+                            })
+                        if dp.minimum is not None:
+                            min_val = min(min_val, dp.minimum) if min_val is not None else dp.minimum
+                true_extremes[m.name] = {
+                    "true_max": round(max_val, 4) if max_val is not None else None,
+                    "true_min": round(min_val, 4) if min_val is not None else None,
+                }
+                if max_points and m.name not in _CHART_ONLY_METRICS:
+                    series_max[m.name] = max_points
+        except Exception as exc:
+            logger.warning("Max/Min aggregation query failed for %s [%s]: %s",
+                           vm_label, ", ".join(group), exc)
 
-    return (rid, series, true_extremes)
+    return (rid, series, true_extremes, series_max)
 
 
 def _percentile(values: list, pct: float) -> float:
@@ -828,13 +927,16 @@ def _percentile(values: list, pct: float) -> float:
     return float(s[lo] + frac * (s[lo + 1] - s[lo]))
 
 
-def _metric_elevation(metric_label: str) -> dict:
+def _metric_elevation(metric_label: str, is_db: bool = False) -> dict:
     """Single source of truth for 'is this metric elevated' bands.
 
     Reads the canonical CPU/MEM/DISK warn/crit thresholds from ``pe_config``
     (live — picks up Settings overrides after ``pe_config.reload()``), so the
     spike detector, per-VM hot-hours, and fleet hot-hours can no longer drift
     apart with parallel hardcoded tables.
+
+    ``is_db`` selects the Oracle/DB memory band (``DB_MEM_WARN``/``DB_MEM_CRIT``)
+    instead of the generic application band.
 
     Returns warn/crit in USED-% terms (higher = worse). ``invert`` marks metrics
     whose RAW samples are 'available %' (memory) — callers working in that space
@@ -846,15 +948,24 @@ def _metric_elevation(metric_label: str) -> dict:
         return {"metric": "cpu", "warn": float(pe_config.CPU_WARN),
                 "crit": float(pe_config.CPU_CRIT), "invert": False}
     if "mem" in name:
+        # DB servers legitimately hold 80-92% memory (Oracle SGA/PGA is
+        # pre-allocated) — judging them against the generic 70/80 app bands
+        # marks every Oracle VM permanently critical, which directly
+        # contradicts the "DB expected band" legend rendered on the same
+        # screen. Use the canonical DB bands from pe_config for DB roles.
+        if is_db:
+            return {"metric": "mem", "warn": float(pe_config.DB_MEM_WARN),
+                    "crit": float(pe_config.DB_MEM_CRIT), "invert": True,
+                    "role": "db"}
         return {"metric": "mem", "warn": float(pe_config.MEM_WARN),
-                "crit": float(pe_config.MEM_CRIT), "invert": True}
+                "crit": float(pe_config.MEM_CRIT), "invert": True, "role": "app"}
     if "disk" in name:
         return {"metric": "disk", "warn": float(pe_config.DISK_WARN),
                 "crit": float(pe_config.DISK_CRIT), "invert": False}
     return {"metric": "other", "warn": 80.0, "crit": 90.0, "invert": False}
 
 
-def _abs_breach_cfg(metric_name: str) -> dict | None:
+def _abs_breach_cfg(metric_name: str, is_db: bool = False) -> dict | None:
     """Absolute-breach thresholds for the spike detector, derived from the same
     canonical ``pe_config`` bands as ``_metric_elevation`` (single source).
 
@@ -862,7 +973,7 @@ def _abs_breach_cfg(metric_name: str) -> dict | None:
     is converted as ``100 - used``. ``min_minutes`` is the spike-duration gate and
     stays metric-specific (orthogonal to the elevation threshold).
     """
-    band = _metric_elevation(metric_name)
+    band = _metric_elevation(metric_name, is_db=is_db)
     m = band["metric"]
     if m == "cpu":
         return {"critical": band["crit"], "warning": band["warn"], "min_minutes": 30}
@@ -917,7 +1028,7 @@ def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
 
 
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
-                   metric_name: str = "") -> list:
+                   metric_name: str = "", is_db: bool = False) -> list:
     """Detect spikes in a time-series using DUAL classifiers:
     
     Classifier 1: Z-score (catches sudden deviations from server's own baseline)
@@ -946,7 +1057,12 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     variance = sum((v - mean) ** 2 for v in vals) / n
     std = variance ** 0.5
 
-    # Metric-specific z-score thresholds
+    # Metric-specific z-score thresholds. These now ACTUALLY gate detection
+    # (see `eff_sigma` below). Previously `z_critical` was computed here but
+    # only passed to _classify_severity for the confidence label, while the
+    # detection loop always compared against the default threshold_sigma=2.0 —
+    # so the documented per-metric sigmas (and the disk noise suppression they
+    # exist for) were never in effect.
     mn = (metric_name or "").lower()
     if "cpu" in mn:
         z_critical = 2.5   # CPU has natural batch variance
@@ -957,19 +1073,31 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     else:
         z_critical = 3.0
 
+    # Detection gate: honour the metric-specific sigma, but never LOOSER than
+    # the caller-supplied threshold_sigma (so an explicit stricter request from
+    # a caller still wins).
+    eff_sigma = max(float(threshold_sigma), z_critical)
+
     # Absolute thresholds (Classifier 2) — chronic breach detection.
     # Sourced from the canonical pe_config bands via _abs_breach_cfg, so the
     # spike detector, per-VM hot-hours, and fleet hot-hours all read ONE shared
     # threshold set instead of three parallel hardcoded tables.
-    abs_cfg = _abs_breach_cfg(metric_name)
-    band = _metric_elevation(metric_name)   # used-% warn/crit for the abs-significance gate
+    abs_cfg = _abs_breach_cfg(metric_name, is_db=is_db)
+    band = _metric_elevation(metric_name, is_db=is_db)   # used-% warn/crit for the abs-significance gate
 
     spikes = []
 
     # ── Classifier 1: Z-score spike detection ──
     # For "Available Memory %", a SPIKE is a DROP (negative z).
     # For CPU/Disk, a SPIKE is a RISE (positive z).
-    is_inverted_metric = "memory" in mn or "mem" in mn  # Available Memory: lower = worse
+    #
+    # Orientation is read from the band rather than re-derived by substring.
+    # `_metric_elevation` already owns this decision and exports it as `invert`,
+    # but that flag had no consumer — every call site pattern-matched the metric
+    # name again, so there were three independent copies of "is this metric
+    # inverted?" that could drift apart. The band is now the single source, and
+    # `_abs_breach_cfg` (below) derives its own `invert` from the same place.
+    is_inverted_metric = bool(band.get("invert"))
     if std >= 0.001:
         in_spike = False
         spike_start = None
@@ -981,7 +1109,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
             z = (p["v"] - mean) / std
             # For inverted metrics, detect negative z (value dropped below baseline)
             effective_z = -z if is_inverted_metric else z
-            if effective_z >= threshold_sigma:
+            if effective_z >= eff_sigma:
                 if not in_spike:
                     in_spike = True
                     spike_start = p["t"]
@@ -1104,6 +1232,14 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         if not overlaps:
                             sev = "critical_sustained" if dur_min > 60 else breach_severity
                             used_pk = (100.0 - breach_peak) if is_inverted else breach_peak
+                            # z_score must be SEVERITY-oriented (higher = worse) to
+                            # match classifier-1's `effective_z`. For an inverted
+                            # metric the breach peak is the LOWEST value, so the raw
+                            # z is negative; negate it. Consumers rank with
+                            # max(events, key=z_score) and gate on `z >= 3.0`, both
+                            # of which were unreachable for memory before this.
+                            _raw_z = ((breach_peak - mean) / std) if std > 0.001 else 0.0
+                            _sev_z = -_raw_z if is_inverted else _raw_z
                             spikes.append(make_spike_record(
                                 start=breach_start, end=series_points[i - 1]["t"],
                                 peak=round(breach_peak, 2), peak_time=breach_peak_time,
@@ -1111,7 +1247,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                                 reason_code="abs_sustained" if dur_min > 60 else "abs_breach",
                                 severity_reason=f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
                                 confidence="high", detection="absolute_threshold",
-                                z_score=round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
+                                z_score=round(_sev_z, 2),
                                 mean=round(mean, 2), std=round(std, 2),
                                 threshold=crit_thresh if breach_severity == "critical" else warn_thresh,
                                 peak_pct=round(used_pk, 1),
@@ -1135,6 +1271,9 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 if not overlaps:
                     sev = "critical_sustained" if dur_min > 60 else breach_severity
                     used_pk = (100.0 - breach_peak) if is_inverted else breach_peak
+                    # Severity-oriented z (see the mid-loop close above).
+                    _raw_z = ((breach_peak - mean) / std) if std > 0.001 else 0.0
+                    _sev_z = -_raw_z if is_inverted else _raw_z
                     spikes.append(make_spike_record(
                         start=breach_start, end=series_points[-1]["t"],
                         peak=round(breach_peak, 2), peak_time=breach_peak_time,
@@ -1142,7 +1281,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         reason_code="abs_sustained" if dur_min > 60 else "abs_breach",
                         severity_reason=f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
                         confidence="high", detection="absolute_threshold",
-                        z_score=round((breach_peak - mean) / std, 2) if std > 0.001 else 0,
+                        z_score=round(_sev_z, 2),
                         mean=round(mean, 2), std=round(std, 2),
                         threshold=crit_thresh if breach_severity == "critical" else warn_thresh,
                         peak_pct=round(used_pk, 1),
@@ -1169,6 +1308,283 @@ def detect_regime_change(recent_baseline: dict, prior_baseline: dict,
     }
 
 
+# ── Waveform (signal shape) classification ───────────────────────────────────
+# Catalogue of shapes the deep-dive "Signal Pattern Analysis" panel renders.
+# Keys MUST stay in sync with the secondary-shape catalogue in static/app.js.
+_WAVEFORM_CATALOG = {
+    "sawtooth": {
+        "label": "Cyclic Load", "icon": "⚡",
+        "meaning": "Regular rise-and-fall cycles — the signature of scheduled batch work rather than organic user load.",
+        "action": "Map the cycle period against the Ctrl-M schedule; stagger overlapping jobs if peaks collide.",
+    },
+    "diurnal": {
+        "label": "Daily Cycle", "icon": "🌓",
+        "meaning": "A repeating ~24h pattern — load tracks the business day or a nightly batch window.",
+        "action": "Size capacity for the daily peak, not the daily mean. Confirm the peak window is the intended one.",
+    },
+    "trending_up": {
+        "label": "Trending ↑", "icon": "📈",
+        "meaning": "The baseline itself is climbing across the observation window — this is growth, not a spike.",
+        "action": "Identify the growth driver (data volume, new jobs, plan regression) before it reaches the critical band.",
+    },
+    "random_spikes": {
+        "label": "Irregular Spikes", "icon": "🎯",
+        "meaning": "Sharp excursions with no repeating period — ad-hoc jobs, retries, or an unpredictable workload.",
+        "action": "Correlate individual spikes with batch runs; an unattributed spike usually means an unscheduled process.",
+    },
+    "plateau": {
+        "label": "Sustained Load", "icon": "▬",
+        "meaning": "Consistently elevated with little variation — the resource is held at a high level, not spiking to it.",
+        "action": "This is a sizing problem, not a scheduling one. Schedule changes will not move a plateau.",
+    },
+    "change_point": {
+        "label": "Regime Shift", "icon": "⚠️",
+        "meaning": "The signal stepped to a new level part-way through the window and stayed there.",
+        "action": "Find what changed at the step: a deployment, config change, data load, or new job.",
+    },
+    "weekend_dip": {
+        "label": "Weekday-Driven", "icon": "📅",
+        "meaning": "Clearly lower at weekends — load is driven by weekday business or weekday batch.",
+        "action": "Weekday peaks govern sizing. Weekend headroom is not spare capacity for weekday work.",
+    },
+    "flat_low": {
+        "label": "Flat / Low", "icon": "✅",
+        "meaning": "Stable and well within band across the whole window.",
+        "action": "No action. Candidate for right-sizing review if consistently this low.",
+    },
+}
+
+
+def _linreg_slope(vals: list) -> float:
+    """Least-squares slope over evenly-indexed samples. 0.0 when undefined."""
+    n = len(vals)
+    if n < 3:
+        return 0.0
+    mx = (n - 1) / 2.0
+    my = sum(vals) / n
+    sxx = sum((i - mx) ** 2 for i in range(n))
+    if sxx <= 0:
+        return 0.0
+    sxy = sum((i - mx) * (v - my) for i, v in enumerate(vals))
+    return sxy / sxx
+
+
+def _autocorr(vals: list, lag: int) -> float:
+    """Pearson autocorrelation at a given lag. 0.0 when undefined."""
+    n = len(vals)
+    if lag <= 0 or n <= lag + 2:
+        return 0.0
+    a = vals[:-lag]
+    b = vals[lag:]
+    m = len(a)
+    ma = sum(a) / m
+    mb = sum(b) / m
+    saa = sum((x - ma) ** 2 for x in a)
+    sbb = sum((x - mb) ** 2 for x in b)
+    if saa <= 1e-9 or sbb <= 1e-9:
+        return 0.0
+    sab = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    return sab / ((saa * sbb) ** 0.5)
+
+
+def _classify_waveform(points: list, metric_name: str, is_db: bool,
+                       grain_minutes: float) -> Optional[Dict[str, Any]]:
+    """Classify the SHAPE of a metric's time-series.
+
+    Feeds the deep dive's "Signal Pattern Analysis" panel, which previously had
+    no producer at all — the entire section was unreachable UI.
+
+    Everything here is computed in USED-% space (higher = worse) so that a
+    memory series (delivered by Azure as *available* %) is judged with the same
+    comparisons as CPU and disk. The inversion happens exactly once, on entry.
+
+    Returns None for metrics that are not percentages, or when there is too
+    little data to say anything defensible.
+    """
+    if metric_name in _CHART_ONLY_METRICS:
+        return None
+    if not points or len(points) < 8:
+        return None
+
+    band = _metric_elevation(metric_name, is_db=is_db)
+    inverted = bool(band.get("invert"))
+    warn, crit = float(band["warn"]), float(band["crit"])
+
+    parsed = []
+    for p in points:
+        try:
+            t = datetime.fromisoformat(str(p["t"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        v = p.get("v")
+        if v is None:
+            continue
+        parsed.append({"t": t, "v": (100.0 - float(v)) if inverted else float(v)})
+    if len(parsed) < 8:
+        return None
+    parsed.sort(key=lambda d: d["t"])
+
+    vals = [d["v"] for d in parsed]
+    n = len(vals)
+    mean_v = sum(vals) / n
+    std_v = (sum((v - mean_v) ** 2 for v in vals) / n) ** 0.5
+    peak_v = max(vals)
+    cv = (std_v / mean_v) if mean_v > 0.5 else 0.0
+
+    # Samples per hour / per day at this grain — drives the periodicity lags.
+    gm = max(1.0, float(grain_minutes))
+    per_hour = 60.0 / gm
+    lag_day = int(round(24 * per_hour))
+
+    # ── Feature extraction ────────────────────────────────────────────────
+    # Peaks: local maxima that clear one sigma above the mean.
+    thr_peak = mean_v + std_v
+    peak_count = 0
+    for i in range(1, n - 1):
+        if vals[i] > thr_peak and vals[i] >= vals[i - 1] and vals[i] > vals[i + 1]:
+            peak_count += 1
+
+    slope = _linreg_slope(vals)                  # units per sample
+    slope_per_day = slope * per_hour * 24.0
+
+    # Periodicity MUST be measured on DETRENDED residuals. A pure linear ramp
+    # has autocorrelation ≈ 1 at every lag, so a trending signal would otherwise
+    # be misread as "diurnal" (verified: a 20→85 ramp classified as diurnal
+    # before this). Removing the least-squares trend first isolates the cyclic
+    # component from the growth component.
+    _mx = (n - 1) / 2.0
+    _my = mean_v
+    resid = [v - (_my + slope * (i - _mx)) for i, v in enumerate(vals)]
+
+    ac_day = _autocorr(resid, lag_day) if n > lag_day + 2 else 0.0
+
+    # Best short-period autocorrelation (2h..12h) → cyclic/batch signature.
+    ac_short, ac_short_lag = 0.0, 0
+    for hrs in (2, 3, 4, 6, 8, 12):
+        lag = int(round(hrs * per_hour))
+        if lag < 2 or n <= lag + 2:
+            continue
+        a = _autocorr(resid, lag)
+        if a > ac_short:
+            ac_short, ac_short_lag = a, hrs
+
+    # Change point: largest split-half mean gap in pooled-sigma units.
+    cp_idx, cp_delta, before_mean, after_mean = None, 0.0, None, None
+    if n >= 16:
+        for i in range(max(4, n // 8), n - max(4, n // 8)):
+            a, b = vals[:i], vals[i:]
+            ma, mb = sum(a) / len(a), sum(b) / len(b)
+            va = sum((x - ma) ** 2 for x in a) / len(a)
+            vb = sum((x - mb) ** 2 for x in b) / len(b)
+            pooled = ((va + vb) / 2.0) ** 0.5
+            if pooled <= 0.001:
+                continue
+            d = abs(mb - ma) / pooled
+            if d > cp_delta:
+                cp_idx, cp_delta, before_mean, after_mean = i, d, round(ma, 1), round(mb, 1)
+
+    # Weekday vs weekend
+    wd = [d["v"] for d in parsed if d["t"].weekday() < 5]
+    we = [d["v"] for d in parsed if d["t"].weekday() >= 5]
+    wd_avg = (sum(wd) / len(wd)) if wd else None
+    we_avg = (sum(we) / len(we)) if we else None
+
+    # Time above the warn band
+    above = sum(1 for v in vals if v >= warn)
+    duration_above_hrs = round(above * gm / 60.0, 1)
+    recurrence_days = len({d["t"].date() for d in parsed if d["v"] >= warn})
+
+    # ── Shape decision (ordered by specificity) ───────────────────────────
+    shapes = []
+    if cp_idx is not None and cp_delta >= 2.5 and abs((after_mean or 0) - (before_mean or 0)) >= 5:
+        shapes.append(("change_point", min(0.95, 0.45 + cp_delta / 12.0)))
+    # A short cycle (e.g. 6h batch) also correlates at 24h because 24 is a
+    # multiple of it. When both fire, the SHORTER period is the more specific —
+    # and more actionable — explanation, so it must outrank "diurnal".
+    _short_wins = ac_short >= 0.40 and ac_short >= (ac_day - 0.05)
+    if ac_day >= 0.45 and n > lag_day + 2 and not _short_wins:
+        shapes.append(("diurnal", min(0.95, 0.40 + ac_day * 0.55)))
+    if ac_short >= 0.40 and cv >= 0.20:
+        shapes.append(("sawtooth", min(0.95, 0.35 + ac_short * 0.55)))
+    if slope_per_day >= 1.0 and abs(slope_per_day) * (n * gm / 1440.0) >= 4:
+        shapes.append(("trending_up", min(0.92, 0.40 + min(slope_per_day, 10.0) / 20.0)))
+    if wd_avg is not None and we_avg is not None and we and wd and (wd_avg - we_avg) >= max(8.0, 0.25 * wd_avg):
+        shapes.append(("weekend_dip", min(0.90, 0.45 + (wd_avg - we_avg) / 60.0)))
+    if mean_v >= warn and cv <= 0.18:
+        shapes.append(("plateau", min(0.95, 0.55 + (mean_v - warn) / 40.0)))
+    if peak_count >= 3 and cv >= 0.30:
+        shapes.append(("random_spikes", min(0.85, 0.35 + peak_count / 30.0)))
+    if not shapes:
+        if mean_v < warn * 0.6 and cv <= 0.25:
+            shapes.append(("flat_low", 0.75))
+        else:
+            shapes.append(("random_spikes", 0.45))
+
+    shapes.sort(key=lambda s: -s[1])
+    shape, confidence = shapes[0]
+    secondary_shape = shapes[1][0] if len(shapes) > 1 else None
+
+    # ── Risk: SHAPE modulates, ABSOLUTE LEVEL decides. A cyclic pattern that
+    # never leaves the healthy band is not a risk; a plateau inside the critical
+    # band is. This mirrors the two-gate rule used by _classify_severity.
+    if peak_v >= crit and duration_above_hrs >= 1:
+        risk = "critical" if shape in ("plateau", "trending_up", "change_point") else "high"
+    elif peak_v >= crit:
+        risk = "high"
+    elif mean_v >= warn or peak_v >= warn:
+        risk = "high" if shape in ("plateau", "trending_up") else "medium"
+    elif shape == "flat_low":
+        risk = "none"
+    else:
+        risk = "low"
+
+    conf_label = ("observed" if confidence >= 0.75
+                  else "inferred" if confidence >= 0.55 else "weak-signal")
+
+    meta = _WAVEFORM_CATALOG[shape]
+    detail_note = ""
+    if shape == "sawtooth" and ac_short_lag:
+        detail_note = f" Dominant cycle ≈ {ac_short_lag}h."
+    elif shape == "trending_up":
+        detail_note = f" Rising ≈ {slope_per_day:.1f}pp/day."
+    elif shape == "change_point" and before_mean is not None:
+        detail_note = f" Level stepped {before_mean:.0f}% → {after_mean:.0f}%."
+    elif shape == "weekend_dip" and wd_avg is not None:
+        detail_note = f" Weekday avg {wd_avg:.0f}% vs weekend {we_avg:.0f}%."
+
+    return {
+        "shape": shape,
+        "secondary_shape": secondary_shape,
+        "label": meta["label"],
+        "icon": meta["icon"],
+        "meaning": meta["meaning"] + detail_note,
+        "action": meta["action"],
+        "risk": risk,
+        "confidence": round(confidence, 2),
+        "confidence_label": conf_label,
+        "recurrence_days": recurrence_days,
+        "duration_above_threshold_hrs": duration_above_hrs,
+        "details": {
+            "peak_used_pct": round(peak_v, 1),
+            "mean_used_pct": round(mean_v, 1),
+            "headroom_pct": round(max(0.0, 100.0 - peak_v), 1),
+            "peak_count": peak_count,
+            "cv": round(cv, 3),
+            "slope_pp_per_day": round(slope_per_day, 2),
+            "autocorr_24h": round(ac_day, 2),
+            "autocorr_short": round(ac_short, 2),
+            "cycle_hours": ac_short_lag or None,
+            "change_point_idx": cp_idx if (shape == "change_point") else None,
+            "before_mean": before_mean if (shape == "change_point") else None,
+            "after_mean": after_mean if (shape == "change_point") else None,
+            "warn_band": warn,
+            "crit_band": crit,
+            "band_role": band.get("role", "app"),
+            "samples": n,
+        },
+    }
+
+
 def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int = 24) -> list:
     """Detect recurring and cross-VM patterns from spike data.
 
@@ -1187,7 +1603,6 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
     days_observed = max(1.0, hours_back / 24.0)
     min_occ = pe_config.PATTERN_MIN_OCCURRENCES
     min_ratio = pe_config.PATTERN_MIN_RATIO
-
     # ── 1. Time-of-day clustering: spikes at similar hours across days ──
     for vm_name, metric_spikes in all_vm_spikes.items():
         hour_hits = defaultdict(list)   # hour -> list of spike events
@@ -1205,7 +1620,13 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
             # both gates, so a sparse weekly pattern fires but a 2-day fluke does
             # not. Ratio is surfaced so a PE lead can judge confidence directly.
             day_count = len({e["_day"] for e in events})
-            ratio = day_count / days_observed
+            # `day_count` counts DISTINCT UTC CALENDAR days, but `days_observed`
+            # is a duration in days — a 24h window straddling UTC midnight spans
+            # 2 calendar days, giving day_count=2 / days_observed=1.0 and a title
+            # reading "(2/1 days, 200%)". Use the calendar-day span the window
+            # can actually cover as the denominator and clamp the ratio at 1.0.
+            days_span = max(days_observed, float(day_count))
+            ratio = min(1.0, day_count / days_span)
             if day_count >= min_occ and ratio >= min_ratio:
                 metrics_hit = list({e["metric"] for e in events})
                 worst = max(events, key=lambda e: e["z_score"])
@@ -1213,10 +1634,10 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
                 patterns.append({
                     "type": "recurring_time",
                     "severity": "critical" if worst["z_score"] >= 3.0 else "high",
-                    "title": f"Recurring spikes at ~{hour:02d}:00 on {vm_name} ({day_count}/{round(days_observed)} days, {pct}%)",
+                    "title": f"Recurring spikes at ~{hour:02d}:00 on {vm_name} ({day_count}/{round(days_span)} days, {pct}%)",
                     "description": (
                         f"Spikes recurred on {day_count} distinct days "
-                        f"({pct}% of {round(days_observed)} days observed) around {hour:02d}:00 UTC "
+                        f"({pct}% of {round(days_span)} days observed) around {hour:02d}:00 UTC "
                         f"across {', '.join(metrics_hit)}. "
                         f"Peak {worst['peak']}% (z={worst['z_score']}). "
                         f"Indicates a scheduled job or periodic load trigger."
@@ -1227,6 +1648,14 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
                     "recurrence_days": day_count,
                     "recurrence_ratio": round(ratio, 2),
                     "peak_z": worst["z_score"],
+                    "peak": worst["peak"],
+                    # Context for a small absolute peak (e.g. 0.01% on a metric
+                    # whose own baseline is ~0.002%). Without this a PE lead
+                    # reasonably reads "peak 0.01%" as a data error rather than
+                    # a legitimate statistical outlier for THIS VM's own scale.
+                    "peak_mean": worst.get("mean"),
+                    "peak_detection": worst.get("detection"),
+                    "metrics": metrics_hit,
                 })
 
     # ── 2. Cross-VM correlation: spikes on different VMs within ±15 min ──
@@ -1293,27 +1722,63 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
                 "vms": vms_hit,
                 "count": len(cluster),
                 "peak_z": worst["spike"]["z_score"],
+                # Raw fields so the frontend can build a condensed line
+                # without re-parsing "~{time_str}" out of the title string.
+                "time_utc": time_str,
+                "metrics": metrics_hit,
+                "worst_vm": worst["vm"],
+                "worst_peak": worst["spike"]["peak"],
             })
 
     # ── 3. Sustained high utilization (mean above threshold) ──
     for vm_name, metric_spikes in all_vm_spikes.items():
         # We get stats passed separately, but we can flag VMs with many spikes
         for metric, spikes in metric_spikes.items():
-            critical_count = sum(1 for s in spikes if s["severity"] == "critical")
+            # `critical_sustained` is a DISTINCT severity string emitted by
+            # _classify_severity — matching only "critical" meant a VM whose
+            # spikes were ALL sustained-critical scored critical_count == 0 and
+            # still fired via the duration arm, rendering the self-contradictory
+            # "0 critical spikes totaling 240 min".
+            critical_count = sum(
+                1 for s in spikes if s["severity"] in ("critical", "critical_sustained")
+            )
             total_dur = sum(s.get("duration_min", 0) for s in spikes)
             if critical_count >= 3 or total_dur >= 60:
+                # The two gates are DIFFERENT claims and must not share one
+                # severity/wording. "critical_count >= 3" means several
+                # individually-critical readings; "total_dur >= 60" alone can
+                # fire from WARNING-severity spikes that never crossed the
+                # critical line but added up over time. Labeling the
+                # duration-only case "critical" and then saying "0 critical
+                # spikes totaling N min" is a direct on-screen contradiction —
+                # this was shipping to customers unfixed despite the comment
+                # above already describing the undercounting half of the bug.
+                if critical_count >= 3:
+                    severity = "critical"
+                    reason = f"{critical_count} critical spikes totaling {total_dur} min of elevated {metric}."
+                else:
+                    severity = "high"
+                    reason = (
+                        f"No single reading crossed the critical threshold, but {metric} stayed "
+                        f"elevated for {total_dur} min of cumulative exposure across the window "
+                        f"({critical_count} critical reading{'s' if critical_count != 1 else ''})."
+                        if critical_count == 0 else
+                        f"{critical_count} critical reading{'s' if critical_count != 1 else ''} plus "
+                        f"sustained exposure totaling {total_dur} min of elevated {metric}."
+                    )
                 patterns.append({
                     "type": "sustained_pressure",
-                    "severity": "critical",
+                    "severity": severity,
                     "title": f"Sustained {metric} pressure on {vm_name}",
                     "description": (
-                        f"{critical_count} critical spikes totaling {total_dur} min "
-                        f"of elevated {metric}. This VM is under persistent load "
-                        f"and may require capacity investigation."
+                        f"{reason} This VM is under persistent load and may require capacity investigation."
                     ),
                     "vms": [vm_name],
                     "count": critical_count,
                     "total_duration_min": total_dur,
+                    # Raw field so the frontend can build a condensed line
+                    # without regex-parsing "Sustained {x} pressure" out of title.
+                    "metric": metric,
                 })
 
     # Sort by severity (critical first) then by peak z-score descending
@@ -1385,35 +1850,56 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         }
         for future in as_completed(futures):
             try:
-                rid, series, true_extremes = future.result()
+                rid, series, true_extremes, series_max = future.result()
                 vm_name = rid.split("/")[-1].lower()
+
+                # Role drives which memory band this VM is judged against.
+                # Oracle/DB VMs hold 80-92% memory by design (SGA/PGA), so the
+                # generic 70/80 app band marks them critical forever — which
+                # contradicts the "DB expected band" legend on the same screen.
+                _rg = ""
+                try:
+                    _parts = rid.split("/")
+                    if "resourceGroups" in _parts:
+                        _rg = _parts[_parts.index("resourceGroups") + 1]
+                except Exception:
+                    _rg = ""
+                _vm_role = _infer_server_type(vm_name, None, _rg)
+                _vm_is_db = (_vm_role == "DB")
 
                 # Compute stats and spikes per metric
                 stats = {}
                 spikes = {}
                 for metric_name, points in series.items():
-                    # Skip Available Memory Bytes from spike detection and chart stats
-                    # — raw byte values are not percentages; only use the % metric
-                    if metric_name == "Available Memory Bytes":
-                        # Store as metadata for unit-aware display, not as a charted metric
+                    # Chart-only metrics (byte counters, ops/sec, availability)
+                    # are NOT percentages and have no warn/crit band. Running
+                    # them through _detect_spikes would grade every datapoint
+                    # "critical_sustained", because _classify_severity's fallback
+                    # band is warn=80/crit=90 and a byte value is numerically
+                    # enormous. Keep descriptive stats for the chart header/axis,
+                    # skip classification entirely.
+                    if metric_name in _CHART_ONLY_METRICS:
                         vals = [p["v"] for p in points]
                         if vals:
+                            _u = _METRIC_UNITS.get(metric_name, "raw")
+                            _mean = sum(vals) / len(vals)
+                            _var = sum((v - _mean) ** 2 for v in vals) / len(vals)
+                            _ex = true_extremes.get(metric_name, {})
                             stats[metric_name] = {
-                                "mean": round(sum(vals) / len(vals), 2),
-                                "max": round(max(vals), 2),
-                                "min": round(min(vals), 2),
-                                "std": 0,
-                                "p95": 0,
+                                "mean": round(_mean, 2),
+                                "max": round(_ex.get("true_max") if _ex.get("true_max") is not None else max(vals), 2),
+                                "min": round(_ex.get("true_min") if _ex.get("true_min") is not None else min(vals), 2),
+                                "std": round(_var ** 0.5, 2),
+                                "p5": round(_percentile(vals, 5), 2),
+                                "p95": round(_percentile(vals, 95), 2),
                                 "count": len(vals),
-                                "unit": "bytes",
+                                "unit": _u,
+                                "chart_only": True,
                             }
                         continue
 
                     vals = [p["v"] for p in points]
                     if vals:
-                        sorted_vals = sorted(vals)
-                        p95_idx = int(len(sorted_vals) * 0.95)
-                        p5_idx  = int(len(sorted_vals) * 0.05)
                         mean_v = sum(vals) / len(vals)
                         var_v = sum((v - mean_v) ** 2 for v in vals) / len(vals)
 
@@ -1425,9 +1911,24 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                         # Outlier filter for max: if true_max is >2x the P95 and only
                         # appears in a single data point, flag it as potentially anomalous
                         max_val = true_max if true_max is not None else max(vals)
-                        p95_val = sorted_vals[min(p95_idx, len(sorted_vals) - 1)]
-                        p5_val  = sorted_vals[min(p5_idx,  len(sorted_vals) - 1)]
-                        max_anomalous = (max_val > p95_val * 2) and (max_val > mean_v + 4 * (var_v ** 0.5))
+                        # Use the SAME interpolated percentile helper the baseline
+                        # analysis uses. The previous `sorted_vals[int(n*0.95)]`
+                        # index lookup collapsed to the MAXIMUM for n<=20 and p5 to
+                        # the MINIMUM for n<20, so on short windows this card's
+                        # "P95" was really the max — and disagreed with the p95 the
+                        # baseline block reported for the very same VM.
+                        p95_val = _percentile(vals, 95)
+                        p5_val  = _percentile(vals, 5)
+                        # max_anomalous compares a MAXIMUM-aggregation value against
+                        # AVERAGE-derived stats, so any bursty VM trips it by
+                        # construction at 1h grain. Require a meaningful absolute
+                        # baseline too, so an idle-disk p95 of 0 can't reduce the
+                        # test to "max_val > 0".
+                        max_anomalous = (
+                            p95_val > 1.0
+                            and (max_val > p95_val * 2)
+                            and (max_val > mean_v + 4 * (var_v ** 0.5))
+                        )
 
                         # Outlier filter for min: flag when min is far below the
                         # mean (>3σ) and appears in fewer than 2 consecutive data points.
@@ -1460,13 +1961,45 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                             "max_anomalous": max_anomalous,
                             "min_anomalous": min_anomalous,
                         }
-                    spikes[metric_name] = _detect_spikes(points, metric_name=metric_name)
+                    spikes[metric_name] = _detect_spikes(
+                        points, metric_name=metric_name, is_db=_vm_is_db)
+
+                # ── Waveform (signal shape) classification ──
+                # Produces the payload the deep dive's "Signal Pattern Analysis"
+                # panel consumes. Nothing produced it before, so that whole
+                # section — including its DB-band rewrite — was unreachable.
+                _grain_min = granularity.total_seconds() / 60.0
+                waveforms = {}
+                for metric_name, points in series.items():
+                    wf = _classify_waveform(points, metric_name, _vm_is_db, _grain_min)
+                    if wf:
+                        waveforms[metric_name] = wf
+
+                # Concurrent pressure: two or more graded metrics simultaneously
+                # at medium+ risk means the VM is under combined load, which is a
+                # different remediation than a single hot metric.
+                _pressured = [m for m, w in waveforms.items()
+                              if w["risk"] in ("medium", "high", "critical")]
+                if len(_pressured) >= 2:
+                    _short = [m.replace("Percentage ", "").replace(" Consumed Percentage", "")
+                              for m in _pressured]
+                    for m in _pressured:
+                        waveforms[m]["concurrent_pressure"] = True
+                        waveforms[m]["concurrent_metrics"] = _short
 
                 result[vm_name] = {
                     "resource_id": rid,
                     "series": series,
+                    # Per-timestamp MAXIMUM, for the Avg+Max overlay. Averages
+                    # hide intra-bucket peaks; showing both is what makes a
+                    # 30-min average of 55% legible as a 98% momentary peak.
+                    "series_max": series_max,
                     "spikes": spikes,
                     "stats": stats,
+                    "waveforms": waveforms,
+                    # Surfaced so the frontend legend and the findings layer can
+                    # state WHICH memory band a VM was judged against.
+                    "role": "DB" if _vm_is_db else _vm_role,
                 }
             except Exception as exc:
                 rid = futures[future]
@@ -1491,6 +2024,15 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
     else:
         _grain_label = f"{total_secs // 3600}h avg"
 
+    # Max datapoints observed on any single VM/metric — the honest "how much
+    # telemetry did we actually get" number for the window badge (a nominal
+    # 720-point window can easily return far fewer).
+    _dp = 0
+    for _vd in result.values():
+        for _pts in (_vd.get("series") or {}).values():
+            if len(_pts) > _dp:
+                _dp = len(_pts)
+
     return {
         "vms": result,
         "patterns": patterns,
@@ -1499,6 +2041,15 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
             "hours_back": hours_back,
             "grain": _grain_label,
             "timezone": "UTC",
+            # start_utc/end_utc/data_points are consumed by the frontend window
+            # badge and the "STILL ACTIVE" open-incident marker. They were never
+            # emitted, so the badge always fell through to the preset branch
+            # (printing "Last 7 days" during a custom range) and the active
+            # marker could never render.
+            "start_utc": start_time.isoformat().replace("+00:00", "Z"),
+            "end_utc": end_time.isoformat().replace("+00:00", "Z"),
+            "is_custom": bool(start_utc and end_utc),
+            "data_points": _dp,
         },
     }
 
@@ -1533,11 +2084,15 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
         "fleet": {},
     }
 
-    # Key metrics to analyze
+    # Key metrics to analyze.
+    # Data Disk BW was queried, charted, spike-detected and persisted but was
+    # missing here, so it was invisible to every baseline-derived finding
+    # (DD5-DD10) — a data disk trending to saturation produced no finding.
     _ANALYSIS_METRICS = [
         "Percentage CPU",
         "Available Memory Percentage",
         "OS Disk Bandwidth Consumed Percentage",
+        "Data Disk Bandwidth Consumed Percentage",
     ]
 
     fleet_daily_profiles: Dict[str, Dict[int, list]] = defaultdict(lambda: defaultdict(list))
@@ -1708,10 +2263,13 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
                         chronic_windows.append(ds["date"])
 
             # ── Multi-day spike recurrence at same hour ──
+            # `metric_name` IS already the raw Azure metric key here (only
+            # `display_name` was rebound), so the old `if is_mem_avail:` re-lookup
+            # re-assigned the identical value. Removing it makes it explicit that
+            # these spike peaks are still in AVAILABLE-% space — which is why
+            # worst_peak below must be inverted before it joins this used-% dict.
             recurring_spikes = []
             spikes_data = vm_info.get("spikes", {}).get(metric_name, [])
-            if is_mem_avail:
-                spikes_data = vm_info.get("spikes", {}).get("Available Memory Percentage", [])
             spike_hours: Dict[int, list] = defaultdict(list)
             for s in spikes_data:
                 try:
@@ -1728,12 +2286,25 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
             for hour, events in spike_hours.items():
                 unique_days = set(e["date"] for e in events)
                 if len(unique_days) >= 2:
+                    # worst_peak MUST be in the same USED-% space as every other
+                    # field in this dict (overall_mean, hot_hours, daily_stats).
+                    # e["peak"] comes from the raw spike record, which for memory
+                    # is AVAILABLE % — so the worst (most pressured) sample is the
+                    # MINIMUM available, not the maximum. Taking max() here picked
+                    # the LEAST severe sample and emitted it as an available-%
+                    # number inside a used-% dict, which routers/findings.py then
+                    # rendered as "Memory spike ... peak 88% — CRITICAL" for what
+                    # was actually an idle VM.
+                    if is_mem_avail:
+                        _worst_peak = 100.0 - min(e["peak"] for e in events)
+                    else:
+                        _worst_peak = max(e["peak"] for e in events)
                     recurring_spikes.append({
                         "hour": hour,
                         "day_count": len(unique_days),
                         "days": sorted(unique_days),
                         "day_names": sorted(set(e["day_name"] for e in events)),
-                        "worst_peak": max(e["peak"] for e in events),
+                        "worst_peak": round(_worst_peak, 1),
                         "avg_duration_min": round(
                             sum(e["duration_min"] for e in events) / len(events), 1
                         ),
@@ -2146,6 +2717,13 @@ def _build_server_records(credential, vms: List[dict],
         cpu_pct_avg = round(m.get("Percentage CPU", 0.0), 2)
         # CPU%: use most recent 1h data point; CPU AVG: use period average
         cpu_pct = round(cpu_pct_recent, 2) if cpu_pct_recent is not None else cpu_pct_avg
+        # CPU MAX/MIN: true period extremes — the worst/best single hourly bucket
+        # across the whole window. Lets a PE lead pick "Max" and see a job-driven
+        # CPU spike that a 15-day average would otherwise smooth away to nothing.
+        _cpu_max = m.get("Percentage CPU__max")
+        _cpu_min = m.get("Percentage CPU__min")
+        cpu_max_pct = round(_cpu_max, 2) if _cpu_max is not None else None
+        cpu_min_pct = round(_cpu_min, 2) if _cpu_min is not None else None
 
         avail_pct   = m.get("Available Memory Percentage")
         avail_bytes = m.get("Available Memory Bytes")
@@ -2173,14 +2751,29 @@ def _build_server_records(credential, vms: List[dict],
             if sub_match and vm.get("vm_size"):
                 sku_needed.append((len(servers), sub_match.group(1), vm["vm_size"]))
 
+        # Memory MAX/MIN — the raw Azure metric is "Available %" (lower = worse),
+        # so the USED-% max (worst pressure point) comes from the AVAILABLE MIN,
+        # and the USED-% min (best point) comes from the AVAILABLE MAX. Inverted
+        # on purpose — do not swap these without also swapping the tooltip copy.
+        _avail_min = m.get("Available Memory Percentage__min")
+        _avail_max = m.get("Available Memory Percentage__max")
+        mem_max_pct = round(max(0.0, min(100.0, 100.0 - _avail_min)), 2) if _avail_min is not None else None
+        mem_min_pct = round(max(0.0, min(100.0, 100.0 - _avail_max)), 2) if _avail_max is not None else None
+
         # Absent disk metric → None (not a fabricated 0.0). Emitting 0.0 here
         # would let a server with no disk telemetry look like a genuine "0% disk"
         # reading and drag the fleet Avg Disk toward zero. None flows through to
         # disk_available=False → disk_pct=None so it is excluded from the mean.
         _disk_raw = m.get("OS Disk Bandwidth Consumed Percentage")
+        _disk_max = m.get("OS Disk Bandwidth Consumed Percentage__max")
+        _disk_min = m.get("OS Disk Bandwidth Consumed Percentage__min")
         if _disk_raw is None:
             _disk_raw = m.get("Data Disk Bandwidth Consumed Percentage")
+            _disk_max = m.get("Data Disk Bandwidth Consumed Percentage__max")
+            _disk_min = m.get("Data Disk Bandwidth Consumed Percentage__min")
         disk_pct = round(_disk_raw, 2) if _disk_raw is not None else None
+        disk_max_pct = round(_disk_max, 2) if _disk_max is not None else None
+        disk_min_pct = round(_disk_min, 2) if _disk_min is not None else None
 
         servers.append({
             "host":          name.lower(),
@@ -2188,9 +2781,15 @@ def _build_server_records(credential, vms: List[dict],
             "type":          _infer_server_type(name, vm.get("tags"), vm.get("rg", "")),
             "cpu_used":      cpu_pct,
             "cpu_avg":       cpu_pct_avg,
+            "cpu_max_pct":   cpu_max_pct,
+            "cpu_min_pct":   cpu_min_pct,
             "mem_used":      mem_pct,
+            "mem_max_pct":   mem_max_pct,
+            "mem_min_pct":   mem_min_pct,
             "mem_total_gb":  mem_total_gb,
             "disk_used_max": disk_pct,
+            "disk_max_pct":  disk_max_pct,
+            "disk_min_pct":  disk_min_pct,
             "cpu_pct":       cpu_pct,
             "mem_pct":       mem_pct,
             "disk_pct":      disk_pct,

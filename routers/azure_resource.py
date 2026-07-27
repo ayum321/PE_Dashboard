@@ -98,12 +98,17 @@ def _session_id(request: Request, response: Optional[Response] = None) -> str:
 _TS_CACHE: Dict[str, Dict[str, Any]] = {}
 _TS_CACHE_LOCK = threading.Lock()
 _TS_CACHE_TTL = 300  # seconds
+_TS_CACHE_MAX = 64   # hard cap on retained result sets
 
 
-def _ts_cache_key(vm_ids: List[str], hours_back: int,
+def _ts_cache_key(session_id: str, vm_ids: List[str], hours_back: int,
                   start_utc: Optional[str], end_utc: Optional[str]) -> str:
+    # SECURITY: the session id is part of the key. Azure credentials are
+    # per-session (see _build_credential), so a key built only from request
+    # params let a second session read the first session's cached Azure metrics
+    # without ever presenting a credential.
     canonical = json.dumps(
-        {"ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc},
+        {"sid": session_id, "ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc},
         sort_keys=True,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -121,7 +126,15 @@ def _ts_cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 def _ts_cache_set(key: str, data: Dict[str, Any]) -> None:
     with _TS_CACHE_LOCK:
-        _TS_CACHE[key] = {"ts": time.time(), "data": data}
+        # Purge expired entries on write — entries were previously only evicted
+        # on read, so keys never read again grew the dict without bound.
+        _now = time.time()
+        for _k in [k for k, v in _TS_CACHE.items() if _now - v["ts"] >= _TS_CACHE_TTL]:
+            del _TS_CACHE[_k]
+        if len(_TS_CACHE) >= _TS_CACHE_MAX:
+            oldest = min(_TS_CACHE, key=lambda k: _TS_CACHE[k]["ts"])
+            del _TS_CACHE[oldest]
+        _TS_CACHE[key] = {"ts": _now, "data": data}
 
 # ── Subscription list cache ──────────────────────────────────────────────────
 # Populated once in the background; served instantly on all subsequent calls.
@@ -892,7 +905,7 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
     Result is cached for 5 minutes so spike drill-down clicks are instant.
     """
     sid = _session_id(request, response)
-    cache_key = _ts_cache_key(body.vm_ids, body.hours_back, body.start_utc, body.end_utc)
+    cache_key = _ts_cache_key(sid, body.vm_ids, body.hours_back, body.start_utc, body.end_utc)
     cached = _ts_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -947,6 +960,12 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
             # only when both prior (>=MIN_PRIOR_PULLS) and historical gates pass, so
             # it never escalates an existing spike — it's a separate classification.
             for metric, st in stats.items():
+                # "Available Memory Bytes" is byte-scale, not a percentage; its
+                # mean/std pollute the percentage-oriented baseline store and it
+                # carries a hardcoded std of 0, so it can never yield a meaningful
+                # regime test. Skip it explicitly.
+                if metric == "Available Memory Bytes":
+                    continue
                 prior = baseline_store.get_prior_baseline(cust, vm_ns, metric)
                 hist = baseline_store.historical_baseline(cust, vm_ns, metric)
                 if not prior or not hist:
@@ -955,18 +974,39 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
                 rc = detect_regime_change(recent, prior, k=pe_config.REGIME_DRIFT_Z_THRESHOLD)
                 if not rc["detected"]:
                     continue
-                arrow = "↑" if rc["direction"] == "up" else "↓"
+                # For "Available Memory Percentage" the series is INVERTED: a rise
+                # in the mean means memory FREED UP (good news). Rendering that as
+                # a red "↑ high severity" regime shift inverts the meaning for the
+                # reader. Present the arrow in pressure space and downgrade the
+                # severity when the shift is an improvement.
+                _inverted = "memory percentage" in metric.lower()
+                _worsening = (rc["direction"] == "down") if _inverted else (rc["direction"] == "up")
+                _label_metric = "Memory Used %" if _inverted else metric
+                arrow = "↑" if _worsening else "↓"
+                if _inverted:
+                    _mean_prior = round(100.0 - float(rc["mean_prior"]), 1)
+                    _mean_recent = round(100.0 - float(rc["mean_recent"]), 1)
+                else:
+                    _mean_prior, _mean_recent = rc["mean_prior"], rc["mean_recent"]
                 patterns.append({
                     "type": "regime_change",
-                    "severity": "high",
-                    "title": f"Regime shift {arrow} on {vm_name} ({metric})",
+                    "severity": "high" if _worsening else "info",
+                    "title": f"Regime shift {arrow} on {vm_name} ({_label_metric})",
                     "description": (
-                        f"{metric} mean shifted from μ={rc['mean_prior']}% to "
-                        f"μ={rc['mean_recent']}% ({'+' if rc['delta_sigma'] >= 0 else ''}{rc['delta_sigma']}σ) "
+                        f"{_label_metric} mean shifted from μ={_mean_prior}% to "
+                        f"μ={_mean_recent}% ({abs(rc['delta_sigma'])}σ, "
+                        f"{'increased pressure' if _worsening else 'reduced pressure'}) "
                         f"vs the prior {prior['pulls']}-pull baseline."
                     ),
                     "vms": [vm_name], "recurrence_days": None,
-                    "delta_sigma": rc["delta_sigma"], "direction": rc["direction"],
+                    "delta_sigma": rc["delta_sigma"],
+                    "direction": "up" if _worsening else "down",
+                    # Raw fields so the frontend can build a condensed line
+                    # without re-parsing "μ={x}% to μ={y}%" out of the description.
+                    "metric": _label_metric,
+                    "mean_prior": _mean_prior,
+                    "mean_recent": _mean_recent,
+                    "worsening": _worsening,
                 })
         except Exception as exc:
             logger.warning("baseline_store record failed for %s: %s", vm_name, exc)

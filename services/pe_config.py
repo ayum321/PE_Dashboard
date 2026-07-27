@@ -28,17 +28,13 @@ def _cfg(key: str, default: Any = None) -> Any:
 
 
 # ── AI master switch ──────────────────────────────────────────────────────────
-# Single kill-switch for ALL AI/LLM integration (NVIDIA NIM + Google Gemini text
-# AND Gemini vision). When False the app runs fully on its deterministic engine:
-# no external API calls are made and no API keys are required. The 4 AI routers
-# (ai, agent, pe_narrative, pe_consultant) are not mounted, and ai_engine.chat /
-# gemini_vision short-circuit. Flip back on with PE_AI_ENABLED=1 (env) or by
-# setting this to True — nothing else needs to change.
+# Single kill-switch for ALL AI/LLM integration (NVIDIA NIM + Google Gemini
+# text). When False the app runs fully on its deterministic engine: no
+# external API calls are made and no API keys are required. The 4 AI routers
+# (ai, agent, pe_narrative, pe_consultant) are not mounted, and ai_engine.chat
+# short-circuits. Flip back on with PE_AI_ENABLED=1 (env) or by setting this
+# to True — nothing else needs to change.
 AI_ENABLED: bool = os.environ.get("PE_AI_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
-
-
-# ── Vision provider ───────────────────────────────────────────────────────────
-VISION_PROVIDER: str = "gemini"   # "gemini" | "azure" | "local"
 
 
 # ── CPU thresholds (%) ────────────────────────────────────────────────────────

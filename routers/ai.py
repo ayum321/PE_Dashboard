@@ -215,11 +215,10 @@ def ai_status() -> dict[str, Any]:
 def ai_self_test() -> dict[str, Any]:
     """Live round-trip every configured model.
 
-    Posts a tiny prompt to each NIM model and each Gemini model, plus a
-    synthetic Vision call, and reports per-model status / latency / sample
-    output / failure reason. Used by the UI's "Verify AI" button so users
-    can confirm the LLM is actually answering — not just that the keys are
-    present.
+    Posts a tiny prompt to each NIM model and each Gemini model, and reports
+    per-model status / latency / sample output / failure reason. Used by the
+    UI's "Verify AI" button so users can confirm the LLM is actually
+    answering — not just that the keys are present.
 
     Side-effects:
       - resets the session dead-model cache so we re-probe every model
@@ -228,8 +227,6 @@ def ai_self_test() -> dict[str, Any]:
         subsequent calls hit the working one first
     """
     import time
-    import io
-    import base64
     from services.ai_engine import (
         _NIM_DEFAULT_WATERFALL, _GEMINI_WATERFALL,
         _call_nim, _call_gemini, get_last_error, reset_dead_cache,
@@ -303,39 +300,15 @@ def ai_self_test() -> dict[str, Any]:
                         "(configured %s was dead)", first_working_nim, configured)
 
 
-    # Vision probe — best-effort synthetic chart
-    vision: dict[str, Any] = {"status": "skipped", "ms": 0, "metrics": []}
-    if gm:
-        try:
-            try:
-                from PIL import Image, ImageDraw
-                img = Image.new("RGB", (320, 120), "white")
-                d = ImageDraw.Draw(img)
-                d.text((10, 10), "selftest-host", fill="black")
-                d.text((10, 40), "Percentage CPU (Max) | 75.5%", fill="red")
-                d.text((10, 60), "Available Memory Percentage (Min) | 50%", fill="blue")
-                buf = io.BytesIO(); img.save(buf, format="PNG")
-                png = buf.getvalue()
-            except ImportError:
-                png = base64.b64decode(
-                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM"
-                    "IQAAAABJRU5ErkJggg=="
-                )
-            from services.gemini_vision import extract_chart_metrics
-            t0 = time.time()
-            metrics = extract_chart_metrics(png, api_key=gm) or []
-            vision = {
-                "status":  "ok" if metrics else "empty",
-                "ms":      int((time.time() - t0) * 1000),
-                "metrics": metrics[:5],
-            }
-        except Exception as exc:
-            vision = {"status": "fail", "ms": 0, "metrics": [], "error": str(exc)[:160]}
+    # Vision (Gemini image-chart extraction) has been removed from the app —
+    # no image/vision parsing is performed anywhere anymore. Reported as a
+    # fixed "removed" status rather than probing anything.
+    vision: dict[str, Any] = {"status": "removed", "ms": 0, "metrics": []}
 
     summary = {
         "text_ok":  sum(1 for r in text_results if r["status"] == "ok"),
         "text_total": len(text_results),
-        "vision_ok":  vision["status"] == "ok",
+        "vision_ok":  False,
         "active_text_model": _ai_status().get("text_model"),
         "promoted_to": promoted,
     }

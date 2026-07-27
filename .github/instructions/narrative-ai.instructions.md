@@ -1,6 +1,6 @@
 ---
 description: "Use when working on PE narrative generation, AI engine, Gemini integration, report writing, executive summary, findings narrative, consultant responses."
-applyTo: "routers/pe_narrative.py, routers/pe_consultant.py, routers/ai.py, routers/executive.py, services/ai_engine.py, services/ai_narrator.py, services/ai_agent.py, services/nvidia_llm.py, services/gemini_vision.py"
+applyTo: "routers/pe_narrative.py, routers/pe_consultant.py, routers/ai.py, routers/executive.py, services/ai_engine.py, services/ai_narrator.py, services/ai_agent.py, services/nvidia_llm.py"
 ---
 
 # PE Narrative & AI Rules
@@ -25,4 +25,3 @@ applyTo: "routers/pe_narrative.py, routers/pe_consultant.py, routers/ai.py, rout
 ## AI Engine
 - Primary: Google Gemini (`google-genai` SDK)
 - Fallback: legacy `google-generativeai` SDK
-- Vision: PyMuPDF for image extraction from PDF/DOCX

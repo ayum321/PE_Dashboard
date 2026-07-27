@@ -74,6 +74,19 @@ def _f(v: Any) -> float:
         return 0.0
 
 
+def _opt_round(v: Any, ndigits: int = 1) -> Optional[float]:
+    """Round a possibly-None/NaN value, preserving None instead of coercing
+    to 0.0 — used for the Max/Min passthrough fields, which are genuinely
+    absent (not zero) for DOCX/PDF-parsed servers with no per-bucket series."""
+    if v is None:
+        return None
+    try:
+        out = float(v)
+        return None if (out != out) else round(out, ndigits)
+    except (TypeError, ValueError):
+        return None
+
+
 def is_unknown_server(s: dict) -> bool:
     """True if server data came from image-only DOCX (all zeros).
     Mirrors `is_unknown_server` from app_v2.py L5985."""
@@ -248,7 +261,6 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     mem_gb  = _f(s.get("mem_total_gb"))
     server_type = (s.get("type") or "APP").upper()
     image_only  = is_unknown_server(s)
-    vision_enriched = bool(s.get("_vision_enriched") or s.get("vision_enriched"))
 
     # ── Aggregation trap detection ──────────────────────────
     agg_trap = detect_aggregation_trap(cpu, cpu_avg) if not image_only else False
@@ -275,16 +287,9 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     # Don't show 0.0% for memory/disk unless we truly have source metrics.
     # If both the percentage and the absolute value are zero, mark as None
     # so the frontend shows "data unavailable" instead of fake precision.
-    # Exception: vision-enriched servers have real measured values — 0% means
-    # "no pressure", not "no data available".
-    if vision_enriched:
-        mem_available  = True
-        disk_available = True
-        cpu_available  = True
-    else:
-        mem_available  = not image_only and (mem > 0 or mem_gb > 0)
-        disk_available = not image_only and disk > 0
-        cpu_available  = not image_only and (cpu > 0 or cpu_avg > 0)
+    mem_available  = not image_only and (mem > 0 or mem_gb > 0)
+    disk_available = not image_only and disk > 0
+    cpu_available  = not image_only and (cpu > 0 or cpu_avg > 0)
 
     # ── DB memory expected band — role-specific status override ─────────────
     # Oracle/SQL DB servers pre-allocate 80–92% of RAM to SGA/PGA by design.
@@ -329,6 +334,17 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         "mem_pct":        round(mem, 1) if mem_available else None,
         "mem_gb":         round(mem_gb, 1) if mem_available else None,
         "disk_pct":       round(disk, 1) if disk_available else None,
+        # ── Period MAX/MIN — Azure-live only (None when parsed from a static
+        # DOCX/PDF report, which has no per-bucket timeseries to derive them
+        # from). Lets the frontend offer an Avg/Max/Min aggregation toggle:
+        # a job that spikes CPU/mem/disk briefly during a 15-day window is
+        # invisible in the Avg but shows up as soon as "Max" is selected.
+        "cpu_max_pct":    _opt_round(s.get("cpu_max_pct")) if cpu_available else None,
+        "cpu_min_pct":    _opt_round(s.get("cpu_min_pct")) if cpu_available else None,
+        "mem_max_pct":    _opt_round(s.get("mem_max_pct")) if mem_available else None,
+        "mem_min_pct":    _opt_round(s.get("mem_min_pct")) if mem_available else None,
+        "disk_max_pct":   _opt_round(s.get("disk_max_pct")) if disk_available else None,
+        "disk_min_pct":   _opt_round(s.get("disk_min_pct")) if disk_available else None,
         "disks":          s.get("disks") or {},
         "image_only":     image_only,
         "health_score":   round(float(score), 1) if score >= 0 else None,

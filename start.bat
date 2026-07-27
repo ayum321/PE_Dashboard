@@ -1,7 +1,7 @@
 @echo off
 REM ================================================================
 REM   PE Audit Dashboard  --  Smart Self-Healing Launcher
-REM   Phases 2-8: Vision AI, SLA Matrix, Benchmark, Azure Monitor
+REM   Phases 2-8: SLA Matrix, Benchmark, Azure Monitor
 REM
 REM   Capabilities:
 REM     * Finds Python 3.11+ in 30+ locations (PATH, LOCALAPPDATA,

@@ -542,7 +542,6 @@
         <!-- Sub-brand: platform indicator chips -->
         <div class="flex items-center gap-1.5 mt-3">
           <span class="metric-badge metric-badge-blue">Batch</span>
-          <span class="metric-badge metric-badge-purple">Vision AI</span>
           <span class="metric-badge" style="background:rgba(45,212,191,.1);color:#2dd4bf;border:1px solid rgba(45,212,191,.25)">SLA</span>
         </div>
       </div>
@@ -670,16 +669,6 @@
             <span class="text-[11px] text-Cmuted">SOW Contract</span>
           </div>
         </div>
-        <!-- AI Vision status -->
-        <div class="mt-1.5 pt-1.5 border-t border-CnavSep/40">
-          <div class="flex items-center justify-between px-1">
-            <div class="flex items-center gap-2">
-              <span id="ds-gemini" class="w-2 h-2 rounded-full status-dot-muted shrink-0 transition-all duration-300"></span>
-              <button onclick="setActiveView('settings')" class="text-[11px] text-Cmuted hover:text-Cwhite transition-colors">Vision AI</button>
-            </div>
-            <span class="text-[9px] font-mono text-Cmuted/60">Gemini</span>
-          </div>
-        </div>
       </div>
 
       <!-- Sidebar footer -->
@@ -731,11 +720,6 @@
           <div class="flex items-center gap-2">
             <!-- Dataset chip -->
             <span id="dataset-chip" class="hidden text-[11px] font-mono px-2.5 py-1 rounded-lg bg-Ccard border border-Cborder text-Cmuted"></span>
-            <!-- Vision status indicator -->
-            <span id="vision-status-chip" class="hidden items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-Cpurple/10 border border-Cpurple/30 text-Cpurple">
-              <span class="w-1.5 h-1.5 rounded-full bg-Cpurple animate-pulse"></span>
-              Vision AI
-            </span>
             <!-- Customer chip + NVIDIA AI engine chip removed from header per UX cleanup.
                  Customer name still appears in the Executive view banner; AI engine
                  status is verifiable via the "Verify" button below.
@@ -744,7 +728,7 @@
             <span id="ai-status-chip"       hidden style="display:none"><span id="ai-status-label"></span></span>
             <!-- Verify AI button — runs live roundtrip test -->
             <button id="ai-verify-btn" onclick="runAiSelfTest()" type="button"
-                    title="Live-probe every text model + Vision and show roundtrip times"
+                    title="Live-probe every text model and show roundtrip times"
                     class="hidden text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-Cpurple/40 text-Cpurple hover:bg-Cpurple/10 transition-colors">
               Verify
             </button>
@@ -765,6 +749,58 @@
       <main class="flex-1 overflow-auto p-4 lg:p-6">
 
         <!-- ════════════════════════════════════════════════════
+             GLOBAL CUSTOMER IDENTITY BANNER
+             Persistent across every tab (not just Executive Overview).
+             Populated by applyCustomerName() in app.js — same IDs as
+             before, only the DOM position moved, so no JS rewiring
+             was needed and there is no duplicate banner anywhere.
+             ════════════════════════════════════════════════════ -->
+        <div id="exec-customer-banner"
+             class="hidden sticky top-0 z-20 rounded-2xl border border-Cpurple/40 bg-gradient-to-r from-Cpurple/15 via-Ccard to-Ccard2 px-6 py-4 flex items-center justify-between gap-4 shadow-panel mb-5">
+          <div class="flex items-center gap-4 min-w-0">
+            <div class="w-12 h-12 rounded-xl bg-Cpurple/25 border border-Cpurple/40 flex items-center justify-center shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-7 h-7 text-Cpurple">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 21V8.25l9-5.25 9 5.25V21M9 21V12h6v9"/>
+              </svg>
+            </div>
+            <div class="min-w-0">
+              <div class="text-[10px] uppercase tracking-[0.18em] text-Cmuted font-bold">Customer</div>
+              <div id="exec-customer-name" class="text-2xl sm:text-3xl font-black text-Cwhite leading-tight truncate">—</div>
+              <div id="exec-customer-source" class="text-[11px] text-Cmuted mt-0.5">Sourced from Ctrl-M filename</div>
+              <div id="exec-products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1 mt-1.5"></div>
+            </div>
+          </div>
+          <!-- Audit Pulse — sparkline + date range + audit id + live status -->
+          <div id="exec-audit-pulse" class="shrink-0 hidden flex items-stretch gap-3">
+            <!-- Tile 1: Date span + day count -->
+            <div class="px-3 py-2 rounded-lg border border-Cborder/60 bg-Ccard/50 min-w-[160px]">
+              <div class="text-[9px] uppercase tracking-[0.18em] text-Cmuted font-bold mb-1">Audit Window</div>
+              <div id="exec-pulse-range" class="text-[12px] font-bold text-Cwhite leading-tight">—</div>
+              <div id="exec-pulse-span" class="text-[10px] text-Cmuted mt-0.5">—</div>
+            </div>
+            <!-- Tile 2: Sparkline + run total -->
+            <div class="px-3 py-2 rounded-lg border border-Cborder/60 bg-Ccard/50 min-w-[180px]">
+              <div class="flex items-baseline justify-between mb-1">
+                <span class="text-[9px] uppercase tracking-[0.18em] text-Cmuted font-bold">Daily Pulse</span>
+                <span id="exec-pulse-total" class="text-[11px] font-black text-Cwhite">—</span>
+              </div>
+              <svg id="exec-pulse-sparkline" viewBox="0 0 160 30" preserveAspectRatio="none"
+                   class="w-full h-7 block"></svg>
+              <div id="exec-pulse-legend" class="text-[9px] text-Cmuted mt-0.5">—</div>
+            </div>
+            <!-- Tile 3: Audit identity + freshness -->
+            <div class="px-3 py-2 rounded-lg border border-Cborder/60 bg-Ccard/50 min-w-[150px]">
+              <div class="flex items-center gap-1.5 mb-1">
+                <span id="exec-pulse-dot" class="w-1.5 h-1.5 rounded-full bg-Cgreen animate-pulse"></span>
+                <span class="text-[9px] uppercase tracking-[0.18em] text-Cmuted font-bold">Audit ID</span>
+              </div>
+              <div id="exec-pulse-id" class="text-[11px] font-mono font-bold text-Cwhite leading-tight">—</div>
+              <div id="exec-pulse-time" class="text-[10px] text-Cmuted mt-0.5">—</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ════════════════════════════════════════════════════
              VIEW · UPLOAD
              ════════════════════════════════════════════════════ -->
         <section data-view-panel="upload" class="space-y-6">
@@ -781,7 +817,7 @@
                 <h2 class="text-base font-bold text-Cwhite">Upload All PE Files</h2>
                 <p class="text-xs text-Cmuted mt-0.5">
                   Upload each file into its matching tile below.
-                  Resource Report accepts PDF or DOCX only; Ctrl-M, SLA Matrix, and Benchmark files have their own upload zones.
+                  Resource Report accepts DOCX only; Ctrl-M, SLA Matrix, and Benchmark files have their own upload zones.
                 </p>
               </div>
             </div>
@@ -878,7 +914,7 @@
                     <button type="button" id="azure-res-upload-btn" onclick="document.getElementById('file-input').click()"
                             class="text-[10px] font-medium py-2 px-3 rounded-lg border transition-all inline-flex items-center gap-1.5
                                    border-Cmuted/20 bg-Cmuted/5 text-Cmuted hover:bg-Cmuted/10 hover:text-Cwhite"
-                            title="Upload Zabbix / Azure DOCX or PDF manually">
+                            title="Upload a Zabbix / Azure DOCX report manually">
                       <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/>
                       </svg>
@@ -887,7 +923,7 @@
                   </div>
                 </div>
                 <!-- hidden file input still needed for upload -->
-                <input id="file-input" type="file" accept=".pdf,.docx" class="hidden" multiple />
+                <input id="file-input" type="file" accept=".docx" class="hidden" multiple />
                 <!-- drop-zone is now hidden, drag-drop still handled via JS -->
                 <div id="drop-zone" class="hidden"></div>
                 <div id="upload-status" class="hidden" data-intake-progress data-color="blue"></div>
@@ -1268,52 +1304,6 @@
 
           <!-- ROW 0 — SIGN-OFF READINESS STRIP -->
           <div id="exec-content" class="hidden space-y-5">
-
-            <!-- Customer banner (big, prominent) -->
-            <div id="exec-customer-banner"
-                 class="hidden rounded-2xl border border-Cpurple/40 bg-gradient-to-r from-Cpurple/15 via-Ccard to-Ccard2 px-6 py-4 flex items-center justify-between gap-4 shadow-panel">
-              <div class="flex items-center gap-4 min-w-0">
-                <div class="w-12 h-12 rounded-xl bg-Cpurple/25 border border-Cpurple/40 flex items-center justify-center shrink-0">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-7 h-7 text-Cpurple">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 21V8.25l9-5.25 9 5.25V21M9 21V12h6v9"/>
-                  </svg>
-                </div>
-                <div class="min-w-0">
-                  <div class="text-[10px] uppercase tracking-[0.18em] text-Cmuted font-bold">Customer</div>
-                  <div id="exec-customer-name" class="text-2xl sm:text-3xl font-black text-Cwhite leading-tight truncate">—</div>
-                  <div id="exec-customer-source" class="text-[11px] text-Cmuted mt-0.5">Sourced from Ctrl-M filename</div>
-                  <div id="exec-products-reviewed-badges" class="hidden flex flex-wrap items-center gap-1 mt-1.5"></div>
-                </div>
-              </div>
-              <!-- Audit Pulse — sparkline + date range + audit id + live status -->
-              <div id="exec-audit-pulse" class="shrink-0 hidden flex items-stretch gap-3">
-                <!-- Tile 1: Date span + day count -->
-                <div class="px-3 py-2 rounded-lg border border-Cborder/60 bg-Ccard/50 min-w-[160px]">
-                  <div class="text-[9px] uppercase tracking-[0.18em] text-Cmuted font-bold mb-1">Audit Window</div>
-                  <div id="exec-pulse-range" class="text-[12px] font-bold text-Cwhite leading-tight">—</div>
-                  <div id="exec-pulse-span" class="text-[10px] text-Cmuted mt-0.5">—</div>
-                </div>
-                <!-- Tile 2: Sparkline + run total -->
-                <div class="px-3 py-2 rounded-lg border border-Cborder/60 bg-Ccard/50 min-w-[180px]">
-                  <div class="flex items-baseline justify-between mb-1">
-                    <span class="text-[9px] uppercase tracking-[0.18em] text-Cmuted font-bold">Daily Pulse</span>
-                    <span id="exec-pulse-total" class="text-[11px] font-black text-Cwhite">—</span>
-                  </div>
-                  <svg id="exec-pulse-sparkline" viewBox="0 0 160 30" preserveAspectRatio="none"
-                       class="w-full h-7 block"></svg>
-                  <div id="exec-pulse-legend" class="text-[9px] text-Cmuted mt-0.5">—</div>
-                </div>
-                <!-- Tile 3: Audit identity + freshness -->
-                <div class="px-3 py-2 rounded-lg border border-Cborder/60 bg-Ccard/50 min-w-[150px]">
-                  <div class="flex items-center gap-1.5 mb-1">
-                    <span id="exec-pulse-dot" class="w-1.5 h-1.5 rounded-full bg-Cgreen animate-pulse"></span>
-                    <span class="text-[9px] uppercase tracking-[0.18em] text-Cmuted font-bold">Audit ID</span>
-                  </div>
-                  <div id="exec-pulse-id" class="text-[11px] font-mono font-bold text-Cwhite leading-tight">—</div>
-                  <div id="exec-pulse-time" class="text-[10px] text-Cmuted mt-0.5">—</div>
-                </div>
-              </div>
-            </div>
 
             <div id="exec-decision-strip"
                  class="rounded-xl border-l-4 border-Cmuted bg-Ccard/80 px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2"
@@ -2069,17 +2059,6 @@
           <!-- Body — populated by renderResourceReview() -->
           <div id="resource-review-body" class="hidden space-y-5">
 
-            <!-- Vision AI confidence banner — shown when image-parsed data is present -->
-            <div id="resource-vision-banner" class="hidden rounded-xl border border-Camber/40 bg-Camber/5 px-4 py-3 flex items-start gap-3">
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-Camber flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
-              </svg>
-              <div>
-                <div class="text-xs font-bold text-Camber">Vision AI Parsed — Verify Manually</div>
-                <div data-vision-label class="text-[10px] text-Cmuted mt-0.5 leading-relaxed">Server utilization values extracted from embedded document images. Accuracy ±5-10%.</div>
-              </div>
-            </div>
-
             <!-- 6 compact KPI cards -->
             <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
               <div class="rounded-xl bg-Ccard border border-Cborder shadow-kpi hover:shadow-kpiHov transition p-4 text-center">
@@ -2181,6 +2160,11 @@
                     <option value="360">15 days</option>
                     <option value="720">30 days</option>
                   </select>
+                  <div class="az-seg-group" role="group" title="How the CPU/Mem/Disk bars are aggregated across the observation window — same Avg/Max/Min choice Azure Metrics Explorer offers. Avg smooths away a short job-driven spike; Max surfaces the true peak.">
+                    <button type="button" onclick="resourceSetAggMode('avg')" data-agg="avg" class="resource-agg-btn az-seg-btn az-active">Avg</button>
+                    <button type="button" onclick="resourceSetAggMode('max')" data-agg="max" class="resource-agg-btn az-seg-btn">Max</button>
+                    <button type="button" onclick="resourceSetAggMode('min')" data-agg="min" class="resource-agg-btn az-seg-btn">Min</button>
+                  </div>
                   <button type="button" data-deep-dive
                           data-title="Fleet Resource · Agent Analysis"
                           data-question="Inspect the uploaded server fleet using the tools. Identify the 3 most stressed hosts, distinguish real bottlenecks from aggregation traps, and link them to any SLA-breaching jobs if evidence supports it."
@@ -2270,7 +2254,7 @@
                   <p class="text-[9px] text-Cmuted/80 mt-0.5">Metric source: Azure Monitor (Average aggregation, auto grain by selected time range)</p>
                 </div>
                 <div class="flex items-center gap-2">
-                  <button id="deepdive-refresh-btn" onclick="loadMetricsDeepDive()"
+                  <button id="deepdive-refresh-btn" onclick="loadMetricsDeepDive(true)"
                           class="px-3 py-1.5 rounded-lg text-[10px] font-semibold border border-Cblue/40 bg-Cblue/10 text-Cblue hover:bg-Cblue/20 transition">
                     Load Time-Series
                   </button>
@@ -2289,6 +2273,31 @@
                 <button data-dd-hours="168" onclick="setDeepDiveHours(this)" class="dd-time-pill dd-time-active px-2 py-0.5 rounded-md text-[10px] font-semibold border transition">7d</button>
                 <button data-dd-hours="360" onclick="setDeepDiveHours(this)" class="dd-time-pill px-2 py-0.5 rounded-md text-[10px] font-semibold border transition">15d</button>
                 <button data-dd-hours="720" onclick="setDeepDiveHours(this)" class="dd-time-pill px-2 py-0.5 rounded-md text-[10px] font-semibold border transition">30d</button>
+                <button id="dd-custom-toggle" type="button" onclick="toggleDeepDiveCustomPicker()"
+                        class="dd-time-pill px-2 py-0.5 rounded-md text-[10px] font-semibold border transition"
+                        title="Pick an exact start and end instead of a rolling window — for scoping the deep dive to one batch night or one incident.">📅 Custom…</button>
+              </div>
+
+              <!-- Absolute range picker. setDeepDiveCustomRange() has always
+                   read #dd-start-utc / #dd-end-utc, but no such inputs existed
+                   in the markup, so the custom-window code path was unreachable
+                   and the "custom window" badge could never appear. -->
+              <div id="deepdive-custom-picker" class="hidden items-end gap-2 flex-wrap rounded-lg border border-Cborder/50 bg-Cbg/40 px-3 py-2">
+                <div class="flex flex-col gap-1">
+                  <label for="dd-start-utc" class="text-[8px] font-bold uppercase tracking-widest text-Cmuted">From</label>
+                  <input id="dd-start-utc" type="datetime-local" step="60"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1 text-[10px] text-Cwhite">
+                </div>
+                <div class="flex flex-col gap-1">
+                  <label for="dd-end-utc" class="text-[8px] font-bold uppercase tracking-widest text-Cmuted">To</label>
+                  <input id="dd-end-utc" type="datetime-local" step="60"
+                         class="bg-Cbg border border-Cborder rounded px-2 py-1 text-[10px] text-Cwhite">
+                </div>
+                <button type="button" onclick="setDeepDiveCustomRange()"
+                        class="px-3 py-1 rounded-md text-[10px] font-bold border border-blue-500/60 text-blue-400 hover:bg-blue-500/15 transition">Apply</button>
+                <button type="button" onclick="clearDeepDiveCustomRange()"
+                        class="px-3 py-1 rounded-md text-[10px] font-semibold border border-Cborder/60 text-Cmuted hover:text-Cwhite transition">Reset to 7d</button>
+                <span id="dd-custom-tz-note" class="text-[8px] text-Cmuted/70 ml-1"></span>
               </div>
 
               <!-- Spike Summary Banner -->
@@ -2312,6 +2321,13 @@
                 <div id="deepdive-mem-heatmap" class="overflow-x-auto rounded-lg border border-Cborder" style="max-height:300px;overflow-y:auto"></div>
               </div>
 
+              <!-- Disk Bandwidth Heatmap — the router already builds heatmap.grids.disk;
+                   this is its render target (previously the grid was computed and dropped). -->
+              <div id="deepdive-disk-heatmap-wrap" class="hidden">
+                <h4 class="text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-2" style="letter-spacing:0.15em">💽 Disk Bandwidth Heatmap — Servers × Time</h4>
+                <div id="deepdive-disk-heatmap" class="overflow-x-auto rounded-lg border border-Cborder" style="max-height:300px;overflow-y:auto"></div>
+              </div>
+
               <!-- Per-VM Charts container -->
               <div id="deepdive-charts" class="space-y-4"></div>
 
@@ -2321,6 +2337,10 @@
                 .dd-time-pill:hover { border-color: rgba(59,130,246,0.5); color: #3b82f6; background: rgba(59,130,246,0.08); }
                 .dd-time-active { border-color: rgba(59,130,246,0.6) !important; color: #3b82f6 !important; background: rgba(59,130,246,0.15) !important; }
                 .dd-type-active { border-color: rgba(59,130,246,0.6) !important; color: #3b82f6 !important; background: rgba(59,130,246,0.15) !important; }
+                /* Evidence chip used by the Detected Patterns panel */
+                .dd-pchip { font-size: 8px; font-family: ui-monospace, monospace; padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
+                #deepdive-patterns-panel summary::-webkit-details-marker { display: none; }
+                #deepdive-patterns-panel summary::marker { content: ""; }
                 .deepdive-chart-container { height: 220px; position: relative; transition: height 0.3s ease; }
                 .deepdive-chart-container.expanded { height: 480px; }
 
@@ -2761,16 +2781,27 @@
                 <input id="pe-name" type="text" placeholder="Enter your name"
                        class="w-full bg-Cbg border border-Cborder rounded-lg px-3 py-2 text-sm text-Cwhite placeholder-Cmuted focus:outline-none focus:border-Cblue" />
               </div>
-              <label id="pe-approve-label" class="flex items-center gap-2 cursor-pointer opacity-50 pointer-events-none">
-                <input id="pe-approve-chk" type="checkbox" class="accent-Cgreen w-4 h-4" disabled />
+              <label id="pe-approve-label" class="flex items-center gap-2 cursor-pointer">
+                <input id="pe-approve-chk" type="checkbox" class="accent-Cgreen w-4 h-4" />
                 <span class="text-sm text-Cmuted">I confirm all PE checklist items are validated</span>
               </label>
               <p id="pe-checklist-hint" class="text-[10px] text-Camber">⚠ Complete all 9 checklist items to enable sign-off</p>
+              <!-- Blocker override disclaimer — shown instead of hard-disabling the
+                   checkbox, so a PE reviewer can consciously choose to proceed with
+                   open items rather than being silently stuck with no way forward. -->
+              <div id="pe-blocker-ack-wrap" class="hidden items-start gap-2 rounded-lg border border-Camber/40 bg-Camber/5 p-2.5">
+                <input id="pe-blocker-ack" type="checkbox" class="accent-Camber w-4 h-4 mt-0.5 shrink-0" />
+                <label for="pe-blocker-ack" class="text-[11px] text-Camber leading-snug cursor-pointer">
+                  I have reviewed the open item(s) above and choose to proceed with sign-off despite them.
+                  This override will be recorded on the exported report.
+                </label>
+              </div>
               <div id="pe-status-badge" class="text-xs font-semibold text-Camber">⏳ PE Approval Pending</div>
             </div>
             <!-- Customer Sign-Off -->
             <div class="rounded-2xl border border-Cborder bg-Ccard shadow-panel p-5 space-y-3">
               <h3 class="text-xs font-bold uppercase tracking-wider text-Cwhite">🏢 Customer Sign-Off</h3>
+              <div class="text-[10px] text-Cmuted">Engagement customer: <span id="gov-detected-customer" class="text-Cwhite font-semibold">—</span></div>
               <div>
                 <label class="block text-[10px] font-bold uppercase tracking-wider text-Cmuted mb-1">Customer Representative</label>
                 <input id="cust-name" type="text" placeholder="e.g. Antony Castaldi"
@@ -3436,7 +3467,7 @@
             <!-- Gemini API key -->
             <div class="space-y-2">
               <label class="block text-[10px] font-bold uppercase tracking-widest text-Cmuted">Gemini API Key</label>
-              <p class="text-xs text-Cmuted">Used for AI Insights, Vision-based resource extraction, and Red Flags analysis.
+              <p class="text-xs text-Cmuted">Used for AI Insights and Red Flags analysis.
                  Key is saved permanently on this machine.</p>
               <div class="flex items-center gap-2">
                 <input id="settings-api-key" type="password"
@@ -4353,6 +4384,12 @@
             <button onclick="azureSelectAll(true)"  class="text-[10px] font-mono font-semibold text-blue-400 hover:text-white transition-colors tracking-wide">Select all</button>
             <span class="text-slate-700">·</span>
             <button onclick="azureSelectAll(false)" class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Clear</button>
+            <span class="text-slate-700 hidden" id="azure-group-sep">·</span>
+            <div id="azure-group-toggle-wrap" class="hidden items-center gap-2" title="Collapse/expand customer groups to bifurcate a large VM list">
+              <button onclick="azureExpandAllCustomers(true)"  class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Expand all</button>
+              <span class="text-slate-700">·</span>
+              <button onclick="azureExpandAllCustomers(false)" class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Collapse all</button>
+            </div>
           </div>
         </div>
 
@@ -4396,6 +4433,18 @@
                 class="azure-env-filter az-seg-btn az-env-stg">STG<span class="az-chip" id="az-cnt-stg"></span></button>
               <button onclick="azureFilterEnv('DEV')" data-env="DEV"
                 class="azure-env-filter az-seg-btn az-env-dev">DEV<span class="az-chip" id="az-cnt-dev"></span></button>
+            </div>
+          </div>
+
+          <!-- REGION row — built dynamically from discovered VM locations, so a
+               single customer's subscription that spans e.g. Brazil/USA/Africa
+               regions can be bifurcated and audited one region at a time. -->
+          <div class="az-filter-row" id="az-region-filter-row">
+            <span class="az-row-label">Region</span>
+            <div class="az-seg-group flex-wrap" role="group" id="az-region-seg-group">
+              <button onclick="azureFilterRegion('ALL')" data-region="ALL"
+                class="azure-region-filter az-seg-btn az-active">All</button>
+              <!-- Region buttons injected by _updateRegionFilterButtons() -->
             </div>
           </div>
 

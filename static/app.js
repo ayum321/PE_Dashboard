@@ -17,32 +17,42 @@
 // ── Global state ────────────────────────────────────────────
 //   Mirrors the role of st.session_state in the old Streamlit app.
 //   Frontend code reads/writes via window.appData.* exclusively.
-window.appData = {
-  upload:        null,   // last resource UploadResponse JSON
-  servers:       [],     // alias to upload.servers, convenience
-  batch:         null,   // last BatchResponse JSON
-  resource:      null,   // last ResourceResponse JSON (Phase 4)
-  issues:        [],     // Issues & Waivers register (Phase 6)
-  customerName:  "",     // extracted from uploaded resource document heading
-  slaMatrix:     null,   // from /api/sla-matrix (Phase 7)
-  slaCeilings:   null,   // from /api/sla-ceilings — customer SLA window dict
-  benchmark:     null,   // merged benchmark (from /api/benchmark) (Phase 7)
-  benchmarkBatch: null,  // batch-runtime-performance source slot
-  benchmarkUI:    null,  // UI-benchmark source slot
-  sowCompare:    null,   // from /api/sow/compare (Phase 8)
-  config:        null,   // loaded from /api/config on startup
-  approvals: {           // Governance sign-off state (Phase 6)
-    customer_name: "",
-    env_type: "",
-    checklist: { batch:false, res:false, data:false, issues:false,
-                 perf:false, ctrlm:false, ui:false, sow:false, res15:false },
-    pe:       { name:"", approved:false, date:"" },
-    customer: { name:"", approved:false, date:"" },
-    notes: "",
-  },
-  view:     "upload",
-  loadedAt: null,
-};
+//
+// Factory (not a static object literal) — clearSessionData() needs to reset
+// to this EXACT shape, not `{}`. A bare `{}` reset previously left
+// window.appData.approvals undefined for the rest of the page session, so
+// the next click of "Export HTML Report" threw "can't access property 'pe',
+// a is undefined" — an uncaught error before exportHtmlReport()'s own
+// try/finally, which perma-disabled the button. See clearSessionData().
+function _freshAppData() {
+  return {
+    upload:        null,   // last resource UploadResponse JSON
+    servers:       [],     // alias to upload.servers, convenience
+    batch:         null,   // last BatchResponse JSON
+    resource:      null,   // last ResourceResponse JSON (Phase 4)
+    issues:        [],     // Issues & Waivers register (Phase 6)
+    customerName:  "",     // extracted from uploaded resource document heading
+    slaMatrix:     null,   // from /api/sla-matrix (Phase 7)
+    slaCeilings:   null,   // from /api/sla-ceilings — customer SLA window dict
+    benchmark:     null,   // merged benchmark (from /api/benchmark) (Phase 7)
+    benchmarkBatch: null,  // batch-runtime-performance source slot
+    benchmarkUI:    null,  // UI-benchmark source slot
+    sowCompare:    null,   // from /api/sow/compare (Phase 8)
+    config:        null,   // loaded from /api/config on startup
+    approvals: {           // Governance sign-off state (Phase 6)
+      customer_name: "",
+      env_type: "",
+      checklist: { batch:false, res:false, data:false, issues:false,
+                   perf:false, ctrlm:false, ui:false, sow:false, res15:false },
+      pe:       { name:"", approved:false, date:"" },
+      customer: { name:"", approved:false, date:"" },
+      notes: "",
+    },
+    view:     "upload",
+    loadedAt: null,
+  };
+}
+window.appData = _freshAppData();
 
 // Theme palette — kept in sync with tailwind.config in index.html
 const THEME = {
@@ -105,6 +115,15 @@ let SLA_DAILY_HRS = 6.0;
 //   buffer% ≤ ATRISK   → red (at risk / breach)
 let SLA_ATRISK_PCT  = 15.0;
 let SLA_LONGJOB_PCT = 40.0;
+
+// SOW volume-consumption bands — single source: services/pe_config.py, synced
+// in loadConfig(). Used by _buildSowCompareFromManual() so the manual-entry
+// fallback classifies status with the SAME thresholds as /api/sow/compare,
+// instead of leaving every manually-entered metric's status/pct unset (which
+// showed as "0.0%" / "N/A" everywhere this fallback feeds a report or panel).
+let SOW_UNDER_PCT     = 70.0;
+let SOW_OVER_PCT      = 110.0;
+let SOW_OVER_CRIT_PCT = 120.0;
 
 /** Map a buffer % to a shared {tone, color, label} band token. */
 function _bufferBand(bufPct) {
@@ -236,6 +255,37 @@ function _simpleHash(str) {
 const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "" };
 const RESOURCE_TABLE_PREVIEW = 25; // initial lazy slice
 const AZURE_REQUIRE_FRESH_LOGIN = false; // persist sign-in across reloads/restarts (fast). Use the Sign out button to switch accounts.
+
+// ── Resource utilization aggregation mode — mirrors Azure Metrics Explorer's
+// own Avg/Max/Min picker (see Fetch Metrics dialog). A job that spikes CPU/
+// mem/disk briefly during a long (7/15/30-day) observation window is averaged
+// away to nothing under Avg; switching to Max surfaces the true worst point so
+// a PE lead can decide whether that job is a resource risk. Only affects the
+// VISUAL bars/sort in the utilization card — health scoring, status bands, and
+// findings continue to use the same server-side fields they always have.
+let _resourceAggMode = "avg"; // 'avg' | 'max' | 'min'
+
+function _resourceAggValue(s, metric, mode) {
+  const m = mode || _resourceAggMode;
+  if (m === "max") {
+    const v = metric === "cpu" ? s.cpu_max_pct : metric === "mem" ? s.mem_max_pct : s.disk_max_pct;
+    if (v != null) return v;
+  } else if (m === "min") {
+    const v = metric === "cpu" ? s.cpu_min_pct : metric === "mem" ? s.mem_min_pct : s.disk_min_pct;
+    if (v != null) return v;
+  } else if (m === "avg" && metric === "cpu" && s.cpu_avg_pct != null) {
+    return s.cpu_avg_pct; // mem_pct/disk_pct are already period averages
+  }
+  // Fallback: current default field (also the 'avg' value for mem/disk)
+  return metric === "cpu" ? s.cpu_pct : metric === "mem" ? s.mem_pct : s.disk_pct;
+}
+
+function resourceSetAggMode(mode) {
+  if (mode === _resourceAggMode) return;
+  _resourceAggMode = mode;
+  document.querySelectorAll(".resource-agg-btn").forEach(b => b.classList.toggle("az-active", b.dataset.agg === mode));
+  renderResourceHeatmap(window.appData?.resource?.servers || []);
+}
 
 // ─────────────────────────────────────────────────────────────
 // Bootstrap
@@ -406,7 +456,7 @@ function initDropZone() {
     const files = picked.filter(f => isAllowed(f));
     const skipped = picked.length - files.length;
     if (skipped > 0) {
-      toast("warning", "Unsupported file(s)", "Resource Report accepts only .pdf and .docx files. Use the other upload tiles for Ctrl-M, SLA Matrix, or Benchmark files.");
+      toast("warning", "Unsupported file(s)", "Resource Report accepts only .docx files. Use the other upload tiles for Ctrl-M, SLA Matrix, or Benchmark files.");
     }
     if (files.length) _uploadResourceFiles(files);
     fileInput.value = ""; // allow re-selecting the same file
@@ -439,7 +489,7 @@ function initDropZone() {
     const valid = files.filter(f => isAllowed(f));
     const skipped = files.length - valid.length;
     if (skipped > 0) {
-      toast("warning", `${skipped} file(s) skipped`, "Resource Report accepts only .pdf and .docx files. Use the other upload tiles for Ctrl-M, SLA Matrix, or Benchmark files.");
+      toast("warning", `${skipped} file(s) skipped`, "Resource Report accepts only .docx files. Use the other upload tiles for Ctrl-M, SLA Matrix, or Benchmark files.");
     }
     if (valid.length) _uploadResourceFiles(valid);
   });
@@ -452,7 +502,7 @@ function initDropZone() {
 
 function isAllowed(file) {
   const name = (file.name || "").toLowerCase();
-  return name.endsWith(".pdf") || name.endsWith(".docx");
+  return name.endsWith(".docx");
 }
 
 
@@ -603,7 +653,7 @@ function renderUploadResult(payload) {
   setText("kpi-filename",     payload.filename);
   setText("kpi-filetype",     (payload.file_type || "").toUpperCase());
   setText("kpi-server-count", String(payload.server_count ?? 0));
-  setText("kpi-mode",         payload.image_only ? "Image-only" : "Text-extracted");
+  setText("kpi-mode",         payload.image_only ? "No Data" : "Text-extracted");
 
   // Header chip + reset button
   const chip = document.getElementById("dataset-chip");
@@ -728,6 +778,12 @@ function applyCustomerName(name, opts = {}) {
       custTag.classList.remove("flex");
     }
   }
+
+  // 5. Governance / sign-off tab — lets the PE reviewer visually confirm the
+  //    exact customer name that will be auto-picked up into the exported
+  //    report header, before clicking Export.
+  const govCust = document.getElementById("gov-detected-customer");
+  if (govCust) govCust.textContent = cust || "—";
 }
 
 // ── Audit Pulse ── Grafana-style multi-tile strip with sparkline + audit id
@@ -4628,13 +4684,30 @@ function _rewriteWaveformForDb(wf, role, memUsed, thresholds) {
   const alarmingShapes = ["plateau", "flat_high"];
   if (!alarmingShapes.includes(shape)) return wf;
   const t = thresholds || RESOURCE_THRESHOLDS;
+  const warnAt = t.db_mem_warn || 88;
+  const bandHigh = t.db_mem_band_high || 92;
+  // pe_config documents this 88-92% used sub-band as still WITHIN the
+  // allocated DB range but worth watching for an upward trend — not
+  // equivalent to "no action needed". The backend's own severity classifier
+  // (services/azure_monitor.py _classify_severity) calls anything >= 88% used
+  // "warning" regardless of the 92% band ceiling, so unconditionally
+  // suppressing this to "Expected DB Load / no action" for the SAME number
+  // directly contradicted the backend-driven spike table and findings text
+  // shown on the same screen. Keep risk visually calm (still an allocated,
+  // not-yet-critical range) but stop asserting "no action" once past the
+  // documented watch line.
+  const inWatchZone = memUsed >= warnAt;
   return {
     ...wf,
-    label: "Expected DB Load",
-    icon: "🗄️",
+    label: inWatchZone ? "DB Load — Watch Trend" : "Expected DB Load",
+    icon: inWatchZone ? "🗄️⚠️" : "🗄️",
     risk: "low",
-    meaning: `Memory at ${memUsed.toFixed(0)}% — normal for DB workload. Oracle SGA/PGA keeps memory intentionally high.`,
-    action: `No action needed. Monitor for growth above ${t.db_mem_warn || 93}%.`,
+    meaning: inWatchZone
+      ? `Memory at ${memUsed.toFixed(0)}% — within the allocated DB band but above the ${warnAt}% watch line. Oracle SGA/PGA keeps memory intentionally high; confirm this isn't still climbing.`
+      : `Memory at ${memUsed.toFixed(0)}% — normal for DB workload. Oracle SGA/PGA keeps memory intentionally high.`,
+    action: inWatchZone
+      ? `Check the trend direction before dismissing — treat as a real finding above ${bandHigh}%.`
+      : `No action needed. Monitor for growth above ${bandHigh}%.`,
   };
 }
 
@@ -4936,20 +5009,6 @@ function renderResourceReview(data) {
           .filter(s => s.resource_id)
           .map(s => s.resource_id);
       }
-    }
-  }
-
-  // Vision AI confidence indicator — show when data came from image parsing
-  const visionBanner = document.getElementById("resource-vision-banner");
-  if (visionBanner) {
-    const imageOnlyServers = (data.servers || []).filter(s => s.image_only);
-    if (imageOnlyServers.length > 0) {
-      visionBanner.classList.remove("hidden");
-      const label = visionBanner.querySelector("[data-vision-label]");
-      if (label) label.textContent =
-        `${imageOnlyServers.length}/${data.servers.length} server(s) parsed via Vision AI from embedded images — values carry ±5-10% accuracy. Verify critical readings manually.`;
-    } else {
-      visionBanner.classList.add("hidden");
     }
   }
 
@@ -5824,8 +5883,8 @@ function renderResourceHeatmap(servers) {
     return;
   }
   const top = [...known].sort((a, b) =>
-    Math.max(b.cpu_pct||0, b.mem_pct||0, b.disk_pct||0)
-    - Math.max(a.cpu_pct||0, a.mem_pct||0, a.disk_pct||0)
+    Math.max(_resourceAggValue(b,"cpu")||0, _resourceAggValue(b,"mem")||0, _resourceAggValue(b,"disk")||0)
+    - Math.max(_resourceAggValue(a,"cpu")||0, _resourceAggValue(a,"mem")||0, _resourceAggValue(a,"disk")||0)
   ).slice(0, 20);
 
   // Update "Top N of M visualised" subtitle dynamically
@@ -5913,6 +5972,22 @@ function renderResourceHeatmap(servers) {
     const diskTrend = trendArrow(s.disk_trend_pct);
     const serverName = escapeHtml(s.server || s.host || "");
 
+    // Values shown in the bars — resolved per the Avg/Max/Min toggle above.
+    const cpuVal  = _resourceAggValue(s, "cpu");
+    const memVal  = _resourceAggValue(s, "mem");   // used-% convention
+    const diskVal = _resourceAggValue(s, "disk");
+
+    // Footnote: when the selected aggregation diverges materially (>5pts) from
+    // the period average, show the average alongside so the swing itself is
+    // visible — this is the exact signal a job-driven spike/tank produces.
+    const _aggNote = (curVal, avgVal) => {
+      if (_resourceAggMode === "avg" || curVal == null || avgVal == null || Math.abs(curVal - avgVal) <= 5) return "";
+      return `<div class="text-[7px] text-Cmuted mt-0.5" title="Selected (${_resourceAggMode}): ${curVal.toFixed(1)}% · Period avg: ${avgVal.toFixed(1)}%">avg ${avgVal.toFixed(0)}%</div>`;
+    };
+    const cpuNote  = _aggNote(cpuVal,  s.cpu_avg_pct ?? s.cpu_pct);
+    const memNote  = _aggNote(memVal,  s.mem_pct);
+    const diskNote = _aggNote(diskVal, s.disk_pct);
+
     return `<div class="grid items-center gap-4 py-2 border-b border-Cborder/20 cursor-pointer hover:bg-white/[0.03] transition rounded-md px-1"
                  style="grid-template-columns:minmax(140px,1.2fr) 1.5fr 1.5fr 1.5fr"
                  onclick="filterServerTable('${serverName.replace(/'/g, "\\'")}')" title="Click to filter table to ${serverName}">
@@ -5922,9 +5997,9 @@ function renderResourceHeatmap(servers) {
         ${sEnvTag}
         <span class="text-[11px] font-mono text-Cwhite truncate font-medium" title="${escapeHtml(s.host || s.server || '')}">${escapeHtml(host)}</span>
       </div>
-      <div>${barCell(s.cpu_pct,  RESOURCE_THRESHOLDS.cpu_ok, RESOURCE_THRESHOLDS.cpu_warn, { threshold: RESOURCE_THRESHOLDS.cpu_warn, trendArrow: cpuTrend })}${s.cpu_avg_pct != null && Math.abs((s.cpu_pct || 0) - s.cpu_avg_pct) > 5 ? `<div class="text-[7px] text-Cmuted mt-0.5" title="Recent snapshot: ${(s.cpu_pct||0).toFixed(1)}% · Period avg: ${s.cpu_avg_pct.toFixed(1)}%">avg ${s.cpu_avg_pct.toFixed(0)}%</div>` : ""}</div>
-      <div>${barCell(s.mem_pct != null ? 100 - s.mem_pct : null,  100 - RESOURCE_THRESHOLDS.mem_ok, 100 - RESOURCE_THRESHOLDS.mem_warn, { threshold: 100 - RESOURCE_THRESHOLDS.mem_warn, invertColor: true, pulseAt: 5, trendArrow: memTrend, serverRole: s.type, memUsedPct: s.mem_pct })}</div>
-      <div>${barCell(s.disk_pct, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn, { threshold: RESOURCE_THRESHOLDS.disk_warn, segmented: true, trendArrow: diskTrend, showGapWarning: true })}</div>
+      <div>${barCell(cpuVal,  RESOURCE_THRESHOLDS.cpu_ok, RESOURCE_THRESHOLDS.cpu_warn, { threshold: RESOURCE_THRESHOLDS.cpu_warn, trendArrow: cpuTrend })}${cpuNote}</div>
+      <div>${barCell(memVal != null ? 100 - memVal : null,  100 - RESOURCE_THRESHOLDS.mem_ok, 100 - RESOURCE_THRESHOLDS.mem_warn, { threshold: 100 - RESOURCE_THRESHOLDS.mem_warn, invertColor: true, pulseAt: 5, trendArrow: memTrend, serverRole: s.type, memUsedPct: memVal })}${memNote}</div>
+      <div>${barCell(diskVal, RESOURCE_THRESHOLDS.disk_ok, RESOURCE_THRESHOLDS.disk_warn, { threshold: RESOURCE_THRESHOLDS.disk_warn, segmented: true, trendArrow: diskTrend, showGapWarning: true })}${diskNote}</div>
     </div>`;
   }).join("");
 
@@ -5942,13 +6017,13 @@ function renderResourceHeatmap(servers) {
          style="grid-template-columns:minmax(140px,1.2fr) 1.5fr 1.5fr 1.5fr">
       <div>Server</div>
       <div class="flex items-center gap-1">
-        <span class="w-2 h-2 rounded-sm" style="background:${THEME.blue}"></span> CPU (threshold ${RESOURCE_THRESHOLDS.cpu_warn}%)
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.blue}"></span> CPU (${_resourceAggMode.toUpperCase()} · threshold ${RESOURCE_THRESHOLDS.cpu_warn}%)
       </div>
       <div class="flex items-center gap-1 cursor-help" title="Available Memory % (Azure native). Shorter bar = less free RAM = more memory pressure. DB servers normally show 8–20% available (SGA/PGA pre-allocation) and render in purple as expected.">
-        <span class="w-2 h-2 rounded-sm" style="background:${THEME.cyan}"></span> Mem avail % <span class="text-[8px] lowercase tracking-normal text-Cmuted/70">· shorter = more pressure</span> <span class="text-[7px] opacity-50">ℹ</span>
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.cyan}"></span> Mem avail % (${_resourceAggMode.toUpperCase()}) <span class="text-[8px] lowercase tracking-normal text-Cmuted/70">· shorter = more pressure</span> <span class="text-[7px] opacity-50">ℹ</span>
       </div>
       <div class="flex items-center gap-1" title="Azure OS/Data Disk Bandwidth Consumed % — NOT storage space. 0.3% = near-idle I/O. Warn at ${RESOURCE_THRESHOLDS.disk_warn}% of provisioned IOPS/BW quota.">
-        <span class="w-2 h-2 rounded-sm" style="background:${THEME.purple}"></span> Disk I/O (threshold ${RESOURCE_THRESHOLDS.disk_warn}%) <span class="text-[7px] opacity-50">ℹ</span>
+        <span class="w-2 h-2 rounded-sm" style="background:${THEME.purple}"></span> Disk I/O (${_resourceAggMode.toUpperCase()} · threshold ${RESOURCE_THRESHOLDS.disk_warn}%) <span class="text-[7px] opacity-50">ℹ</span>
       </div>
     </div>
     ${rows}
@@ -6329,9 +6404,15 @@ let _deepDiveCharts = [];   // track Chart.js instances for cleanup
 let _deepDiveData = null;   // last fetched timeseries payload
 
 // ── Deep Dive metric visibility ──
-// By default only core metrics (CPU, Memory, Disk BW) are shown.
-// Extended metrics (IOPS, latency, cached/uncached) are behind a toggle.
+// By default only the four graded percentage metrics (CPU, Available Memory,
+// OS/Data Disk bandwidth) are shown. The Azure "Platform Metrics" throughput
+// and availability counters are behind a toggle.
 let _ddShowExtendedMetrics = false;
+
+// Overlay the per-bucket MAXIMUM on top of the AVERAGE line, matching the
+// Azure Platform Metrics "Percentage CPU (Avg + Max)" panel. On by default:
+// an averaged chart alone under-reports every short saturation event.
+let _ddShowMaxOverlay = true;
 
 // ── Deep Dive time range picker ──
 let _deepDiveHoursBack = 168;
@@ -6360,38 +6441,90 @@ function setDeepDiveHours(el) {
   const hours = parseInt(el.dataset.ddHours) || 168;
   _deepDiveHoursBack = hours;
   _deepDiveCustomWindow = null;
-  // Update active pill styling
+  // Update active pill styling. The Custom toggle carries .dd-time-pill too, so
+  // picking a preset correctly de-selects it — but the panel must also collapse,
+  // otherwise it stays open showing values that are no longer in effect.
   document.querySelectorAll(".dd-time-pill").forEach(p => p.classList.remove("dd-time-active"));
   el.classList.add("dd-time-active");
+  const cw = document.getElementById("deepdive-custom-picker");
+  cw?.classList.add("hidden");
+  cw?.classList.remove("flex");
   // Auto-reload if data was already fetched
   if (_deepDiveData) loadMetricsDeepDive();
+}
+
+// ── Absolute (custom) time-range picker ───────────────────────
+// The <input type="datetime-local"> fields are in BROWSER-LOCAL time, and
+// `new Date(value).toISOString()` below converts them to UTC — which is what
+// the API expects. The offset is shown next to the inputs so an analyst in IST
+// is never guessing which clock the boxes are in.
+function toggleDeepDiveCustomPicker() {
+  const wrap = document.getElementById("deepdive-custom-picker");
+  const btn = document.getElementById("dd-custom-toggle");
+  if (!wrap) return;
+  const opening = wrap.classList.contains("hidden");
+  wrap.classList.toggle("hidden", !opening);
+  wrap.classList.toggle("flex", opening);
+  btn?.classList.toggle("dd-time-active", opening);
+  if (!opening) return;
+
+  const note = document.getElementById("dd-custom-tz-note");
+  if (note) {
+    const offMin = -new Date().getTimezoneOffset();
+    const sign = offMin >= 0 ? "+" : "-";
+    const hh = String(Math.floor(Math.abs(offMin) / 60)).padStart(2, "0");
+    const mm = String(Math.abs(offMin) % 60).padStart(2, "0");
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+    note.textContent = `Browser time — ${tz} (UTC${sign}${hh}:${mm}). Sent to Azure as UTC.`;
+  }
+  // Prefill with the window currently in view so "Custom" starts from what the
+  // analyst is already looking at rather than an empty box.
+  const sEl = document.getElementById("dd-start-utc");
+  const eEl = document.getElementById("dd-end-utc");
+  const toLocalInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+    .toISOString().slice(0, 16);
+  if (sEl && eEl && !sEl.value && !eEl.value) {
+    const end = new Date();
+    const start = new Date(end.getTime() - (_deepDiveHoursBack || 168) * 3600 * 1000);
+    sEl.value = toLocalInput(start);
+    eEl.value = toLocalInput(end);
+  }
 }
 
 function setDeepDiveCustomRange() {
   const sEl = document.getElementById("dd-start-utc");
   const eEl = document.getElementById("dd-end-utc");
   if (!sEl || !eEl || !sEl.value || !eEl.value) {
-    toast("warn", "Custom window", "Pick both Start and End UTC values.");
+    toast("warn", "Custom window", "Pick both a From and a To value.");
     return;
   }
   const s = new Date(sEl.value);
   const e = new Date(eEl.value);
   if (!(s instanceof Date) || isNaN(s) || !(e instanceof Date) || isNaN(e) || e <= s) {
-    toast("error", "Custom window", "Invalid UTC range. End must be after Start.");
+    toast("error", "Custom window", "Invalid range. 'To' must be after 'From'.");
     return;
   }
   _deepDiveCustomWindow = { start_utc: s.toISOString(), end_utc: e.toISOString() };
   document.querySelectorAll(".dd-time-pill").forEach(p => p.classList.remove("dd-time-active"));
+  document.getElementById("dd-custom-toggle")?.classList.add("dd-time-active");
   loadMetricsDeepDive();
 }
 
 function clearDeepDiveCustomRange() {
   _deepDiveCustomWindow = null;
+  const wrap = document.getElementById("deepdive-custom-picker");
+  wrap?.classList.add("hidden");
+  wrap?.classList.remove("flex");
+  document.getElementById("dd-custom-toggle")?.classList.remove("dd-time-active");
+  const sEl = document.getElementById("dd-start-utc");
+  const eEl = document.getElementById("dd-end-utc");
+  if (sEl) sEl.value = "";
+  if (eEl) eEl.value = "";
   const active = document.querySelector('.dd-time-pill[data-dd-hours="168"]');
   if (active) setDeepDiveHours(active);
 }
 
-function loadMetricsDeepDive() {
+function loadMetricsDeepDive(forceRefresh) {
   if (!_lastFetchedVmIds || !_lastFetchedVmIds.length) {
     toast("warn", "No VMs", "Fetch Azure resource data first.");
     return;
@@ -6423,8 +6556,11 @@ function loadMetricsDeepDive() {
 
   const t0 = performance.now();
 
-  // Always bust the server-side cache before fetching so explicit Refresh
-  // never serves a stale result from a previous (potentially broken) call.
+  // Bust the server-side cache ONLY on an explicit user Refresh. This was
+  // previously unconditional, which meant the 5-minute result cache could never
+  // hit — including for the spike drill-down (openSpikeWindow) it exists to make
+  // instant. Window-switches and drill-downs now reuse the cached pull; the
+  // Refresh button still forces a fresh Azure read.
   const payload = { vm_ids: _lastFetchedVmIds, hours_back: hoursBack };
   if (_deepDiveCustomWindow?.start_utc && _deepDiveCustomWindow?.end_utc) {
     payload.start_utc = _deepDiveCustomWindow.start_utc;
@@ -6435,9 +6571,10 @@ function loadMetricsDeepDive() {
   const _ddController = new AbortController();
   const _ddTimeout = setTimeout(() => _ddController.abort(), 240_000);
 
-  // Bust the in-process cache then fetch fresh data
-  fetch("/api/azure/clear-ts-cache", { method: "POST" })
-    .catch(() => {}) // non-blocking — if it fails the main fetch still proceeds
+  // Bust the in-process cache then fetch fresh data (explicit Refresh only)
+  (forceRefresh
+      ? fetch("/api/azure/clear-ts-cache", { method: "POST" }).catch(() => {})
+      : Promise.resolve())
     .finally(() => {
       fetch("/api/azure/timeseries", {
         method: "POST",
@@ -6473,6 +6610,7 @@ function loadMetricsDeepDive() {
     const _ddDeferred = [
       () => _renderDeepDiveHeatmap(data.heatmap),
       () => _renderDeepDiveMemoryHeatmap(data.vms),
+      () => _renderDeepDiveDiskHeatmap(),
       () => _renderDeepDiveCharts(data.vms, data.summary),
       () => {
         _updatePriorityFromDeepDive(data.vms);
@@ -6486,7 +6624,22 @@ function loadMetricsDeepDive() {
     let _ddi = 0;
     function _nextDD() {
       if (_ddi < _ddDeferred.length) {
-        _ddDeferred[_ddi++]();
+        // Each deferred step MUST be isolated. Before this guard, a single
+        // throwing step (e.g. a heatmap render error) aborted the entire
+        // remaining chain silently — `requestAnimationFrame(_nextDD)` never
+        // ran because the throw happened on the line before it, so every
+        // later step (disk heatmap, the whole VM grid + Unified Time-Series
+        // chart, findings refresh) never executed and nothing on screen
+        // indicated why. This is exactly how a `binSize is not defined`
+        // ReferenceError inside the memory heatmap (invisible to
+        // `_validate_js.py`, which only checks syntax) took out the entire
+        // rest of the Deep Dive panel with zero visible error to the user.
+        try {
+          _ddDeferred[_ddi++]();
+        } catch (e) {
+          console.error(`Deep Dive render step ${_ddi - 1} failed:`, e);
+          toast("error", "Deep Dive render error", `Step ${_ddi} failed (${e.message}) — later panels still attempted.`);
+        }
         requestAnimationFrame(_nextDD);
       }
     }
@@ -6620,31 +6773,191 @@ function _renderDeepDiveBanner(summary) {
 let _deepDivePatterns = [];   // stored for export
 let _deepDiveAttribution = null;   // spike-to-batch join, stored for export
 
+// Short display name for a metric key — shared by the patterns panel so a
+// condensed line doesn't have to spell out the full Azure metric name.
+function _ddShortMetric(k) {
+  k = k || "";
+  if (k.includes("CPU")) return "CPU";
+  if (k.includes("Memory")) return "Memory";
+  if (k.includes("OS Disk")) return "OS Disk";
+  if (k.includes("Data Disk")) return "Data Disk";
+  return k.replace(" Percentage", "").replace(" Consumed", "");
+}
+
 function _renderDeepDivePatterns(patterns) {
   _deepDivePatterns = patterns || [];
-  // Most patterns feed the export report only. Regime shifts are surfaced inline
-  // as compact chips — same visual weight as "likely recurring", not a severity
-  // escalation. Worst offenders first so a PE lead sees the biggest step-change.
   const banner = document.getElementById("deepdive-spike-banner");
-  let row = document.getElementById("deepdive-regime-row");
-  const regimes = _deepDivePatterns
-    .filter(p => p.type === "regime_change")
-    .sort((a, b) => Math.abs(b.delta_sigma || 0) - Math.abs(a.delta_sigma || 0));
-  if (!regimes.length) { row?.remove(); return; }
-  if (!row && banner) {
-    row = document.createElement("div");
-    row.id = "deepdive-regime-row";
-    row.className = "flex items-center gap-2 flex-wrap mb-1";
-    banner.parentNode.insertBefore(row, banner);
+  document.getElementById("deepdive-regime-row")?.remove();
+  document.getElementById("deepdive-patterns-panel")?.remove();
+  if (!banner || !_deepDivePatterns.length) return;
+
+  // Rendering contract: the backend computes FOUR pattern types
+  // (recurring_time, cross_vm_correlation, sustained_pressure, regime_change).
+  // Grouped by type so the panel answers a different question per group.
+  //
+  // The on-screen panel intentionally does NOT print the backend's raw
+  // title/description strings — those are written for the exported report
+  // (verbose, self-contained sentences) and, displayed together with chips
+  // that carry the SAME numbers, produced a cluttered, triple-repeated
+  // reading (title restates the stats, description restates them again in
+  // prose, chips restate them a third time). Each item here is built fresh
+  // from the raw fields into ONE short line + chips, with a second muted
+  // line ONLY when there's a genuine nuance chips can't carry (e.g. why a
+  // "sustained" pattern with zero critical spikes isn't a false alarm).
+  const META = {
+    cross_vm_correlation: {
+      icon: "🔗", label: "Correlated Across Servers",
+      hint: "Multiple servers spiked inside the same 15-minute window — points at shared infrastructure or one coordinated workload, not an isolated server problem.",
+      color: THEME.red,
+    },
+    recurring_time: {
+      icon: "🕒", label: "Recurring At A Fixed Hour",
+      hint: "The same hour spiked on multiple distinct days. This is the signature of a scheduled job — cross-check the hour against the Ctrl-M schedule.",
+      color: THEME.amber,
+    },
+    sustained_pressure: {
+      icon: "▬", label: "Sustained Pressure",
+      hint: "Persistent elevation rather than short excursions. Rescheduling will not help a sustained load — this is a sizing question.",
+      color: THEME.purple,
+    },
+    regime_change: {
+      icon: "⚠️", label: "Regime Shift",
+      hint: "The baseline itself stepped to a new level part-way through the window and stayed there. Look for a change at that point in time.",
+      color: "#a78bfa",
+    },
+  };
+  const ORDER = ["cross_vm_correlation", "recurring_time", "sustained_pressure", "regime_change"];
+  const SEV_RANK = { critical: 0, high: 1, warning: 2, medium: 2, info: 3, low: 3 };
+  const chip = (text, color) => `<span class="dd-pchip" style="color:${color};background:${hexA(color, 0.1)}">${text}</span>`;
+
+  // Build ONE condensed { subject, note, chips[] } per pattern — no field is
+  // ever repeated between subject text and its own chips.
+  function _condense(type, p) {
+    const sc = (p.severity === "critical") ? THEME.red : (p.severity === "high") ? THEME.amber : THEME.muted;
+    if (type === "cross_vm_correlation") {
+      const names = (p.vms || []);
+      const shown = names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "");
+      const chips = [
+        chip(`${names.length} servers`, THEME.red),
+        p.time_utc != null ? chip(`${p.time_utc} UTC`, THEME.muted) : "",
+        (p.metrics || []).length ? chip((p.metrics || []).map(_ddShortMetric).join("+"), THEME.muted) : "",
+        p.peak_z != null ? chip(`z=${Number(p.peak_z).toFixed(1)}`, THEME.muted) : "",
+      ].filter(Boolean);
+      return { sc, subject: `Correlated spike — ${escapeHtml(shown)}`, note: "", chips };
+    }
+    if (type === "recurring_time") {
+      const vm = (p.vms || [])[0] || "";
+      const chips = [
+        p.hour != null ? chip(`${String(p.hour).padStart(2, "0")}:00 UTC`, THEME.muted) : "",
+        (p.recurrence_days != null && p.recurrence_ratio != null)
+          ? chip(`↺ ${p.recurrence_days}d · ${Math.round(p.recurrence_ratio * 100)}%`, THEME.cyan) : "",
+        (p.metrics || []).length ? chip((p.metrics || []).map(_ddShortMetric).join("+"), THEME.muted) : "",
+        p.peak_z != null ? chip(`z=${Number(p.peak_z).toFixed(1)}`, THEME.muted) : "",
+      ].filter(Boolean);
+      // A tiny absolute peak (e.g. 0.01%) on a near-zero-baseline metric (disk
+      // bandwidth on an idle disk) is a legitimate statistical outlier for
+      // THIS VM, not a data error — but reads like one without this context.
+      let note = "";
+      if (p.peak != null && Math.abs(p.peak) < 1 && p.peak_mean != null) {
+        note = `Peak ${p.peak}% vs this VM's own baseline ${p.peak_mean}% — statistically unusual for this VM, small in absolute terms.`;
+      }
+      return { sc, subject: `Recurring @ ${escapeHtml(vm)}`, note, chips };
+    }
+    if (type === "sustained_pressure") {
+      const vm = (p.vms || [])[0] || "";
+      const metricShort = _ddShortMetric(p.metric || "");
+      const chips = [
+        p.total_duration_min ? chip(`⏱ ${p.total_duration_min} min`, THEME.amber) : "",
+        chip(`${p.count || 0} critical`, (p.count || 0) > 0 ? THEME.red : THEME.muted),
+      ].filter(Boolean);
+      // The count-vs-duration distinction IS the fix for the on-screen
+      // contradiction reported against this panel ("0 critical spikes" shown
+      // as a critical-severity item) — state it plainly rather than relying
+      // on the reader to reconcile a red dot against a zero count.
+      const note = (p.count || 0) === 0
+        ? "No single reading reached critical — flagged for cumulative duration, not peak severity."
+        : "";
+      return { sc, subject: `Sustained ${escapeHtml(metricShort)} — ${escapeHtml(vm)}`, note, chips };
+    }
+    if (type === "regime_change") {
+      const vm = (p.vms || [])[0] || "";
+      const arrow = p.direction === "up" ? "↑" : "↓";
+      const metricShort = _ddShortMetric(p.metric || "");
+      const chips = [
+        (p.mean_prior != null && p.mean_recent != null) ? chip(`${p.mean_prior}%→${p.mean_recent}%`, THEME.muted) : "",
+        p.delta_sigma != null ? chip(`Δ${Math.abs(Number(p.delta_sigma)).toFixed(1)}σ`, THEME.muted) : "",
+      ].filter(Boolean);
+      return { sc, subject: `Regime shift ${arrow} ${escapeHtml(metricShort)} — ${escapeHtml(vm)}`, note: "", chips };
+    }
+    return { sc, subject: escapeHtml(p.title || ""), note: "", chips: [] };
   }
-  if (!row) return;
-  row.innerHTML = regimes.map(p => {
-    const arrow = p.direction === "up" ? "↑" : "↓";
-    const c = "#a78bfa";
-    return `<span class="text-[10px] font-semibold px-2 py-1 rounded-full cursor-help"
-      style="color:${c};background:${hexA(c,0.12)};border:1px solid ${hexA(c,0.3)}"
-      title="${escapeHtml(p.description || "")}">Regime shift ${arrow} ${escapeHtml((p.vms||[])[0]||"")}</span>`;
+
+  const groups = ORDER
+    .map(type => ({
+      type,
+      meta: META[type],
+      items: _deepDivePatterns
+        .filter(p => p.type === type)
+        .sort((a, b) =>
+          (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9) ||
+          Math.abs(b.peak_z || b.delta_sigma || 0) - Math.abs(a.peak_z || a.delta_sigma || 0)),
+    }))
+    .filter(g => g.items.length);
+  if (!groups.length) return;
+
+  const MAX_SHOWN = 3;   // keep the panel scannable; the rest go to export
+  const total = _deepDivePatterns.length;
+  // Count using the SAME severity strings the backend now emits (duration-only
+  // sustained_pressure is "high", not "critical") — otherwise this header count
+  // over-states critical findings independently of the fix below.
+  const criticalCount = _deepDivePatterns.filter(p => p.severity === "critical").length;
+
+  const groupHtml = groups.map(g => {
+    const shown = g.items.slice(0, MAX_SHOWN);
+    const hidden = g.items.length - shown.length;
+    const rows = shown.map(p => {
+      const { sc, subject, note, chips } = _condense(g.type, p);
+      return `
+        <div class="flex items-start gap-2 py-1 border-b border-Cborder/15 last:border-0">
+          <span class="mt-1.5 shrink-0 rounded-full" style="width:6px;height:6px;background:${sc}"></span>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span class="text-[10px] font-semibold text-Cwhite">${subject}</span>
+              ${chips.join("")}
+            </div>
+            ${note ? `<div class="text-[8px] text-Cmuted/80 mt-0.5 leading-snug">${escapeHtml(note)}</div>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+    const more = hidden > 0
+      ? `<div class="text-[8px] text-Cmuted/70 pt-1">+${hidden} more in the exported report</div>`
+      : "";
+    return `
+      <div class="rounded-lg p-2" style="background:${hexA(g.meta.color, 0.05)};border:1px solid ${hexA(g.meta.color, 0.22)}">
+        <div class="flex items-center gap-1.5 mb-1 cursor-help" title="${escapeHtml(g.meta.hint)}">
+          <span class="text-xs">${g.meta.icon}</span>
+          <span class="text-[9px] font-bold uppercase tracking-widest" style="color:${g.meta.color}">${g.meta.label}</span>
+          <span class="text-[8px] font-mono text-Cmuted">${g.items.length}</span>
+        </div>
+        ${rows}${more}
+      </div>`;
   }).join("");
+
+  const panel = document.createElement("div");
+  panel.id = "deepdive-patterns-panel";
+  panel.className = "mb-2";
+  panel.innerHTML = `
+    <details open class="rounded-lg border border-Cborder/40 bg-Cbg/40">
+      <summary class="cursor-pointer select-none px-3 py-2 flex items-center gap-2">
+        <span class="text-[10px] font-bold uppercase tracking-widest text-Cwhite">🧭 Detected Patterns</span>
+        <span class="text-[9px] text-Cmuted">${total} pattern${total > 1 ? "s" : ""}${criticalCount ? ` · ${criticalCount} critical` : ""}</span>
+        <span class="text-[8px] text-Cmuted/60 ml-auto">grouped by what the pattern means</span>
+      </summary>
+      <div class="px-3 pb-3 pt-1 grid gap-2" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+        ${groupHtml}
+      </div>
+    </details>`;
+  banner.parentNode.insertBefore(panel, banner);
 }
 
 // ── Spike-to-batch attribution panel ──────────────────────────
@@ -6724,6 +7037,7 @@ function _toggleDeepDiveHeatmapWindow() {
   if (!_deepDiveData) return;
   _renderDeepDiveHeatmap(_deepDiveData.heatmap);
   _renderDeepDiveMemoryHeatmap(_deepDiveData.vms);
+  _renderDeepDiveDiskHeatmap();
 }
 
 // Reduces a time-axis heatmap to at most 120 display columns by averaging
@@ -6732,7 +7046,7 @@ function _toggleDeepDiveHeatmapWindow() {
 // reduction in SVG/canvas operations with no visible loss of shape.
 const _HEATMAP_MAX_COLS = 120;
 function _binHeatmap(tDates, zMatrix) {
-  if (tDates.length <= _HEATMAP_MAX_COLS) return { tDates, zMatrix };
+  if (tDates.length <= _HEATMAP_MAX_COLS) return { tDates, zMatrix, binSize: 1 };
   const binSize = Math.ceil(tDates.length / _HEATMAP_MAX_COLS);
   const bT = [], bZ = zMatrix.map(() => []);
   for (let i = 0; i < tDates.length; i += binSize) {
@@ -6743,7 +7057,60 @@ function _binHeatmap(tDates, zMatrix) {
       bZ[r].push(vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null);
     }
   }
-  return { tDates: bT, zMatrix: bZ };
+  return { tDates: bT, zMatrix: bZ, binSize };
+}
+
+// A heatmap cell showing an AVERAGE of several raw samples looks identical to
+// one showing a single raw sample — nothing on screen discloses that Plotly's
+// native zoom just magnifies the same pre-aggregated cells rather than
+// revealing finer data. Returns "" when no aggregation happened.
+function _binningDisclosure(binSize) {
+  return binSize > 1 ? ` · cells = avg of ${binSize} samples (zoom to refine)` : "";
+}
+
+// ── Zoom-driven re-binning ─────────────────────────────────────────────────
+// Plotly's native zoom only magnifies the ≤120 columns already sent to it — it
+// does not reveal more temporal detail. This listens for the user's zoom/pan/
+// reset and re-runs `_binHeatmap` against the FULL-RESOLUTION series stashed
+// on the container (`container._ddHeatFullRes`) for just the visible range, so
+// zooming in on a 30-day heatmap actually shows finer buckets for that window
+// instead of the same coarse cells stretched wider. Idempotent — call on every
+// render; the dataset guard prevents duplicate listeners.
+function _wireHeatmapZoomRebin(container) {
+  if (container.dataset.ddZoomRebinInit) return;
+  container.dataset.ddZoomRebinInit = "1";
+  container.on("plotly_relayout", (ev) => {
+    const full = container._ddHeatFullRes;
+    if (!full || !Array.isArray(full.timestamps) || !full.timestamps.length) return;
+    const hasRange = Object.prototype.hasOwnProperty.call(ev, "xaxis.range[0]");
+    const isReset = Object.prototype.hasOwnProperty.call(ev, "xaxis.autorange");
+    if (!hasRange && !isReset) return; // not a zoom/pan/reset event — ignore
+
+    const tsAll = full.timestamps.map(t => new Date(t));
+    let idx0 = 0, idx1 = tsAll.length;
+    if (hasRange) {
+      const t0 = new Date(ev["xaxis.range[0]"]).getTime();
+      const t1 = new Date(ev["xaxis.range[1]"]).getTime();
+      const found0 = tsAll.findIndex(d => d.getTime() >= t0);
+      idx0 = found0 < 0 ? 0 : found0;
+      idx1 = tsAll.length;
+      for (let i = tsAll.length - 1; i >= 0; i--) {
+        if (tsAll[i].getTime() <= t1) { idx1 = i + 1; break; }
+      }
+    }
+    const tSlice = tsAll.slice(idx0, idx1);
+    const zSlice = full.zRows.map(row => row.slice(idx0, idx1));
+    if (tSlice.length < 2) return;
+
+    const { tDates, zMatrix, binSize } = _binHeatmap(tSlice, zSlice);
+    Plotly.restyle(container, { z: [zMatrix], x: [tDates] }, [0]);
+    // Refresh the "cells = avg of N samples" disclosure to match the new zoom level.
+    const titleEl = container.querySelector(".gtitle");
+    if (titleEl && full.titleBase != null) {
+      const suffix = _binningDisclosure(binSize);
+      Plotly.relayout(container, { "title.text": full.titleBase + suffix });
+    }
+  });
 }
 
 // ── Fleet CPU Heatmap (Plotly) ────────────────────────────────
@@ -6756,12 +7123,22 @@ function _renderDeepDiveHeatmap(heatmap) {
   const _hoursBack = Number(_deepDiveData?.window?.hours_back || _deepDiveHoursBack || 0);
   _renderHeatmapWindowToggle(_hoursBack);
 
-  const vmNames = heatmap.vms.map(v => v.name);
-  const zRaw = heatmap.vms.map(v => v.values.map(x => x ?? 0));
+  // Prefer the router's union-aligned CPU grid (grids.cpu) over the legacy
+  // `heatmap.vms` field. Both cover the same metric, but `vms` was being
+  // zero-filled for missing telemetry buckets (`x ?? 0`) — on CPU that paints
+  // a data gap the same color as a genuinely idle server, so an outage window
+  // (no telemetry) is indistinguishable from "confirmed idle". This is the same
+  // class of bug already fixed on the memory/disk heatmaps; null is preserved
+  // here too so Plotly's `hoverongaps:false` renders gaps as empty, not idle.
+  const cpuGrid = Array.isArray(heatmap.grids?.cpu) && heatmap.grids.cpu.length
+    ? heatmap.grids.cpu
+    : heatmap.vms;
+  const vmNames = cpuGrid.map(v => v.name);
+  const zRaw = cpuGrid.map(v => v.values.map(x => (x == null ? null : x)));
   const _sliced = _sliceHeatmapToWindow(heatmap.timestamps, zRaw, _hoursBack, _deepDiveShowFullHeatmap);
 
   // Bin to ≤120 display columns — reduces Plotly rendering work 3-6× on long windows
-  const { tDates, zMatrix: z } = _binHeatmap(
+  const { tDates, zMatrix: z, binSize } = _binHeatmap(
     _sliced.timestamps.map(t => new Date(t)),
     _sliced.zRows
   );
@@ -6806,11 +7183,12 @@ function _renderDeepDiveHeatmap(heatmap) {
       showarrow: false, font: { color: THEME.red, size: 8 }, xanchor: "left" },
   ];
 
+  const titleBase = `Fleet CPU Utilisation${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Grain: ${_deepDiveData?.window?.grain || "1h avg"} · Source: Azure Monitor UTC`;
   const layout = _plotlyBaseLayout({
     margin: { l: 140, r: 60, t: 28, b: 40 },
     height: Math.max(160, vmNames.length * 30 + 70),
     title: {
-      text: `Fleet CPU Utilisation${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Grain: ${_deepDiveData?.window?.grain || "1h avg"} · Source: Azure Monitor UTC`,
+      text: titleBase + _binningDisclosure(binSize),
       font: { size: 9, color: THEME.muted },
       x: 0.01, xanchor: "left",
     },
@@ -6833,6 +7211,13 @@ function _renderDeepDiveHeatmap(heatmap) {
   // Plotly.react() diffs the existing plot on re-renders (refresh, drill-down return)
   // instead of purge+rebuild — much faster on second+ renders.
   Plotly.react(container, [trace], layout, _plotlyConfig());
+
+  // Stashed at FULL (pre-display-binning) resolution so zooming can re-derive
+  // finer cells for just the visible range instead of magnifying the same
+  // ≤120 pre-aggregated columns. Updated on every render (refresh, time-range
+  // change), independent of the one-time listener guard below.
+  container._ddHeatFullRes = { timestamps: _sliced.timestamps, zRows: _sliced.zRows, titleBase };
+  _wireHeatmapZoomRebin(container);
 
   // Only wire click/toolbar/sync once — guard prevents duplicate listeners on re-render
   if (!container.dataset.ddHeatInit) {
@@ -6865,50 +7250,86 @@ function _renderDeepDiveMemoryHeatmap(vms) {
   const container = document.getElementById("deepdive-mem-heatmap");
   if (!wrap || !container || !vms || typeof Plotly === "undefined") return;
 
-  // Extract "Available Memory Percentage" series from all VMs
-  const vmEntries = Object.entries(vms);
+  // ── Source of truth: the union-aligned grid the ROUTER already built
+  // (heatmap.grids.memory, one column per timestamp across ALL VMs, null for
+  // gaps). Previously this function re-derived the grid from allSeries[0] —
+  // whichever VM happened to be first — which silently truncated every other
+  // VM to that VM's series length, and filled gaps with 0. On an "available %"
+  // metric a 0-fill renders as the MOST critical red cell, so missing
+  // telemetry was painted as total memory exhaustion. Consuming the router
+  // grid fixes the alignment and the gap handling in one place.
+  const grid = _deepDiveData?.heatmap?.grids?.memory;
+  const gridTimes = _deepDiveData?.heatmap?.timestamps;
   const vmNames = [];
-  const allSeries = [];
+  const rowsAvail = [];   // raw Available Memory % (nulls preserved)
 
-  for (const [vmName, vmData] of vmEntries) {
-    const series = (vmData.series || {})["Available Memory Percentage"];
-    if (!series || !series.length) continue;
-    // Annotate DB servers so memory 80-92% is clearly expected
-    const role = _inferRole(vmName);
-    const roleTag = _isDbRole(role) ? " [DB]" : "";
-    vmNames.push(vmName + roleTag);
-    // Show as Azure does: Available Memory % (higher = more headroom)
-    allSeries.push(series.map(p => ({ t: p.t, v: p.v || 0 })));
+  if (Array.isArray(grid) && grid.length && Array.isArray(gridTimes) && gridTimes.length) {
+    for (const row of grid) {
+      const vmData = vms[row.name];
+      if (!vmData) continue;
+      // Skip VMs with no memory telemetry at all (all-null row) — an empty
+      // row would otherwise render as a full-width gap band.
+      if (!(row.values || []).some(v => v != null)) continue;
+      const role = _inferRole(row.name);
+      vmNames.push(row.name + (_isDbRole(role) ? " [DB]" : ""));
+      rowsAvail.push(row.values.map(v => (v == null ? null : v)));
+    }
+  } else {
+    // Fallback (older payload without grids): align every VM onto the union of
+    // ALL timestamps, not just the first VM's — same correctness, computed here.
+    const tSet = new Set();
+    for (const [, vmData] of Object.entries(vms)) {
+      for (const p of ((vmData.series || {})["Available Memory Percentage"] || [])) tSet.add(p.t);
+    }
+    const union = [...tSet].sort();
+    if (!union.length) return;
+    for (const [vmName, vmData] of Object.entries(vms)) {
+      const series = (vmData.series || {})["Available Memory Percentage"];
+      if (!series || !series.length) continue;
+      const tsMap = new Map(series.map(p => [new Date(p.t).getTime(), p.v]));
+      const role = _inferRole(vmName);
+      vmNames.push(vmName + (_isDbRole(role) ? " [DB]" : ""));
+      // null (NOT 0) for a missing bucket — 0 would mean "0% memory available".
+      rowsAvail.push(union.map(rt => { const v = tsMap.get(new Date(rt).getTime()); return v == null ? null : v; }));
+    }
+    if (!vmNames.length) return;
+    _deepDiveData = _deepDiveData || {};
+    _deepDiveData.heatmap = _deepDiveData.heatmap || {};
+    _deepDiveData.heatmap.timestamps = union;
   }
 
   if (!vmNames.length) return;
+  const refTimes = (Array.isArray(grid) && grid.length && Array.isArray(gridTimes) && gridTimes.length)
+    ? gridTimes
+    : _deepDiveData.heatmap.timestamps;
 
   wrap.classList.remove("hidden");
   const _hoursBack = Number(_deepDiveData?.window?.hours_back || _deepDiveHoursBack || 0);
 
-  // Build time buckets (use first VM's timestamps as reference)
-  const refTimes = allSeries[0].map(p => p.t);
-
-  // Build z-matrix (VMs × time) — O(N+M) Map lookup, not O(N×M) nested scan.
-  // All series share Azure-issued timestamps so direct key match is reliable.
-  const z = allSeries.map(series => {
-    const tsMap = new Map(series.map(p => [new Date(p.t).getTime(), p.v]));
-    return refTimes.map(rt => tsMap.get(new Date(rt).getTime()) ?? 0);
-  });
+  const z = rowsAvail;
   const _sliced = _sliceHeatmapToWindow(refTimes, z, _hoursBack, _deepDiveShowFullHeatmap);
 
   // Bin to ≤120 display columns for Plotly (full-res z kept for analysis + CSV)
-  const { tDates, zMatrix: zPlotly } = _binHeatmap(
+  const { tDates, zMatrix: zPlotly, binSize } = _binHeatmap(
     _sliced.timestamps.map(t => new Date(t)),
     _sliced.zRows.map(row => [...row])
   );
 
-  // Detect shared batch patterns: time slots where >50% VMs have high memory
+  // ── Shared-batch / saturation detection — compared in USED-% space.
+  // The grid is Available %, where LOW = pressure. The previous code tested
+  // `row[ti] >= 80` directly against the available value, so an IDLE fleet
+  // (80% memory free) triggered a "critical fleet-wide memory saturation"
+  // banner while a genuinely saturated fleet (5% available) triggered nothing.
+  // Convert to used % (100 - avail) once, here, then compare normally.
   const nVms = vmNames.length;
   const batchFindings = [];
-  for (const th of [{pct:80,label:"≥80%"},{pct:50,label:"≥50%"}]) {
+  for (const th of [{pct:90,label:"≥90% used"},{pct:80,label:"≥80% used"}]) {
     const count = _sliced.timestamps.filter((_, ti) => {
-      const highCount = _sliced.zRows.filter(row => row[ti] >= th.pct).length;
+      const highCount = _sliced.zRows.filter(row => {
+        const avail = row[ti];
+        if (avail == null) return false;        // gap ≠ pressure
+        return (100 - avail) >= th.pct;
+      }).length;
       return highCount >= nVms * 0.5;
     }).length;
     if (count > 2) batchFindings.push({...th, count});
@@ -6944,11 +7365,12 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     hovertemplate: "<b>%{y}</b><br>%{x|%b %d %I:%M %p}<br>Available Memory: %{z:.1f}%<extra></extra>",
   };
 
+  const titleBase = `Fleet Avail Memory %${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Teal = DB expected (8–20%) · Red = critical (<8%) · Grain: ${_deepDiveData?.window?.grain || "1h avg"}`;
   const layout = _plotlyBaseLayout({
     margin: { l: 140, r: 60, t: 28, b: 40 },
     height: Math.max(160, vmNames.length * 30 + 70),
     title: {
-      text: `Fleet Avail Memory %${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Teal = DB expected (8–20%) · Red = critical (<8%) · Grain: ${_deepDiveData?.window?.grain || "1h avg"}`,
+      text: titleBase + _binningDisclosure(binSize),
       font: { size: 9, color: THEME.muted },
       x: 0.01, xanchor: "left",
     },
@@ -6969,15 +7391,22 @@ function _renderDeepDiveMemoryHeatmap(vms) {
   // Plotly.react() diffs existing plot on re-renders — no full SVG teardown
   Plotly.react(container, [trace], layout, _plotlyConfig());
 
+  container._ddHeatFullRes = { timestamps: _sliced.timestamps, zRows: _sliced.zRows, titleBase };
+  _wireHeatmapZoomRebin(container);
+
   // V2: Single merged batch pattern banner — distinguish chronic from periodic
   if (batchFindings.length) {
     const worst = batchFindings[0];
-    const totalSlots = refTimes.length;
+    // Denominator MUST be the same slice `worst.count` was counted over. It
+    // previously used the FULL window length while count came from the fast-7d
+    // slice, so on any 15d/30d pull (where fast-7d is the default view) the
+    // chronic branch was mathematically unreachable.
+    const totalSlots = _sliced.timestamps.length;
     const indicator = document.createElement("div");
     indicator.className = "text-[10px] mt-2 px-3 py-1.5 rounded-lg border";
 
     // When ≥95% of time slots breach the highest threshold → chronic condition, not batch
-    const isChronic = worst.count >= totalSlots * 0.95;
+    const isChronic = totalSlots > 0 && worst.count >= totalSlots * 0.95;
 
     // Count DB servers — their high memory is expected, not a batch pattern
     const dbCount = vmNames.filter(n => n.includes("[DB]")).length;
@@ -7021,44 +7450,152 @@ function _renderDeepDiveMemoryHeatmap(vms) {
   }
 }
 
-// Unit-aware peak formatter — converts raw bytes to GB, others to %
+// ── Disk Bandwidth Heatmap ─────────────────────────────────────────────────
+// Consumes heatmap.grids.disk, which the router has always built (union-aligned
+// across all VMs, null for gaps) but which nothing rendered — so disk saturation
+// had no fleet-level view at all. Disk BW % is NOT inverted: higher = worse.
+function _renderDeepDiveDiskHeatmap() {
+  const wrap = document.getElementById("deepdive-disk-heatmap-wrap");
+  const container = document.getElementById("deepdive-disk-heatmap");
+  if (!wrap || !container || typeof Plotly === "undefined") return;
+
+  const grid = _deepDiveData?.heatmap?.grids?.disk;
+  const gridTimes = _deepDiveData?.heatmap?.timestamps;
+  if (!Array.isArray(grid) || !grid.length || !Array.isArray(gridTimes) || !gridTimes.length) {
+    wrap.classList.add("hidden");
+    return;
+  }
+
+  const vmNames = [];
+  const rows = [];
+  for (const row of grid) {
+    if (!(row.values || []).some(v => v != null)) continue;   // no disk telemetry
+    const role = _inferRole(row.name);
+    vmNames.push(row.name + (_isDbRole(role) ? " [DB]" : ""));
+    rows.push(row.values.map(v => (v == null ? null : v)));
+  }
+  if (!vmNames.length) { wrap.classList.add("hidden"); return; }
+
+  wrap.classList.remove("hidden");
+  const _hoursBack = Number(_deepDiveData?.window?.hours_back || _deepDiveHoursBack || 0);
+  const _sliced = _sliceHeatmapToWindow(gridTimes, rows, _hoursBack, _deepDiveShowFullHeatmap);
+  const { tDates, zMatrix: zPlotly, binSize } = _binHeatmap(
+    _sliced.timestamps.map(t => new Date(t)),
+    _sliced.zRows.map(r => [...r])
+  );
+
+  const _warn = Number(window.appData?.thresholds?.disk_warn ?? 70);
+  const _crit = Number(window.appData?.thresholds?.disk_crit ?? 85);
+
+  const trace = {
+    z: zPlotly, x: tDates, y: vmNames, type: "heatmap",
+    zmin: 0, zmax: 100,
+    colorscale: [
+      [0,    "#0d1526"],
+      [0.40, "#0e7490"],
+      [_warn / 100, "#f59e0b"],
+      [_crit / 100, "#f97316"],
+      [1.0,  "#dc2626"],
+    ],
+    colorbar: {
+      title: { text: "Disk BW %", font: { color: THEME.muted, size: 10 } },
+      tickfont: { color: THEME.muted, size: 9 },
+      thickness: 12,
+      tickvals: [0, 40, _warn, _crit, 100],
+      ticktext: ["0%", "40%", `${_warn}% warn`, `${_crit}% crit`, "100%"],
+    },
+    hoverongaps: false,
+    hovertemplate: "<b>%{y}</b><br>%{x|%b %d %I:%M %p}<br>Disk bandwidth: %{z:.1f}%<extra></extra>",
+  };
+
+  const titleBase = `Fleet Disk Bandwidth Consumed %${_sliced.fastMode ? " · Fast 7d view (switch for full range)" : ""} · Warn ${_warn}% · Crit ${_crit}% · Grain: ${_deepDiveData?.window?.grain || "1h avg"}`;
+  const layout = _plotlyBaseLayout({
+    margin: { l: 140, r: 60, t: 28, b: 40 },
+    height: Math.max(160, vmNames.length * 30 + 70),
+    title: {
+      text: titleBase + _binningDisclosure(binSize),
+      font: { size: 9, color: THEME.muted }, x: 0.01, xanchor: "left",
+    },
+    xaxis: {
+      type: "date", tickfont: { color: THEME.muted, size: 9 }, tickangle: -45,
+      nticks: 20, tickformat: "%b %d %I%p", hoverformat: "%b %d %I:%M %p",
+    },
+    yaxis: { tickfont: { color: THEME.muted, size: 10 }, autorange: "reversed" },
+  });
+
+  Plotly.react(container, [trace], layout, _plotlyConfig());
+
+  container._ddHeatFullRes = { timestamps: _sliced.timestamps, zRows: _sliced.zRows, titleBase };
+  _wireHeatmapZoomRebin(container);
+
+  if (!container.dataset.ddDiskHeatInit) {
+    container.dataset.ddDiskHeatInit = "1";
+    container.on("plotly_click", (data) => {
+      if (!data.points || !data.points.length) return;
+      const detailCard = document.querySelector(`[data-vm-detail="${data.points[0].y}"]`);
+      if (detailCard) {
+        detailCard.scrollIntoView({ behavior: "smooth", block: "center" });
+        detailCard.style.boxShadow = `0 0 20px ${hexA(THEME.cyan, 0.4)}`;
+        setTimeout(() => { detailCard.style.boxShadow = ""; }, 2000);
+      }
+    });
+    _addChartToolbar(wrap, container, () => {
+      let csv = "VM,Timestamp,Disk_BW_Pct\n";
+      vmNames.forEach((vm, vi) => {
+        _sliced.timestamps.forEach((t, ti) => { csv += `${vm},${t},${_sliced.zRows[vi][ti]?.toFixed(1) ?? ""}\n`; });
+      });
+      return csv;
+    });
+    _registerPlotlySync(container);
+  }
+}
+
+// Unit-aware peak formatter — bytes → human scale, ops/s, availability, else %
 function _formatPeak(metricKey, value) {
   const mk = metricKey || "";
-  if (metricKey === "Available Memory Bytes" || (typeof value === 'number' && value > 1e6)) {
-    return (value / 1073741824).toFixed(1) + " GB";
-  }
-  if (mk.includes("Latency")) {
-    return `${Number(value).toFixed(1)} ms`;
+  if (mk.includes("Bytes") || mk === "Network In Total" || mk === "Network Out Total") {
+    return _fmtBytes(value);
   }
   if (mk.includes("Operations/Sec")) {
     return `${Number(value).toFixed(1)} ops/s`;
   }
+  if (mk === "VmAvailabilityMetric") {
+    return `${(Number(value) * 100).toFixed(1)}% available`;
+  }
   // Show memory as Available % — matches Azure Portal convention
-  const isMemAvail = (metricKey || "").includes("Memory") && !(metricKey || "").includes("Bytes");
+  const isMemAvail = mk.includes("Memory") && !mk.includes("Bytes");
   if (isMemAvail) {
-    return value.toFixed(1) + "% available";
+    return Number(value).toFixed(1) + "% available";
   }
   return value + "%";
 }
 
-// Format deviation text with correct sign/direction for the metric
+// Byte formatter shared by peak/axis/tooltip rendering — binary units, matching
+// how the Azure portal labels the same panels.
+function _fmtBytes(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs >= 1099511627776) return (n / 1099511627776).toFixed(2) + " TiB";
+  if (abs >= 1073741824)    return (n / 1073741824).toFixed(2) + " GiB";
+  if (abs >= 1048576)       return (n / 1048576).toFixed(1) + " MiB";
+  if (abs >= 1024)          return (n / 1024).toFixed(1) + " KiB";
+  return n.toFixed(0) + " B";
+}
+
+// Format deviation text with correct sign/direction for the metric.
+// Only graded (percentage) metrics reach here — throughput/availability metrics
+// are chart-only and never produce spike records, so the previous isLatency /
+// isOps branches were unreachable and have been removed.
 function _formatDeviation(spike) {
   const mn = (spike.metric || "").toLowerCase();
   const isMemory = mn.includes("memory") && !mn.includes("bytes");
-  const isLatency = mn.includes("latency");
-  const isOps = mn.includes("operations/sec") || mn.includes("iops");
   const zAbs = Math.abs(spike.z_score).toFixed(1);
   const sevWord = zAbs >= 4 ? "extreme" : zAbs >= 3 ? "significant" : "notable";
   if (isMemory) {
     // Memory available dropped — show as "below mean" and convert mean to used
     const usedMean = (100 - spike.mean).toFixed(1);
     return `${sevWord} deviation below avail baseline (avg ${spike.mean}% avail, ${usedMean}% used)`;
-  }
-  if (isLatency) {
-    return `${sevWord} latency elevation (avg ${Number(spike.mean).toFixed(2)} ms)`;
-  }
-  if (isOps) {
-    return `${sevWord} I/O rate deviation (avg ${Number(spike.mean).toFixed(2)} ops/s)`;
   }
   return `${sevWord} deviation above baseline (avg ${spike.mean}%)`;
 }
@@ -7126,24 +7663,26 @@ function _renderDeepDiveCharts(vms, summary) {
   const chartsDiv = document.getElementById("deepdive-charts");
   if (!chartsDiv) return;
 
+  // Metric catalogue. EVERY entry here must correspond to a metric the backend
+  // actually queries (services/azure_monitor.py _TS_METRIC_GROUPS) — 12 entries
+  // previously referenced metrics that were never requested from Azure, which
+  // made the "Extended Metrics" toggle reveal nothing at all.
+  //   core: true  → graded percentage metric, drawn on the % axis
+  //   chartOnly   → throughput/availability, no warn/crit band, own axis
   const metricConfig = [
     { key: "Percentage CPU",                    label: "CPU %",            color: THEME.blue,   warn: 80, core: true },
     { key: "Available Memory Percentage",       label: "Available Mem %",  color: THEME.cyan,   warn: 20, core: true },
-    { key: "Available Memory Bytes",            label: "Available Memory Bytes", color: THEME.cyan, warn: 0, unit: "bytes" },
     { key: "OS Disk Bandwidth Consumed Percentage",   label: "OS Disk BW %",   color: THEME.amber,  warn: 80, core: true },
     { key: "Data Disk Bandwidth Consumed Percentage", label: "Data Disk BW %", color: THEME.purple, warn: 80, core: true },
-    { key: "OS Disk IOPS Consumed Percentage",  label: "OS Disk IOPS %", color: "#f97316", warn: 80 },
-    { key: "Data Disk IOPS Consumed Percentage",label: "Data Disk IOPS %", color: "#a855f7", warn: 80 },
-    { key: "VM Cached IOPS Consumed Percentage", label: "VM Cached IOPS %", color: "#0ea5e9", warn: 80 },
-    { key: "VM Uncached IOPS Consumed Percentage", label: "VM Uncached IOPS %", color: "#14b8a6", warn: 80 },
-    { key: "VM Cached Bandwidth Consumed Percentage", label: "VM Cached BW %", color: "#22c55e", warn: 80 },
-    { key: "VM Uncached Bandwidth Consumed Percentage", label: "VM Uncached BW %", color: "#eab308", warn: 80 },
-    { key: "OS Disk Latency",                   label: "OS Disk Latency (ms)", color: "#f43f5e", warn: 15, unit: "ms" },
-    { key: "Data Disk Latency",                 label: "Data Disk Latency (ms)", color: "#ec4899", warn: 15, unit: "ms" },
-    { key: "OS Disk Read Operations/Sec",       label: "OS Read IOPS", color: "#60a5fa", warn: 0, unit: "ops/s" },
-    { key: "OS Disk Write Operations/Sec",      label: "OS Write IOPS", color: "#93c5fd", warn: 0, unit: "ops/s" },
-    { key: "Data Disk Read Operations/Sec",     label: "Data Read IOPS", color: "#c084fc", warn: 0, unit: "ops/s" },
-    { key: "Data Disk Write Operations/Sec",    label: "Data Write IOPS", color: "#d8b4fe", warn: 0, unit: "ops/s" },
+    // ── Azure "Platform Metrics" parity (chart-only, not graded) ──
+    { key: "Available Memory Bytes",   label: "Available Memory",   color: "#67e8f9", unit: "bytes", chartOnly: true },
+    { key: "Disk Read Bytes",          label: "Disk Read",          color: "#60a5fa", unit: "bytes", chartOnly: true },
+    { key: "Disk Write Bytes",         label: "Disk Write",         color: "#c084fc", unit: "bytes", chartOnly: true },
+    { key: "Disk Read Operations/Sec", label: "Disk Read Ops/s",    color: "#93c5fd", unit: "ops/s", chartOnly: true },
+    { key: "Disk Write Operations/Sec",label: "Disk Write Ops/s",   color: "#d8b4fe", unit: "ops/s", chartOnly: true },
+    { key: "Network In Total",         label: "Network In",         color: "#22c55e", unit: "bytes", chartOnly: true },
+    { key: "Network Out Total",        label: "Network Out",        color: "#eab308", unit: "bytes", chartOnly: true },
+    { key: "VmAvailabilityMetric",     label: "Availability",       color: "#10b981", unit: "avail", chartOnly: true },
   ];
 
   // Separate VMs with critical spikes from clean VMs
@@ -7197,10 +7736,14 @@ function _renderDeepDiveCharts(vms, summary) {
         <button data-dd-type="app" class="dd-type-pill px-1.5 py-0.5 rounded text-[9px] font-semibold border border-Cborder/50 text-Cmuted">APP</button>
         <button data-dd-type="sre" class="dd-type-pill px-1.5 py-0.5 rounded text-[9px] font-semibold border border-Cborder/50 text-Cmuted">SRE</button>
       </div>
-      <div class="flex items-center gap-1.5 ml-auto">
-        <label class="flex items-center gap-1.5 cursor-pointer select-none" title="Show IOPS, latency, cached/uncached bandwidth metrics in charts and tables">
+      <div class="flex items-center gap-3 ml-auto">
+        <label class="flex items-center gap-1.5 cursor-pointer select-none" title="Overlays the per-bucket MAXIMUM as a shaded band above the average line, the same as the Azure portal's 'Percentage CPU (Avg + Max)' panel. An average alone hides short saturation: a 30-minute bucket averaging 55% can contain a 98% peak.">
+          <input type="checkbox" id="dd-max-overlay-toggle" class="accent-blue-500 w-3 h-3 cursor-pointer"${_ddShowMaxOverlay ? " checked" : ""}>
+          <span class="text-[9px] text-Cmuted font-semibold">Avg + Max</span>
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none" title="Adds the Azure Platform Metrics panels — disk read/write throughput, disk operations/sec, network in/out, and VM availability. These are shown for context only and are not graded against a threshold, because a byte counter has no warn/critical band.">
           <input type="checkbox" id="dd-extended-metrics-toggle" class="accent-blue-500 w-3 h-3 cursor-pointer"${_ddShowExtendedMetrics ? " checked" : ""}>
-          <span class="text-[9px] text-Cmuted font-semibold">Extended Metrics</span>
+          <span class="text-[9px] text-Cmuted font-semibold">Throughput &amp; Availability</span>
         </label>
       </div>
     `;
@@ -7366,6 +7909,26 @@ function _renderDeepDiveCharts(vms, summary) {
       if (detailArea) detailArea.innerHTML = "";
     });
 
+    // Avg + Max overlay toggle — only the charts change, so re-render the
+    // currently expanded VM rather than rebuilding the whole grid.
+    const maxToggle = document.getElementById("dd-max-overlay-toggle");
+    maxToggle?.addEventListener("change", () => {
+      _ddShowMaxOverlay = maxToggle.checked;
+      const detailArea = document.getElementById("deepdive-detail-area");
+      const openVm = _ddSelectedVm;
+      _deepDiveCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
+      _deepDiveCharts = [];
+      if (detailArea) detailArea.innerHTML = "";
+      const vmPayload = openVm ? (_deepDiveData?.vms || {})[openVm] : null;
+      if (openVm && vmPayload && detailArea) {
+        _renderVmDeepDiveCard(
+          openVm, vmPayload,
+          _ddShowExtendedMetrics ? metricConfig : metricConfig.filter(m => m.core),
+          detailArea, true,
+        );
+      }
+    });
+
     // Expanded detail area (empty until card clicked)
     const detailArea = document.createElement("div");
     detailArea.id = "deepdive-detail-area";
@@ -7374,6 +7937,18 @@ function _renderDeepDiveCharts(vms, summary) {
   }
 
   // ── Clean VMs: compact summary ──
+  // BUG (root cause of "Unified Time-Series chart isn't displaying"): the
+  // Unified Time-Series chart only ever renders inside `_renderVmDeepDiveCard`,
+  // which was only reachable by clicking a card in the `#dd-server-grid` grid
+  // — and that grid, along with `#deepdive-detail-area` itself, was ONLY
+  // created inside `if (criticalVms.length)`. A fully healthy fleet (zero
+  // detected spikes on every VM — a perfectly normal, even desirable, outcome)
+  // meant `criticalVms` was empty, so the grid, the detail area, and every
+  // click affordance into the chart never existed in the DOM at all. Clean
+  // VMs rendered as a plain read-only table with no way to open ANY detail
+  // view for ANY server. Fixed: clean rows are now clickable and open the
+  // same detail view (and therefore the same Unified Time-Series chart) as a
+  // critical VM does — a healthy server's time-series is still worth seeing.
   if (cleanVms.length) {
     const cleanCard = document.createElement("div");
     cleanCard.className = "rounded-xl border border-green-500/20 bg-green-500/5 p-4 space-y-2";
@@ -7389,7 +7964,7 @@ function _renderDeepDiveCharts(vms, summary) {
         ? `✓ Normal ⚠ (${Number(cpuS.max).toFixed(0)}% spike)`
         : "✓ Normal";
       const statusColor = cpuSpike ? THEME.amber : THEME.green;
-      return `<tr class="border-t border-Cborder/20">
+      return `<tr class="border-t border-Cborder/20 cursor-pointer hover:bg-white/[0.04] transition" data-vm-name="${escapeHtml(vmName)}" title="Click to view CPU/Memory/Disk time-series for ${escapeHtml(vmName)}">
         <td class="py-1.5 pr-3 text-[10px] font-semibold text-Cwhite">${escapeHtml(vmName)}</td>
         <td class="py-1.5 pr-3 text-[10px] text-Cblue">${cpuText}</td>
         <td class="py-1.5 pr-3 text-[10px] text-Ccyan">${memText}</td>
@@ -7398,9 +7973,21 @@ function _renderDeepDiveCharts(vms, summary) {
     }).join("");
 
     cleanCard.innerHTML = `
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
         <span class="text-sm">✅</span>
         <h4 class="text-[10px] font-bold uppercase tracking-widest text-green-400" style="letter-spacing:0.15em">Healthy — ${cleanVms.length} Server${cleanVms.length > 1 ? "s" : ""} Normal</h4>
+        <span class="text-[8px] text-Cmuted normal-case">click a row for time-series</span>
+        ${!criticalVms.length ? `
+        <div class="flex items-center gap-3 ml-auto">
+          <label class="flex items-center gap-1.5 cursor-pointer select-none normal-case" title="Overlays the per-bucket MAXIMUM as a shaded band above the average line. An average alone hides short saturation: a 30-minute bucket averaging 55% can contain a 98% peak.">
+            <input type="checkbox" id="dd-max-overlay-toggle" class="accent-blue-500 w-3 h-3 cursor-pointer"${_ddShowMaxOverlay ? " checked" : ""}>
+            <span class="text-[9px] text-Cmuted font-semibold">Avg + Max</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer select-none normal-case" title="Adds the Azure Platform Metrics panels — disk read/write throughput, disk operations/sec, network in/out, and VM availability. Shown for context only, not graded against a threshold.">
+            <input type="checkbox" id="dd-extended-metrics-toggle" class="accent-blue-500 w-3 h-3 cursor-pointer"${_ddShowExtendedMetrics ? " checked" : ""}>
+            <span class="text-[9px] text-Cmuted font-semibold">Throughput &amp; Availability</span>
+          </label>
+        </div>` : ""}
       </div>
       <div class="overflow-x-auto">
         <table class="w-full text-left"><thead>
@@ -7412,6 +7999,70 @@ function _renderDeepDiveCharts(vms, summary) {
       </div>
     `;
     chartsDiv.appendChild(cleanCard);
+
+    // `#deepdive-detail-area` is normally created inside the `criticalVms`
+    // branch above. When there are no critical VMs that branch never runs,
+    // so create it here if it's still missing — this is what makes a clean
+    // row's click actually have somewhere to render its chart.
+    let detailArea = document.getElementById("deepdive-detail-area");
+    if (!detailArea) {
+      detailArea = document.createElement("div");
+      detailArea.id = "deepdive-detail-area";
+      detailArea.className = "space-y-4";
+      chartsDiv.appendChild(detailArea);
+    }
+
+    const cleanVmMap = new Map(cleanVms);
+    cleanCard.querySelector("tbody").addEventListener("click", (ev) => {
+      const row = ev.target.closest("tr[data-vm-name]");
+      if (!row) return;
+      const vmName = row.dataset.vmName;
+      const vmData = cleanVmMap.get(vmName);
+      if (!vmData) return;
+      const area = document.getElementById("deepdive-detail-area");
+      if (!area) return;
+      _deepDiveCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
+      _deepDiveCharts = [];
+      area.innerHTML = "";
+      cleanCard.querySelectorAll("tr[data-vm-selected]").forEach(r => r.removeAttribute("data-vm-selected"));
+      row.setAttribute("data-vm-selected", "1");
+      _ddSelectedVm = vmName;
+      _renderVmDeepDiveCard(
+        vmName, vmData,
+        _ddShowExtendedMetrics ? metricConfig : metricConfig.filter(m => m.core),
+        area, true,
+      );
+      requestAnimationFrame(() => area.scrollIntoView({ behavior: "smooth", block: "start" }));
+    });
+
+    // Toggles only exist in THIS markup when there are zero critical VMs (see
+    // the `!criticalVms.length` guard above) — the critical-grid branch has
+    // its own copies with the same element ids, so wiring both unconditionally
+    // would attach duplicate listeners once a spike later appears in the same
+    // session. Re-render whichever clean VM is currently expanded on change.
+    if (!criticalVms.length) {
+      const _rerenderOpenClean = () => {
+        const area = document.getElementById("deepdive-detail-area");
+        const vmData = _ddSelectedVm ? cleanVmMap.get(_ddSelectedVm) : null;
+        if (!area || !vmData) return;
+        _deepDiveCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
+        _deepDiveCharts = [];
+        area.innerHTML = "";
+        _renderVmDeepDiveCard(
+          _ddSelectedVm, vmData,
+          _ddShowExtendedMetrics ? metricConfig : metricConfig.filter(m => m.core),
+          area, true,
+        );
+      };
+      document.getElementById("dd-max-overlay-toggle")?.addEventListener("change", (ev) => {
+        _ddShowMaxOverlay = ev.target.checked;
+        _rerenderOpenClean();
+      });
+      document.getElementById("dd-extended-metrics-toggle")?.addEventListener("change", (ev) => {
+        _ddShowExtendedMetrics = ev.target.checked;
+        _rerenderOpenClean();
+      });
+    }
   }
 
   if (!chartsDiv.children.length) {
@@ -7724,11 +8375,29 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
 // ── Single VM expanded card with charts + spike table ─────────
 function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showCharts) {
   const metrics = vmData.series || {};
+  const metricsMax = vmData.series_max || {};
   const spikes = vmData.spikes || {};
   const stats = vmData.stats || {};
   const availableMetrics = metricConfig.filter(mc => metrics[mc.key] && metrics[mc.key].length > 0);
 
-  if (!availableMetrics.length) return;
+  // A VM with zero queryable metrics (stopped, missing diagnostics extension,
+  // insufficient permissions — a real, common Azure fleet state, not an edge
+  // case) used to `return` here with NOTHING appended to the detail area.
+  // Clicking such a row cleared the previous card and rendered silently
+  // empty — indistinguishable from the click simply not working. Render an
+  // explicit message instead so a real "no data" state is never confused
+  // with a broken click handler.
+  if (!availableMetrics.length) {
+    const empty = document.createElement("div");
+    empty.className = "rounded-xl border border-Cborder/40 bg-Cbg/50 p-4 text-center";
+    empty.innerHTML = `
+      <div class="text-sm mb-1">📭</div>
+      <div class="text-xs font-semibold text-Cwhite">${escapeHtml(vmName)} — no time-series data in this window</div>
+      <div class="text-[10px] text-Cmuted mt-1">Azure Monitor returned no CPU/Memory/Disk samples for this VM. Common causes: the VM is stopped/deallocated, the diagnostics extension isn't installed, or this account lacks Monitoring Reader on it.</div>
+    `;
+    container.appendChild(empty);
+    return;
+  }
 
   const card = document.createElement("div");
   card.className = "rounded-xl border border-red-500/25 bg-Ccard p-4 space-y-3";
@@ -7801,36 +8470,73 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     </div>
   `;
 
-  // Always show disk IO telemetry summary (avg/max), even when no spikes.
-  // Hidden by default — only visible when "Extended Metrics" toggle is on.
+  // Throughput/availability telemetry summary (avg/max per metric), matching
+  // the Azure "Platform Metrics" Grafana panels. Hidden by default — only
+  // visible when "Throughput & Availability" toggle is on.
+  //
+  // The 10 metric keys previously listed here ("OS/Data Disk Latency",
+  // "OS/Data Disk IOPS Consumed Percentage", "VM Cached/Uncached IOPS Consumed
+  // Percentage", "OS/Data Disk Read/Write Operations/Sec") are NOT requested
+  // from Azure by _TS_METRIC_GROUPS — every single row showed "N/A". This
+  // table had been 100% non-functional (worse than empty: it implied data
+  // existed that was never collected). Replaced with the metrics that are
+  // actually queried, matching the toggle's own name so the section, the
+  // toggle, and the chart legend all describe the same thing consistently.
   if (_ddShowExtendedMetrics) {
   const ioMetrics = [
-    ["OS Disk Latency", "OS Latency", "ms"],
-    ["Data Disk Latency", "Data Latency", "ms"],
-    ["OS Disk IOPS Consumed Percentage", "OS IOPS %", "%"],
-    ["Data Disk IOPS Consumed Percentage", "Data IOPS %", "%"],
-    ["VM Cached IOPS Consumed Percentage", "Cached IOPS %", "%"],
-    ["VM Uncached IOPS Consumed Percentage", "Uncached IOPS %", "%"],
-    ["OS Disk Read Operations/Sec", "OS Read IOPS", "ops/s"],
-    ["OS Disk Write Operations/Sec", "OS Write IOPS", "ops/s"],
-    ["Data Disk Read Operations/Sec", "Data Read IOPS", "ops/s"],
-    ["Data Disk Write Operations/Sec", "Data Write IOPS", "ops/s"],
+    ["Disk Read Operations/Sec", "Disk Read Ops", "ops/s"],
+    ["Disk Write Operations/Sec", "Disk Write Ops", "ops/s"],
+    ["Disk Read Bytes", "Disk Read", "bytes"],
+    ["Disk Write Bytes", "Disk Write", "bytes"],
+    ["Network In Total", "Network In", "bytes"],
+    ["Network Out Total", "Network Out", "bytes"],
   ];
+  const _fmtIoVal = (v, unit) => unit === "bytes" ? _fmtBytes(v) : `${Number(v ?? 0).toFixed(2)} ${unit}`;
   const ioRows = ioMetrics.map(([k, lbl, unit]) => {
     const s = stats[k];
     if (!s) {
       return `<tr class="border-t border-Cborder/20"><td class="py-1 pr-3 text-[9px] text-Cmuted">${lbl}</td><td class="py-1 pr-3 text-[9px] text-Cmuted">N/A</td><td class="py-1 text-[9px] text-Cmuted">N/A</td></tr>`;
     }
-    const avg = Number(s.mean ?? 0).toFixed(2);
-    const mx = Number(s.max ?? 0).toFixed(2);
-    return `<tr class="border-t border-Cborder/20"><td class="py-1 pr-3 text-[9px] text-Cwhite">${lbl}</td><td class="py-1 pr-3 text-[9px] text-Cmuted font-mono">${avg} ${unit}</td><td class="py-1 text-[9px] text-Cmuted font-mono">${mx} ${unit}</td></tr>`;
+    return `<tr class="border-t border-Cborder/20"><td class="py-1 pr-3 text-[9px] text-Cwhite">${lbl}</td><td class="py-1 pr-3 text-[9px] text-Cmuted font-mono">${_fmtIoVal(s.mean, unit)}</td><td class="py-1 text-[9px] text-Cmuted font-mono">${_fmtIoVal(s.max, unit)}</td></tr>`;
   }).join("");
+
+  // Availability is a 0/1 flag, not an avg/max quantity — a "down windows"
+  // summary answers "when and why" instead of a meaningless average-of-a-flag.
+  let availNote = "";
+  const availPts = metrics["VmAvailabilityMetric"];
+  if (availPts && availPts.length) {
+    const gapMin = availPts.length >= 2
+      ? (new Date(availPts[1].t) - new Date(availPts[0].t)) / 60000 : 60;
+    const downWindows = [];
+    let cur = null;
+    for (const p of availPts) {
+      const down = p.v != null && p.v < 0.999;
+      if (down && !cur) cur = { start: p.t, end: p.t };
+      else if (down && cur) cur.end = p.t;
+      else if (!down && cur) { downWindows.push(cur); cur = null; }
+    }
+    if (cur) downWindows.push(cur);
+    const upPct = 100 * availPts.filter(p => p.v != null && p.v >= 0.999).length / availPts.length;
+    if (!downWindows.length) {
+      availNote = `<div class="text-[9px] mt-2 pt-2 border-t border-Cborder/20" style="color:${THEME.green}">✅ Availability: 100% — no downtime observed in this window.</div>`;
+    } else {
+      const top = downWindows
+        .map(w => ({ ...w, durMin: Math.round((new Date(w.end) - new Date(w.start)) / 60000) + gapMin }))
+        .sort((a, b) => b.durMin - a.durMin)
+        .slice(0, 2)
+        .map(w => `${new Date(w.start).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} (${w.durMin} min)`)
+        .join(" · ");
+      availNote = `<div class="text-[9px] mt-2 pt-2 border-t border-Cborder/20" style="color:${THEME.amber}">⚠ Availability: ${upPct.toFixed(1)}% — ${downWindows.length} down window${downWindows.length > 1 ? "s" : ""}, longest first: ${top}</div>`;
+    }
+  }
+
   const ioSection = document.createElement("div");
   ioSection.className = "rounded-lg border border-Cborder/40 bg-Cbg/50 p-3";
   ioSection.innerHTML = `
-    <div class="text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">Disk IO Telemetry (Azure Monitor)</div>
-    <div class="text-[8px] text-Cmuted mb-1">Source timezone: UTC (display may follow browser locale)</div>
+    <div class="text-[10px] font-bold uppercase tracking-widest text-Cmuted mb-1">Throughput & Availability Telemetry (Azure Monitor)</div>
+    <div class="text-[8px] text-Cmuted mb-1">Source timezone: UTC (display may follow browser locale) · not graded — shown for context only</div>
     <table class="w-full text-left"><thead><tr class="text-[8px] text-Cmuted uppercase tracking-wider"><th class="pb-1 pr-3">Metric</th><th class="pb-1 pr-3">Average</th><th class="pb-1">Maximum</th></tr></thead><tbody>${ioRows}</tbody></table>
+    ${availNote}
   `;
   card.appendChild(ioSection);
   } // end _ddShowExtendedMetrics guard
@@ -7849,6 +8555,11 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     allCriticalSpikes.sort((a, b) => b.z_score - a.z_score);
 
     // P2: Group by metric + similar time-of-day (within 2h window) across different days
+    // Hour/day bucketing MUST use UTC — the backend groups recurrence in UTC
+    // (_detect_patterns / recurring_spikes both use t.hour and %Y-%m-%d on
+    // tz-aware UTC datetimes). Using getHours()/toDateString() here bucketed in
+    // BROWSER-LOCAL time, so for any analyst outside UTC this table's day count
+    // disagreed with the DD9 finding generated from the same spikes.
     const groups = [];
     const used = new Set();
     for (let i = 0; i < allCriticalSpikes.length; i++) {
@@ -7856,14 +8567,14 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       const s = allCriticalSpikes[i];
       const group = [s];
       used.add(i);
-      const sHour = new Date(s.peak_time).getHours();
+      const sHour = new Date(s.peak_time).getUTCHours();
       for (let j = i + 1; j < allCriticalSpikes.length; j++) {
         if (used.has(j)) continue;
         const t = allCriticalSpikes[j];
         if (t.metric !== s.metric) continue;
-        const tHour = new Date(t.peak_time).getHours();
-        const sDay = new Date(s.peak_time).toDateString();
-        const tDay = new Date(t.peak_time).toDateString();
+        const tHour = new Date(t.peak_time).getUTCHours();
+        const sDay = new Date(s.peak_time).toISOString().slice(0, 10);
+        const tDay = new Date(t.peak_time).toISOString().slice(0, 10);
         if (sDay !== tDay && Math.abs(tHour - sHour) <= 2) {
           group.push(t);
           used.add(j);
@@ -7929,7 +8640,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const maxPeak = Math.max(...group.map(g => g.peak));
         const avgDurMin = (group.reduce((a, g) => a + g.duration_min, 0) / group.length);
         const avgDurLabel = _humanizeDurationMin(avgDurMin);
-        const days = group.map(g => new Date(g.peak_time).toLocaleDateString([], { weekday: "short" }));
+        const days = group.map(g => new Date(g.peak_time).toLocaleDateString([], { weekday: "short", timeZone: "UTC" }));
         const uniqueDays = [...new Set(days)];
         // Bug 2: "Daily" when ≥6 unique days, otherwise list them
         const dayLabel = uniqueDays.length >= 6 ? "Daily" : uniqueDays.join("/");
@@ -8105,75 +8816,80 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     }
 
     let wfRows = "";
-    // ── Actionable patterns: full detail with new intelligence fields ──
+    // ── Actionable patterns: two colored badges max (shape + risk), everything
+    // else is evidence — folded into one muted line instead of 6+ separately
+    // colored chips. The previous version gave confidence/duration/recurrence
+    // their own red/amber/green badges, which used color as if THEY were
+    // separate severity signals competing with the actual risk pill — a wall
+    // of same-weight colored chips that took longer to scan, not less.
     for (const { metric, wf, dWf } of actionable) {
       const rc = riskColorsD[dWf.risk] || THEME.muted;
       const det = wf.details || {};
 
-      // Peak tag
-      const peakTag = det.peak_used_pct != null
-        ? `<span class="text-[8px] font-mono px-1 py-0.5 rounded" style="color:${det.peak_used_pct >= 85 ? THEME.red : det.peak_used_pct >= 65 ? THEME.amber : THEME.green};background:${hexA(det.peak_used_pct >= 85 ? THEME.red : det.peak_used_pct >= 65 ? THEME.amber : THEME.green, 0.1)}">peak ${det.peak_used_pct.toFixed(0)}%</span>`
-        : "";
+      // Peak + headroom are the same fact stated two ways — merge into one
+      // clause instead of two separate badges, colored once by the worse side.
+      let peakClause = "";
+      if (det.peak_used_pct != null) {
+        const pv = det.peak_used_pct;
+        const pc = pv >= 85 ? THEME.red : pv >= 65 ? THEME.amber : THEME.green;
+        const hd = det.headroom_pct != null ? ` <span class="text-Cmuted">(${det.headroom_pct.toFixed(0)}% free)</span>` : "";
+        peakClause = `<span style="color:${pc}">peak ${pv.toFixed(0)}%</span>${hd}`;
+      }
 
-      // Headroom tag
-      const hdTag = det.headroom_pct != null
-        ? `<span class="text-[8px] font-mono px-1 py-0.5 rounded" style="color:${det.headroom_pct <= 15 ? THEME.red : det.headroom_pct <= 30 ? THEME.amber : THEME.green};background:${hexA(det.headroom_pct <= 15 ? THEME.red : det.headroom_pct <= 30 ? THEME.amber : THEME.green, 0.1)}">${det.headroom_pct.toFixed(0)}% free</span>`
-        : "";
-
-      // DB expected band rewrite badge
-      const dbBandTag = (metric.includes("Memory") && dWf !== wf)
-        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded" style="color:${DB_EXPECTED_COLOR};background:${hexA(DB_EXPECTED_COLOR,0.1)}">DB EXPECTED</span>`
-        : "";
-
-      // Confidence label with color coding
+      // Confidence is a DATA-QUALITY signal, not a severity signal — giving it
+      // its own green/amber badge made it look like a second risk indicator
+      // sitting next to the real one. Rendered as plain muted text instead.
       const confLabel = dWf.confidence_label || (dWf.confidence >= 0.75 ? "observed" : dWf.confidence >= 0.55 ? "inferred" : "weak-signal");
-      const confColor = confLabel === "observed" ? THEME.green : confLabel === "inferred" ? THEME.amber : THEME.muted;
       const confPct = dWf.confidence != null ? `${(dWf.confidence * 100).toFixed(0)}%` : "";
-      const confTag = `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded cursor-help"
-        style="color:${confColor};background:${hexA(confColor,0.1)}"
-        title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${wf.recurrence_days || 0} breach days, ${(det.cv || 0).toFixed(2)} CV."
-        >${confLabel} ${confPct}</span>`;
+      const confClause = confPct ? `${confLabel} ${confPct}`
+        : "";
 
-      // Recurrence days tag
       const recurDays = wf.recurrence_days || 0;
-      const recurTag = recurDays > 0
-        ? `<span class="text-[7px] font-mono px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.muted,0.08)}" title="${recurDays} distinct days with threshold breach">↺ ${recurDays}d</span>`
-        : "";
+      const recurClause = recurDays > 0 ? `↺ ${recurDays}d recurring` : "";
 
-      // Duration above threshold tag
       const durHrs = wf.duration_above_threshold_hrs || 0;
-      const durTag = durHrs >= 1
-        ? `<span class="text-[7px] font-mono px-1 py-0.5 rounded" style="color:${durHrs >= 8 ? THEME.red : THEME.amber};background:${hexA(durHrs >= 8 ? THEME.red : THEME.amber, 0.1)}" title="${durHrs.toFixed(1)}h above threshold">⏱ ${durHrs.toFixed(0)}h above</span>`
+      const durClause = durHrs >= 1
+        ? `<span style="color:${durHrs >= 8 ? THEME.red : THEME.muted}">⏱ ${durHrs.toFixed(0)}h above threshold</span>`
         : "";
 
-      // Change point badge
+      // DB expected band rewrite — still a distinct colored badge since it
+      // changes the VERDICT (not just supporting evidence).
+      const dbBandTag = (metric.includes("Memory") && dWf !== wf)
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded shrink-0" style="color:${DB_EXPECTED_COLOR};background:${hexA(DB_EXPECTED_COLOR,0.1)}">DB EXPECTED</span>`
+        : "";
+
+      // Change point / concurrent-pressure are real escalations, not routine
+      // evidence — these keep their own colored badge.
       const cpTag = (dWf.shape === "change_point" || det.change_point_idx != null)
-        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded" style="color:#f472b6;background:${hexA('#f472b6',0.1)}" title="Regime shift detected: level changed from ${det.before_mean || '?'}% to ${det.after_mean || '?'}%">REGIME SHIFT</span>`
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded shrink-0" style="color:#f472b6;background:${hexA('#f472b6',0.1)}" title="Regime shift detected: level changed from ${det.before_mean || '?'}% to ${det.after_mean || '?'}%">REGIME SHIFT</span>`
         : "";
-
-      // Concurrent pressure badge
       const concTag = dWf.concurrent_pressure
-        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded animate-pulse" style="color:${THEME.red};background:${hexA(THEME.red,0.15)}" title="Concurrent pressure: ${(dWf.concurrent_metrics||[]).join(' + ')} all under load simultaneously">🔥 CONCURRENT</span>`
+        ? `<span class="text-[7px] font-bold px-1 py-0.5 rounded shrink-0 animate-pulse" style="color:${THEME.red};background:${hexA(THEME.red,0.15)}" title="Concurrent pressure: ${(dWf.concurrent_metrics||[]).join(' + ')} all under load simultaneously">🔥 CONCURRENT</span>`
         : "";
 
-      // Secondary pattern
       const secShape = dWf.secondary_shape;
       const secCatalog = secShape ? { sawtooth: {label:"Cyclic",icon:"⚡"}, diurnal: {label:"Diurnal",icon:"🌓"}, trending_up:{label:"Trending ↑",icon:"📈"}, random_spikes:{label:"Spikes",icon:"🎯"}, plateau:{label:"Sustained",icon:"▬"}, change_point:{label:"Shift",icon:"⚠️"}, weekend_dip:{label:"Wknd Dip",icon:"📅"}, flat_low:{label:"Flat Low",icon:"✅"} }[secShape] : null;
-      const secTag = secCatalog
-        ? `<span class="text-[7px] font-mono px-1 py-0.5 rounded" style="color:${THEME.muted};background:${hexA(THEME.muted,0.08)}" title="Secondary pattern: ${secCatalog.label}">also: ${secCatalog.icon} ${secCatalog.label}</span>`
+      const secClause = secCatalog ? `also ${secCatalog.icon} ${secCatalog.label}` : "";
+
+      const evidenceParts = [confClause, peakClause, durClause, recurClause, secClause].filter(Boolean);
+      const evidenceLine = evidenceParts.length
+        ? `<div class="text-[9px] text-Cmuted mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap" title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${recurDays} breach days, ${(det.cv || 0).toFixed(2)} CV.">
+            ${evidenceParts.map((p, i) => i === 0 ? p : `<span class="text-Cborder">·</span> ${p}`).join(" ")}
+          </div>`
         : "";
 
       wfRows += `
         <div class="flex items-start gap-3 py-2 border-b border-Cborder/20 last:border-0 hover:bg-white/[0.015] rounded transition">
           <span class="text-lg shrink-0 mt-0.5">${dWf.icon}</span>
           <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5 flex-wrap mb-0.5">
+            <div class="flex items-center gap-1.5 flex-wrap">
               <span class="text-[11px] font-bold text-Cwhite">${metricShort(metric)}</span>
-              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
-              <span class="text-[8px] font-bold uppercase px-1 py-0.5 rounded" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
-              ${confTag}${peakTag}${hdTag}${durTag}${recurTag}${cpTag}${concTag}${secTag}${dbBandTag}
+              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
+              <span class="text-[8px] font-bold uppercase px-1 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
+              ${cpTag}${concTag}${dbBandTag}
             </div>
-            <div class="text-[9px] text-Cwhite/80 leading-relaxed">${dWf.meaning || ""}</div>
+            ${evidenceLine}
+            <div class="text-[9px] text-Cwhite/80 leading-relaxed mt-1">${dWf.meaning || ""}</div>
             <div class="text-[9px] mt-0.5 font-medium" style="color:${THEME.cyan}">→ ${dWf.action || ""}</div>
           </div>
         </div>`;
@@ -8202,25 +8918,48 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     card.appendChild(wfSection);
   }
 
-  // ── Unified multi-metric chart (dual Y-axes) ──────────────
-  // CPU + Disk on left axis, Memory (inverted to "used") on right axis
-  // Core metrics always shown; extended (IOPS/BW) only when toggle is on
-  const _allUnifiedMetrics = [
-    { key: "Percentage CPU",                          label: "CPU %",                  color: THEME.blue,   axis: "y", dash: [], core: true },
-    { key: "Available Memory Percentage",              label: "Available Mem %",        color: THEME.cyan,   axis: "y1", dash: [], core: true },
-    { key: "OS Disk Bandwidth Consumed Percentage",    label: "OS Disk %",              color: THEME.amber,  axis: "y", dash: [4, 2], core: true },
-    { key: "Data Disk Bandwidth Consumed Percentage",  label: "Data Disk %",            color: THEME.purple, axis: "y", dash: [2, 2], core: true },
-    { key: "OS Disk IOPS Consumed Percentage",         label: "OS IOPS %",              color: "#f97316",  axis: "y", dash: [6, 3] },
-    { key: "Data Disk IOPS Consumed Percentage",       label: "Data IOPS %",            color: "#a855f7",  axis: "y", dash: [3, 3] },
-    { key: "VM Cached IOPS Consumed Percentage",       label: "Cached IOPS %",          color: "#0ea5e9",  axis: "y", dash: [1, 2] },
-    { key: "VM Uncached IOPS Consumed Percentage",     label: "Uncached IOPS %",        color: "#14b8a6",  axis: "y", dash: [8, 2] },
-  ];
-  const unifiedMetrics = _ddShowExtendedMetrics ? _allUnifiedMetrics : _allUnifiedMetrics.filter(m => m.core);
+  // ── Unified multi-metric chart (triple Y-axes) ──────────────
+  //   y  = CPU / Disk bandwidth %          (left)
+  //   y1 = Available Memory %              (right, Azure-native orientation)
+  //   y2 = throughput & availability       (right, bytes/s + ops/s)
+  //
+  // Built directly from the `metricConfig` PARAMETER — the same catalogue
+  // `_renderDeepDiveCharts` defines once and already filters for the current
+  // "Extended Metrics" toggle before calling this function. A second, parallel
+  // catalogue used to be hand-maintained here and had already drifted from the
+  // outer one (missing "Available Memory Bytes", missing "VmAvailabilityMetric")
+  // — toggling "Extended Metrics" silently showed those two nowhere on the
+  // unified chart despite them being fetched and listed in the toggle's own
+  // tooltip. Deriving from one source makes that drift structurally impossible.
+  const AXIS_BY_KEY = {
+    "Percentage CPU": { axis: "y", dash: [] },
+    "Available Memory Percentage": { axis: "y1", dash: [] },
+    "OS Disk Bandwidth Consumed Percentage": { axis: "y", dash: [4, 2] },
+    "Data Disk Bandwidth Consumed Percentage": { axis: "y", dash: [2, 2] },
+  };
+  const _CHARTONLY_DASHES = [[5, 2], [2, 2], [6, 3], [3, 3], [1, 2], [8, 2]];
+  let _dashCursor = 0;
+  // "avail" (VmAvailabilityMetric, a 0/1 flag) is deliberately excluded from
+  // the line chart — plotted against a bytes-scale y2 axis it would be an
+  // invisible flat line at the bottom. It gets its own status caption below.
+  const unifiedMetrics = metricConfig
+    .filter(m => m.unit !== "avail")
+    .map(m => m.core
+      ? { key: m.key, label: m.label, color: m.color, ...(AXIS_BY_KEY[m.key] || { axis: "y", dash: [] }), core: true }
+      : { key: m.key, label: m.label, color: m.color, axis: "y2",
+          dash: _CHARTONLY_DASHES[_dashCursor++ % _CHARTONLY_DASHES.length], unit: m.unit });
+  // Only build the throughput axis when something is actually plotted on it,
+  // otherwise Chart.js draws an empty 0–1 scale next to the memory axis.
+  const _hasY2 = unifiedMetrics.some(m => m.axis === "y2" && (metrics[m.key] || []).length);
 
   const datasetsForChart = [];
   let unifiedLabels = null;
   const allAnnotations = {};
   const _pendingAnnotations = [];
+  // "When and why did it max out" facts — one entry per metric where the
+  // Avg+Max overlay is actually drawn, used to build a compact caption
+  // instead of leaving the user to infer it from a dashed line alone.
+  const _maxOverlayFacts = [];
 
   // Downsample large time-series to prevent Firefox canvas overload.
   // Uses largest-triangle-three-bucket (LTTB-lite): keeps visual shape.
@@ -8264,14 +9003,79 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       data: dsVals,
       borderColor: um.color,
       backgroundColor: "transparent",
-      borderWidth: 1.5,
+      borderWidth: 2,
       borderDash: um.dash,
       pointRadius: 0,
       pointHitRadius: 6,
       fill: false,
       tension: 0.3,
       yAxisID: um.axis,
+      // Unit tag read by the tooltip callback. Without it every series was
+      // suffixed "%", so a 4.2 GiB network counter read "4509715660.0%".
+      _ddUnit: um.unit || "pct",
     });
+
+    // ── "Average AND Maximum" overlay (Azure Platform Metrics parity) ──
+    // Drawn as a faint dashed band above the average line. This is the single
+    // most important honesty control on an averaged chart: a 30-minute bucket
+    // averaging 55% can contain a 98% peak, and only the average line was ever
+    // drawn — so real saturation was invisible. Only rendered for the graded
+    // percentage metrics, and only when the max meaningfully exceeds the avg.
+    if (_ddShowMaxOverlay && um.unit == null) {
+      // Timestamp-aligned lookup, NOT position/length equality. The AVERAGE
+      // and MAXIMUM Azure Monitor queries can return a different point count
+      // at the edges of the window — a length check silently skipped the
+      // overlay whenever they drifted by even one point, and if they ever
+      // matched in length but not in offset, values would have been plotted
+      // against the wrong timestamp with no error.
+      const maxMap = new Map((metricsMax[um.key] || []).map(p => [p.t, p.v]));
+      const maxAligned = pts.map(p => (maxMap.has(p.t) ? maxMap.get(p.t) : null));
+      let gapSum = 0, gapCount = 0, bestGap = -Infinity, bestIdx = -1;
+      for (let i = 0; i < vals.length; i++) {
+        const mv = maxAligned[i];
+        if (mv == null) continue;
+        const g = mv - vals[i];
+        gapSum += Math.abs(g);
+        gapCount++;
+        if (g > bestGap) { bestGap = g; bestIdx = i; }
+      }
+      const gap = gapCount ? gapSum / gapCount : 0;
+      // Require real overlap (not just 1-2 coincidental matching timestamps)
+      // before trusting the gap average enough to draw the band.
+      const hasEnoughOverlap = gapCount >= Math.max(3, Math.round(vals.length * 0.2));
+      if (hasEnoughOverlap && gap >= 2) {   // below 2pp the two lines overlap and just add noise
+        datasetsForChart.push({
+          label: `${um.label} (max)`,
+          data: maxAligned.length > MAX_PTS ? _downsample(maxAligned, MAX_PTS) : maxAligned,
+          // No visible stroke — a busy metric's max series is jagged at almost
+          // every sample, and drawing it as a second dashed LINE on the SAME
+          // axis as 2-3 other metrics produced a tangle of competing spiky
+          // lines rather than the intended "soft band above the average."
+          // Fill-only (no border) reads as a translucent wash — you can see
+          // HOW MUCH higher the peaks ran without it fighting the average
+          // line for visual attention.
+          borderColor: "transparent",
+          borderWidth: 0,
+          backgroundColor: hexA(um.color, 0.16),
+          pointRadius: 0,
+          pointHitRadius: 4,
+          fill: "-1",           // shade the avg→max band
+          tension: 0.3,
+          yAxisID: um.axis,
+          _ddUnit: "pct",
+        });
+        if (bestIdx >= 0 && bestGap >= 2) {
+          _maxOverlayFacts.push({
+            label: um.label,
+            color: um.color,
+            gap: bestGap,
+            avgVal: vals[bestIdx],
+            maxVal: maxAligned[bestIdx],
+            time: rawLabels[bestIdx],
+          });
+        }
+      }
+    }
 
     // Add spike annotations for this metric — collision-aware layout
     const metricSpikes = spikes[um.key] || [];
@@ -8403,10 +9207,16 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     const chartWrap = document.createElement("div");
     chartWrap.className = "rounded-lg border border-Cborder/50 bg-Cbg/50 p-3";
 
-    // Legend chips
-    const legendHtml = datasetsForChart.map(ds =>
-      `<span class="inline-flex items-center gap-1 text-[9px]"><span class="w-3 h-0.5 inline-block rounded" style="background:${ds.borderColor}"></span>${ds.label}</span>`
-    ).join(" ");
+    // Legend chips — line swatch for average series, translucent block swatch
+    // for the (max) band series (their borderColor is transparent by design,
+    // so a line swatch would render as an invisible sliver).
+    const legendHtml = datasetsForChart.map(ds => {
+      const isBand = ds.label.endsWith("(max)");
+      const swatch = isBand
+        ? `<span class="w-3 h-2.5 inline-block rounded-sm" style="background:${ds.backgroundColor}"></span>`
+        : `<span class="w-3 h-0.5 inline-block rounded" style="background:${ds.borderColor}"></span>`;
+      return `<span class="inline-flex items-center gap-1 text-[9px] ${isBand ? 'text-Cmuted' : ''}">${swatch}${ds.label}</span>`;
+    }).join(" ");
 
     chartWrap.innerHTML = `
       <div class="flex items-center justify-between mb-2">
@@ -8416,6 +9226,16 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           <button class="dd-expand-btn px-1.5 py-0.5 rounded border border-Cborder/50 text-[9px] text-Cmuted hover:text-Cblue hover:border-Cblue/40 transition" title="Expand / Collapse chart">⤢ Expand</button>
         </div>
       </div>
+      ${_maxOverlayFacts.length ? `
+      <div class="text-[8px] text-Cmuted mb-2 leading-relaxed">
+        <span class="font-bold uppercase tracking-wider" style="color:${THEME.muted}">Why the shaded band exists</span> —
+        the average bucket briefly ran hotter than its own average shows:
+        ${_maxOverlayFacts
+          .sort((a, b) => b.gap - a.gap)
+          .slice(0, 3)
+          .map(f => `<span style="color:${f.color}">${escapeHtml(f.label)}</span> hit ${f.maxVal.toFixed(0)}% at ${f.time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} while that bucket averaged ${f.avgVal.toFixed(0)}% (+${f.gap.toFixed(0)}pp)`)
+          .join(" · ")}
+      </div>` : ""}
       <div class="deepdive-chart-container">
         <canvas></canvas>
       </div>
@@ -8453,7 +9273,14 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
             bodyFont: { size: 10 },
             callbacks: {
               title: items => items.length ? new Date(items[0].parsed.x).toLocaleString() : "",
-              label: item => `${item.dataset.label}: ${item.parsed.y.toFixed(1)}%`,
+              label: item => {
+                const v = item.parsed.y;
+                if (v == null) return `${item.dataset.label}: no data`;
+                const u = item.dataset._ddUnit || "pct";
+                if (u === "bytes") return `${item.dataset.label}: ${_fmtBytes(v)}`;
+                if (u === "ops/s") return `${item.dataset.label}: ${v.toFixed(1)} ops/s`;
+                return `${item.dataset.label}: ${v.toFixed(1)}%`;
+              },
             },
           },
           annotation: {
@@ -8523,6 +9350,22 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
             ticks: { color: hexA(THEME.cyan, 0.6), font: { size: 9 }, callback: v => v + "%" },
             grid: { drawOnChartArea: false },
           },
+          // Throughput / ops axis — only present when a chart-only metric is
+          // plotted. Byte values are formatted with _fmtBytes so a 4.2 GiB tick
+          // does not render as 4509715660.
+          ...(_hasY2 ? {
+            y2: {
+              position: "right",
+              beginAtZero: true,
+              title: { display: true, text: "Throughput (bytes/s · ops/s)", color: "#9ca3af", font: { size: 9 } },
+              ticks: {
+                color: "#9ca3af",
+                font: { size: 9 },
+                callback: v => (v >= 1024 ? _fmtBytes(v) : String(Math.round(v))),
+              },
+              grid: { drawOnChartArea: false },
+            },
+          } : {}),
         },
       },
       plugins: [{
@@ -8785,6 +9628,13 @@ function onChecklistChange(e) {
   refreshChecklistProgress();
 }
 
+// Combined blocker state from the two independent gates (manual checklist +
+// automated findings-engine decision). Neither gate hard-disables the PE
+// sign-off checkbox anymore — instead _updatePeSignoffGate() surfaces a
+// disclaimer the reviewer must explicitly acknowledge to proceed, so a PE
+// engineer is never stuck with a greyed-out control and no way forward.
+const _peGate = { checklistDone: false, checklistDone_n: 0, checklistTotal: 9, decisionOk: true, blockersCount: 0, incomplete: false };
+
 function refreshChecklistProgress() {
   const chk   = window.appData.approvals.checklist;
   const done  = Object.values(chk).filter(Boolean).length;
@@ -8798,29 +9648,61 @@ function refreshChecklistProgress() {
   }
   if (label) label.textContent = `Checklist ${done}/${total} complete`;
 
-  const allDone = done === total;
-  const peLabel = document.getElementById("pe-approve-label");
+  _peGate.checklistDone   = done === total;
+  _peGate.checklistDone_n = done;
+  _peGate.checklistTotal  = total;
+  _updatePeSignoffGate();
+}
+
+// ── Shared PE sign-off gate (checklist + findings-decision blockers) ──
+function _updatePeSignoffGate() {
   const peChk   = document.getElementById("pe-approve-chk");
+  const peLabel = document.getElementById("pe-approve-label");
   const hint    = document.getElementById("pe-checklist-hint");
-  if (peLabel) peLabel.classList.toggle("opacity-50",       !allDone);
-  if (peLabel) peLabel.classList.toggle("pointer-events-none", !allDone);
-  if (peChk)  peChk.disabled = !allDone;
-  if (hint)   hint.classList.toggle("hidden", allDone);
+  const ackWrap = document.getElementById("pe-blocker-ack-wrap");
+  const ackChk  = document.getElementById("pe-blocker-ack");
+  const blocked = _peGate.incomplete || !_peGate.checklistDone || !_peGate.decisionOk;
+
+  if (peChk) { peChk.disabled = false; peChk.dataset.blocked = blocked ? "1" : "0"; }
+  if (peLabel) { peLabel.classList.remove("opacity-50", "pointer-events-none"); }
+  if (hint) {
+    hint.classList.toggle("hidden", !blocked);
+    if (blocked) {
+      hint.textContent = _peGate.incomplete
+        ? "⚠ Upload data to begin the review before the checklist can be completed."
+        : !_peGate.checklistDone
+          ? `⚠ ${_peGate.checklistTotal - _peGate.checklistDone_n} checklist item(s) incomplete.`
+          : `⚠ ${_peGate.blockersCount || 0} unresolved blocker(s) found by the findings engine.`;
+    }
+  }
+  if (ackWrap) ackWrap.classList.toggle("hidden", !blocked);
+  // Once every gate clears naturally, drop any stale override acknowledgment
+  // so a future engagement's blockers can't be silently pre-acknowledged.
+  if (!blocked && ackChk) ackChk.checked = false;
 }
 
 // ── PE sign-off ───────────────────────────────────────────────
 function onPeApprove(e) {
-  const approved = e.target.checked;
+  const chk     = e.target;
+  const blocked = chk.dataset.blocked === "1";
+  const ackChk  = document.getElementById("pe-blocker-ack");
+  if (chk.checked && blocked && !(ackChk && ackChk.checked)) {
+    chk.checked = false;
+    toast("warning", "Open blocker(s)", "Acknowledge the disclaimer below before signing off.");
+    return;
+  }
+  const approved = chk.checked;
   window.appData.approvals.pe.approved = approved;
+  window.appData.approvals.pe.override_blockers = approved && blocked;
   if (approved && !window.appData.approvals.pe.date) {
     window.appData.approvals.pe.date = new Date().toISOString().slice(0, 10);
   }
   const badge = document.getElementById("pe-status-badge");
   if (badge) {
     badge.textContent = approved
-      ? `✅ PE Approved — ${window.appData.approvals.pe.date}`
+      ? (blocked ? `⚠️ PE Approved (override) — ${window.appData.approvals.pe.date}` : `✅ PE Approved — ${window.appData.approvals.pe.date}`)
       : "⏳ PE Approval Pending";
-    badge.style.color = approved ? THEME.green : THEME.amber;
+    badge.style.color = approved ? (blocked ? THEME.amber : THEME.green) : THEME.amber;
   }
   refreshGoLiveBanner();
 }
@@ -8891,23 +9773,47 @@ async function exportHtmlReport() {
   const btn = document.getElementById("export-report-btn");
   if (btn) { btn.disabled = true; btn.textContent = "Generating…"; }
 
-  // Sync text inputs into appData right before sending
-  const a = window.appData.approvals;
-  a.pe.name       = document.getElementById("pe-name")?.value.trim()   || a.pe.name;
-  a.customer.name = document.getElementById("cust-name")?.value.trim() || a.customer.name;
-  a.notes         = document.getElementById("approval-notes")?.value   || a.notes;
-
-  // Build payload — entire appData snapshot
-  const payload = {
-    upload:    window.appData.upload,
-    servers:   window.appData.servers,
-    batch:     window.appData.batch,
-    resource:  window.appData.resource,
-    issues:    window.appData.issues,
-    approvals: window.appData.approvals,
-  };
-
+  // Everything below is wrapped in try/finally (not just the fetch) so that
+  // ANY unexpected error — bad appData shape, a null entry in `servers`, etc.
+  // — can never leave the button permanently stuck on "Generating…" with no
+  // way to retry. This was the root cause of a real stuck-button report.
   try {
+    // Sync text inputs into appData right before sending
+    const a = window.appData.approvals;
+    a.pe.name       = document.getElementById("pe-name")?.value.trim()   || a.pe.name;
+    a.customer.name = document.getElementById("cust-name")?.value.trim() || a.customer.name;
+    a.notes         = document.getElementById("approval-notes")?.value   || a.notes;
+
+    // Auto-wire customer name + environment from data we already reliably know,
+    // without clobbering a value the PE reviewer explicitly set. These two
+    // fields used to stay permanently blank, so the exported report always
+    // showed "Unknown Customer" / "Production" regardless of the real upload.
+    if (!a.customer_name) a.customer_name = window.appData.customerName || "";
+    if (!a.env_type) {
+      const _benv = ((window.appData.batch?.kpis?.batch_env || window.appData.batch?.kpis?.env_type || "") + "").toUpperCase();
+      const _envs = new Set(
+        (window.appData.servers || [])
+          .filter(Boolean)
+          .map(s => ((s.environment || s.source_env || "") + "").toUpperCase())
+          .filter(Boolean)
+      );
+      if (_benv) _envs.add(_benv);
+      if (_envs.size === 1) a.env_type = [..._envs][0];
+      else if (_envs.size > 1) a.env_type = "Mixed (" + [..._envs].sort().join(" + ") + ")";
+    }
+
+    // Build payload — entire appData snapshot
+    const payload = {
+      upload:    window.appData.upload,
+      servers:   window.appData.servers,
+      batch:     window.appData.batch,
+      resource:  window.appData.resource,
+      issues:    window.appData.issues,
+      approvals: window.appData.approvals,
+      sow:       window.appData.sowCompare,
+      benchmark: window.appData.benchmark,
+    };
+
     const res = await fetch("/api/export-report", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
@@ -8921,12 +9827,18 @@ async function exportHtmlReport() {
     const blob     = await res.blob();
     const url      = URL.createObjectURL(blob);
     const anchor   = document.createElement("a");
+    // The server already names this file "PE_Audit_{Customer}_{yyyymmdd_hhmm}.html"
+    // via the Content-Disposition header (routers/export.py) — read it instead of
+    // re-inventing a generic "PE_Audit_Report_<date>.html" name here, which
+    // silently discarded the customer name + time the backend already computed.
+    const cd = res.headers.get("Content-Disposition") || "";
+    const cdMatch = cd.match(/filename="?([^";]+)"?/i);
     const dateStr  = new Date().toISOString().slice(0, 10);
     anchor.href    = url;
-    anchor.download= `PE_Audit_Report_${dateStr}.html`;
+    anchor.download= cdMatch ? cdMatch[1] : `PE_Audit_Report_${dateStr}.html`;
     anchor.click();
     URL.revokeObjectURL(url);
-    toast("success", "Report downloaded", "Standalone HTML report saved to your Downloads folder.", 5000);
+    toast("success", "Report downloaded", `Saved as ${anchor.download}`, 5000);
   } catch (err) {
     _handleFetchError(err);
   } finally {
@@ -9275,15 +10187,16 @@ function _buildDeepDiveSummary() {
     const memAvailMin = st["Available Memory Percentage"]?.min ?? null;
     const memUsed = memAvailMin != null ? 100 - memAvailMin : null;
     const cpuMax = st["Percentage CPU"]?.max ?? null;
-    const diskIopsMax = Math.max(
-      st["OS Disk IOPS Consumed Percentage"]?.max ?? 0,
-      st["Data Disk IOPS Consumed Percentage"]?.max ?? 0,
-      st["VM Cached IOPS Consumed Percentage"]?.max ?? 0,
-      st["VM Uncached IOPS Consumed Percentage"]?.max ?? 0,
+    // Disk pressure from the bandwidth metrics the backend actually queries.
+    // The previous IOPS-% / Latency lookups referenced metrics that were never
+    // requested from Azure, so both fields were unconditionally null.
+    const diskBwMax = Math.max(
+      st["OS Disk Bandwidth Consumed Percentage"]?.max ?? 0,
+      st["Data Disk Bandwidth Consumed Percentage"]?.max ?? 0,
     ) || null;
-    const diskLatencyMax = Math.max(
-      st["OS Disk Latency"]?.max ?? 0,
-      st["Data Disk Latency"]?.max ?? 0,
+    const diskOpsMax = Math.max(
+      st["Disk Read Operations/Sec"]?.max ?? 0,
+      st["Disk Write Operations/Sec"]?.max ?? 0,
     ) || null;
 
     perVm.push({
@@ -9292,8 +10205,8 @@ function _buildDeepDiveSummary() {
       spike_count: spikeCount,
       mem_used_max: memUsed,
       cpu_max: cpuMax,
-      disk_iops_max: diskIopsMax,
-      disk_latency_max_ms: diskLatencyMax,
+      disk_bw_max: diskBwMax,
+      disk_ops_max: diskOpsMax,
       trend,
       spikes: spikeDetails.slice(0, 5), // top 5 per VM
       waveforms: _summarizeWaveforms(vmData.waveforms || {}),
@@ -9880,7 +10793,7 @@ function renderFindings(findings) {
   const infoCount = realFindings.filter(f => f.level === "info").length;
 
   // Decision logic: only MEASURED criticals are hard blockers.
-  // Inferred/unavailable criticals (e.g., Vision AI parsed resource data)
+  // Inferred/unavailable criticals (e.g., a server with no parseable metrics)
   // result in REMEDIATE (action required) rather than outright BLOCKED.
   const hardBlockers = critFindings.filter(f =>
     f.evidence_class === "measured" || f.evidence_class === "defaulted");
@@ -11628,7 +12541,6 @@ function refreshDataStatus() {
   const hasBatch     = !!(window.appData.batch);
   const hasIssues    = !!(window.appData.issues?.length);
   const hasBenchmark = !!(window.appData.benchmark);
-  const hasGemini    = !!(window.appData.geminiKey || window.appData.config?.gemini_api_key);
   const hasSla       = !!(window.appData.slaMatrix || window.appData.batchSlaInfo);
   const hasSow       = !!(window.appData.sowCompare || window.appData.sow);
 
@@ -11642,14 +12554,6 @@ function refreshDataStatus() {
   setDot("ds-benchmark", hasBenchmark);
   setDot("ds-sla",       hasSla,       slaJobs ? `${slaJobs} jobs` : "");
   setDot("ds-sow",       hasSow);
-  setDot("ds-gemini",    hasGemini);
-
-  // Show/hide vision-status chip in header
-  const visionChip = document.getElementById("vision-status-chip");
-  if (visionChip) {
-    if (hasGemini) visionChip.classList.remove("hidden"), visionChip.classList.add("flex");
-    else visionChip.classList.add("hidden"), visionChip.classList.remove("flex");
-  }
 }
 
 // ── Shared chart palette ──────────────────────────────────────
@@ -12046,25 +12950,14 @@ function _renderSignoffChecklistV2(decision) {
       </div>`;
   }).join("");
 
-  // ── Gate PE sign-off checkbox based on server state machine ──
+  // ── Feed the shared PE sign-off gate (see _updatePeSignoffGate) — no
+  // longer hard-disables the checkbox; a disclaimer override lets the
+  // reviewer proceed deliberately instead of being stuck with no path forward.
   const serverStatus = (decision?.status || "").toUpperCase();
-  const canSignOff = serverStatus === "APPROVED" || serverStatus === "CONDITIONAL_HOLD";
-  const peChk   = document.getElementById("pe-approve-chk");
-  const peLabel  = document.getElementById("pe-approve-label");
-  const hint     = document.getElementById("pe-checklist-hint");
-  if (peChk) {
-    peChk.disabled = !canSignOff;
-    if (!canSignOff) peChk.checked = false;
-  }
-  if (peLabel) peLabel.classList.toggle("pointer-events-none", !canSignOff);
-  if (hint) {
-    hint.classList.toggle("hidden", canSignOff);
-    if (!canSignOff) {
-      hint.textContent = serverStatus === "INCOMPLETE"
-        ? "Upload data to begin the review before sign-off is available."
-        : `Sign-off gated — resolve ${decision?.blockers_count || 0} blocker(s) first.`;
-    }
-  }
+  _peGate.decisionOk    = serverStatus === "APPROVED" || serverStatus === "CONDITIONAL_HOLD";
+  _peGate.blockersCount = decision?.blockers_count || 0;
+  _peGate.incomplete    = serverStatus === "INCOMPLETE";
+  _updatePeSignoffGate();
 }
 
 // ── Sub-App Summary Table ─────────────────────────────────────
@@ -14715,6 +15608,9 @@ async function loadConfig() {
     // in sync with pe_config so all panels share one green/amber/red rule.
     if (cfg.sla_atrisk_pct  != null) SLA_ATRISK_PCT  = Number(cfg.sla_atrisk_pct)  || SLA_ATRISK_PCT;
     if (cfg.sla_longjob_pct != null) SLA_LONGJOB_PCT = Number(cfg.sla_longjob_pct) || SLA_LONGJOB_PCT;
+    if (cfg.sow_under_pct     != null) SOW_UNDER_PCT     = Number(cfg.sow_under_pct)     || SOW_UNDER_PCT;
+    if (cfg.sow_over_pct      != null) SOW_OVER_PCT      = Number(cfg.sow_over_pct)      || SOW_OVER_PCT;
+    if (cfg.sow_over_crit_pct != null) SOW_OVER_CRIT_PCT = Number(cfg.sow_over_crit_pct) || SOW_OVER_CRIT_PCT;
 
     const keyEl = document.getElementById("settings-api-key");
     if (keyEl && cfg.gemini_api_key) keyEl.value = cfg.gemini_api_key;
@@ -14789,7 +15685,7 @@ async function refreshAiStatus() {
 
 
 /**
- * Live-probe every text model + Vision and render the result in a modal.
+ * Live-probe every text model and render the result in a modal.
  * Confirms the LLM is actually answering — not just that the keys exist.
  */
 async function runAiSelfTest() {
@@ -14839,19 +15735,11 @@ async function runAiSelfTest() {
       </tr>`;
     };
 
-    const v = data.vision || {};
-    const visionDot = v.status === "ok" ? "🟢" : v.status === "fail" ? "🔴" : "⚪";
-    const visionMetrics = (v.metrics || []).map(m =>
-      `<span class="inline-block px-2 py-0.5 mr-1 mb-1 rounded bg-Cpurple/10 border border-Cpurple/30 text-Cpurple text-[10px]">
-        ${m.metric_type || "?"}: ${m.max_value ?? m.raw_value ?? "—"}${m.unit||""}
-       </span>`).join("");
-
     body.innerHTML = `
       <div class="mb-3 p-3 rounded-lg bg-Ccard/60 border border-Cborder/40">
         <div class="text-[11px] text-Cmuted mb-1">Summary</div>
         <div class="text-Cwhite font-semibold">
-          Text models: ${data.summary.text_ok}/${data.summary.text_total} responding ·
-          Vision: ${data.summary.vision_ok ? '<span class="text-Cgreen">OK</span>' : '<span class="text-Cred">not ready</span>'}
+          Text models: ${data.summary.text_ok}/${data.summary.text_total} responding
         </div>
         <div class="text-[11px] text-Cmuted mt-1">Active model: <span class="font-mono text-Cwhite">${data.summary.active_text_model || '—'}</span></div>
         ${data.summary.promoted_to ? `
@@ -14872,13 +15760,6 @@ async function runAiSelfTest() {
         </tr></thead>
         <tbody>${(data.text || []).map(rowFor).join("")}</tbody>
       </table>
-
-      <div class="mb-2 text-[11px] font-bold text-Cwhite uppercase tracking-wider">Image → text (Gemini Vision)</div>
-      <div class="p-3 rounded-lg bg-Ccard/60 border border-Cborder/40">
-        <div>${visionDot} Status: <span class="text-Cwhite">${v.status||'skipped'}</span> · ${v.ms||0}ms</div>
-        ${v.error ? `<div class="text-Cred mt-1">${v.error}</div>` : ""}
-        ${visionMetrics ? `<div class="mt-2">${visionMetrics}</div>` : ""}
-      </div>
     `;
   } catch (err) {
     body.innerHTML = `<div class="text-Cred">Self-test request failed: ${String(err?.message || err)}</div>`;
@@ -15169,7 +16050,7 @@ async function saveApiKey() {
 
     statusEl.textContent = `✅ Valid — ${vData.recommended || "model ready"}`;
     statusEl.className   = "text-xs text-Cgreen";
-    toast("success", "API key saved", "Gemini Vision + AI Insights are now active");
+    toast("success", "API key saved", "Gemini AI Insights are now active");
   } catch (err) {
     statusEl.textContent = "❌ Network error";
     statusEl.className   = "text-xs text-Cred";
@@ -15745,12 +16626,13 @@ function openAzureModal() {
   if (step1) step1.classList.remove("hidden");
   if (step2) step2.classList.add("hidden");
   if (statusDiv) { statusDiv.textContent = ""; statusDiv.classList.add("hidden"); }
-  // Reset both filters to ALL and clear search
-  _activeVmFilters = { type: "ALL", env: "ALL" };
+  // Reset all filters (type, env, region) to ALL and clear search
+  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL" };
   document.querySelectorAll('.azure-type-filter').forEach(b => b.classList.remove("az-active"));
   document.querySelector('.azure-type-filter[data-type="ALL"]')?.classList.add("az-active");
   document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("az-active"));
   document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("az-active");
+  document.querySelectorAll('.azure-region-filter:not([data-region="ALL"])').forEach(b => b.remove());
   const srch = document.getElementById("azure-vm-search"); if (srch) srch.value = "";
   // Refresh auth bar and load subscriptions
   _refreshModalAuthBar();
@@ -16013,7 +16895,8 @@ async function azureLoadRGs() {
 /* ── Cached discovered VMs ── */
 let _discoveredVMs = [];
 let _selectedVmIds = new Set();   // Persistent selection — survives filter switches
-let _activeVmFilters = { type: "ALL", env: "ALL" };
+let _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL" };
+let _collapsedCustomers = new Set(); // Customer group names currently collapsed in the VM table
 
 /* ── Detect VM environment from Azure tags or name prefix ── */
 function _getVmEnv(vm) {
@@ -16031,10 +16914,24 @@ function _getVmEnv(vm) {
   return "PROD"; // default — assume production
 }
 
-/* ── Helper: show discovered VMs in step 2 ── */
+/* ── Helper: show discovered VMs in step 2 ──
+   Defensively de-duplicates by resource_id (falling back to lower-cased
+   name) so the same physical server can never appear as two rows — even
+   if a search matches a VM on more than one field (name + tag) or the
+   same VM shows up via overlapping subscription/resource-group scopes. */
 function _showDiscoveredVMs(data, statusEl, statusMsg) {
-  _discoveredVMs = data.vms || [];
+  const rawVms = data.vms || [];
+  const seenIds = new Set();
+  let dupCount = 0;
+  _discoveredVMs = [];
+  for (const vm of rawVms) {
+    const key = (vm.resource_id || `${vm.name}|${vm.location}`).toLowerCase();
+    if (seenIds.has(key)) { dupCount++; continue; }
+    seenIds.add(key);
+    _discoveredVMs.push(vm);
+  }
   _selectedVmIds = new Set();
+  _collapsedCustomers = new Set();
   if (!_discoveredVMs.length) {
     if (statusEl) { statusEl.textContent = "No VMs found."; statusEl.className = "text-xs text-amber-400"; }
     return;
@@ -16044,16 +16941,26 @@ function _showDiscoveredVMs(data, statusEl, statusMsg) {
   const step2 = document.getElementById("azure-step2");
   if (step2) step2.classList.remove("hidden");
 
-  const counts = data.counts || {};
-  document.getElementById("azure-vm-total").textContent = `${data.total} VMs`;
+  // Recompute counts/customers from the deduped list — never trust the
+  // pre-dedup backend totals once rows have been dropped.
+  const counts = {APP:0, DB:0, SRE:0};
+  const custSet = new Set();
+  _discoveredVMs.forEach(v => {
+    counts[v.type] = (counts[v.type]||0) + 1;
+    custSet.add(v.customer || (v.tags||{}).CustomerName || (v.tags||{}).customerName || "Untagged");
+  });
+  document.getElementById("azure-vm-total").textContent =
+    custSet.size > 1 ? `${_discoveredVMs.length} VMs · ${custSet.size} customers` : `${_discoveredVMs.length} VMs`;
   document.getElementById("azure-vm-app-badge").textContent = `APP ${counts.APP || 0}`;
   document.getElementById("azure-vm-db-badge").textContent  = `DB ${counts.DB || 0}`;
   document.getElementById("azure-vm-sre-badge").textContent = `SRE ${counts.SRE || 0}`;
 
   _updateFilterCounts();
+  _updateRegionFilterButtons();
   _renderVMTable(_discoveredVMs);
   _updateSelectedCount();
-  if (statusEl) { statusEl.textContent = statusMsg; statusEl.className = "text-xs text-emerald-400"; }
+  const dupNote = dupCount > 0 ? ` (${dupCount} duplicate${dupCount>1?'s':''} removed)` : "";
+  if (statusEl) { statusEl.textContent = statusMsg + dupNote; statusEl.className = "text-xs text-emerald-400"; }
 }
 
 /* ── Inject live counts into filter buttons + env summary badges ── */
@@ -16139,8 +17046,7 @@ async function azureDiscoverVMs() {
       return;
     }
 
-    _discoveredVMs = data.vms || [];
-    if (!_discoveredVMs.length) {
+    if (!(data.vms || []).length) {
       if (status) { status.textContent = "No VMs found in this subscription/resource group."; status.className = "text-xs text-amber-400"; }
       return;
     }
@@ -16173,11 +17079,26 @@ function _renderVMTable(vms) {
     grouped[cust].push({ vm, idx: i });
   });
 
-  const customers = Object.keys(grouped);
+  // Sort customer groups alphabetically (Untagged always last) so a 200-VM
+  // list across dozens of customers can be scanned/found predictably instead
+  // of relying on whatever order the backend query happened to return.
+  const customers = Object.keys(grouped).sort((a, b) => {
+    if (a === "Untagged") return 1;
+    if (b === "Untagged") return -1;
+    return a.localeCompare(b);
+  });
   const multiCustomer = customers.length > 1 || (customers.length === 1 && customers[0] !== "Untagged");
 
+  // Show/hide the Expand all · Collapse all controls — meaningless noise
+  // when there's nothing to bifurcate (single customer).
+  const groupToggleWrap = document.getElementById("azure-group-toggle-wrap");
+  const groupToggleSep  = document.getElementById("azure-group-sep");
+  if (groupToggleWrap) { groupToggleWrap.classList.toggle("hidden", !multiCustomer); groupToggleWrap.classList.toggle("flex", multiCustomer); }
+  if (groupToggleSep)  groupToggleSep.classList.toggle("hidden", !multiCustomer);
+
   let html = "";
-  for (const cust of customers) {
+  customers.forEach((cust, custPos) => {
+    const collapsed = _collapsedCustomers.has(cust);
     // Customer group header (only if multiple customers or tagged)
     if (multiCustomer) {
       const count = grouped[cust].length;
@@ -16186,15 +17107,23 @@ function _renderVMTable(vms) {
       const badges = Object.entries(typeBreakdown).map(([t,c]) => `${t}:${c}`).join(" · ");
       const allSelected = grouped[cust].every(({vm}) => _selectedVmIds.has(vm.resource_id));
       const someSelected = grouped[cust].some(({vm}) => _selectedVmIds.has(vm.resource_id));
-      html += `<tr class="bg-Cbg/60 border-t border-Cborder">
-        <td class="px-2 py-1.5"><input type="checkbox" ${allSelected ? 'checked' : ''} ${!allSelected && someSelected ? 'indeterminate' : ''} class="azure-cust-check rounded border-Cborder"
+      // Alternating accent band per customer group makes the group boundary
+      // obvious at a glance even when scrolling fast through 200+ rows.
+      const bandClr = custPos % 2 === 0 ? "border-l-Cblue/50" : "border-l-Cpurple/50";
+      html += `<tr class="bg-gradient-to-r from-Cbg to-Cbg/30 border-t-2 border-Cborder border-l-2 ${bandClr}" data-cust-header="${_escHtml(cust)}">
+        <td class="px-2 py-2"><input type="checkbox" ${allSelected ? 'checked' : ''} ${!allSelected && someSelected ? 'indeterminate' : ''} class="azure-cust-check rounded border-Cborder"
             onchange="azureToggleCustomer(this, '${_escHtml(cust)}')" title="Select/deselect all ${_escHtml(cust)} VMs" /></td>
-        <td colspan="6" class="px-2 py-1.5">
-          <span class="text-[10px] font-bold text-Cwhite">${_escHtml(cust)}</span>
-          <span class="text-[10px] text-Cmuted ml-2">${count} VM${count>1?'s':''} · ${badges}</span>
+        <td colspan="6" class="px-2 py-2">
+          <button type="button" onclick="_toggleCustomerGroup('${_escHtml(cust)}')" class="inline-flex items-center gap-1.5 text-left" title="${collapsed ? 'Expand' : 'Collapse'} ${_escHtml(cust)}">
+            <svg class="w-3 h-3 text-Cmuted flex-shrink-0 transition-transform" style="transform:rotate(${collapsed ? '-90' : '0'}deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+            <span class="text-[11px] font-bold text-Cwhite tracking-tight">${_escHtml(cust)}</span>
+            <span class="text-[10px] text-Cmuted ml-1">${count} VM${count>1?'s':''} · ${badges}</span>
+          </button>
         </td>
       </tr>`;
     }
+
+    if (collapsed) return; // skip rendering this customer's VM rows
 
     for (const { vm, idx } of grouped[cust]) {
       const colors = typeColors[vm.type] || typeColors.APP;
@@ -16219,16 +17148,16 @@ function _renderVMTable(vms) {
         <td class="px-2 py-1.5 text-Cmuted text-[10px] hidden sm:table-cell">${_escHtml(vm.location)}</td>
       </tr>`;
     }
-  }
+  });
   tbody.innerHTML = html;
 
   // Set indeterminate state on customer group checkboxes (must be done via JS, not HTML attribute)
   document.querySelectorAll('.azure-cust-check').forEach(cb => {
     const custRow = cb.closest('tr');
     if (!custRow) return;
-    // Find customer name from sibling cell
-    const custName = custRow.querySelector('td[colspan] .text-\\[10px\\]')?.textContent?.trim() ||
-                     custRow.querySelectorAll('td')[1]?.querySelector('span')?.textContent?.trim() || "";
+    // Reliable lookup via data attribute — do not scrape span text/classes,
+    // those are cosmetic and can drift independently of this logic.
+    const custName = custRow.dataset.custHeader || "";
     if (!custName) return;
     const custVms = _discoveredVMs.filter(v =>
       (v.customer || (v.tags||{}).CustomerName || (v.tags||{}).customerName || "Untagged") === custName);
@@ -16246,6 +17175,26 @@ function azureToggleCustomer(headerCb, customer) {
     _syncVmSelection(cb);
   });
   _updateSelectedCount();
+}
+
+/* ── Collapse/expand a single customer group — lets a reviewer bifurcate
+   a 200-VM list down to just the customer(s) they're targeting without
+   losing the rest of the discovered set or their current selection. ── */
+function _toggleCustomerGroup(customer) {
+  if (_collapsedCustomers.has(customer)) _collapsedCustomers.delete(customer);
+  else _collapsedCustomers.add(customer);
+  _applyVmFilters();
+}
+
+/* ── Expand/collapse every customer group at once ── */
+function azureExpandAllCustomers(expand) {
+  if (expand) {
+    _collapsedCustomers.clear();
+  } else {
+    _collapsedCustomers = new Set(_discoveredVMs.map(v =>
+      v.customer || (v.tags||{}).CustomerName || (v.tags||{}).customerName || "Untagged"));
+  }
+  _applyVmFilters();
 }
 
 function _escHtml(s) { const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
@@ -16302,7 +17251,59 @@ function _updateSelectedCount() {
   if (el) el.textContent = `${_selectedVmIds.size} of ${_discoveredVMs.length} selected`;
 }
 
-/* ── Combined filter: respects type + env + name search ── */
+/* ── Region filter buttons — built dynamically per subscription/search result.
+   Regions aren't a fixed enum like type/env: one customer's subscription can
+   span multiple Azure regions (e.g. brazilsouth, southafricanorth, eastus).
+   Rebuilt every time the VM list changes so it always reflects only the
+   regions actually present, letting a reviewer bifurcate the audit to just
+   one region (e.g. "audit only the Brazil VMs"). ── */
+function _updateRegionFilterButtons() {
+  const group = document.getElementById("az-region-seg-group");
+  if (!group) return;
+  // Count VMs per region
+  const counts = {};
+  _discoveredVMs.forEach(v => {
+    const loc = (v.location || "unknown").trim() || "unknown";
+    counts[loc] = (counts[loc] || 0) + 1;
+  });
+  const regions = Object.keys(counts).sort();
+  // Preserve the "All" button, rebuild the rest
+  const allBtn = group.querySelector('.azure-region-filter[data-region="ALL"]');
+  group.querySelectorAll('.azure-region-filter:not([data-region="ALL"])').forEach(b => b.remove());
+  // If only one region (or none) is present, no bifurcation is possible —
+  // hide the row entirely so the UI doesn't offer a meaningless single choice.
+  const row = document.getElementById("az-region-filter-row");
+  if (row) row.classList.toggle("hidden", regions.length <= 1);
+  if (allBtn) allBtn.classList.add("az-active");
+  _activeVmFilters.region = "ALL";
+  regions.forEach(region => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.region = region;
+    btn.className = "azure-region-filter az-seg-btn";
+    btn.onclick = () => azureFilterRegion(region);
+    btn.innerHTML = `${_escHtml(region)}<span class="az-chip">${counts[region]}</span>`;
+    group.appendChild(btn);
+  });
+}
+
+/* ── Region filter — single-select radio style (same pattern as env) ── */
+function azureFilterRegion(region) {
+  const allBtn  = document.querySelector('.azure-region-filter[data-region="ALL"]');
+  const clicked = document.querySelector(`.azure-region-filter[data-region="${CSS.escape(region)}"]`);
+  const wasActive = clicked?.classList.contains("az-active") && region !== "ALL";
+  document.querySelectorAll('.azure-region-filter').forEach(b => b.classList.remove("az-active"));
+  if (region === "ALL" || wasActive) {
+    allBtn?.classList.add("az-active");
+    _activeVmFilters.region = "ALL";
+  } else {
+    clicked?.classList.add("az-active");
+    _activeVmFilters.region = region;
+  }
+  _applyVmFilters();
+}
+
+/* ── Combined filter: respects type + env + region + name search ── */
 function _applyVmFilters() {
   const activeTypes = [...document.querySelectorAll('.azure-type-filter.az-active')].map(b => b.dataset.type);
   const showAllTypes = activeTypes.includes("ALL") || activeTypes.length === 0;
@@ -16310,6 +17311,9 @@ function _applyVmFilters() {
   let filtered = showAllTypes ? _discoveredVMs : _discoveredVMs.filter(v => activeTypes.includes(v.type));
   if (_activeVmFilters.env !== "ALL") {
     filtered = filtered.filter(v => _getVmEnv(v) === _activeVmFilters.env);
+  }
+  if (_activeVmFilters.region !== "ALL") {
+    filtered = filtered.filter(v => ((v.location || "unknown").trim() || "unknown") === _activeVmFilters.region);
   }
   if (searchQ) {
     filtered = filtered.filter(v =>
@@ -19615,11 +20619,12 @@ async function clearSessionData() {
     });
 
     // ── 2. Wipe browser-side app state ───────────────────────────────────
-    if (window.appData && typeof window.appData === "object") {
-      window.appData.benchmarkBatch = null;
-      window.appData.benchmarkUI = null;
-    }
-    window.appData        = {};
+    // Reset to the SAME shape window.appData started with (_freshAppData()),
+    // never a bare {} — a bare reset previously left approvals/servers/etc.
+    // undefined, which crashed exportHtmlReport() with "can't access
+    // property 'pe', a is undefined" the next time Export was clicked in
+    // the same tab session (before any new upload repopulated the shape).
+    window.appData        = _freshAppData();
     window._lastFindings  = [];
     window._execCache     = null;
     window._execCacheHash = null;
@@ -19799,7 +20804,7 @@ async function clearSessionData() {
     document.getElementById("sow-contract-grid")?.classList.add("hidden");
 
     // ── 11. Status dots ───────────────────────────────────────────────────
-    ["ds-batch","ds-resource","ds-issues","ds-sow","ds-gemini"].forEach(id => {
+    ["ds-batch","ds-resource","ds-issues","ds-sow"].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.className = "w-2 h-2 rounded-full status-dot-muted shrink-0 transition-all duration-300";
     });
@@ -20813,10 +21818,24 @@ function _buildSowCompareFromManual() {
     { key: "batch_jobs",   label: "Batch Jobs / Day",      base: _pick("sow-batchjobs-baseline", sc.manual_batchjobs_baseline),  act: _pick("sow-batchjobs-actual", sc.manual_batchjobs_actual) },
     { key: "peak_users",   label: "Peak Concurrent Users", base: _pick("sow-users-baseline", sc.manual_users_baseline),          act: _pick("sow-users-actual", sc.manual_users_actual) },
   ];
-  const metrics = fields.filter(f => f.base > 0).map(f => ({
-    key: f.key, label: f.label, sow: f.base, actual: f.act > 0 ? f.act : null,
-  }));
-  return metrics.length ? { metrics } : null;
+  const metrics = fields.filter(f => f.base > 0).map(f => {
+    // pct/status were previously omitted entirely from this manual fallback —
+    // every consumer (report export, findings, exec dashboard) then showed
+    // "0.0%" / "N/A" for manually-entered SOW data even though sow/actual were
+    // both present. Compute both here so this fallback matches the shape (and
+    // status vocabulary) of the real /api/sow/compare response.
+    const act = f.act > 0 ? f.act : null;
+    const pct = (act != null && f.base > 0) ? +((act / f.base) * 100).toFixed(1) : 0;
+    let status = "LOW";
+    if (act == null)                     status = "LOW";
+    else if (pct > SOW_OVER_CRIT_PCT)    status = "CRITICAL_OVER";
+    else if (pct > SOW_OVER_PCT)         status = "OVER";
+    else if (pct < SOW_UNDER_PCT)        status = "LOW";
+    else if (pct < 90)                   status = "ACCEPTABLE";
+    else                                 status = "OPTIMAL";
+    return { key: f.key, label: f.label, sow: f.base, actual: act, pct, status };
+  });
+  return metrics.length ? { metrics, overall_status: metrics.some(m => m.status === "CRITICAL_OVER") ? "CRITICAL_OVER" : metrics.some(m => m.status === "OVER") ? "OVER" : "ACCEPTABLE" } : null;
 }
 
 // ── Volume Analysis: synthesizes SOW contract + manual inputs + batch stats

@@ -56,6 +56,13 @@ class ExportRequest(BaseModel):
     resource:  Optional[Dict[str, Any]] = None
     issues:    Optional[List[Dict[str, Any]]] = None
     approvals: Optional[Dict[str, Any]] = None
+    # SOW volume compliance (window.appData.sowCompare) and performance
+    # benchmark (window.appData.benchmark) — the checklist has always claimed
+    # "Data volume (DFU/SKU) vs SOW verified" and "UI performance benchmarking
+    # approved", but nothing ever passed this data to the report, so those
+    # claims had zero supporting evidence in the exported document.
+    sow:       Optional[Dict[str, Any]] = None
+    benchmark: Optional[Dict[str, Any]] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -230,6 +237,73 @@ def _top_rows(top_jobs: List[dict]) -> str:
     return "".join(rows)
 
 
+def _sow_rows(metrics: List[dict]) -> str:
+    """SOW volume-compliance rows — mirrors the dashboard's SOW Contract &
+    Volume Compliance tab so the exported report shows the SAME evidence the
+    checklist's "Data volume (DFU/SKU) vs SOW verified" line claims was reviewed.
+    """
+    if not metrics:
+        return ("<tr><td colspan='5' class='empty'>No SOW contract data captured "
+                "for this engagement.</td></tr>")
+    _status_tag = {
+        "OPTIMAL":       ('tag-green', 'OPTIMAL'),
+        "ACCEPTABLE":    ('tag-green', 'ACCEPTABLE'),
+        "LOW":           ('tag-blue',  'UNDER-UTILISED'),
+        "OVER":          ('tag-amber', 'OVER CONTRACT'),
+        "CRITICAL_OVER": ('tag-red',   'CRITICAL OVER'),
+    }
+    rows = []
+    for m in metrics:
+        label  = _esc(m.get("label") or m.get("key") or "?")
+        sow_v  = _f(m.get("sow", 0))
+        act_v  = _f(m.get("actual", 0))
+        pct    = _f(m.get("pct", 0))
+        status_key = (m.get("status") or "").upper()
+        cls, label_txt = _status_tag.get(status_key, ('tag-gray', status_key or 'N/A'))
+        pct_style = 'style="color:#ef4444;font-weight:700"' if status_key == "CRITICAL_OVER" else \
+                    ('style="color:#f59e0b;font-weight:700"' if status_key == "OVER" else "")
+        rows.append(f"""<tr>
+          <td><b>{label}</b></td>
+          <td class="num">{sow_v:,.0f}</td>
+          <td class="num">{act_v:,.0f}</td>
+          <td {pct_style}>{pct:.1f}%</td>
+          <td><span class="tag {cls}">{label_txt}</span></td>
+        </tr>""")
+    return "".join(rows)
+
+
+def _bench_rows(rows_in: List[dict]) -> str:
+    """Performance benchmark rows — mirrors the Performance Benchmark tab so
+    the report backs the checklist's "Batch performance-test report reviewed"
+    / "UI performance benchmarking approved" lines with actual numbers,
+    sorted worst-regression-first so the most material result is visible
+    without opening the full dashboard.
+    """
+    if not rows_in:
+        return ("<tr><td colspan='5' class='empty'>No benchmark data captured "
+                "for this engagement.</td></tr>")
+    _status_tag = {"OK": "tag-green", "WATCH": "tag-amber", "BREACH": "tag-red", "REFERENCE": "tag-gray"}
+    ordered = sorted(rows_in, key=lambda r: _f(r.get("delta_pct", 0)), reverse=True)
+    rows = []
+    for r in ordered[:20]:
+        name   = _esc(r.get("transaction") or "?")
+        base_s = _f(r.get("baseline_sec", 0))
+        cur_s  = _f(r.get("current_sec", 0))
+        delta  = _f(r.get("delta_pct", 0))
+        status_key = (r.get("status") or "").upper()
+        cls = _status_tag.get(status_key, "tag-gray")
+        delta_style = 'style="color:#ef4444;font-weight:700"' if delta > 0 and status_key in ("WATCH", "BREACH") else ""
+        delta_sign = "+" if delta > 0 else ""
+        rows.append(f"""<tr>
+          <td><b>{name}</b></td>
+          <td class="dim">{base_s:.2f}s</td>
+          <td>{cur_s:.2f}s</td>
+          <td {delta_style}>{delta_sign}{delta:.1f}%</td>
+          <td><span class="tag {cls}">{status_key or 'N/A'}</span></td>
+        </tr>""")
+    return "".join(rows)
+
+
 def _checklist_rows(checklist: dict) -> str:
     labels = {
         "batch":   "Batch SLA validated (daily/weekly/monthly)",
@@ -268,10 +342,14 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         issues    = body.issues    or []
         approvals = body.approvals or {}
         servers   = body.servers   or []
+        sow       = body.sow       or {}
+        benchmark = body.benchmark or {}
 
         batch_kpis    = batch.get("kpis")    or {}
         resource_kpis = resource.get("kpis") or {}
         top_jobs_data = batch.get("top_jobs") or batch.get("top_breaches") or []
+        sow_metrics   = sow.get("metrics") or []
+        bench_rows_data = benchmark.get("rows") or []
 
         checklist    = approvals.get("checklist",  {})
         pe_info      = approvals.get("pe",         {})
@@ -280,9 +358,20 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         pe_approved  = bool(pe_info.get("approved",   False))
         cust_approved= bool(cust_info.get("approved", False))
         both_ok      = pe_approved and cust_approved
+        # PE reviewer chose to sign off despite an unresolved checklist/blocker
+        # gate (frontend disclaimer override) — surface this on the report
+        # itself so the sign-off card never silently looks identical to a
+        # clean approval.
+        pe_override  = bool(pe_info.get("override_blockers", False))
 
         customer   = _esc(approvals.get("customer_name", "") or "Unknown Customer")
-        env        = _esc(approvals.get("env_type",       "") or "Production")
+        # "Production" used to be a silent fallback here even when nothing had
+        # actually been detected — for real customer data that reads as a
+        # confident claim the report never verified. "Not Detected" is honest;
+        # the frontend now auto-derives the real value before this is ever hit
+        # (see exportHtmlReport() in static/app.js), so this fallback should be
+        # rare in practice, not the normal path.
+        env        = _esc(approvals.get("env_type",       "") or "Not Detected")
         pe_name    = _esc(pe_info.get("name",   "") or "—")
         cust_name  = _esc(cust_info.get("name", "") or "—")
         pe_date    = _esc(pe_info.get("date",   ""))
@@ -335,8 +424,46 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
                           f"SRE {_g(_sret['ok'])}/{_g(_sret['warn'])}")
         db_mem_label = f"{_g(_DB_MEM_LO)}–{_g(_DB_MEM_HI)}%"
 
+        # ── SOW volume compliance ───────────────────────────────────
+        sow_status  = (sow.get("overall_status") or "").upper()
+        sow_summary = _esc(sow.get("summary") or "")
+        n_sow       = len(sow_metrics)
+        sow_badge = {
+            "OPTIMAL": ("#22c55e", "OPTIMAL"), "ACCEPTABLE": ("#22c55e", "ACCEPTABLE"),
+            "LOW": ("#3b82f6", "UNDER-UTILISED"), "OVER": ("#f59e0b", "OVER CONTRACT"),
+            "CRITICAL_OVER": ("#ef4444", "CRITICAL OVER"),
+        }.get(sow_status, ("#6b7a99", "NOT ASSESSED"))
+
+        # ── Performance benchmark ────────────────────────────────
+        bench_summary = _esc(benchmark.get("summary") or "")
+        n_bench_total   = int(benchmark.get("total_transactions", len(bench_rows_data)))
+        n_bench_breach  = int(benchmark.get("sla_breaches", 0))
+        n_bench_degraded= int(benchmark.get("degraded", 0))
+        bench_badge = ("#ef4444", f"{n_bench_breach} BREACH") if n_bench_breach else (
+                      ("#f59e0b", f"{n_bench_degraded} DEGRADED") if n_bench_degraded else
+                      ("#22c55e", "WITHIN TOLERANCE") if n_bench_total else ("#6b7a99", "NOT ASSESSED"))
+
+        # Batch table is capped to the top 20 jobs by peak runtime for a
+        # readable page — previously this cap had no caption, so the "{{n_jobs}}
+        # jobs" panel badge and the 20-row table silently disagreed.
+        n_jobs_shown = min(20, len(top_jobs_data))
+
+        # Products/modules reviewed — engagement-scoped selection persisted by
+        # routers/sow.py (config_store key "reviewed_products"), mirrored here so
+        # the same badge strip shown on every dashboard tab also appears on the
+        # exported HTML report header.
+        reviewed_product_labels: List[str] = []
+        try:
+            from services import config_store as _cfg_store
+            from services.product_taxonomy import labels_for as _labels_for
+            _reviewed_ids = _cfg_store.get("reviewed_products") or []
+            reviewed_product_labels = [_esc(lbl) for lbl in _labels_for(_reviewed_ids)]
+        except Exception:
+            reviewed_product_labels = []
+
         ctx = dict(
             customer=customer, env=env, gen_date=gen_date,
+            reviewed_product_labels=reviewed_product_labels,
             sign_color=sign_color, sign_label=sign_label,
             sign_state=sign_state, sign_text=sign_text,
             pe_name=pe_name, cust_name=cust_name,
@@ -354,6 +481,7 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             n_issues=len(issues),
             srv_rows=_srv_rows(servers),
             top_rows=_top_rows(top_jobs_data),
+            n_jobs_shown=n_jobs_shown,
             iss_rows=_iss_rows(issues),
             checklist_rows=_checklist_rows(checklist),
             daily_limit=DAILY_LIMIT_HRS,
@@ -363,6 +491,13 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             mem_ok_t=mem_ok_t, mem_warn_t=mem_warn_t,
             disk_ok_t=disk_ok_t, disk_warn_t=disk_warn_t,
             role_cpu_label=role_cpu_label, db_mem_label=db_mem_label,
+            sow_rows=_sow_rows(sow_metrics), n_sow=n_sow,
+            sow_status=sow_status, sow_summary=sow_summary,
+            sow_badge_color=sow_badge[0], sow_badge_text=sow_badge[1],
+            bench_rows=_bench_rows(bench_rows_data), n_bench=len(bench_rows_data),
+            n_bench_total=n_bench_total, bench_summary=bench_summary,
+            bench_badge_color=bench_badge[0], bench_badge_text=bench_badge[1],
+            pe_override=pe_override,
         )
 
         html = templates.get_template("report_export.html").render(**ctx)

@@ -850,7 +850,9 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         n_agg   = _i(rk.get("n_agg_trap"))
         n_dual  = _i(rk.get("n_dual_pressure"))
 
-        # Check if all servers have 0.0% metrics (IMAGE_DOCX not yet vision-enriched)
+        # Check if all servers have 0.0% metrics (image-only DOCX with no
+        # selectable text/tables — Vision AI enrichment was removed, so these
+        # servers can no longer be auto-filled and stay at zero).
         # Uses effective_cpu (agg-adjusted) first, then cpu_pct; mem_pct for memory
         all_zero = all(
             _f(s.get("effective_cpu") or s.get("cpu_pct") or 0) == 0
@@ -863,22 +865,10 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         res_evidence_class = "inferred" if not all_zero else "unavailable"
 
         if grade == "N/A" or all_zero:
-            try:
-                from services import config_store as _cs_vision
-                _has_vision_key = bool(_cs_vision.get_gemini_key())
-            except Exception:
-                _has_vision_key = False
-            if _has_vision_key:
-                _res_sub = ("Metrics are embedded as images and could not be read from text. "
-                            "A Gemini Vision key is configured — retry, or re-upload a text-based report.")
-                _res_rec = ("Re-run extraction (Vision key present), or re-upload a resource report "
-                            "with selectable text / numeric tables.")
-            else:
-                _res_sub = ("Metrics are embedded as images — no text values to parse, and no Gemini "
-                            "Vision key is configured to read them. Configure a Vision key in Settings "
-                            "or re-upload a text-based report.")
-                _res_rec = ("Configure a Gemini Vision API key in Settings to extract image-based "
-                            "metrics, or re-upload a resource report with selectable text / numeric tables.")
+            _res_sub = ("Metrics are embedded as images (charts/screenshots) with no selectable "
+                        "text or numeric tables — the deterministic parser found nothing to read.")
+            _res_rec = ("Re-upload a resource report with selectable text / numeric tables, or "
+                        "connect directly to Azure Monitor (Live) for this fleet instead.")
             add("warning", "📡",
                 f"Fleet Grade N/A — resource metrics unavailable ({total_s} servers, all 0.0%)",
                 _res_sub,
@@ -1148,7 +1138,8 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         add("critical" if dd_total >= 5 else "warning", "📡",
             f"{dd_total} critical anomal{'ies' if dd_total > 1 else 'y'} detected across "
             f"{dd_affected} VM{'s' if dd_affected > 1 else ''} in last {dd_hours}h "
-            f"(Azure Monitor time-series, z-score ≥ 3σ)",
+            f"(Azure Monitor time-series; dual-gate: per-metric z-score "
+            f"AND absolute threshold breach)",
             "Time-series evidence confirms resource pressure is real, not a snapshot artifact. "
             "Review spike timing against batch schedule to isolate root cause.",
             source="resource",
@@ -1343,16 +1334,41 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                     continue
 
                 metric_short = metric_name.replace("Percentage ", "").replace(" Used %", "")
+
+                # Breach threshold must be the metric's OWN critical band, not a
+                # hardcoded 90. Memory Used % is critical at MEM_CRIT (80) and
+                # Disk BW % at DISK_CRIT (85) — projecting all three to 90 both
+                # understated memory/disk urgency and produced "within 1 days"
+                # for a server already above the hardcoded number.
+                _mn = metric_name.lower()
+                from services import pe_config as _pec_dd6
+                if "mem" in _mn:
+                    _crit_thresh = float(_pec_dd6.MEM_CRIT)
+                elif "disk" in _mn:
+                    _crit_thresh = float(_pec_dd6.DISK_CRIT)
+                elif "cpu" in _mn:
+                    _crit_thresh = float(_pec_dd6.CPU_CRIT)
+                else:
+                    _crit_thresh = float(_pec_dd6.CPU_CRIT)
+
                 sev = "critical" if trend_pct > 15 or overall_mean > 80 else "warning"
+
+                # Daily growth rate (pp/day) from the half-window delta.
+                _rate = max(trend_delta / max(dd_days_observed / 2, 1), 0.01)
+                if overall_mean >= _crit_thresh:
+                    _eta_txt = (f"The server is ALREADY above the {_crit_thresh:.0f}% critical "
+                                f"threshold for {metric_short} and still rising.")
+                else:
+                    _days_to_breach = max(1, round((_crit_thresh - overall_mean) / _rate))
+                    _eta_txt = (f"At this rate ({_rate:.2f}pp/day), it breaches the "
+                                f"{_crit_thresh:.0f}% critical threshold in ~{_days_to_breach} "
+                                f"day{'s' if _days_to_breach != 1 else ''} if the trend continues.")
 
                 add(sev, "📈",
                     f"{vm_name}: {metric_short} trending upward — "
                     f"+{trend_delta:.1f}pp ({trend_pct:+.1f}%) over {dd_days_observed:.0f} days",
                     f"First-half average vs second-half average shows {metric_short} is increasing. "
-                    f"Current overall mean: {overall_mean:.1f}%. "
-                    f"At this rate, the server will breach critical thresholds "
-                    f"within {max(1, round((90 - overall_mean) / max(trend_delta / max(dd_days_observed / 2, 1), 0.01)))}"
-                    f" days if trend continues.",
+                    f"Current overall mean: {overall_mean:.1f}%. {_eta_txt}",
                     source="resource", confidence=85,
                     evidence_class="measured",
                     impact=f"{metric_short} is on an upward trajectory — capacity will be exhausted "

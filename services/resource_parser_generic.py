@@ -945,8 +945,9 @@ def parse_resource_file(file_bytes: bytes, filename: str) -> List[Dict[str, Any]
       4. DOCX fallback           → python-docx structured parser if text extraction yields 0
       5. save_resource_session() → clears stale _SESSION, returns fresh list
 
-    Returns a list of server dicts.  Empty list means image-only mode —
-    caller should trigger Vision enrichment via _run_vision_enrichment().
+    Returns a list of server dicts.  Empty list means image-only mode — no
+    further enrichment is attempted (Vision AI extraction was removed); the
+    caller surfaces these as `_image_only=True` stubs with zeroed metrics.
 
     Each server dict has keys:
         host, type, cpu_used, cpu_avg, mem_used, mem_total_gb,
@@ -1020,7 +1021,7 @@ def parse_resource_file(file_bytes: bytes, filename: str) -> List[Dict[str, Any]
             logger.warning("parse_resource_file: NVIDIA LLM fallback failed: %s", exc)
 
     if not servers:
-        logger.info("parse_resource_file: no text metrics extracted — image_only, Vision required")
+        logger.info("parse_resource_file: no text metrics extracted — image_only, no further enrichment available")
 
     # Extract customer name if tagged by the DOCX parser
     customer_name: Optional[str] = None

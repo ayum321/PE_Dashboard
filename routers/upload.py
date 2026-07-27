@@ -2,12 +2,13 @@
 File upload router for the PE Audit Dashboard.
 
 POST /api/upload
-    Accepts a single PDF or DOCX resource-utilization file.
-    Routes to text parser → if image-only, enriches via Gemini Vision.
-    Returns a JSON payload the frontend can render.
+    Accepts a single DOCX resource-utilization file.
+    Routes to the deterministic text parser and returns a JSON payload the
+    frontend can render. Servers with zero parseable metrics are returned
+    with `image_only=True` and excluded from fleet averages.
 
 POST /api/smart-upload
-    Accepts ANY file (CSV, XLSX, PDF, DOCX, TXT, HTML).
+    Accepts ANY file (CSV, XLSX, DOCX, TXT, HTML).
     Auto-classifies the file type and routes to the right engine.
     Returns { type, data, classification } — frontend routes display.
 """
@@ -29,7 +30,7 @@ from services.smart_router import classify
 router = APIRouter()
 
 # ── Constants ───────────────────────────────────────────────────
-ALLOWED_EXTENSIONS     = {".pdf", ".docx", ".csv", ".xlsx", ".xls"}
+ALLOWED_EXTENSIONS     = {".docx", ".csv", ".xlsx", ".xls"}
 SMART_UPLOAD_ALLOWED   = {".pdf", ".docx", ".csv", ".xlsx", ".xls", ".txt", ".html", ".htm"}
 MAX_FILE_BYTES         = 50 * 1024 * 1024  # 50 MB
 
@@ -49,7 +50,6 @@ class ServerRecord(BaseModel):
     disks:           Dict[str, float] = Field(default_factory=dict)
     health_score:    float = 0.0
     image_only:      bool  = False
-    vision_enriched: bool  = False
 
 
 class UploadResponse(BaseModel):
@@ -57,7 +57,6 @@ class UploadResponse(BaseModel):
     file_type:        str
     server_count:     int
     image_only:       bool
-    vision_attempted: bool = False
     customer_name:    Optional[str] = None   # extracted from document heading
     servers:          List[ServerRecord]
     ai_summary:       Optional[str] = None   # post-upload Gemma/Llama briefing
@@ -89,24 +88,7 @@ def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
 
     record["health_score"]    = float(get_health_score(cpu, mem, disk, stype))
     record["image_only"]      = bool(record.get("_image_only", image_only))
-    record["vision_enriched"] = bool(record.get("_vision_enriched", False))
     return record
-
-
-def _run_vision_enrichment(raw: bytes, filename: str, servers: list) -> list:
-    """Call Gemini Vision to fill in metrics for image-only servers (parallel)."""
-    try:
-        from services.gemini_vision import enrich_servers_with_vision
-        api_key = config_store.get_gemini_key()
-        if not api_key:
-            return servers
-        enriched = enrich_servers_with_vision(
-            raw, filename, servers, api_key,
-            max_images=60, max_workers=8,
-        )
-        return enriched
-    except Exception:
-        return servers
 
 
 def _run_post_upload_summary(
@@ -200,7 +182,7 @@ def _run_post_upload_summary(
     "/upload",
     response_model=UploadResponse,
     status_code=status.HTTP_200_OK,
-    summary="Upload a Zabbix PDF or DOCX resource utilization report",
+    summary="Upload a DOCX resource utilization report",
 )
 async def upload(file: UploadFile = File(...)) -> UploadResponse:
     if not file or not file.filename:
@@ -219,8 +201,6 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     if len(raw) > MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds 50 MB limit.")
 
-    vision_attempted = False
-
     try:
         # RULE 4 — parse_resource_file() calls detect_resource_mode() internally.
         # save_resource_session() clears stale keys from the previous upload.
@@ -235,22 +215,6 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
                 or float(s.get("disk_used_max") or 0) > 0)
 
     image_only = not any(_has_data(s) for s in (servers_raw or []))
-
-    # Trigger Gemini Vision if:
-    #   • The entire file is image-only (no text metrics at all), OR
-    #   • At least ONE server has all-zero metrics (mixed files: some text, some image charts).
-    # This fixes silent miss-enrichment in Leonardo/Distell DOCXs where the file
-    # has one text-parseable server but the rest are chart screenshots.
-    # Skip Vision for CSV/XLSX — those are structured data, not image charts.
-    _ext_lower = ext.lower()
-    _skip_vision = _ext_lower in (".csv", ".xlsx", ".xls")
-    _zero_servers = [s for s in (servers_raw or []) if not _has_data(s)]
-
-    if not _skip_vision and (image_only or _zero_servers) and config_store.get_gemini_key():
-        vision_attempted = True
-        servers_raw = _run_vision_enrichment(raw, file.filename, servers_raw or [])
-        # Recalculate image_only after enrichment
-        image_only = not any(_has_data(s) for s in (servers_raw or []))
 
     # Customer name is ONLY extracted from Ctrl-M filenames (see routers/batch.py).
     # Resource uploads never contribute to customer identity.
@@ -280,7 +244,6 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
         file_type=ext.lstrip("."),
         server_count=len(enriched),
         image_only=bool(image_only),
-        vision_attempted=vision_attempted,
         customer_name=customer_name,
         servers=enriched,
         ai_summary=ai_summary,
@@ -333,10 +296,6 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 s.get("cpu_used", 0) > 0 or s.get("mem_used", 0) > 0
                 for s in (servers_raw or [])
             )
-
-            # Vision enrichment if no text metrics found
-            if img_only and config_store.get_gemini_key():
-                servers_raw = _run_vision_enrichment(raw, file.filename, servers_raw or [])
 
             enriched = [_enrich(dict(s), img_only) for s in (servers_raw or [])]
             data = {

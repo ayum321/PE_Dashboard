@@ -104,6 +104,11 @@ body::before{
 }
 .chip b{color:var(--ink); font-weight:700;}
 .chip .dot{width:7px; height:7px; border-radius:50%; background:var(--cyan); box-shadow:0 0 8px 1px currentColor;}
+.prod-chips{display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-start; margin-top:2px;}
+.prod-chip{
+  font-size:10.5px; font-weight:600; padding:3px 9px; border-radius:999px;
+  background:rgba(168,85,247,.12); border:1px solid rgba(168,85,247,.4); color:#c084fc;
+}
 
 /* ── Verdict banner ──────────────────────────────────────── */
 .banner{
@@ -305,6 +310,13 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         {% if customer and customer != 'Unknown Customer' %}
         <div class="cust-source">Sourced from Ctrl-M filename</div>
         {% endif %}
+        {% if reviewed_product_labels %}
+        <div class="prod-chips">
+          {% for label in reviewed_product_labels %}
+          <span class="prod-chip">{{ label }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
         <div class="chips">
           <span class="chip"><span class="dot"></span>{{ env }}</span>
           <span class="chip">Generated <b>{{ gen_date }}</b></span>
@@ -429,6 +441,9 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         </tr></thead>
         <tbody>{{ top_rows|safe }}</tbody>
       </table>
+      {% if n_jobs_shown < n_jobs %}
+      <div class="dim" style="padding:10px 20px;font-size:12px;">Showing top {{ n_jobs_shown }} of {{ n_jobs }} jobs by peak runtime.</div>
+      {% endif %}
     </div>
   </section>
 
@@ -449,6 +464,53 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         </tr></thead>
         <tbody>{{ srv_rows|safe }}</tbody>
       </table>
+    </div>
+  </section>
+
+  <!-- ── SOW volume compliance ───────────────────────────── -->
+  <section class="panel" style="--accent:#f97316;">
+    <div class="panel__head">
+      <div class="panel__icon">📄</div>
+      <div>
+        <div class="panel__t">SOW Contract &amp; Volume Compliance</div>
+        <div class="panel__s">{% if sow_summary %}{{ sow_summary }}{% else %}Actual engagement volumes vs. the contracted SOW ceilings{% endif %}</div>
+      </div>
+      <div class="panel__count" style="color:{{ sow_badge_color }};">{{ sow_badge_text }}</div>
+    </div>
+    <div class="panel__body" style="padding:{{ '0' if n_sow else '18px 20px' }};">
+      {% if n_sow %}
+      <table>
+        <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
+        <tbody>{{ sow_rows|safe }}</tbody>
+      </table>
+      {% else %}
+      <div class="empty">No SOW contract uploaded for this engagement — volume compliance not assessed.</div>
+      {% endif %}
+    </div>
+  </section>
+
+  <!-- ── Performance benchmark ──────────────────────────── -->
+  <section class="panel" style="--accent:#eab308;">
+    <div class="panel__head">
+      <div class="panel__icon">📊</div>
+      <div>
+        <div class="panel__t">Performance Benchmark Results</div>
+        <div class="panel__s">{% if bench_summary %}{{ bench_summary }}{% else %}Baseline vs. current transaction/runtime comparison{% endif %}</div>
+      </div>
+      <div class="panel__count" style="color:{{ bench_badge_color }};">{{ bench_badge_text }}</div>
+    </div>
+    <div class="panel__body" style="padding:{{ '0' if n_bench else '18px 20px' }};">
+      {% if n_bench %}
+      <table>
+        <thead><tr><th>Transaction</th><th>Baseline</th><th>Current</th><th>Δ%</th><th>Status</th></tr></thead>
+        <tbody>{{ bench_rows|safe }}</tbody>
+      </table>
+      {% if n_bench < n_bench_total %}
+      <div class="dim" style="padding:10px 20px;font-size:12px;">Showing top {{ n_bench }} of {{ n_bench_total }} transactions by regression.</div>
+      {% endif %}
+      {% else %}
+      <div class="empty">No benchmark data uploaded for this engagement — performance benchmarking not assessed.</div>
+      {% endif %}
     </div>
   </section>
 
@@ -506,6 +568,9 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
             {{ pe_tick }} {{ 'Approved' if pe_approved else 'Pending' }}
           </div>
           <div class="appr__line">Signed: {{ pe_date or '—' }}</div>
+          {% if pe_override %}
+          <div class="appr__line" style="color:#f59e0b;font-weight:700;">⚠ Signed off with unresolved checklist/blocker item(s) — override acknowledged</div>
+          {% endif %}
         </div>
         <div class="appr">
           <div class="appr__role">Customer</div>

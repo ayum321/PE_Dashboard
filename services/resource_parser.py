@@ -333,7 +333,8 @@ def parse_zabbix_pdf_text(text):
       D) Mixed: some servers have text metrics, others are image-only
 
     Returns list of server dicts. Image-only servers have zeroed metrics
-    and are flagged for Gemini Vision OCR enrichment.
+    and are flagged `image_only=True` (no further enrichment is attempted —
+    Vision AI extraction was removed; re-upload a text-based report instead).
     """
     servers_map = {}  # short_host_lower → rec (case-insensitive dedup)
     def _dedup_key(h):
