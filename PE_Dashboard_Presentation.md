@@ -159,8 +159,10 @@ $$
 - Thresholds (`SLA_ATRISK_PCT=15`, `SLA_LONGJOB_PCT=40`) live in **one file**
   (`pe_config.py`) — every consumer (SLA matrix, compliance engine, findings
   engine, frontend legend) reads the same constant, never a hardcoded copy.
-- Division-by-zero guarded (`np.nan` → `fillna(-100)`) so a zero-hour SLA
-  never silently renders as `inf%`.
+- Zero/missing SLA guard (`routers/sla_matrix.py`): `sla_hrs <= 0` never
+  computes a buffer number at all — `buffer_pct = None`,
+  `reason_code = "SLA_MISSING"`. A data-integrity gap is surfaced as
+  **missing data**, never silently manufactured into a BREACH verdict.
 
 ---
 
@@ -224,26 +226,36 @@ tool can do, because it needs both Ctrl-M **and** Azure Monitor data:
 
 ---
 
-## Formula Detail
+## Formula Detail (with the clamps that actually ship)
 
 $$
-\text{RFCS} = \text{failureRate} \times \frac{0.6\cdot\text{avgCPU} + 0.4\cdot\text{avgMem}}{100} \times \big(1 + 0.15 \times \min(\text{criticalServers},10)\big)
+\text{RFCS} = \min\Big(100, \text{failureRate} \times \frac{0.6\cdot\text{avgCPU} + 0.4\cdot\text{avgMem}}{100} \times \big(1 + 0.15 \times \min(\text{criticalServers},10)\big)\Big)
 $$
+`failureRate` is passed in as a **percentage** (`100 - compliance_pct`), not a
+fraction — raw value can reach ~250 before the `min(100, …)` clamp caps it.
 
 $$
 \text{SRI} = \frac{\text{peakHours}}{\text{slaCeilingHours}} \times \Big(1 + \max\big(0, \tfrac{\text{avgCPU}-70}{100}\big)\Big) \quad (>1.0 = \text{breach})
 $$
+`peakHours / slaCeilingHours` is algebraically `1 - bufferPct/100` — SRI
+deliberately **reuses** the same buffer fact (amplified by CPU pressure), it
+is not a second independent computation that could silently disagree.
 
 $$
-\text{CRS} = \text{failedFlag} \times \frac{\text{downstreamCount}}{\text{downstreamCount}+5} \times \Big(1 - \tfrac{\text{slaBuffer}}{100}\Big)
+\text{CRS} = \min\Big(1, \text{failedFlag} \times \frac{\text{downstreamCount}}{\text{downstreamCount}+5} \times \big(1 - \text{clamp}(\text{slaBuffer},0,100)/100\big)\Big)
 $$
+`slaBuffer` is clamped to `[0,100]` **before** use — a −200% (deep breach)
+buffer becomes `0`, not a negative that would push CRS past 1. Result is
+clamped again to `≤1`.
 
 $$
 \text{OSHS} = 0.40\cdot\text{batchScore} + 0.35\cdot\text{slaScore} + 0.25\cdot\text{resourceScore}
 $$
+Weights re-normalize over batch+SLA only (0.40/0.35 → proportional) when no
+resource data exists — never fabricates a resource score.
 
-*Talk track: these feed the Executive Dashboard's letter grade — the one
-number a customer sponsor actually looks at.*
+*Talk track: every formula here is clamped at both ends in code — the deck
+now states the clamps explicitly instead of leaving them implicit.*
 
 ---
 
@@ -281,12 +293,21 @@ $$
 \text{pct} = \frac{\text{actual}}{\text{SOW contracted}} \times 100
 $$
 
-| Band | Status |
-|---|---|
-| `< SOW_UNDER_PCT` | **LOW** — under-utilized vs. contract |
-| `90% – SOW_OVER_PCT` | **OPTIMAL** |
-| `> SOW_OVER_PCT` | **OVER** |
-| `> SOW_OVER_CRIT_PCT` | **CRITICAL_OVER** — blocks PE sign-off without disclaimer |
+Evaluated in strict order (first match wins — never double-fires):
+
+| Order | Condition | Status |
+|---|---|---|
+| 1 | `> SOW_OVER_CRIT_PCT` | **CRITICAL_OVER** — blocks PE sign-off without disclaimer |
+| 2 | `> SOW_OVER_PCT` | **OVER** |
+| 3 | `< SOW_UNDER_PCT` | **LOW** — under-utilized vs. contract |
+| 4 | `< 90%` (remaining) | **ACCEPTABLE** — inside window, lower end |
+| 5 | else | **OPTIMAL** — preferred zone |
+
+⚠️ **Known gap**: the `90%` boundary in step 4 is a literal hardcoded value
+in `routers/sow.py`, not read from `pe_config` — inconsistent with this
+deck's own "thresholds live in one file" rule. Low blast radius today (only
+matters if `SOW_UNDER_PCT` is ever configured above 90), but worth fixing to
+a named constant.
 
 *Talk track: this is what tells a customer "you're running 53% under your
 contracted daily volume" or "you've exceeded scope and need a change order."*
