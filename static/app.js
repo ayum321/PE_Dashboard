@@ -784,6 +784,11 @@ function applyCustomerName(name, opts = {}) {
   //    report header, before clicking Export.
   const govCust = document.getElementById("gov-detected-customer");
   if (govCust) govCust.textContent = cust || "—";
+
+  // 6. Go-Live banner "Customer: —" fallback (see refreshGoLiveBanner) needs
+  //    to refresh the instant the customer name becomes known — otherwise it
+  //    stays on the pre-upload "—" until the next unrelated approval click.
+  if (typeof refreshGoLiveBanner === "function") refreshGoLiveBanner();
 }
 
 // ── Audit Pulse ── Grafana-style multi-tile strip with sparkline + audit id
@@ -9741,8 +9746,17 @@ function refreshGoLiveBanner() {
     label.style.color = color;
   }
   if (meta) {
-    const peName   = a.pe.name       || "—";
-    const custName = a.customer.name || "—";
+    const peName = a.pe.name || "—";
+    // `a.customer.name` is the SIGNER's personal name (e.g. "John Doe"), a
+    // distinct field from the engagement customer/company name. When no one
+    // has typed a signer name yet, showing a bare "—" reads as "we don't even
+    // know who the customer is" even though the company is already known
+    // from the upload (window.appData.customerName, e.g. "Dawnfoods") — fall
+    // back to that instead, with a qualifier so it's clear no signer has
+    // actually signed yet.
+    const custName = a.customer.name
+      ? a.customer.name
+      : (window.appData.customerName ? `${window.appData.customerName} (unsigned)` : "—");
     meta.textContent = `PE: ${peName}  |  Customer: ${custName}`;
   }
 }

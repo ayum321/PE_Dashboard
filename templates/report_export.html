@@ -483,6 +483,8 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
         <tbody>{{ sow_rows|safe }}</tbody>
       </table>
+      <div style="padding:12px 20px;font-size:12.5px;line-height:1.5;border-top:1px solid var(--border-soft);color:{{ sow_badge_color }};background:color-mix(in srgb,{{ sow_badge_color }} 8%, transparent);">{{ sow_disclaimer }}</div>
+      <div class="dim" style="padding:8px 20px 14px;font-size:11px;">Status bands — <b style="color:#3b82f6">UNDER-UTILISED</b> &lt;{{ sow_under_t }}% &middot; <b style="color:#22c55e">ACCEPTABLE / OPTIMAL</b> {{ sow_under_t }}–{{ sow_over_t }}% &middot; <b style="color:#f59e0b">OVER CONTRACT</b> &gt;{{ sow_over_t }}% &middot; <b style="color:#ef4444">CRITICAL OVER</b> &gt;{{ sow_over_crit_t }}%</div>
       {% else %}
       <div class="empty">No SOW contract uploaded for this engagement — volume compliance not assessed.</div>
       {% endif %}
@@ -499,7 +501,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       </div>
       <div class="panel__count" style="color:{{ bench_badge_color }};">{{ bench_badge_text }}</div>
     </div>
-    <div class="panel__body" style="padding:{{ '0' if n_bench else '18px 20px' }};">
+    <div class="panel__body" style="padding:{{ '0' if (n_bench or has_batch_perf) else '18px 20px' }};">
       {% if n_bench %}
       <table>
         <thead><tr><th>Transaction</th><th>Baseline</th><th>Current</th><th>Δ%</th><th>Status</th></tr></thead>
@@ -508,6 +510,12 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       {% if n_bench < n_bench_total %}
       <div class="dim" style="padding:10px 20px;font-size:12px;">Showing top {{ n_bench }} of {{ n_bench_total }} transactions by regression.</div>
       {% endif %}
+      {% elif has_batch_perf %}
+      <table>
+        <thead><tr><th>Job</th><th>Baseline</th><th>Current</th><th>Δ%</th><th>Status</th></tr></thead>
+        <tbody>{{ batch_perf_rows|safe }}</tbody>
+      </table>
+      <div class="dim" style="padding:10px 20px;font-size:12px;">Showing top {{ n_batch_perf_regr if n_batch_perf_regr < 10 else 10 }} regression(s) of {{ n_batch_perf_total }} jobs compared — Ctrl-M batch runtime comparison, not a UI transaction benchmark.</div>
       {% else %}
       <div class="empty">No benchmark data uploaded for this engagement — performance benchmarking not assessed.</div>
       {% endif %}

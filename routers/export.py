@@ -237,6 +237,50 @@ def _top_rows(top_jobs: List[dict]) -> str:
     return "".join(rows)
 
 
+def _sow_status(pct: float) -> str:
+    """Classify SOW consumption % against the PE standard process window.
+
+    Mirrors routers/sow.py::_status() exactly (same pe_config thresholds) so
+    the exported report can NEVER show a different verdict than the live SOW
+    Contract tab for the same numbers — and so a stale/incomplete client
+    payload (e.g. an old browser tab that never sent status) still gets a
+    correct, real classification instead of "N/A".
+    """
+    if pct > pe_config.SOW_OVER_CRIT_PCT: return "CRITICAL_OVER"
+    if pct > pe_config.SOW_OVER_PCT:      return "OVER"
+    if pct < pe_config.SOW_UNDER_PCT:     return "LOW"
+    if pct < 90:                          return "ACCEPTABLE"
+    return "OPTIMAL"
+
+
+_SOW_STATUS_TAG = {
+    "OPTIMAL":       ('tag-green', 'OPTIMAL'),
+    "ACCEPTABLE":    ('tag-green', 'ACCEPTABLE'),
+    "LOW":           ('tag-blue',  'UNDER-UTILISED'),
+    "OVER":          ('tag-amber', 'OVER CONTRACT'),
+    "CRITICAL_OVER": ('tag-red',   'CRITICAL OVER'),
+}
+
+
+def _sow_resolve(m: dict) -> tuple[float, float, str]:
+    """Resolve (sow, actual, status) for one SOW metric, recomputing pct/status
+    server-side when the client sent them missing or zeroed (stale cached JS,
+    a manual-entry object built before both fields existed, etc.) even though
+    sow/actual are real numbers. Returns (sow_v, act_v, pct, status_key) —
+    the single source both _sow_rows() and the overall-status fallback use,
+    so the per-row statuses and the header badge can never disagree.
+    """
+    sow_v  = _f(m.get("sow", 0))
+    act_v  = _f(m.get("actual", 0))
+    pct    = _f(m.get("pct", 0))
+    status_key = (m.get("status") or "").upper()
+    if pct <= 0 and sow_v > 0 and act_v > 0:
+        pct = round(act_v / sow_v * 100, 1)
+    if status_key not in _SOW_STATUS_TAG:
+        status_key = _sow_status(pct) if (sow_v > 0 and act_v > 0) else "LOW"
+    return sow_v, act_v, pct, status_key
+
+
 def _sow_rows(metrics: List[dict]) -> str:
     """SOW volume-compliance rows — mirrors the dashboard's SOW Contract &
     Volume Compliance tab so the exported report shows the SAME evidence the
@@ -245,21 +289,11 @@ def _sow_rows(metrics: List[dict]) -> str:
     if not metrics:
         return ("<tr><td colspan='5' class='empty'>No SOW contract data captured "
                 "for this engagement.</td></tr>")
-    _status_tag = {
-        "OPTIMAL":       ('tag-green', 'OPTIMAL'),
-        "ACCEPTABLE":    ('tag-green', 'ACCEPTABLE'),
-        "LOW":           ('tag-blue',  'UNDER-UTILISED'),
-        "OVER":          ('tag-amber', 'OVER CONTRACT'),
-        "CRITICAL_OVER": ('tag-red',   'CRITICAL OVER'),
-    }
     rows = []
     for m in metrics:
         label  = _esc(m.get("label") or m.get("key") or "?")
-        sow_v  = _f(m.get("sow", 0))
-        act_v  = _f(m.get("actual", 0))
-        pct    = _f(m.get("pct", 0))
-        status_key = (m.get("status") or "").upper()
-        cls, label_txt = _status_tag.get(status_key, ('tag-gray', status_key or 'N/A'))
+        sow_v, act_v, pct, status_key = _sow_resolve(m)
+        cls, label_txt = _SOW_STATUS_TAG.get(status_key, ('tag-gray', status_key or 'N/A'))
         pct_style = 'style="color:#ef4444;font-weight:700"' if status_key == "CRITICAL_OVER" else \
                     ('style="color:#f59e0b;font-weight:700"' if status_key == "OVER" else "")
         rows.append(f"""<tr>
@@ -268,6 +302,33 @@ def _sow_rows(metrics: List[dict]) -> str:
           <td class="num">{act_v:,.0f}</td>
           <td {pct_style}>{pct:.1f}%</td>
           <td><span class="tag {cls}">{label_txt}</span></td>
+        </tr>""")
+    return "".join(rows)
+
+
+def _batch_perf_rows(bps: dict) -> str:
+    """Batch-runtime performance rows (top regressions, worst-first) — used
+    when the benchmark upload is a Ctrl-M runtime comparison (batch_perf_summary
+    present) rather than a UI transaction benchmark (generic `rows`). Without
+    this, a real batch-perf upload with genuine regressions rendered as
+    "No benchmark data uploaded" because the report only ever looked at
+    `benchmark.rows`, which batch-perf responses leave empty by design.
+    """
+    regressions = (bps.get("top_regressions") or [])[:10]
+    if not regressions:
+        return "<tr><td colspan='5' class='empty'>No regressions detected.</td></tr>"
+    rows = []
+    for r in regressions:
+        name  = _esc(r.get("job") or "?")
+        old_s = _f(r.get("old_secs", 0))
+        new_s = _f(r.get("new_secs", 0))
+        delta = _f(r.get("delta_pct", 0))
+        rows.append(f"""<tr>
+          <td><b>{name}</b></td>
+          <td class="dim">{old_s:.1f}s</td>
+          <td>{new_s:.1f}s</td>
+          <td style="color:#ef4444;font-weight:700">+{delta:.1f}%</td>
+          <td><span class="tag tag-red">REGRESSION</span></td>
         </tr>""")
     return "".join(rows)
 
@@ -428,6 +489,28 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         sow_status  = (sow.get("overall_status") or "").upper()
         sow_summary = _esc(sow.get("summary") or "")
         n_sow       = len(sow_metrics)
+        # Defense-in-depth (mirrors _sow_resolve()): a client payload can omit
+        # overall_status even when its metrics are real (stale cached JS, the
+        # manual-entry fallback, a restored-but-different session shape) — this
+        # is exactly what produced a "NOT ASSESSED" header badge sitting above
+        # two fully-populated, real DFU/SKU rows in a live customer report.
+        # Derive the worst per-metric status instead of ever defaulting to
+        # "not assessed" when metrics are actually present.
+        _SOW_SEVERITY = {"CRITICAL_OVER": 4, "OVER": 3, "LOW": 2, "ACCEPTABLE": 1, "OPTIMAL": 0}
+        if sow_status not in ("OPTIMAL", "ACCEPTABLE", "LOW", "OVER", "CRITICAL_OVER") and sow_metrics:
+            resolved = [_sow_resolve(m)[3] for m in sow_metrics]
+            sow_status = max(resolved, key=lambda s: _SOW_SEVERITY.get(s, 0))
+        # Disclaimer text — always shown, so a reader unfamiliar with the
+        # audit's internal vocabulary knows exactly what each verdict means
+        # before deciding whether it's acceptable, instead of just seeing a
+        # colored word with no context.
+        sow_disclaimer = {
+            "CRITICAL_OVER": f"⚠ CRITICAL — actual volume exceeds {_g(pe_config.SOW_OVER_CRIT_PCT)}% of the contracted SOW ceiling. This is a commercial over-consumption event and must be formally acknowledged before PE sign-off.",
+            "OVER":          f"⚠ Actual volume exceeds {_g(pe_config.SOW_OVER_PCT)}% of the contracted SOW ceiling — outside the standard process window. Requires formal review and acknowledgment.",
+            "LOW":           f"ℹ Actual volume is below {_g(pe_config.SOW_UNDER_PCT)}% of the contracted SOW ceiling — under-utilised relative to contract. Findings are validated only at the tested volume, not at full contracted scale.",
+            "ACCEPTABLE":    f"✓ Within the standard {_g(pe_config.SOW_UNDER_PCT)}%–{_g(pe_config.SOW_OVER_PCT)}% SOW process window (lower range).",
+            "OPTIMAL":       f"✓ Within the preferred 90%–{_g(pe_config.SOW_OVER_PCT)}% SOW process window. Go-live confidence high.",
+        }.get(sow_status, "SOW volume comparison not yet performed for this engagement — upload a SOW contract and Ctrl-M actuals to assess.")
         sow_badge = {
             "OPTIMAL": ("#22c55e", "OPTIMAL"), "ACCEPTABLE": ("#22c55e", "ACCEPTABLE"),
             "LOW": ("#3b82f6", "UNDER-UTILISED"), "OVER": ("#f59e0b", "OVER CONTRACT"),
@@ -442,6 +525,17 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         bench_badge = ("#ef4444", f"{n_bench_breach} BREACH") if n_bench_breach else (
                       ("#f59e0b", f"{n_bench_degraded} DEGRADED") if n_bench_degraded else
                       ("#22c55e", "WITHIN TOLERANCE") if n_bench_total else ("#6b7a99", "NOT ASSESSED"))
+        # Batch-runtime-performance uploads (Ctrl-M runtime comparison) store
+        # their results in batch_perf_summary, NOT the generic `rows` array —
+        # without this, a real upload with genuine regressions rendered as
+        # "No benchmark data uploaded" underneath a summary line that plainly
+        # described real regression/improvement counts.
+        batch_perf = benchmark.get("batch_perf_summary") or {}
+        has_batch_perf = bool(batch_perf)
+        n_batch_perf_regr = int(batch_perf.get("regressions", 0))
+        if has_batch_perf and not n_bench_total:
+            bench_badge = ("#ef4444", f"{n_batch_perf_regr} REGRESSION") if n_batch_perf_regr \
+                          else ("#22c55e", "WITHIN TOLERANCE")
 
         # Batch table is capped to the top 20 jobs by peak runtime for a
         # readable page — previously this cap had no caption, so the "{{n_jobs}}
@@ -494,9 +588,15 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             sow_rows=_sow_rows(sow_metrics), n_sow=n_sow,
             sow_status=sow_status, sow_summary=sow_summary,
             sow_badge_color=sow_badge[0], sow_badge_text=sow_badge[1],
+            sow_disclaimer=_esc(sow_disclaimer),
+            sow_under_t=_g(pe_config.SOW_UNDER_PCT), sow_over_t=_g(pe_config.SOW_OVER_PCT),
+            sow_over_crit_t=_g(pe_config.SOW_OVER_CRIT_PCT),
             bench_rows=_bench_rows(bench_rows_data), n_bench=len(bench_rows_data),
             n_bench_total=n_bench_total, bench_summary=bench_summary,
             bench_badge_color=bench_badge[0], bench_badge_text=bench_badge[1],
+            has_batch_perf=has_batch_perf, n_batch_perf_regr=n_batch_perf_regr,
+            n_batch_perf_total=int(batch_perf.get("total_jobs", 0)),
+            batch_perf_rows=_batch_perf_rows(batch_perf) if has_batch_perf else "",
             pe_override=pe_override,
         )
 
