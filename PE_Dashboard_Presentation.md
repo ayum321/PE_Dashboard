@@ -140,6 +140,12 @@ flowchart TD
   convention across backend and frontend.
 - **Every value carries provenance**: `sla_source`, `reason_code`,
   `debug_runtime_source` — a reviewer can always see *why* a number is what it is.
+- **Tier 1 is externally verified** across real customer engagements —
+  matches every hand-checked row. **Tier 2 (SOW PDF ceiling) is designed and
+  wired, but not yet empirically validated** — every real engagement
+  reviewed so far showed "No SOW contract uploaded yet," so this fallback
+  path has never actually been exercised against a live SOW PDF. State it at
+  that confidence level, not the same as Tier 1, until it has been.
 
 ---
 
@@ -164,6 +170,13 @@ flowchart TD
   computes a buffer number at all — `buffer_pct = None`,
   `reason_code = "SLA_MISSING"`. A data-integrity gap is surfaced as
   **missing data**, never silently manufactured into a BREACH verdict.
+- **This guard only catches literal-zero SLA.** A real, nonzero-but-tiny SLA
+  (e.g. a 10-minute/0.167h Tier-1 ceiling) passes the guard and can still
+  produce implausible-looking magnitudes (e.g. a job seen at −3713% buffer
+  on a real customer dashboard) — mathematically correct given the inputs,
+  but a value that large is itself a signal the Tier-1 SLA entry deserves a
+  second look, not evidence of a display bug. Not yet capped/flagged
+  separately from an ordinary breach.
 
 ---
 
@@ -221,9 +234,18 @@ tool can do, because it needs both Ctrl-M **and** Azure Monitor data:
 |---|---|
 | **RFCS** (0–100) | Resource-Failure Correlation Score — how much resource stress lines up with job failures |
 | **SRI** (0–∞) | SLA Risk Index per job — buffer distance amplified by CPU pressure |
-| **JRTOS** (per hour 0–23) | Job-Resource Temporal Overlap — which hour of day is riskiest |
+| **JRTOS** (0–1, one score per hour-of-day bucket 0–23) | Job-Resource Temporal Overlap — which hour of day is riskiest |
 | **CRS** (0–1) | Cascade Risk Score — likelihood a breach cascades downstream |
 | **OSHS** (0–100 → A–F) | Overall System Health Score — executive-dashboard grade |
+
+⚠️ **Calibration caveat**: across the real engagements reviewed so far
+(failure rates consistently <1%, average CPU consistently <5%), RFCS and
+SRI's amplification terms rarely activate — both formulas were designed
+assuming a wider input range than this Ctrl-M/Oracle batch workload class
+actually produces. On this class of engagement they may not discriminate a
+0.1%-failure customer from a 3%-failure one as clearly as the "0–100"/CPU-
+amplified framing implies. Worth validating against a heavier-load
+engagement before presenting either as a differentiated signal to a customer.
 
 ---
 
@@ -252,11 +274,28 @@ tool can do, because it needs both Ctrl-M **and** Azure Monitor data:
   result is clamped again to `≤ 1`.
 - Example: job failed, 8 downstream jobs, buffer was −200% (deep breach)
   → chain factor `8/13 = 0.615` × buffer risk `1 − 0/100 = 1.0` → **CRS ≈ 0.62**
+- **Verified against a real worst-case row** (a job at −3713.1% buffer):
+  `calc_crs(True, 8, -3713.1)` returns the **same 0.615** as a −20% breach
+  with the same downstream count. The clamp fixes boundedness completely,
+  but as a side effect **CRS can't distinguish "barely breached" from
+  "catastrophically breached"** — every breach past 0% buffer maxes out the
+  buffer-risk term identically. Chain size is the only thing still varying
+  CRS between two failed jobs.
 
 **OSHS** — Overall System Health Score (executive grade)
 > `OSHS = 0.40×batchScore + 0.35×slaScore + 0.25×resourceScore`
 - Weights re-normalize over batch+SLA only (→ 0.53/0.47 proportional) when
   no resource data exists — **never fabricates** a resource score.
+
+**JRTOS** — Job-Resource Temporal Overlap (per hour-of-day bucket, 0–23)
+> `JRTOS[h] = (jobs[h]/maxJobsInAnyHour) × (failRate[h]/100) × (peakCPU/100)`
+- All three factors are ratios in `[0,1]`, so `JRTOS[h]` is naturally bounded
+  to `[0,1]` — no clamp needed. The "0–23" in the summary table is the
+  **hour index** (24 buckets/day), not the score's range — a labeling
+  ambiguity now fixed above.
+- Example: hour 2am has 12 jobs (busiest hour, so `jobs/max=1.0`), 2 of
+  those failed (`failRate=16.7%`), peak CPU that hour was 40%
+  → `1.0 × 0.167 × 0.40` → **JRTOS(2am) ≈ 0.067**
 
 *Talk track: every formula here is clamped at both ends in code — the deck
 now states the clamps and a worked example for each, instead of leaving the
