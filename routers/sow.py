@@ -78,18 +78,18 @@ def _status(pct: float) -> str:
     Bands come from services/pe_config.py — never hardcode them here, the
     window is customer-tunable via config_store.
 
-    LOW           < SOW_UNDER_PCT      — below the contracted floor. Findings are
-                                         only validated at the tested volume.
-    ACCEPTABLE    floor .. 90%         — inside the standard window, lower end.
-    OPTIMAL       90% .. SOW_OVER_PCT  — preferred zone.
-    OVER          > SOW_OVER_PCT       — over-consumption vs contracted scope.
-    CRITICAL_OVER > SOW_OVER_CRIT_PCT  — severe over-consumption; blocks PE
-                                         sign-off until commercially resolved.
+    LOW           < SOW_UNDER_PCT          — below the contracted floor. Findings
+                                             are only validated at the tested volume.
+    ACCEPTABLE    floor .. SOW_ACCEPTABLE_PCT — inside the standard window, lower end.
+    OPTIMAL       SOW_ACCEPTABLE_PCT .. SOW_OVER_PCT — preferred zone.
+    OVER          > SOW_OVER_PCT           — over-consumption vs contracted scope.
+    CRITICAL_OVER > SOW_OVER_CRIT_PCT      — severe over-consumption; blocks PE
+                                             sign-off until commercially resolved.
     """
-    if pct > _pc.SOW_OVER_CRIT_PCT: return "CRITICAL_OVER"
-    if pct > _pc.SOW_OVER_PCT:      return "OVER"
-    if pct < _pc.SOW_UNDER_PCT:     return "LOW"
-    if pct < 90:                    return "ACCEPTABLE"
+    if pct > _pc.SOW_OVER_CRIT_PCT:     return "CRITICAL_OVER"
+    if pct > _pc.SOW_OVER_PCT:          return "OVER"
+    if pct < _pc.SOW_UNDER_PCT:         return "LOW"
+    if pct < _pc.SOW_ACCEPTABLE_PCT:    return "ACCEPTABLE"
     return "OPTIMAL"
 
 

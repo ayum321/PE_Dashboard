@@ -121,9 +121,10 @@ let SLA_LONGJOB_PCT = 40.0;
 // fallback classifies status with the SAME thresholds as /api/sow/compare,
 // instead of leaving every manually-entered metric's status/pct unset (which
 // showed as "0.0%" / "N/A" everywhere this fallback feeds a report or panel).
-let SOW_UNDER_PCT     = 70.0;
-let SOW_OVER_PCT      = 110.0;
-let SOW_OVER_CRIT_PCT = 120.0;
+let SOW_UNDER_PCT      = 70.0;
+let SOW_OVER_PCT       = 110.0;
+let SOW_OVER_CRIT_PCT  = 120.0;
+let SOW_ACCEPTABLE_PCT = 90.0;
 
 /** Map a buffer % to a shared {tone, color, label} band token. */
 function _bufferBand(bufPct) {
@@ -15622,9 +15623,10 @@ async function loadConfig() {
     // in sync with pe_config so all panels share one green/amber/red rule.
     if (cfg.sla_atrisk_pct  != null) SLA_ATRISK_PCT  = Number(cfg.sla_atrisk_pct)  || SLA_ATRISK_PCT;
     if (cfg.sla_longjob_pct != null) SLA_LONGJOB_PCT = Number(cfg.sla_longjob_pct) || SLA_LONGJOB_PCT;
-    if (cfg.sow_under_pct     != null) SOW_UNDER_PCT     = Number(cfg.sow_under_pct)     || SOW_UNDER_PCT;
-    if (cfg.sow_over_pct      != null) SOW_OVER_PCT      = Number(cfg.sow_over_pct)      || SOW_OVER_PCT;
-    if (cfg.sow_over_crit_pct != null) SOW_OVER_CRIT_PCT = Number(cfg.sow_over_crit_pct) || SOW_OVER_CRIT_PCT;
+    if (cfg.sow_under_pct      != null) SOW_UNDER_PCT      = Number(cfg.sow_under_pct)      || SOW_UNDER_PCT;
+    if (cfg.sow_over_pct       != null) SOW_OVER_PCT       = Number(cfg.sow_over_pct)       || SOW_OVER_PCT;
+    if (cfg.sow_over_crit_pct  != null) SOW_OVER_CRIT_PCT  = Number(cfg.sow_over_crit_pct)  || SOW_OVER_CRIT_PCT;
+    if (cfg.sow_acceptable_pct != null) SOW_ACCEPTABLE_PCT = Number(cfg.sow_acceptable_pct) || SOW_ACCEPTABLE_PCT;
 
     const keyEl = document.getElementById("settings-api-key");
     if (keyEl && cfg.gemini_api_key) keyEl.value = cfg.gemini_api_key;
@@ -21845,7 +21847,7 @@ function _buildSowCompareFromManual() {
     else if (pct > SOW_OVER_CRIT_PCT)    status = "CRITICAL_OVER";
     else if (pct > SOW_OVER_PCT)         status = "OVER";
     else if (pct < SOW_UNDER_PCT)        status = "LOW";
-    else if (pct < 90)                   status = "ACCEPTABLE";
+    else if (pct < SOW_ACCEPTABLE_PCT)   status = "ACCEPTABLE";
     else                                 status = "OPTIMAL";
     return { key: f.key, label: f.label, sow: f.base, actual: act, pct, status };
   });

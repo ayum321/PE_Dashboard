@@ -303,11 +303,13 @@ Evaluated in strict order (first match wins — never double-fires):
 | 4 | `< 90%` (remaining) | **ACCEPTABLE** — inside window, lower end |
 | 5 | else | **OPTIMAL** — preferred zone |
 
-⚠️ **Known gap**: the `90%` boundary in step 4 is a literal hardcoded value
-in `routers/sow.py`, not read from `pe_config` — inconsistent with this
-deck's own "thresholds live in one file" rule. Low blast radius today (only
-matters if `SOW_UNDER_PCT` is ever configured above 90), but worth fixing to
-a named constant.
+✅ **Fixed**: the `90%` boundary is now `pe_config.SOW_ACCEPTABLE_PCT` — a
+named, config-store-backed constant (`sow_acceptable_pct`), not a hardcoded
+literal. It was previously duplicated as a raw `90` in 5 places
+(`routers/sow.py`, `routers/export.py`, `routers/findings.py`,
+`routers/pe_narrative.py`, `static/app.js`) — all five now read the same
+constant. Verified the strict `if/elif` order never produces a gap or
+overlap even when `SOW_UNDER_PCT` is configured above 90 (mutation-tested).
 
 *Talk track: this is what tells a customer "you're running 53% under your
 contracted daily volume" or "you've exceeded scope and need a change order."*

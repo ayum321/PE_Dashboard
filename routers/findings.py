@@ -2800,7 +2800,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 # Bands from pe_config — mirrors routers/sow.py _status().
                 _status = ("CRITICAL_OVER" if _pct > _pec_sow.SOW_OVER_CRIT_PCT
                            else "OVER"       if _pct > _pec_sow.SOW_OVER_PCT
-                           else "OPTIMAL"    if _pct >= 90
+                           else "OPTIMAL"    if _pct >= _pec_sow.SOW_ACCEPTABLE_PCT
                            else "ACCEPTABLE" if _pct >= _pec_sow.SOW_UNDER_PCT
                            else "LOW")
             items.append({**_m, "status": _status, "label": _m.get("label") or _m.get("key") or "?"})

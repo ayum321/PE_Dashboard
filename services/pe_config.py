@@ -422,13 +422,13 @@ SOW_BATCH_JOBS:    float = 450.0
 # The PE standard process window is SOW_UNDER_PCT … SOW_OVER_PCT. Outside that
 # range the deviation requires formal review and customer acknowledgment.
 #
-#   < SOW_UNDER_PCT      LOW           — tested below contracted scale; findings
-#                                        are not validated at full volume
-#   … SOW_OVER_PCT       ACCEPTABLE /  — inside the standard process window
-#                        OPTIMAL
-#   > SOW_OVER_PCT       OVER          — over-consumption vs contracted scope
-#   > SOW_OVER_CRIT_PCT  CRITICAL_OVER — severe over-consumption; blocks PE
-#                                        sign-off until commercially resolved
+#   < SOW_UNDER_PCT       LOW           — tested below contracted scale; findings
+#                                         are not validated at full volume
+#   … SOW_ACCEPTABLE_PCT  ACCEPTABLE    — inside the standard process window, low end
+#   … SOW_OVER_PCT        OPTIMAL       — preferred zone
+#   > SOW_OVER_PCT        OVER          — over-consumption vs contracted scope
+#   > SOW_OVER_CRIT_PCT   CRITICAL_OVER — severe over-consumption; blocks PE
+#                                         sign-off until commercially resolved
 #
 # Every consumer (routers/sow.py, routers/findings.py, routers/pe_narrative.py
 # and the SOW panels in static/app.js) reads these — never hardcode 70/110/120
@@ -436,6 +436,11 @@ SOW_BATCH_JOBS:    float = 450.0
 SOW_UNDER_PCT:     float = 70.0
 SOW_OVER_PCT:      float = 110.0
 SOW_OVER_CRIT_PCT: float = 120.0
+# ACCEPTABLE/OPTIMAL split within the standard window (SOW_UNDER_PCT..SOW_OVER_PCT).
+# Was a hardcoded `90` literal duplicated in routers/sow.py, routers/export.py,
+# routers/findings.py, routers/pe_narrative.py and static/app.js — pulled into
+# one named constant here so none of those five call sites can drift.
+SOW_ACCEPTABLE_PCT: float = 90.0
 
 
 def reload() -> None:
@@ -472,7 +477,7 @@ def reload() -> None:
     global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
     global BATCH_DATA_HEAVY_PATTERNS
     global SOW_DFU, SOW_SKU, SOW_ORDERS, SOW_BATCH_JOBS
-    global SOW_UNDER_PCT, SOW_OVER_PCT, SOW_OVER_CRIT_PCT
+    global SOW_UNDER_PCT, SOW_OVER_PCT, SOW_OVER_CRIT_PCT, SOW_ACCEPTABLE_PCT
     global JOB_TYPE_PATTERNS, EXCLUDE_FROM_SLA, ENV_PREFIXES_TO_STRIP, CTRLM_COLUMN_MAP
     global STRONG_UTILITY_TOKENS, RUNTIME_GATED_UTILITY, UTILITY_JOB_PATTERNS
     global SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
@@ -572,6 +577,7 @@ def reload() -> None:
     SOW_UNDER_PCT     = _f("sow_under_pct",      70.0)
     SOW_OVER_PCT      = _f("sow_over_pct",      110.0)
     SOW_OVER_CRIT_PCT = _f("sow_over_crit_pct", 120.0)
+    SOW_ACCEPTABLE_PCT = _f("sow_acceptable_pct", 90.0)
 
     _pats  = _cfg("job_type_patterns")
     if isinstance(_pats, dict) and _pats:

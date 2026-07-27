@@ -660,7 +660,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                     # Bands from pe_config — mirrors routers/sow.py _status().
                     status = ("CRITICAL_OVER" if pct > _pec_sow.SOW_OVER_CRIT_PCT
                               else "OVER"       if pct > _pec_sow.SOW_OVER_PCT
-                              else "OPTIMAL"    if pct >= 90
+                              else "OPTIMAL"    if pct >= _pec_sow.SOW_ACCEPTABLE_PCT
                               else "ACCEPTABLE" if pct >= _pec_sow.SOW_UNDER_PCT
                               else "LOW")
                 util_s = (f"{pct:.1f}% ({status})" if pct is not None and status

@@ -246,10 +246,10 @@ def _sow_status(pct: float) -> str:
     payload (e.g. an old browser tab that never sent status) still gets a
     correct, real classification instead of "N/A".
     """
-    if pct > pe_config.SOW_OVER_CRIT_PCT: return "CRITICAL_OVER"
-    if pct > pe_config.SOW_OVER_PCT:      return "OVER"
-    if pct < pe_config.SOW_UNDER_PCT:     return "LOW"
-    if pct < 90:                          return "ACCEPTABLE"
+    if pct > pe_config.SOW_OVER_CRIT_PCT:  return "CRITICAL_OVER"
+    if pct > pe_config.SOW_OVER_PCT:       return "OVER"
+    if pct < pe_config.SOW_UNDER_PCT:      return "LOW"
+    if pct < pe_config.SOW_ACCEPTABLE_PCT: return "ACCEPTABLE"
     return "OPTIMAL"
 
 
