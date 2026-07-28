@@ -227,8 +227,32 @@ visible in the UI."*
 ✅ **Tested**: 20 synthetic runs at ~4.0–4.4h → correctly classified `STRONG`,
 `sla_hrs = 4.4` (p95), capped under the 6h global ceiling supplied.
 
+⚠️ **Real bug found and fixed this session, on a real customer file**: uploaded
+USF's actual `BatchSLA_info.xlsx` (clock-time columns like `Start Time` =
+"Sunday 9:05 PM CST", `Expected End Time/SLA` = "6AM CST" — no numeric SLA
+column). Every one of 11 workflows showed a generic `17h` (WEEKLY) or `6h`
+(DAILY/PERIODIC) instead of its real contracted window. Root cause: the
+overnight-delta parser never stripped the day-of-week name from `Start Time`
+before calling `pd.to_datetime()`, so `"Sunday 9:05 PM"` parsed to `NaT` for
+**every single row**, and the parser silently fell through to the Tier-3
+generic default for all 11 workflows — discarding real, computable per-workflow
+windows that were sitting right there in the same file.
+- **Fixed**: strip the day-name prefix before parsing. Re-ran the real file:
+  **8 of 11 workflows now resolve to their genuine file-derived windows**
+  (8.92h, 14.0h, 2.0h — not 17h/6h), correctly tagged
+  `sla_source = BATCH_SLA_XLSX`. The remaining 3 correctly still use the
+  default — their `Expected End Time` is literally `"NA"` (genuinely cyclic,
+  no fixed deadline stated), not a parse failure.
+- **Verified no regression**: ran the existing SLA test suite against both
+  the old and new code (git-stash A/B test) — identical 12-pass/5-fail
+  baseline both times (those 5 are pre-existing, unrelated). 4 other SLA
+  regression suites (`dominant_ceiling`, `window_compliance_regression`,
+  `windows_denominator_shared`, `anchor_match`) all still pass clean.
+
 *Talk track: the dashboard never falls back to "one global SLA for every job"
-— even with zero uploads, every job gets its own history-derived ceiling.*
+— even with zero uploads, every job gets its own history-derived ceiling. And
+when the answer WAS wrong, it was wrong the same honest way for every
+affected row — which made the root cause traceable to one function.*
 
 ---
 
