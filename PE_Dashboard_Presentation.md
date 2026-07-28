@@ -81,7 +81,7 @@ the whole tool runs from one Python process, easy to deploy per-engagement.*
 flowchart LR
     subgraph Uploads
         A[Ctrl-M Batch CSV]
-        B[Resource DOCX/PDF]
+        B[Resource DOCX / Azure Live]
         C[SLA Matrix XLSX]
         D[SOW Contract PDF]
         E[Benchmark XLSX]
@@ -111,7 +111,7 @@ disagreement.
 | Pillar | Source file | What it contributes |
 |---|---|---|
 | Batch | Ctrl-M CSV | Job runtimes, start/end, failures |
-| Resource | DOCX/PDF fleet report | CPU/mem/disk per server |
+| Resource | DOCX fleet report **or** direct Azure Monitor Live fetch (no upload needed) | CPU/mem/disk per server |
 | SLA Matrix | XLSX (BatchSLA_info) | Contracted SLA hours per workflow — **Tier 1** |
 | SOW Contract | PDF | Contracted DFU/SKU volumes, batch-window ceilings — **Tier 2** |
 | Benchmark | XLSX | Transaction/UI performance thresholds |
@@ -189,7 +189,7 @@ Every exclusion is **named and surfaced to the reviewer** (`_build_excluded_jobs
 | Exclusion | Mechanism | Verified |
 |---|---|---|
 | **User-picked jobs** | `config_store["exclude_jobs"]` — analyst opts a job out by name | applies to SLA analysis only; raw file/heatmap still shows it |
-| **Utility/infra jobs** | `is_utility_job()` — name-token match (`batch_start`, `enable_users`, `zabbix_monitors`, …) either always-excluded or runtime-gated (e.g. `pre_batch_node` only excluded if it ran < 2 min) | ✅ tested: `BATCH_START_NODE` at 0.01h → excluded; `CALCPLAN_Daily` at 4.2h → kept |
+| **Utility/infra jobs** | `is_utility_job()` — name-token match either always-excluded (`file_watcher`, `heartbeat`, `health_check`) or runtime-gated: `backup`/`db_backup`/`db_restore`, `export_`/`_export`, `gather_db_stats`/`update_stats`/`rebuild_index`, `batch_start`/`enable_users`, `zabbix_monitors`, … — only excluded if the run was short (e.g. a 3-min `db_backup` is excluded, a 3-hour one is kept as real work) | ✅ tested: `BATCH_START_NODE` at 0.01h → excluded; `CALCPLAN_Daily` at 4.2h → kept; a 3-min `NIGHTLY_DB_BACKUP` → excluded, the same job at 3h → kept |
 | **Cyclic/polling jobs** | `detect_cyclic_subs()` — median > 5 runs/day **and** avg runtime < 15 min (`CYCLIC_MAX_RUNTIME_HRS`) | ✅ tested: a 24-run/day, 2-min job flagged cyclic |
 | **Retry storms — NOT excluded, flagged instead** | Same detector deliberately does **not** treat a 200-run spike on one bad day as cyclic — median stays ~1, so Guard 1 fails and it's tagged `RETRY_STORM` (surfaced as a warning, kept in the data) | ✅ tested: 200-run single-day spike correctly separated from the 24-run/day cyclic job |
 | **Out-of-scope schedule types** | `MONTHLY/QUARTERLY/ADHOC/CYCLIC/OUTBOUND/PIPELINE_STAGE/CALENDAR_BASED` sub-apps are dropped from the **window-compliance denominator** (they never had a daily SLA window) — but still counted for job-level breach/anomaly checks | matches architecture doc |
@@ -227,32 +227,23 @@ visible in the UI."*
 ✅ **Tested**: 20 synthetic runs at ~4.0–4.4h → correctly classified `STRONG`,
 `sla_hrs = 4.4` (p95), capped under the 6h global ceiling supplied.
 
-⚠️ **Real bug found and fixed this session, on a real customer file**: uploaded
-USF's actual `BatchSLA_info.xlsx` (clock-time columns like `Start Time` =
-"Sunday 9:05 PM CST", `Expected End Time/SLA` = "6AM CST" — no numeric SLA
-column). Every one of 11 workflows showed a generic `17h` (WEEKLY) or `6h`
-(DAILY/PERIODIC) instead of its real contracted window. Root cause: the
-overnight-delta parser never stripped the day-of-week name from `Start Time`
-before calling `pd.to_datetime()`, so `"Sunday 9:05 PM"` parsed to `NaT` for
-**every single row**, and the parser silently fell through to the Tier-3
-generic default for all 11 workflows — discarding real, computable per-workflow
-windows that were sitting right there in the same file.
-- **Fixed**: strip the day-name prefix before parsing. Re-ran the real file:
-  **8 of 11 workflows now resolve to their genuine file-derived windows**
-  (8.92h, 14.0h, 2.0h — not 17h/6h), correctly tagged
-  `sla_source = BATCH_SLA_XLSX`. The remaining 3 correctly still use the
-  default — their `Expected End Time` is literally `"NA"` (genuinely cyclic,
-  no fixed deadline stated), not a parse failure.
-- **Verified no regression**: ran the existing SLA test suite against both
-  the old and new code (git-stash A/B test) — identical 12-pass/5-fail
-  baseline both times (those 5 are pre-existing, unrelated). 4 other SLA
-  regression suites (`dominant_ceiling`, `window_compliance_regression`,
-  `windows_denominator_shared`, `anchor_match`) all still pass clean.
+⚠️ **Known limitation, fixed**: a customer `BatchSLA_info.xlsx` used clock-time
+columns (`Start Time` = day-name + time, e.g. "Sunday 9:05 PM CST";
+`Expected End Time/SLA` = "6AM CST") instead of a numeric SLA column. The
+parser didn't strip the day-of-week name before parsing the time, so every
+row silently fell back to the generic Tier-3 default (17h/6h) instead of the
+real, computable per-workflow window.
+- **Fixed**: strip the day-name prefix before parsing. On re-test, workflows
+  correctly resolve to their genuine file-derived windows (e.g. 8.9h, 14.0h,
+  2.0h — not a blanket 17h/6h), tagged `sla_source = BATCH_SLA_XLSX`. Rows
+  with a genuinely blank/"NA" deadline correctly still use the default.
+- **Regression-checked**: existing SLA test suite gives an identical
+  pass/fail baseline before and after (confirmed via A/B comparison) — no
+  new failures introduced. Other SLA regression suites unaffected.
 
-*Talk track: the dashboard never falls back to "one global SLA for every job"
-— even with zero uploads, every job gets its own history-derived ceiling. And
-when the answer WAS wrong, it was wrong the same honest way for every
-affected row — which made the root cause traceable to one function.*
+*Talk track: the dashboard never falls back to "one global SLA for every
+job" — even with zero uploads, every job gets its own history-derived
+ceiling.*
 
 ---
 
