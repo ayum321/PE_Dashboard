@@ -618,12 +618,34 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
     import pandas as _pd
 
     def _clean(v: Any) -> str:
-        """Strip timezone suffix, normalise dot-as-colon, return clean time string."""
+        """Strip day-name prefix, timezone suffix, normalise dot-as-colon, return
+        clean time string.
+
+        Real customer files (e.g. USF) put a day-of-week name/phrase directly in
+        the Start_Time cell alongside the clock time: "Sunday 9:05 PM CST",
+        "Saturday start at 2PM CST", "Monday/Wednesday 9:05 PM CST". Without
+        stripping this, pd.to_datetime("Sunday 9:05 PM") returns NaT for every
+        such row, silently discarding a real, computable per-workflow SLA window
+        in favour of a generic batch-type default.
+        """
         s = str(v).strip() if v is not None else ""
         if not s or s.lower() in ("nan", "none", "nat"):
             return ""
-        # Strip trailing timezone qualifiers: "EST", "CST", "IST", "UTC+5:30", etc.
         import re as _re
+        # Strip a leading day-of-week name/phrase (handles "Monday/Wednesday ",
+        # "Saturday start at ", "Sunday "), and repeated day tokens joined by
+        # "/", "-", "," or "&". Iterative: keeps stripping while a day-name
+        # (optionally followed by filler like "start at"/"at") remains at the front.
+        _DAY = r'(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sun|Mon|Tue|Wed|Thu|Fri|Sat)'
+        while True:
+            s2 = _re.sub(
+                rf'^{_DAY}(?:\s*[/\-,&]\s*{_DAY})*\s*(?:start\s+at\s+|at\s+)?',
+                '', s, flags=_re.IGNORECASE,
+            ).strip()
+            if s2 == s:
+                break
+            s = s2
+        # Strip trailing timezone qualifiers: "EST", "CST", "IST", "UTC+5:30", etc.
         s = _re.sub(
             r'\s+(?:CST|CDT|EST|EDT|PST|PDT|MST|MDT|IST|GMT|UTC[+-]?\d*)\s*$',
             '', s, flags=_re.IGNORECASE,
