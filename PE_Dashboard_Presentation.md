@@ -33,12 +33,13 @@ audit with one deterministic pipeline that never disagrees with itself."*
 2. Tech stack
 3. Architecture — one pipeline, six data pillars
 4. SLA resolution logic + the buffer formula
-5. Pulling & correlating Azure resource metrics
-6. Cross-source correlation formulas (RFCS / SRI / JRTOS / CRS / OSHS)
-7. SOW contract vs. actual volume
-8. Findings engine (automated audit rules)
-9. Governance, export & sign-off
-10. Roadmap / Q&A
+5. Job exclusion, concurrent-job handling, false-signal negation, cyclic/multi-SLA batches
+6. Pulling & correlating Azure resource metrics
+7. Cross-source correlation formulas (RFCS / SRI / JRTOS / CRS / OSHS)
+8. SOW contract vs. actual volume
+9. Findings engine (automated audit rules)
+10. Governance, export & sign-off
+11. Roadmap / Q&A
 
 ---
 
@@ -177,6 +178,128 @@ flowchart TD
   but a value that large is itself a signal the Tier-1 SLA entry deserves a
   second look, not evidence of a display bug. Not yet capped/flagged
   separately from an ordinary breach.
+
+---
+
+## Which Jobs Get Excluded From Analysis — and Why
+
+Every exclusion is **named and surfaced to the reviewer** (`_build_excluded_jobs_list()`
++ the `excluded_jobs`/`excluded_sub_apps` payload) — nothing is silently dropped.
+
+| Exclusion | Mechanism | Verified |
+|---|---|---|
+| **User-picked jobs** | `config_store["exclude_jobs"]` — analyst opts a job out by name | applies to SLA analysis only; raw file/heatmap still shows it |
+| **Utility/infra jobs** | `is_utility_job()` — name-token match (`batch_start`, `enable_users`, `zabbix_monitors`, …) either always-excluded or runtime-gated (e.g. `pre_batch_node` only excluded if it ran < 2 min) | ✅ tested: `BATCH_START_NODE` at 0.01h → excluded; `CALCPLAN_Daily` at 4.2h → kept |
+| **Cyclic/polling jobs** | `detect_cyclic_subs()` — median > 5 runs/day **and** avg runtime < 15 min (`CYCLIC_MAX_RUNTIME_HRS`) | ✅ tested: a 24-run/day, 2-min job flagged cyclic |
+| **Retry storms — NOT excluded, flagged instead** | Same detector deliberately does **not** treat a 200-run spike on one bad day as cyclic — median stays ~1, so Guard 1 fails and it's tagged `RETRY_STORM` (surfaced as a warning, kept in the data) | ✅ tested: 200-run single-day spike correctly separated from the 24-run/day cyclic job |
+| **Out-of-scope schedule types** | `MONTHLY/QUARTERLY/ADHOC/CYCLIC/OUTBOUND/PIPELINE_STAGE/CALENDAR_BASED` sub-apps are dropped from the **window-compliance denominator** (they never had a daily SLA window) — but still counted for job-level breach/anomaly checks | matches architecture doc |
+| **Adaptive-SLA quality gate** | `SHORT_JOB` (avg < 5 min) and `INSUFFICIENT` (< 3 runs) baselines are excluded from **compliance %**, not from the job list — still visible, just not scored | code-verified |
+
+*Talk track: "excluded" never means "hidden" in this dashboard — it means
+"removed from a specific denominator, for a stated reason, with the reason
+visible in the UI."*
+
+---
+
+## SLA After Upload — Exact Join First, Then Adaptive Fallback
+
+**Step 1 — Tier 1 join** (`routers/sla_matrix.py`, on BatchSLA_info.xlsx upload):
+1. **Exact match** — normalized workflow key (`_norm()`) hits the XLSX row directly
+2. **Anchor match** — the XLSX's `First_Job`/`Last_Job` sentinel names anchor a
+   Ctrl-M sub-app to its workflow even if the sub-app name itself doesn't match
+3. **Token match** — remaining unmatched workflows fall back to a token-overlap
+   fuzzy match
+4. **Collision guard** — if two different workflows would share the same
+   stripped secondary key (e.g. `PETBARN_DAILY` and `TESCO_DAILY` both reducing
+   to `DAILY`), that secondary key is **skipped entirely** rather than
+   last-writer-wins silently assigning the wrong SLA to one of them
+
+**Step 2 — sentinel-restricted window** (not naive min/max):
+- The wall-clock window opens at the **earliest** First_Job run and closes at
+  the **latest** Last_Job run (`.min()`/`.max()` respectively — deliberately
+  asymmetric so a Last_Job that fires from several parallel sub-workflows
+  doesn't truncate the window early)
+- Prevents pre-batch file-prep jobs from inflating the measured window
+
+**Step 3 — if no XLSX is uploaded at all (PATH C, adaptive)**:
+> Per job, from Ctrl-M run history alone: `STRONG` (≥14 OK runs) → p95 runtime · `MODERATE` (7–13) → max(p90, avg+2σ) · `WEAK` (3–6) → a blended peak/variance estimate · `INSUFFICIENT` (<3) → best-guess peak, excluded from compliance · always capped at the schedule's global ceiling.
+
+✅ **Tested**: 20 synthetic runs at ~4.0–4.4h → correctly classified `STRONG`,
+`sla_hrs = 4.4` (p95), capped under the 6h global ceiling supplied.
+
+*Talk track: the dashboard never falls back to "one global SLA for every job"
+— even with zero uploads, every job gets its own history-derived ceiling.*
+
+---
+
+## Concurrent & Overlapping Jobs — Busy-Time, Not a Naive Sum
+
+A day's "batch window" is not `sum(runtimes)` and not `last_end − first_start`
+either — both overstate reality when jobs run in parallel or in separated
+clusters.
+
+- **`_merge_intervals()`**: unions all job `[start, end]` pairs for the day.
+  Two jobs that ran 01:00–02:00 and 01:30–03:00 in parallel count as **2h of
+  real busy time**, not 3h.
+- **Block detection**: runs separated by more than `BATCH_BLOCK_GAP_HRS` are
+  reported as **separate batch blocks** (e.g. a morning phase and an evening
+  phase) instead of one artificially long elapsed window spanning the idle gap
+  between them.
+
+✅ **Tested**: three overlapping/adjacent runs (01:00–02:00, 01:30–03:00,
+04:00–04:30) → `busy_hrs = 2.5`, correctly the union, not the naive `3.5h` sum.
+
+⚠️ **Important distinction**: this real interval-union logic is what powers
+window-elapsed measurement. **CRS's "downstream count" is a different,
+simpler thing** — it's `len(jobs in the same sub-application)`, a proxy for
+blast radius, **not** a true dependency-graph traversal (Ctrl-M CSV exports
+carry no job-precedence/dependency column, so a real cascade graph isn't
+available to this pipeline). Worth stating plainly rather than implying CRS
+models actual job dependencies.
+
+---
+
+## Negating False Signals From Ctrl-M
+
+| Bad signal | How it's neutralized | Status |
+|---|---|---|
+| Midnight crossover (End < Start) | +24h correction before computing elapsed | code-verified |
+| Corrupt timestamp pairs | Elapsed capped at 168h (1 week) | code-verified |
+| Retry-storm inflating "cyclic" detection | Median (not max) run-count guard — see exclusion table above | ✅ tested |
+| Zero/near-zero runtime after a real prior baseline | Batch-benchmark comparison (`BATCH_NOWORK_SEC`, `BATCH_COLLAPSE_RATIO`) flags a ≥95% runtime drop as an **implausible "improvement"** to investigate, not a genuine win | code-verified |
+| Job peak/avg skewed by failed runs | Peak/avg computed from `Status == "OK"` rows only; FAILED runs are counted separately (`fail_count`) so they can't quietly drag down a peak-runtime metric | code-verified |
+| Missing `Start_Time` column entirely | Falls back to `pd.Timestamp.now()` for every row | ⚠️ **real gap found this session** |
+
+⚠️ **Real gap, not just a doc issue**: the frontend (`static/app.js`) has a
+`⛔ SYNTHETIC TIMESTAMPS` badge gated on `data_coverage.has_synthetic_timestamps`
+— but the backend's `data_coverage` payload (`services/batch_calculator.py`)
+**never sets that field**. Grepped the whole repo: `has_synthetic_timestamps`
+exists in exactly one place (the frontend check) and nowhere on the backend.
+If a customer's Ctrl-M export has no parseable `Start_Time` column, every run
+silently becomes "happened right now," the server logs a warning **nobody
+sees**, no confidence penalty applies, and the promised UI badge can never
+fire. This is dead code, not a working safety net — recommend wiring it
+before presenting this row as a shipped protection.
+
+---
+
+## Multi-SLA & Cyclic vs. Non-Cyclic Batches
+
+- **Schedule classification** (`classify_schedule()` / `detect_batch_type()`):
+  `DAILY`/`WEEKLY`/`BIWEEKLY`/`MONTHLY`/`MONTHLY_WORKDAY`/`QUARTERLY`/`ADHOC`/
+  `CYCLIC`/`OUTBOUND` — inferred from workflow name + schedule text, with a
+  fixed detection priority (`ADHOC` checked before `DAILY` so compound names
+  like `BIWEEKLY_ADHOC` resolve correctly).
+- **Different SLA windows coexist honestly**: when more than one distinct
+  resolved ceiling is in scope for a review, the dashboard tracks
+  `window_inscope_ceiling_count` and changes the headline wording from a
+  single "within the 6h window" claim to "each within its own ceiling
+  (min–max)" — it does not force multiple real SLA windows into one
+  misleading number.
+- **Cyclic ≠ excluded from everything** — a cyclic sub-app is dropped from the
+  *window-elapsed* measurement only (it would otherwise inflate the window to
+  ~24h and manufacture a false 0% compliance day); its individual job runs
+  are still counted for job-level breach/anomaly/failure-rate purposes.
 
 ---
 
