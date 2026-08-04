@@ -4147,15 +4147,18 @@ function renderWindowTrendChart(winData, topJobsData) {
   const _domCeilW = Number(_kp.window_dominant_ceiling_hrs);
   const winCeil = (Number.isFinite(_domCeilW) && _domCeilW > 0) ? _domCeilW : SLA_DAILY_HRS;
 
-  // Multiple SLA ceilings in scope (e.g. DAILY 6h + WEEKLY 9h sub-apps mixed
-  // on the same chart) → draw one dashed reference line per distinct ceiling
-  // instead of a single line that only matches SOME of the bars. Falls back
-  // to the single dominant-ceiling line (unchanged behaviour) whenever every
-  // in-scope day shares one ceiling.
-  const _dayCeilings = winData
-    .map(w => +(w.breach_sub_ceil || w.sla_hrs || w.sla_ceil || 0))
-    .filter(v => Number.isFinite(v) && v > 0);
-  const _distinctCeilings = Array.from(new Set(_dayCeilings.map(v => v.toFixed(2)))).map(Number).sort((a, b) => a - b);
+  // Multiple SLA ceilings in scope (e.g. a matrix resolving 4 distinct windows
+  // 0.17h-14h across different sub-apps) → draw one dashed reference line per
+  // distinct ceiling instead of a single line. Per-day window rows only carry
+  // a populated ceiling on BREACH days (breach_sub_ceil) or the day's tightest
+  // sub-app (tight_ceil) — neither reliably surfaces every window in scope, so
+  // the full set comes from the SLA-source payload's resolved_ceilings (the
+  // same list already used for the "N windows X-Yh" caption chip).
+  const _slaSrc = window.appData?.batch?.sla_source || {};
+  const _resolvedCeilings = Array.isArray(_slaSrc.resolved_ceilings) ? _slaSrc.resolved_ceilings : [];
+  const _distinctCeilings = Array.from(new Set(
+    _resolvedCeilings.filter(v => Number.isFinite(+v) && +v > 0).map(v => (+v).toFixed(2))
+  )).map(Number).sort((a, b) => a - b);
   const slaLineValues = _distinctCeilings.length > 1 ? _distinctCeilings : winCeil;
 
   // Build excluded set from ALL top_jobs (unfiltered) — caller must pass full list
@@ -4563,7 +4566,22 @@ function renderWindowTrendChart(winData, topJobsData) {
         },
       },
     },
-    plugins: [slaLinePlugin(slaLineValues), enrichPlugin, crosshairPlugin],
+    plugins: [
+      slaLinePlugin(slaLineValues, ({ skipped }) => {
+        const note = document.getElementById("chart-window-ceilings-note");
+        if (!note) return;
+        if (skipped.length) {
+          const vals = skipped.map(v => `${v}h`).join(", ");
+          note.textContent = `⚠ ${skipped.length} SLA ceiling${skipped.length === 1 ? "" : "s"} (${vals}) not drawn — above this chart's scale; see the SLA Matrix tab for those windows.`;
+          note.classList.remove("hidden");
+        } else {
+          note.textContent = "";
+          note.classList.add("hidden");
+        }
+      }),
+      enrichPlugin,
+      crosshairPlugin,
+    ],
   });
 
   // ── Shared buffer-band legend (identical semantics to the SLA Buffer gauge) ──
@@ -4643,10 +4661,14 @@ function _roundRect(ctx, x, y, w, h, r) {
 // Chart.js plugin: dashed horizontal SLA line(s) on the y-axis. Accepts a
 // single hour value (legacy, one ceiling) OR an array of hour values — pass
 // an array whenever more than one distinct SLA ceiling is actually in scope
-// for the plotted days (e.g. DAILY 6h + WEEKLY 9h sub-apps mixed on one
-// chart), so the reference line always matches the ceiling each bar was
-// actually judged against instead of implying a single blanket SLA.
-function slaLinePlugin(slaHrsOrList) {
+// for the plotted days (e.g. a matrix resolving 0.17h/5h/12.5h/14h windows
+// across different sub-apps), so the reference line always matches a real
+// ceiling instead of implying a single blanket SLA. Ceilings far above the
+// chart's own bar values (e.g. a 14h window when every bar is under 4h)
+// would render off-canvas if forced onto the axis, so those are skipped —
+// `onRender` reports what was skipped so the caller can surface a note
+// instead of silently dropping the information.
+function slaLinePlugin(slaHrsOrList, onRender) {
   const rawList = Array.isArray(slaHrsOrList) ? slaHrsOrList : [slaHrsOrList];
   // Dedupe (rounded to 2dp so float noise doesn't spawn near-duplicate lines),
   // drop non-positive values, sort ascending.
@@ -4668,8 +4690,15 @@ function slaLinePlugin(slaHrsOrList) {
       if (!yScale || !list.length) return;
       const { left, right } = chart.chartArea;
       const ctx = chart.ctx;
+      // Only draw ceilings that actually fall within the rendered axis range —
+      // one far above the tallest bar would be invisible above the canvas
+      // anyway, and stretching the axis to fit it would flatten every real bar.
+      const axisMax = yScale.max;
+      const visible = list.filter(v => v <= axisMax);
+      const skipped = list.filter(v => v > axisMax);
+      let drawnIdx = 0;
       ctx.save();
-      list.forEach((slaHrs, idx) => {
+      visible.forEach((slaHrs) => {
         const y = yScale.getPixelForValue(slaHrs);
         // Dashed line
         ctx.strokeStyle = hexA(THEME.red, 0.7);
@@ -4685,15 +4714,19 @@ function slaLinePlugin(slaHrsOrList) {
         const label = list.length > 1 ? `${slaHrs}h` : `${slaHrs}h SLA`;
         ctx.font = 'bold 9px "Sora", sans-serif';
         const tw = ctx.measureText(label).width;
-        const bx = left + 4 + idx * (tw + 16);
+        const bx = left + 4 + drawnIdx * (tw + 16);
         ctx.fillStyle = hexA(THEME.red, 0.12);
         _roundRect(ctx, bx, y - 16, tw + 10, 14, 3);
         ctx.fill();
         ctx.fillStyle = THEME.red;
         ctx.textAlign = "left";
         ctx.fillText(label, bx + 5, y - 6);
+        drawnIdx++;
       });
       ctx.restore();
+      if (typeof onRender === "function") {
+        onRender({ drawn: visible, skipped, axisMax });
+      }
     },
   };
 }
