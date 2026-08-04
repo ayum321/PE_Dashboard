@@ -41,7 +41,9 @@ PE_Dashboard_Release*.zip
 # IDE / editor
 .vscode/
 .claude/
+.codex/
 .mcp.json
+node_modules/
 
 # Old versions / release bundles
 0.0.9/
@@ -68,3 +70,17 @@ tests/
 .pe_baseline.db
 .pe_baseline.db-wal
 .pe_baseline.db-shm
+
+# Impeccable local runtime artifacts (critique reports remain trackable)
+.impeccable/config.local.json
+.impeccable/screenshots/
+.impeccable/live/
+.impeccable/cache/
+
+# Graphify generated knowledge-graph output (regenerable, not source)
+graphify-out/
+
+# Stray validation-run artifacts
+.server_pid_actual_validation
+server_stdout_actual_validation.txt
+server_stderr_actual_validation.txt

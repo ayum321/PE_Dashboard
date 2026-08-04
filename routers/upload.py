@@ -484,7 +484,9 @@ async def extract_sla_ceilings(file: UploadFile = File(...)) -> Dict[str, Any]:
         import logging as _log_c
         _log_c.getLogger("pe_dashboard").warning("sla-ceilings recompute failed: %s", _e)
 
-    return {**sla_map, "recompute_status": _recompute_status}
+    # Keep this legacy endpoint numeric-only: callers treat it as a ceiling map.
+    # A string status key makes older Dict[str, float] response schemas reject it.
+    return sla_map
 
 
 # ── /api/sla-intelligence (full SLA analysis) ────────────────────

@@ -12,8 +12,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Sora:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 
-  <!-- Tailwind v3 Play CDN — supports inline tailwind.config -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/tailwind.css?v={{ static_v }}" />
 
   <!-- Chart.js (loaded now, used in Phase 3) -->
   <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -24,57 +23,6 @@
   <!-- Chart.js zoom plugin for interactive zoom/pan (Grafana-style) -->
   <script defer src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
-  <!-- Plotly.js for Executive Dashboard (lightweight minified) -->
-  <script defer src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-
-  <!-- ── Tailwind theme ─ extracted from app_v2.py C dict ─────── -->
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            // Core surfaces
-            Cbg:               '#060914',
-            Ccard:             '#0d1526',
-            Ccard2:            '#111d36',
-            Cborder:           '#213060',
-            // Status / accents
-            Cgreen:            '#10d96e',
-            Camber:            '#f59e0b',
-            Cred:              '#f43f5e',
-            Cblue:             '#3b82f6',
-            Cpurple:           '#a855f7',
-            Ccyan:             '#22d3ee',
-            // Text
-            Cmuted:            '#6b7db3',
-            Cwhite:            '#f0f4ff',
-            // Sidebar / nav
-            CnavBg:            '#06091a',
-            CnavActiveBg:      '#14296a',
-            CnavActiveBorder:  '#3b82f6',
-            CnavSep:           '#1a2850',
-            CnavGroup:         '#1e3060',
-            // Extended chart palette
-            Cteal:             '#2dd4bf',
-            Corange:           '#fb923c',
-            Cpink:             '#ec4899',
-            Cindigo:           '#6366f1',
-          },
-          fontFamily: {
-            sora: ['Sora', 'Inter', 'system-ui', 'sans-serif'],
-            mono: ['"JetBrains Mono"', 'Menlo', 'monospace'],
-          },
-          boxShadow: {
-            kpi:    '0 4px 20px rgba(0,0,0,.4), 0 0 0 1px rgba(59,130,246,.08), inset 0 1px 0 rgba(255,255,255,.04)',
-            kpiHov: '0 12px 40px rgba(59,130,246,.18), 0 0 0 1px rgba(59,130,246,.2)',
-            panel:  '0 4px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04)',
-          },
-        },
-      },
-    };
-  </script>
-
   <!-- ── Professional PE Dashboard styles (Tableau/Grafana-inspired) ── -->
   <style>
     /* ── Base ──────────────────────────────────────────────── */
@@ -86,31 +34,16 @@
     ::-webkit-scrollbar-thumb { background: #213060; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: rgba(59,130,246,.5); }
 
-    /* ── Animated gradient brand logo ────────────────────── */
-    @keyframes logo-spin {
-      0%   { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-    @keyframes logo-pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,.5), 0 0 16px rgba(168,85,247,.3); }
-      50%       { box-shadow: 0 0 0 6px rgba(59,130,246,.0), 0 0 28px rgba(168,85,247,.5); }
-    }
+    /* ── Brand mark ──────────────────────────────────────── */
     .brand-logo {
-      animation: logo-pulse 3s ease-in-out infinite;
       background: linear-gradient(135deg, #1d4ed8 0%, #7c3aed 50%, #0ea5e9 100%);
       position: relative;
       overflow: hidden;
-    }
-    .brand-logo::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(45deg, transparent 30%, rgba(255,255,255,.15) 50%, transparent 70%);
-      animation: logo-spin 4s linear infinite;
+      box-shadow: 0 0 16px rgba(59,130,246,.22);
     }
 
     /* ── Nav active item — Grafana-style left accent ──────── */
-    .nav-btn { transition: all .15s ease; }
+    .nav-btn { transition: background-color .15s ease, color .15s ease, border-color .15s ease; }
     .nav-btn.active {
       background: linear-gradient(90deg, rgba(59,130,246,.18) 0%, rgba(59,130,246,.06) 100%);
       border-left: 2px solid #3b82f6;
@@ -130,16 +63,29 @@
       background-clip: text;
     }
 
-    /* ── Sidebar gradient top accent line ─────────────────── */
+    /* ── Sidebar top accent line ──────────────────────────── */
     .sidebar-accent-line {
       height: 2px;
-      background: linear-gradient(90deg, #3b82f6, #a855f7, #22d3ee);
-      background-size: 200% 100%;
-      animation: gradient-slide 4s linear infinite;
+      background: linear-gradient(90deg, #3b82f6, #22d3ee);
     }
-    @keyframes gradient-slide {
-      0%   { background-position: 0% 50%; }
-      100% { background-position: 200% 50%; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
+    .upload-control:focus-visible,
+    .nav-btn:focus-visible,
+    button:focus-visible,
+    a:focus-visible,
+    select:focus-visible,
+    input:focus-visible {
+      outline: 2px solid #22d3ee;
+      outline-offset: 2px;
     }
 
     /* ── KPI cards — Tableau-style glassmorphism ──────────── */
@@ -675,8 +621,9 @@
       <div class="px-3 py-2.5 border-t border-CnavSep flex items-center justify-between">
         <span class="version-badge">v2.1.0</span>
         <button id="btn-new-engagement" title="Clear all session data — start fresh for a new customer"
+          aria-label="Start a new engagement and clear all session data"
           onclick="clearSessionData()"
-          class="flex items-center gap-1 text-[10px] text-Cmuted/70 hover:text-Cred transition-colors font-mono">
+          class="min-h-6 px-1 flex items-center gap-1 text-[10px] text-Cmuted/70 hover:text-Cred transition-colors font-mono">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-3 h-3">
             <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
           </svg>
@@ -695,7 +642,8 @@
         <div class="h-13 flex items-center justify-between px-4 lg:px-6 py-2.5">
           <div class="flex items-center gap-3">
             <!-- Hamburger toggle (mobile only) -->
-            <button id="sidebar-toggle" onclick="toggleSidebar()"
+                <button id="sidebar-toggle" onclick="toggleSidebar()"
+                  aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"
                     class="lg:hidden w-8 h-8 flex items-center justify-center rounded-lg
                            text-Cmuted hover:text-Cwhite hover:bg-Ccard transition-colors shrink-0"
                     title="Toggle sidebar">
@@ -806,7 +754,7 @@
         <section data-view-panel="upload" class="space-y-6">
 
           <!-- ── Page header ───────────────────────────────── -->
-          <div class="rounded-2xl border border-Cborder bg-gradient-to-br from-Ccard to-Ccard2 shadow-panel p-7">
+          <div class="rounded-2xl border border-Cborder bg-Ccard shadow-panel p-5 sm:p-7">
             <div class="flex items-center gap-4 mb-5">
               <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-Cblue/30 to-Cpurple/30 border border-Cblue/30 flex items-center justify-center shrink-0">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-6 h-6 text-Cblue">
@@ -814,27 +762,42 @@
                 </svg>
               </div>
               <div>
-                <h2 class="text-base font-bold text-Cwhite">Upload All PE Files</h2>
-                <p class="text-xs text-Cmuted mt-0.5">
-                  Upload each file into its matching tile below.
-                  Resource Report accepts DOCX only; Ctrl-M, SLA Matrix, and Benchmark files have their own upload zones.
+                <h2 class="text-base font-bold text-Cwhite">Build the audit evidence set</h2>
+                <p class="text-xs text-Cmuted mt-0.5 leading-relaxed">
+                  Start with Ctrl-M execution history and resource evidence. Add workflow SLA information for an auditable compliance verdict; SOW and benchmark files provide supporting context.
                 </p>
               </div>
             </div>
 
-            <!-- ── Four upload zones 2×2 grid ───────────────── -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4 text-xs">
+              <div class="rounded-lg border border-Cgreen/30 bg-Cgreen/5 px-3 py-2">
+                <div class="font-semibold text-Cgreen">1. Ctrl-M history</div>
+                <div class="text-Cmuted mt-0.5">Required for batch runtime and failure analysis</div>
+              </div>
+              <div class="rounded-lg border border-Cblue/30 bg-Cblue/5 px-3 py-2">
+                <div class="font-semibold text-Cblue">2. Resource evidence</div>
+                <div class="text-Cmuted mt-0.5">Required for infrastructure health and correlation</div>
+              </div>
+              <div class="rounded-lg border border-Cteal/30 bg-Cteal/5 px-3 py-2">
+                <div class="font-semibold text-Cteal">3. Workflow SLA</div>
+                <div class="text-Cmuted mt-0.5">Recommended for customer-specific compliance</div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
 
               <!-- Zone A — Ctrl-M Batch Export (CSV / XLSX) — FIRST: sets the customer -->
-              <div class="space-y-2">
+              <div class="space-y-2 order-1 xl:col-span-2">
                 <div class="flex items-center gap-2">
                   <span id="batch-status-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
                   <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Ctrl-M Batch Export</span>
                 </div>
                 <div id="batch-drop-zone"
-                     class="rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
-                            p-6 text-center cursor-pointer select-none
-                            transition-all duration-150 hover:border-Cgreen hover:bg-Cgreen/5"
+                  class="upload-control rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
+                    p-6 text-center cursor-pointer select-none
+                    transition-colors duration-150 hover:border-Cgreen hover:bg-Cgreen/5"
+                  role="button" tabindex="0" aria-controls="batch-file-input"
+                  aria-label="Choose Ctrl-M execution history files"
                      style="min-height:130px">
                   <div class="flex flex-col items-center gap-2 pointer-events-none">
                     <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-Cgreen/20 to-Cteal/20 border border-Cgreen/30 flex items-center justify-center">
@@ -852,7 +815,7 @@
               </div>
 
               <!-- Zone B — Resource (Azure Monitor hero + upload secondary) -->
-              <div class="space-y-2">
+              <div class="space-y-2 order-2 xl:col-span-2">
                 <div class="flex items-center gap-2">
                   <span id="res-status-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
                   <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Resource Report</span>
@@ -909,7 +872,7 @@
                       <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 0 0 4.5 4.5H18a3.75 3.75 0 0 0 1.332-7.257 3 3 0 0 0-3.758-3.848 5.25 5.25 0 0 0-10.233 2.33A4.502 4.502 0 0 0 2.25 15Z"/>
                       </svg>
-                      <span id="azure-res-connect-text">Connect Azure</span>
+                      <span id="azure-res-connect-text">Fetch live Azure metrics</span>
                     </button>
                     <button type="button" id="azure-res-upload-btn" onclick="document.getElementById('file-input').click()"
                             class="text-[10px] font-medium py-2 px-3 rounded-lg border transition-all inline-flex items-center gap-1.5
@@ -918,7 +881,7 @@
                       <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/>
                       </svg>
-                      Upload
+                      Import supplied report
                     </button>
                   </div>
                 </div>
@@ -930,7 +893,12 @@
               </div>
 
               <!-- Zone D — Performance Benchmark (two sources) -->
-              <div class="space-y-2">
+              <div class="sm:col-span-2 xl:col-span-6 order-4 mt-2 pt-4 border-t border-Cborder">
+                <h3 class="text-xs font-bold text-Cwhite">Add supporting evidence</h3>
+                <p class="text-[11px] text-Cmuted mt-0.5">Benchmarks and contract context strengthen regression, volume, and scope findings.</p>
+              </div>
+
+              <div class="space-y-2 order-5 xl:col-span-3">
                 <div class="flex items-center gap-2">
                   <span id="bench-intake-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
                   <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Performance Benchmark</span>
@@ -939,9 +907,11 @@
 
                 <!-- D-1: Batch Runtime Performance (new vs old release runtimes) -->
                 <div id="bench-batch-drop-zone"
-                     class="rounded-lg border-2 border-dashed border-Cborder bg-Cbg/40
+                  class="upload-control rounded-lg border-2 border-dashed border-Cborder bg-Cbg/40
                             px-3 py-4 text-center cursor-pointer select-none
-                            transition-all duration-150 hover:border-Camber hover:bg-Camber/5"
+                    transition-colors duration-150 hover:border-Camber hover:bg-Camber/5"
+                  role="button" tabindex="0" aria-controls="bench-batch-file-input"
+                  aria-label="Choose batch runtime benchmark file"
                      style="min-height:96px">
                   <div class="flex items-center gap-3 pointer-events-none text-left">
                     <div class="w-9 h-9 shrink-0 rounded-lg bg-Camber/10 border border-Camber/30 flex items-center justify-center">
@@ -962,9 +932,11 @@
 
                 <!-- D-2: UI Benchmark (transaction load / response times) -->
                 <div id="bench-ui-drop-zone"
-                     class="rounded-lg border-2 border-dashed border-Cborder bg-Cbg/40
+                  class="upload-control rounded-lg border-2 border-dashed border-Cborder bg-Cbg/40
                             px-3 py-4 text-center cursor-pointer select-none
-                            transition-all duration-150 hover:border-Cpurple hover:bg-Cpurple/5"
+                    transition-colors duration-150 hover:border-Cpurple hover:bg-Cpurple/5"
+                  role="button" tabindex="0" aria-controls="bench-ui-file-input"
+                  aria-label="Choose UI benchmark file"
                      style="min-height:96px">
                   <div class="flex items-center gap-3 pointer-events-none text-left">
                     <div class="w-9 h-9 shrink-0 rounded-lg bg-Cpurple/10 border border-Cpurple/30 flex items-center justify-center">
@@ -985,15 +957,17 @@
               </div>
 
               <!-- Zone E — Workflow SLA Info (BatchSLA_info.xlsx) — Tier 1 SLA source -->
-              <div class="space-y-2">
+              <div class="space-y-2 order-3 xl:col-span-2">
                 <div class="flex items-center gap-2">
                   <span id="batch-sla-info-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
                   <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">Workflow SLA Info</span>
                 </div>
                 <div id="batch-sla-info-drop-zone"
-                     class="rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
+                  class="upload-control rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
                             p-6 text-center cursor-pointer select-none
-                            transition-all duration-150 hover:border-Cteal hover:bg-Cteal/5"
+                    transition-colors duration-150 hover:border-Cteal hover:bg-Cteal/5"
+                  role="button" tabindex="0" aria-controls="batch-sla-info-file-input"
+                  aria-label="Choose workflow SLA information file"
                      style="min-height:130px">
                   <div class="flex flex-col items-center gap-2 pointer-events-none">
                     <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-Cteal/20 to-Cgreen/20 border border-Cteal/30 flex items-center justify-center">
@@ -1011,15 +985,17 @@
               </div>
 
               <!-- Zone F — SOW Contract PDF — Tier 2 SLA ceilings + volume ramp -->
-              <div class="space-y-2">
+              <div class="space-y-2 order-6 xl:col-span-3">
                 <div class="flex items-center gap-2">
                   <span id="sow-intake-dot" class="w-2 h-2 rounded-full bg-Cmuted/40 shrink-0"></span>
                   <span class="text-[11px] font-bold text-Cwhite uppercase tracking-wider">SOW Contract</span>
                 </div>
                 <div id="sow-intake-drop-zone"
-                     class="rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
+                  class="upload-control rounded-xl border-2 border-dashed border-Cborder bg-Cbg/40
                             p-6 text-center cursor-pointer select-none
-                            transition-all duration-150 hover:border-Ccyan hover:bg-Ccyan/5"
+                    transition-colors duration-150 hover:border-Ccyan hover:bg-Ccyan/5"
+                  role="button" tabindex="0" aria-controls="sow-intake-file-input"
+                  aria-label="Choose SOW contract file"
                      style="min-height:130px">
                   <div class="flex flex-col items-center gap-2 pointer-events-none">
                     <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-Ccyan/20 to-Cblue/20 border border-Ccyan/30 flex items-center justify-center">
@@ -1146,7 +1122,7 @@
                   <div id="batch-compliance-kpi" class="text-lg font-extrabold mt-0.5 text-Cwhite">—</div>
                 </div>
                 <div class="rounded-lg border border-Cborder bg-Cbg/60 p-2">
-                  <div class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Breaches</div>
+                  <div class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">In-Scope Peak Breaches</div>
                   <div id="batch-breach-kpi" class="text-lg font-extrabold mt-0.5 text-Cred">—</div>
                 </div>
               </div>
@@ -1176,7 +1152,7 @@
                   <div id="sla-result-mode" class="text-[11px] font-bold mt-0.5">—</div>
                 </div>
                 <div class="rounded-lg border border-Cborder bg-Cbg/60 p-2">
-                  <div class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Breaches</div>
+                  <div class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">In-Scope Run Breaches</div>
                   <div id="sla-result-breach" class="text-lg font-extrabold mt-0.5 text-Cred">—</div>
                 </div>
               </div>
@@ -1227,7 +1203,7 @@
                   <div id="bench-result-filename" class="text-[11px] font-bold mt-0.5 truncate">—</div>
                 </div>
                 <div class="rounded-lg border border-Cborder bg-Cbg/60 p-2">
-                  <div class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Transactions</div>
+                  <div id="bench-result-total-label" class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Transactions</div>
                   <div id="bench-result-total" class="text-lg font-extrabold mt-0.5 text-Cpurple">—</div>
                 </div>
                 <div class="rounded-lg border border-Cborder bg-Cbg/60 p-2">
@@ -1235,7 +1211,7 @@
                   <div id="bench-result-degraded" class="text-lg font-extrabold mt-0.5 text-Cred">—</div>
                 </div>
                 <div class="rounded-lg border border-Cborder bg-Cbg/60 p-2">
-                  <div class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Avg Delta</div>
+                  <div id="bench-result-delta-label" class="text-[9px] font-bold uppercase tracking-widest text-Cmuted">Avg Delta</div>
                   <div id="bench-result-delta" class="text-lg font-extrabold mt-0.5 text-Cwhite">—</div>
                 </div>
               </div>
@@ -1248,17 +1224,17 @@
           </div>
 
           <!-- Next step prompt (shown when at least one file loaded) -->
-          <div id="upload-next-prompt" class="hidden rounded-xl border border-Cborder bg-Ccard2/60 px-5 py-4 flex items-center justify-between gap-4">
+          <div id="upload-next-prompt" class="hidden rounded-xl border border-Cborder bg-Ccard2/60 px-5 py-4 flex items-center justify-between gap-4" aria-live="polite">
             <div>
-              <p class="text-sm font-semibold text-Cwhite">Ready to analyse</p>
-              <p class="text-xs text-Cmuted mt-0.5">Navigate to any tab, or go straight to the Executive Dashboard for a full summary.</p>
+              <p id="upload-readiness-title" class="text-sm font-semibold text-Cwhite">Audit evidence coverage</p>
+              <p id="upload-readiness-detail" class="text-xs text-Cmuted mt-0.5">Upload core evidence to begin analysis.</p>
             </div>
-            <button onclick="setActiveView('overview')"
+            <button id="upload-readiness-action" onclick="setActiveView('overview')"
                     class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-Cblue/20 to-Cpurple/20 border border-Cblue/40 text-Cwhite hover:from-Cblue/30 hover:to-Cpurple/30 transition-all">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375Z" />
               </svg>
-              Open Executive Dashboard
+              Review available evidence
             </button>
           </div>
 
@@ -1723,7 +1699,7 @@
             <div id="batch-data-warnings" class="hidden space-y-1"></div>
 
             <!-- ── KPI strip (6 kpi-cards — 3 separated metrics + compliance + breach + SLA source) ── -->
-            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div id="batch-kpi-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
 
               <!-- KPI 1 — Elapsed Batch Window -->
               <div class="relative overflow-hidden rounded-2xl border border-Cborder
@@ -1734,9 +1710,9 @@
                    title="Effective batch window — longest contiguous run per day (idle gaps excluded). The SLA-binding measure.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cpurple/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Effective Window</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Effective Window</div>
                 <div id="bk-elapsed" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Cpurple">—</div>
-                <div id="bk-elapsed-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-elapsed-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
 
               <!-- KPI 2 — Summed Job Runtime -->
@@ -1748,9 +1724,9 @@
                    title="Sum of all individual job Run_Sec values per day. NOT wall-clock elapsed time.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cblue/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Summed Runtime</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Summed Runtime</div>
                 <div id="bk-summed" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Cblue">—</div>
-                <div id="bk-summed-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-summed-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
 
               <!-- KPI 3 — Worst-Job Peak -->
@@ -1762,9 +1738,9 @@
                    title="Single highest OK-run duration across all jobs.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Camber/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Worst-Job Peak</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Worst-Job Peak</div>
                 <div id="bk-worst" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Camber">—</div>
-                <div id="bk-worst-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-worst-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
 
               <!-- KPI 4 — Batch Compliance -->
@@ -1776,9 +1752,9 @@
                    title="Percentage of individual job peaks within SLA. Does NOT measure aggregate daily batch window.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cgreen/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Job SLA</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Job SLA</div>
                 <div id="bk-compliance" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Cgreen">—</div>
-                <div id="bk-compliance-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-compliance-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
 
               <!-- KPI 4b — Window SLA Rate (batch-window level) -->
@@ -1791,19 +1767,19 @@
                    title="Batch Window SLA Rate — how many run-days completed within the SLA window. ≠ Job SLA Rate.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Camber/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Window SLA</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Window SLA</div>
                 <div id="bk-window-compliance" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Camber">—</div>
-                <div id="bk-window-compliance-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-window-compliance-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
               <div class="relative overflow-hidden rounded-2xl border border-Cborder
                           bg-gradient-to-br from-Ccard to-Ccard2 p-4 min-h-[100px] shadow-kpi
                           hover:-translate-y-0.5 hover:shadow-kpiHov hover:border-Cred/60
                           transition-all duration-200 kpi-explain"
-                   data-explain="Breach: job's peak runtime exceeded the daily SLA ceiling. At-risk: peak is within SLA but buffer < 15%. OK: peak is safely within SLA with ≥ 15% buffer remaining."
-                   title="Job count by SLA status. Breach = peak exceeds SLA. At-risk = buffer < 15%.">
+                   data-explain="Peak job breach: the job's highest runtime exceeded its SLA ceiling. At-risk and OK are also based on each job's peak runtime. Individual-run breach counts are shown in the SLA Matrix."
+                   title="Job count by peak-runtime SLA status. Individual-run breach counts are shown in the SLA Matrix.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cred/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Breach · Risk · OK</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Peak Job · Risk · OK</div>
                 <div id="bk-breach-split" class="text-[22px] font-extrabold leading-[1.05] tracking-tight mt-1">
                   <span id="bk-breach" class="text-Cred">0</span>
                   <span class="text-Cmuted text-[16px] mx-0.5">·</span>
@@ -1811,7 +1787,7 @@
                   <span class="text-Cmuted text-[16px] mx-0.5">·</span>
                   <span id="bk-ok" class="text-Cgreen">0</span>
                 </div>
-                <div id="bk-breach-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-breach-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
 
               <!-- KPI 5b — Failed Runs (ENDED NOT OK) -->
@@ -1824,9 +1800,9 @@
                    title="Number of runs whose Ctrl-M completion status was not ENDED OK.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Corange/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">Failed Runs</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">Failed Runs</div>
                 <div id="bk-failed" class="text-[32px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Corange">—</div>
-                <div id="bk-failed-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-failed-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
 
               <!-- KPI 6 — SLA Source -->
@@ -1838,9 +1814,9 @@
                    title="Source of the SLA window used for all compliance calculations. Upload a customer SLA XLSX to override defaults.">
                 <div class="absolute top-0 left-0 right-0 h-[2px]
                             bg-gradient-to-r from-transparent via-Cteal/60 to-transparent"></div>
-                <div class="text-[9px] font-bold uppercase tracking-[0.12em] text-Cmuted">SLA Source</div>
+                <div class="text-[10.5px] font-bold uppercase tracking-[0.12em] text-Cmuted">SLA Source</div>
                 <div id="bk-sla-source" class="text-[18px] font-extrabold leading-[1.05] tracking-tight mt-1 text-Cteal">—</div>
-                <div id="bk-sla-source-sub" class="text-[10px] text-Cmuted mt-1 font-medium">—</div>
+                <div id="bk-sla-source-sub" class="text-[11px] text-Cmuted mt-1 font-medium">—</div>
               </div>
             </div>
 
@@ -1848,7 +1824,7 @@
                  confusion (two different % figures next to each other) was the single
                  most-repeated point of confusion across every review of this dashboard,
                  so it gets a permanent on-page line, not just a hover tooltip. -->
-            <div class="text-[10.5px] text-Cmuted/90 -mt-1 px-1 flex items-start gap-1.5">
+            <div id="batch-kpi-caption" class="text-[10.5px] text-Cmuted/90 -mt-1 px-1 flex items-start gap-1.5">
               <span class="text-Cblue">ℹ</span>
               <span><span class="text-Cwhite font-semibold">Job SLA</span> = % of jobs whose own peak runtime beat its SLA ceiling.
               <span class="text-Cwhite font-semibold">Window SLA</span> = % of days the full batch window (first start → last end) beat the same ceiling.
@@ -4512,10 +4488,53 @@
     function toggleSidebar() {
       const sb = document.getElementById('sidebar');
       const ov = document.getElementById('sidebar-overlay');
+      const toggle = document.getElementById('sidebar-toggle');
       const open = sb.classList.contains('-translate-x-full');
       sb.classList.toggle('-translate-x-full', !open);
       ov.classList.toggle('hidden', !open);
+      sb.toggleAttribute('inert', !open);
+      toggle?.setAttribute('aria-expanded', String(open));
+      toggle?.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+      if (open) {
+        requestAnimationFrame(() => sb.querySelector('.nav-btn')?.focus());
+      } else {
+        toggle?.focus();
+      }
     }
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || window.innerWidth >= 1024) return;
+      const sb = document.getElementById('sidebar');
+      if (sb && !sb.classList.contains('-translate-x-full')) toggleSidebar();
+    });
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const sb = document.getElementById('sidebar');
+      if (sb && window.innerWidth < 1024) sb.setAttribute('inert', '');
+    });
+
+    let sidebarWasDesktop = window.innerWidth >= 1024;
+    window.addEventListener('resize', () => {
+      const sb = document.getElementById('sidebar');
+      const ov = document.getElementById('sidebar-overlay');
+      const toggle = document.getElementById('sidebar-toggle');
+      if (!sb) return;
+      const isDesktop = window.innerWidth >= 1024;
+      if (isDesktop) {
+        sb.removeAttribute('inert');
+        ov?.classList.add('hidden');
+        toggle?.setAttribute('aria-expanded', 'false');
+      } else if (sidebarWasDesktop) {
+        sb.classList.add('-translate-x-full');
+        ov?.classList.add('hidden');
+        sb.setAttribute('inert', '');
+        toggle?.setAttribute('aria-expanded', 'false');
+        toggle?.setAttribute('aria-label', 'Open navigation');
+      } else if (sb.classList.contains('-translate-x-full')) {
+        sb.setAttribute('inert', '');
+      }
+      sidebarWasDesktop = isDesktop;
+    });
   </script>
 
   <!-- Application bootstrap -->

@@ -44,6 +44,9 @@ _NOISE_TOKENS: Set[str] = {
     "TEST", "PROD", "PRD", "UAT", "DEV", "STG", "STAGE", "STAGING", "QA",
     "SIT", "PERF", "PRE", "PREPROD", "NONPROD", "TRAIN", "DR",
     "BY", "THE", "OF", "AND", "FOR", "TO", "ON", "AT", "A", "AN",
+    # Generic container words are not workflow identity. Retaining APP let
+    # an unrelated pattern such as SCPO_SAT_RESTART_APP bind APP_A.
+    "APP", "APPLICATION", "APPLICATIONS",
 }
 
 # Day-of-week variants → canonical 3-letter token so "TUESDAY" matches "TUE".
@@ -55,7 +58,20 @@ _DAY_CANON: Dict[str, str] = {
     "FRIDAY": "FRI", "FRI": "FRI",
     "SATURDAY": "SAT", "SAT": "SAT",
     "SUNDAY": "SUN", "SUN": "SUN",
+    # Common customer abbreviations that identify a distinct SLA window. Without
+    # MORN → MORNING, SCPO_SUN_MORN and SCPO_SUN_NIGHT tie on only SCPO + SUN.
+    "MORN": "MORNING", "MORNING": "MORNING",
+    "EVE": "EVENING", "EVENING": "EVENING",
 }
+
+_WEEKDAY_IDENTITY_TOKENS: Set[str] = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+
+def _has_conflicting_weekday_tokens(left: Set[str], right: Set[str]) -> bool:
+    """True when both names explicitly name different weekdays."""
+    left_days = left & _WEEKDAY_IDENTITY_TOKENS
+    right_days = right & _WEEKDAY_IDENTITY_TOKENS
+    return bool(left_days and right_days and not (left_days & right_days))
+
 
 _YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")  # 1900-2099 — calendar years, not identity
 
@@ -95,9 +111,144 @@ def _token_match_score(sa_tok: Set[str], pat_tok: Set[str]) -> float:
     inter = sa_tok & pat_tok
     if not inter:
         return 0.0
+    # A single shared family token (for example SCPO) is not enough to bind
+    # SCPO_SAT to SCPO_FRIDAY. Retain legitimate one-token contracts such as
+    # BY_WEEKLY -> TEST_WEEKLY, where one side is fully identified by it.
+    if len(inter) == 1 and len(sa_tok) > 1 and len(pat_tok) > 1:
+        return 0.0
     sa_cov  = len(inter) / len(sa_tok)  if sa_tok  else 0.0
     pat_cov = len(inter) / len(pat_tok) if pat_tok else 0.0
     return sa_cov + pat_cov
+
+
+def _weekday_from_run_date(run_date: Any) -> Optional[int]:
+    """Return Python weekday (Mon=0..Sun=6) for a window date, if usable."""
+    if run_date is None or str(run_date).strip() == "":
+        return None
+    try:
+        import pandas as _pd
+        stamp = _pd.to_datetime(run_date, errors="coerce")
+        return None if _pd.isna(stamp) else int(stamp.weekday())
+    except Exception:
+        return None
+
+
+def resolve_window_ceiling_detail(
+    sub_application: str,
+    run_date: Any = None,
+    xlsx_config: Optional[Dict[str, Any]] = None,
+    pe_config_ref=None,
+) -> Dict[str, Any]:
+    """Resolve one ``sub-application × service date`` SLA contract.
+
+    A static sub-application ceiling is not enough when a workbook defines
+    multiple schedule-day variants. This preserves the established fuzzy matcher
+    but filters matching workflow rows to the service date before selecting one.
+    A matching workflow outside its stated schedule is deliberately unresolved;
+    it is safer than silently scoring it against a different contract variant.
+    """
+    sub_app = str(sub_application or "").strip()
+    fallback = build_ceiling_map_detailed(
+        [sub_app], xlsx_config=xlsx_config, pe_config_ref=pe_config_ref,
+    ).get(sub_app.upper(), {})
+    if not xlsx_config or not sub_app:
+        return fallback
+
+    day = _weekday_from_run_date(run_date)
+    sa_upper = sub_app.upper()
+    sa_tok = _signal_tokens(sa_upper)
+    candidates: List[Dict[str, Any]] = []
+    no_contract_candidates: List[Dict[str, Any]] = []
+    outside_schedule: List[Dict[str, Any]] = []
+
+    for wf in xlsx_config.get("workflows") or []:
+        if not isinstance(wf, dict):
+            continue
+        pat = str(wf.get("workflow") or wf.get("sub_app_pattern") or "").upper().strip()
+        try:
+            sla_h = float(wf.get("sla_hours") or wf.get("window_sla_hrs") or wf.get("sla_hrs") or 0)
+        except (TypeError, ValueError):
+            sla_h = 0.0
+        if not pat:
+            continue
+        explicit_no_contract = str(wf.get("sla_source") or "").upper() in {"NO_CONTRACT", "NO_EXPLICIT_SLA"}
+
+        pat_tok = _signal_tokens(pat)
+        # Weekday-bearing names must agree on the weekday before a fuzzy
+        # token match can bind them (FRI_RESTART must not match SAT_RESTART).
+        token_score = (0.0 if _has_conflicting_weekday_tokens(sa_tok, pat_tok)
+                       else _token_match_score(sa_tok, pat_tok))
+        if pat == sa_upper:
+            score, match_type = 3.0, "exact"
+        elif pat in sa_upper or sa_upper in pat:
+            score, match_type = 2.5 + min(token_score, 0.49), "substring"
+        elif token_score >= _TOKEN_MATCH_THRESHOLD:
+            score, match_type = token_score, "token"
+        else:
+            continue
+
+        raw_days = wf.get("schedule_days") or []
+        try:
+            schedule_days = {int(d) for d in raw_days}
+        except (TypeError, ValueError):
+            schedule_days = set()
+        if sla_h <= 0:
+            if not explicit_no_contract:
+                continue
+            candidate = {
+                "sla_hrs": 0.0,
+                "source": "unresolved",
+                "match_type": "no_contract",
+                "matched_pattern": pat,
+                "score": round(score, 3),
+                "schedule_type": str(wf.get("batch_type") or fallback.get("schedule_type") or "DAILY"),
+                "schedule_days": sorted(schedule_days) if schedule_days else None,
+            }
+            if schedule_days and day is not None and day not in schedule_days:
+                outside_schedule.append(candidate)
+                continue
+            no_contract_candidates.append(candidate)
+            continue
+
+        candidate = {
+            "sla_hrs": sla_h,
+            "source": "sla_matrix",
+            "match_type": match_type,
+            "matched_pattern": pat,
+            "score": round(score, 3),
+            "schedule_type": str(wf.get("batch_type") or fallback.get("schedule_type") or "DAILY"),
+            "schedule_days": sorted(schedule_days) if schedule_days else None,
+        }
+        if schedule_days and day is not None and day not in schedule_days:
+            outside_schedule.append(candidate)
+            continue
+        candidates.append(candidate)
+
+    def _precedence_key(candidate: Dict[str, Any]) -> tuple[int, float, int]:
+        score = float(candidate["score"])
+        # exact=3, substring>=2.5, token<2.5 — identity specificity first.
+        specificity = 3 if score >= 3.0 else (2 if score >= 2.5 else 1)
+        return (specificity, score, len(_signal_tokens(candidate["matched_pattern"])))
+
+    best_positive = (max(
+        candidates,
+        key=lambda c: (_precedence_key(c), -float(c["sla_hrs"])),
+    ) if candidates else None)
+    if no_contract_candidates:
+        best_no_contract = max(no_contract_candidates, key=_precedence_key)
+        # An equally or more specific explicit no-contract row is intentional
+        # business input, so it must not be replaced by a generic positive SLA.
+        if best_positive is None or _precedence_key(best_no_contract) >= _precedence_key(best_positive):
+            return best_no_contract
+    if best_positive is not None:
+        return best_positive
+    if outside_schedule:
+        blocked = max(
+            outside_schedule,
+            key=lambda c: (float(c["score"]), len(_signal_tokens(c["matched_pattern"]))),
+        )
+        return {**blocked, "sla_hrs": 0.0, "source": "unresolved", "match_type": "outside_schedule"}
+    return fallback
 
 
 # Minimum dual-containment score to accept a token match. 0.5 demands at least
@@ -554,63 +705,65 @@ def build_ceiling_map_detailed(
         sa_tok   = _signal_tokens(sa_upper)
         stype    = _sched_type(sa)
 
-        # Priority 1: token-overlap match against XLSX workflow patterns.
-        # Picks the most specific governing contract via dual-containment score,
-        # so cadence names ("BY WEEKLY") resolve to their Ctrl-M sub-app
-        # ("TEST_2025_WEEKLY") even when neither is a substring of the other.
-        best_score = 0.0
-        best_sla: Optional[float] = None
-        best_pat: Optional[str] = None
-        for pat, sla_h, pat_tok in _xlsx_pairs:
-            score = _token_match_score(sa_tok, pat_tok)
-            if score < _TOKEN_MATCH_THRESHOLD:
-                continue
-            # Higher score wins; tie-break on the tighter (smaller) contract
-            # window — the binding SLA when two contracts match equally well.
-            if best_sla is None or score > best_score or (score == best_score and sla_h < best_sla):
-                best_score = score
-                best_sla   = sla_h
-                best_pat   = pat
-
-        if best_sla is not None:
-            detail_map[sa_upper] = {
-                "sla_hrs":         best_sla,
-                "source":          "sla_matrix",
-                "match_type":      "token",
-                "matched_pattern": best_pat,
-                "score":           round(best_score, 3),
-                "schedule_type":   stype,
+        def _default(match_type: str = "schedule_default") -> Dict[str, Any]:
+            return {
+                "sla_hrs": _sched_hrs(stype), "source": "default",
+                "match_type": match_type, "matched_pattern": None,
+                "score": 0.0, "schedule_type": stype,
             }
+
+        def _detail(pat: str, sla_h: float, match_type: str, score: float) -> Dict[str, Any]:
+            return {
+                "sla_hrs": sla_h, "source": "sla_matrix",
+                "match_type": match_type, "matched_pattern": pat,
+                "score": round(score, 3), "schedule_type": stype,
+            }
+
+        # Priority 1: exact workflow identity. If the exact workflow has more
+        # than one differing target, a date-aware caller must select it; a static
+        # per-sub-app map must not silently pick a convenient value.
+        exact = [(pat, sla_h, pt) for pat, sla_h, pt in _xlsx_pairs if pat == sa_upper]
+        if exact:
+            if len({round(v[1], 6) for v in exact}) == 1:
+                detail_map[sa_upper] = _detail(exact[0][0], exact[0][1], "exact", 3.0)
+            else:
+                detail_map[sa_upper] = _default("ambiguous_contract")
             continue
 
-        # Priority 1b: legacy substring match — covers opaque codes with no
-        # clean alpha tokens (e.g. "EDI852") where tokenisation can't help.
-        matched: Optional[float] = None
-        matched_pat: Optional[str] = None
-        for pat, sla_h, _pt in _xlsx_pairs:
-            if pat in sa_upper or sa_upper in pat:
-                matched = sla_h
-                matched_pat = pat
-                break
-        if matched is not None:
-            detail_map[sa_upper] = {
-                "sla_hrs":         matched,
-                "source":          "sla_matrix",
-                "match_type":      "substring",
-                "matched_pattern": matched_pat,
-                "score":           0.0,
-                "schedule_type":   stype,
-            }
-        else:
-            # Priority 2 / 3: schedule-type default
-            detail_map[sa_upper] = {
-                "sla_hrs":         _sched_hrs(stype),
-                "source":          "default",
-                "match_type":      "schedule_default",
-                "matched_pattern": None,
-                "score":           0.0,
-                "schedule_type":   stype,
-            }
+        # Priority 2: containment is stronger than shared cadence tokens. Pick
+        # the most specific (longest) matching workflow, and only accept it when
+        # that most-specific identity has one unambiguous SLA.
+        contained = [(pat, sla_h, pt) for pat, sla_h, pt in _xlsx_pairs if pat in sa_upper or sa_upper in pat]
+        if contained:
+            max_len = max(len(pat) for pat, _sla_h, _pt in contained)
+            best = [row for row in contained if len(row[0]) == max_len]
+            if len({round(v[1], 6) for v in best}) == 1:
+                detail_map[sa_upper] = _detail(best[0][0], best[0][1], "substring", 2.5)
+            else:
+                detail_map[sa_upper] = _default("ambiguous_contract")
+            continue
+
+        # Priority 3: token overlap handles naming-convention differences such
+        # as "BY WEEKLY" vs "TEST_2025_WEEKLY". Equal-best but differently
+        # valued contracts are ambiguous, not an instruction to choose the
+        # smallest SLA (which manufactured false breaches in the USF workbook).
+        token_hits = []
+        for pat, sla_h, pat_tok in _xlsx_pairs:
+            score = (0.0 if _has_conflicting_weekday_tokens(sa_tok, pat_tok)
+                     else _token_match_score(sa_tok, pat_tok))
+            if score >= _TOKEN_MATCH_THRESHOLD:
+                token_hits.append((pat, sla_h, score))
+        if token_hits:
+            top_score = max(v[2] for v in token_hits)
+            best = [row for row in token_hits if abs(row[2] - top_score) < 1e-9]
+            if len({round(v[1], 6) for v in best}) == 1:
+                best_pat, best_sla, best_score = max(best, key=lambda v: len(v[0]))
+                detail_map[sa_upper] = _detail(best_pat, best_sla, "token", best_score)
+            else:
+                detail_map[sa_upper] = _default("ambiguous_token")
+            continue
+
+        detail_map[sa_upper] = _default()
 
     return detail_map
 

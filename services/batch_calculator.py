@@ -607,6 +607,9 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
             else:
                 df["Run_Sec"] = 0
 
+    # An explicit zero differs from a blank runtime: Ctrl-M uses zero for
+    # control/status records, which must not be expanded to End−Start later.
+    _runtime_reported = df["Run_Sec"].notna() & df["Run_Sec"].astype(str).str.strip().ne("")
     df["Run_Sec"] = pd.to_numeric(df["Run_Sec"], errors="coerce").fillna(0)
 
     # If Run_Sec is still all zeros and there's a human-readable duration column, parse it
@@ -659,10 +662,30 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
     if "End_Time" in df.columns:
         df["Start_Time"] = _parse_dt(df["Start_Time"])
         df["End_Time"]   = _parse_dt(df["End_Time"])
-        # Derive runtime from End−Start for ANY row where Run_Sec is zero.
-        # Previous mask (Status == "OK") was too narrow — it left ENDED_OK, LONG, etc.
-        # with zero runtime, causing wrong buffer % calculations in the SLA matrix.
-        mask = df["Run_Sec"] == 0
+
+        # Ctrl-M report exports can include a folder-level control marker as a
+        # pseudo-job. It repeats the folder name in Job_Name and spans multiple
+        # calendar days while a rerun is open. It is not an executable job, and
+        # including it makes a normal nightly batch look like a 24-72h window.
+        if "Folder" in df.columns and "Job_Name" in df.columns:
+            _folder_control = (
+                df["Folder"].notna()
+                & df["Job_Name"].notna()
+                & df["Folder"].astype(str).str.strip().str.upper().eq(
+                    df["Job_Name"].astype(str).str.strip().str.upper()
+                )
+            )
+            _folder_control_count = int(_folder_control.sum())
+            if _folder_control_count:
+                logger.warning(
+                    "load_ctrlm_bytes '%s': excluded %d folder-level control row(s) from job metrics",
+                    filename, _folder_control_count,
+                )
+                df = df.loc[~_folder_control].copy()
+
+        # Derive elapsed runtime only when the report omitted a runtime. An
+        # explicit zero is a Ctrl-M control/status record, not a missing value.
+        mask = (df["Run_Sec"] == 0) & ~_runtime_reported
         # Preserve original zero-runtime flag BEFORE backfill — used by anomaly
         # detection to distinguish timeout/wait jobs from genuinely slow execution.
         df["_orig_zero_runtime"] = False
@@ -1179,6 +1202,22 @@ def build_top_jobs_df(df: pd.DataFrame,
     else:
         top_jobs["is_utility"] = False
         top_jobs["utility_reason"] = ""
+
+    # Per-job concurrency: how many hours of THIS job's worst run overlapped
+    # with other jobs, and which ones — surfaced so a long product job isn't
+    # mistaken for a lone SLA culprit when it ran alongside other real work.
+    conc = _peak_interval_concurrency(df, group_cols)
+    if not conc.empty:
+        top_jobs = top_jobs.merge(conc, on=group_cols, how="left")
+    if "concurrent_overlap_hrs" not in top_jobs.columns:
+        top_jobs["concurrent_overlap_hrs"] = 0.0
+        top_jobs["concurrent_job_count"] = 0
+        top_jobs["concurrent_jobs_sample"] = [[] for _ in range(len(top_jobs))]
+    else:
+        top_jobs["concurrent_overlap_hrs"] = top_jobs["concurrent_overlap_hrs"].fillna(0.0)
+        top_jobs["concurrent_job_count"] = top_jobs["concurrent_job_count"].fillna(0).astype(int)
+        top_jobs["concurrent_jobs_sample"] = top_jobs["concurrent_jobs_sample"].apply(
+            lambda v: v if isinstance(v, list) else [])
 
     return top_jobs
 
@@ -1704,6 +1743,289 @@ def _busy_and_blocks_for_day(starts, ends, block_gap_hrs: float):
     return round(busy_hrs, 3), blocks
 
 
+def _concurrent_job_groups_for_day(job_names, starts, ends) -> list[dict]:
+    """Detect groups of DIFFERENT jobs whose [start, end] windows genuinely
+    overlap on one (sub_app, run_date). Unlike _busy_and_blocks_for_day (which
+    only returns an aggregate busy-time/run-count), this keeps each exact active
+    job set during a positive-duration overlap, so a reviewer can see WHICH jobs
+    ran at the same time, not a transitive chain of jobs that never overlapped.
+
+    Returns a list of {jobs: [sorted names], start, end, span_hrs,
+    peak_concurrent} — one entry per contiguous interval with the same active
+    set containing 2+ distinct job names. Runs of the SAME job alone (e.g. a
+    job that happens to run twice) are not reported as job concurrency.
+    """
+    triples = [
+        (s, e, str(j), index) for index, (j, s, e) in enumerate(zip(job_names, starts, ends))
+        if pd.notna(s) and pd.notna(e) and e > s
+    ]
+    if len(triples) < 2:
+        return []
+    events: dict = {}
+    for start, end, job, index in triples:
+        events.setdefault(start, {"start": [], "end": []})["start"].append((job, index))
+        events.setdefault(end, {"start": [], "end": []})["end"].append((job, index))
+
+    times = sorted(events)
+    active: dict[int, str] = {}
+    result: list[dict] = []
+    for position, current in enumerate(times[:-1]):
+        # An interval ending at this timestamp is no longer active; a new one
+        # starts after that removal, so touching intervals are not concurrent.
+        for _job, index in events[current]["end"]:
+            active.pop(index, None)
+        for job, index in events[current]["start"]:
+            active[index] = job
+        next_time = times[position + 1]
+        distinct_jobs = sorted(set(active.values()))
+        if len(distinct_jobs) < 2 or next_time <= current:
+            continue
+        span_hrs = round((next_time - current).total_seconds() / 3600.0, 3)
+        if result and result[-1]["jobs"] == distinct_jobs and result[-1]["end"] == current:
+            result[-1]["end"] = next_time
+            result[-1]["span_hrs"] = round(
+                (next_time - result[-1]["start"]).total_seconds() / 3600.0, 3
+            )
+            result[-1]["peak_concurrent"] = max(result[-1]["peak_concurrent"], len(active))
+        else:
+            result.append({
+                "jobs":            distinct_jobs,
+                "start":           current,
+                "end":             next_time,
+                "span_hrs":        span_hrs,
+                "peak_concurrent": len(active),
+            })
+    return result
+
+
+def _summarize_concurrency(rows: list[dict]) -> dict:
+    """Roll up per-(sub_app, run_date) concurrent-job-group rows into a
+    reviewer-facing summary, one card per sub-application (not per exact
+    job-set) — a real pileup where the active set changes membership for a
+    few seconds must not fragment into several near-identical cards.
+
+    Same-day overlap intervals for a sub-application are merged into "burst"
+    events (union of jobs, true peak concurrency), so the UI can show a
+    compact, explainable list of when pileups happened instead of a wall of
+    duplicated groups.
+
+    Returns {total_days_with_concurrency, groups: [...], by_job: [...]}.
+    """
+    if not rows:
+        return {"total_days_with_concurrency": 0, "groups": [], "by_job": []}
+
+    from collections import defaultdict
+
+    days_with_conc = {r["run_date"] for r in rows}
+    job_days: dict[str, set] = defaultdict(set)
+    for r in rows:
+        for j in r["jobs"]:
+            job_days[j].add(r["run_date"])
+
+    by_day: dict[tuple, list] = defaultdict(list)
+    for r in rows:
+        by_day[(r["sub_application"], r["run_date"])].append(r)
+
+    bursts_by_sub: dict[str, list[dict]] = defaultdict(list)
+    for (sub_app, run_date), day_rows in by_day.items():
+        ivs = sorted(day_rows, key=lambda r: pd.Timestamp(r["start"]))
+        merged: list[dict] = []
+        for iv in ivs:
+            st, et = pd.Timestamp(iv["start"]), pd.Timestamp(iv["end"])
+            if merged and st <= merged[-1]["end"]:
+                merged[-1]["end"] = max(merged[-1]["end"], et)
+                merged[-1]["jobs"] = sorted(set(merged[-1]["jobs"]) | set(iv["jobs"]))
+                merged[-1]["peak_concurrent"] = max(merged[-1]["peak_concurrent"], iv["peak_concurrent"])
+            else:
+                merged.append({"start": st, "end": et, "jobs": list(iv["jobs"]),
+                                "peak_concurrent": int(iv["peak_concurrent"])})
+        for m in merged:
+            dur_min = round((m["end"] - m["start"]).total_seconds() / 60.0, 1)
+            bursts_by_sub[sub_app].append({
+                "run_date":         run_date,
+                "start_clock":      m["start"].strftime("%H:%M"),
+                "end_clock":        m["end"].strftime("%H:%M"),
+                "duration_min":     dur_min,
+                "peak_concurrent":  int(m["peak_concurrent"]),
+                "jobs":             m["jobs"],
+                "job_count":        len(m["jobs"]),
+            })
+
+    groups_out = []
+    for sub_app, bursts in bursts_by_sub.items():
+        bursts.sort(key=lambda b: (-b["peak_concurrent"], -b["duration_min"]))
+        occurrences = len(bursts)
+        days_seen = len({b["run_date"] for b in bursts})
+        peak = max((b["peak_concurrent"] for b in bursts), default=0)
+        max_span_hrs = max((b["duration_min"] for b in bursts), default=0.0) / 60.0
+        avg_duration_min = round(sum(b["duration_min"] for b in bursts) / len(bursts), 2) if bursts else 0.0
+        # Jobs-per-minute-of-overlap — a high value means many jobs piled into
+        # a very short window (the "AbbVie-style" filesystem I/O risk pattern),
+        # distinct from a moderate overlap sustained over a long span.
+        burst_tightness = round(peak / max(avg_duration_min, 0.5), 2) if peak > 0 else 0.0
+        all_jobs = sorted({j for b in bursts for j in b["jobs"]})
+
+        # Occurrences-per-ISO-week trend (chronological) so a reviewer can tell
+        # a stable long-standing pattern from a recent regression at a glance.
+        _week_counts: dict = defaultdict(int)
+        for b in bursts:
+            _ts = pd.Timestamp(b["run_date"])
+            _iso = _ts.isocalendar()
+            _week_counts[(int(_iso.year), int(_iso.week))] += 1
+        trend = [c for _k, c in sorted(_week_counts.items())]
+
+        groups_out.append({
+            "example_sub_app":     sub_app,
+            "jobs":                all_jobs,
+            "job_count":           len(all_jobs),
+            "distinct_jobs_total": len(all_jobs),
+            "occurrences":         occurrences,
+            "days_seen":           days_seen,
+            "days_list":           sorted({b["run_date"] for b in bursts}),
+            "peak_concurrent":     peak,
+            "max_span_hrs":        round(max_span_hrs, 3),
+            "avg_duration_min":    avg_duration_min,
+            "burst_tightness":     burst_tightness,
+            "trend":               trend,
+            "bursts":              bursts[:60],
+        })
+
+    # ── Severity tiers = terciles of the OBSERVED peak values ────────────────
+    # A fixed absolute threshold made every group read HIGH (all peaks cleared
+    # it). Percentile cutoffs guarantee real separation whenever peaks vary:
+    # top third of observed peaks → high, middle third → medium, else low.
+    _peaks = [int(g["peak_concurrent"]) for g in groups_out if g["peak_concurrent"] > 0]
+    if _peaks:
+        _p33 = float(np.percentile(_peaks, 33.334))
+        _p67 = float(np.percentile(_peaks, 66.667))
+    else:
+        _p33 = _p67 = 0.0
+    for g in groups_out:
+        _pk = int(g["peak_concurrent"])
+        if _pk <= 0:
+            g["severity_level"] = "low"
+        elif _pk >= _p67 and _p67 > _p33:
+            g["severity_level"] = "high"
+        elif _pk >= _p33:
+            g["severity_level"] = "medium"
+        else:
+            g["severity_level"] = "low"
+        # Keep a numeric score (peak-anchored) for any legacy consumer, but the
+        # canonical ordering below is by the DISPLAYED peak so the list can
+        # never contradict the number shown on each row.
+        g["severity_score"] = float(_pk)
+
+    # Sort by the peak value shown on each row (descending), tiebreak by
+    # affected-day count then occurrences — peaks now read monotonically
+    # non-increasing top to bottom.
+    groups_out.sort(key=lambda g: (
+        -int(g.get("peak_concurrent", 0)),
+        -int(g.get("days_seen", 0)),
+        -int(g.get("occurrences", 0)),
+    ))
+
+    by_job_out = sorted(
+        (
+            {"job": j, "days_seen": len(d), "days_list": sorted(d)}
+            for j, d in job_days.items()
+        ),
+        key=lambda x: -x["days_seen"],
+    )
+    return {
+        "total_days_with_concurrency": len(days_with_conc),
+        "groups": groups_out[:25],
+        "by_job": by_job_out[:50],
+    }
+
+
+def _peak_interval_concurrency(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    """For each (Sub_Application, Job_Name)'s WORST (longest) run, compute how
+    many hours of that specific run overlapped with ANY other job on the same
+    (Sub_Application, run_date), and which distinct jobs overlapped.
+
+    Why this exists alongside _concurrent_job_groups_for_day: that function
+    only reports a span when the EXACT active job-set stays constant — the
+    instant any one job in a cluster starts or ends earlier/later than its
+    neighbours (the normal case), a genuine multi-hour overlap fragments into
+    many sub-minute segments and the real signal disappears. A long product
+    job's worst run overlapping with other jobs for hours is exactly the
+    scenario a reviewer needs surfaced on the job itself, not buried in a
+    cluster-recurrence rollup.
+
+    Returns a DataFrame keyed by group_cols with concurrent_overlap_hrs,
+    concurrent_job_count, concurrent_jobs_sample columns — merge onto top_jobs.
+    """
+    empty = pd.DataFrame(columns=group_cols + [
+        "concurrent_overlap_hrs", "concurrent_job_count", "concurrent_jobs_sample"])
+    needed = {"Start_Time", "End_Time", "run_date", "Job_Name"}
+    if df.empty or not needed.issubset(df.columns) or "Sub_Application" not in group_cols:
+        return empty
+
+    valid = df[df["Start_Time"].notna() & df["End_Time"].notna() & (df["End_Time"] > df["Start_Time"])]
+    if valid.empty:
+        return empty
+
+    peak_idx = valid.groupby(group_cols)["run_time_hrs"].idxmax()
+    peaks = valid.loc[peak_idx, group_cols + ["Start_Time", "End_Time", "run_date"]].reset_index(drop=True)
+
+    # Precompute one numpy int64 (ns) array per (sub_app, run_date) group so the
+    # per-job overlap scan below is vectorized, not row-by-row Python iteration
+    # (which does not scale past a few hundred jobs/day on real PROD exports).
+    day_arrays: dict[tuple, dict] = {}
+    for key, grp in valid.groupby(["Sub_Application", "run_date"]):
+        day_arrays[key] = {
+            "starts": grp["Start_Time"].to_numpy(dtype="datetime64[ns]").astype("int64"),
+            "ends":   grp["End_Time"].to_numpy(dtype="datetime64[ns]").astype("int64"),
+            "names":  grp["Job_Name"].astype(str).to_numpy(),
+        }
+
+    overlap_hrs_out, job_count_out, sample_out = [], [], []
+    for row in peaks.itertuples(index=False):
+        sub_app, job = getattr(row, "Sub_Application"), row.Job_Name
+        p_start = np.int64(pd.Timestamp(row.Start_Time).value)
+        p_end   = np.int64(pd.Timestamp(row.End_Time).value)
+        day = day_arrays.get((sub_app, row.run_date))
+        if day is None:
+            overlap_hrs_out.append(0.0); job_count_out.append(0); sample_out.append([])
+            continue
+        other_mask = day["names"] != job
+        cs = np.maximum(day["starts"][other_mask], p_start)
+        ce = np.minimum(day["ends"][other_mask], p_end)
+        pos_mask = ce > cs
+        if not pos_mask.any():
+            overlap_hrs_out.append(0.0); job_count_out.append(0); sample_out.append([])
+            continue
+        cs, ce = cs[pos_mask], ce[pos_mask]
+        names = day["names"][other_mask][pos_mask]
+        order = np.argsort(cs)
+        cs, ce = cs[order], ce[order]
+        merged_end = ce[0]
+        union_ns = np.int64(0)
+        for i in range(1, len(cs)):
+            if cs[i] > merged_end:
+                union_ns += merged_end - cs[i - 1] if i == 1 else union_ns
+            merged_end = max(merged_end, ce[i])
+        # Re-derive the union total simply and correctly (avoid the loop above's
+        # partial bookkeeping): sweep once, summing each new merged span.
+        union_ns = np.int64(0)
+        cur_s, cur_e = cs[0], ce[0]
+        for i in range(1, len(cs)):
+            if cs[i] > cur_e:
+                union_ns += cur_e - cur_s
+                cur_s, cur_e = cs[i], ce[i]
+            else:
+                cur_e = max(cur_e, ce[i])
+        union_ns += cur_e - cur_s
+        overlap_hrs_out.append(round(float(union_ns) / 3.6e12, 3))
+        job_count_out.append(int(np.unique(names).size))
+        sample_out.append(sorted(set(names.tolist()))[:5])
+
+    peaks["concurrent_overlap_hrs"] = overlap_hrs_out
+    peaks["concurrent_job_count"] = job_count_out
+    peaks["concurrent_jobs_sample"] = sample_out
+    return peaks[group_cols + ["concurrent_overlap_hrs", "concurrent_job_count", "concurrent_jobs_sample"]]
+
+
 # ─────────────────────────────────────────────────────────────────
 # compute_metrics — extracted from app_v2.py:2314
 # ─────────────────────────────────────────────────────────────────
@@ -1880,6 +2202,9 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     window_inscope_ceiling_count = 1
     window_inscope_ceiling_min = float(global_ceil)
     window_inscope_ceiling_max = float(global_ceil)
+    # Default so the "concurrency" key in the return dict below is always safe
+    # even when this whole block is skipped (no End_Time / no Sub_Application).
+    _concurrency_rows: list[dict] = []
 
     if has_end_time and "Sub_Application" in df_analysis.columns:
         # ── Gap 1: Sentinel job map from BatchSLA XLSX ───────────────────────
@@ -1991,6 +2316,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # span.
         _blk_gap = float(getattr(pe_config, "BATCH_BLOCK_GAP_HRS", 1.0))
         _sa_busy_rows = []
+        _concurrency_rows: list[dict] = []
         try:
             for (_sa_b, _rd_b), _g_b in (
                 _df_win_for_agg.dropna(subset=["run_date"])
@@ -2006,8 +2332,22 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                     "largest_block_hrs": round(max((b["span_hrs"] for b in _blks), default=0.0), 3),
                     "block_count_sa":    len(_blks),
                 })
+                # Which specific jobs actually overlapped in clock time on this
+                # (sub_app, date) — distinct from the aggregate busy/block stats
+                # above, which only ever carry counts, never job names.
+                if "Job_Name" in _g_b.columns:
+                    for _cg in _concurrent_job_groups_for_day(
+                        list(_g_b["Job_Name"]), list(_g_b["Start_Time"]), list(_g_b["End_Time"])
+                    ):
+                        _concurrency_rows.append({
+                            "sub_application": str(_sa_b),
+                            "run_date":        pd.Timestamp(_rd_b).strftime("%Y-%m-%d"),
+                            **_cg,
+                        })
         except Exception:
+            logger.exception("Could not calculate batch busy-time/concurrency evidence")
             _sa_busy_rows = []
+            _concurrency_rows = []
         if _sa_busy_rows:
             window_agg = window_agg.merge(
                 pd.DataFrame(_sa_busy_rows), on=["Sub_Application", "run_date"], how="left"
@@ -2831,6 +3171,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "window_excluded_days":    _window_excluded_days,
         # Canonical (sub_app, date)-granular window compliance from the shared engine
         "window_compliance":       window_compliance,
+        # Which specific jobs (within the same sub-application/day) genuinely
+        # overlapped in clock time — distinct from window_compliance's aggregate
+        # busy-time number, this names the actual concurrent jobs and how many
+        # distinct days each recurring cluster was seen.
+        "concurrency":             _summarize_concurrency(_concurrency_rows),
         # Gap 4: parallel wall-clock deadline compliance (absolute clock ceilings)
         "deadline_compliance":     deadline_compliance,
         "total_jobs":       t_jobs,
@@ -3341,6 +3686,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "top_jobs":      [],
             "top_breaches":  [],
             "window":        [],
+            "concurrency":   {"total_days_with_concurrency": 0, "groups": [], "by_job": []},
             "sub_stats":     [],
             "anomalies":     [],
             "hourly_counts": {"hourly_jobs": {}, "hourly_fails": {}},
@@ -3521,7 +3867,9 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                               "sla_match_confidence", "sla_match_detail",
                               "buffer_pct", "sla_used_pct", "buffer_status",
                               "baseline_quality", "is_high_variance",
-                              "fail_count", "is_utility", "utility_reason"]
+                              "fail_count", "is_utility", "utility_reason",
+                              "concurrent_overlap_hrs", "concurrent_job_count",
+                              "concurrent_jobs_sample"]
                  if c in top_jobs_df.columns]
 
     # CHANGE 1: cache the full df so SLA-matrix upload can recompute without
@@ -3703,6 +4051,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,
         "window_sub_app": (m.get("window_compliance") or {}).get("per_sub_app", []),
+        # Concurrent-job groups: which specific jobs genuinely overlapped in
+        # clock time, how many distinct days each recurring cluster was seen,
+        # and a per-job "days seen running alongside something else" rollup.
+        "concurrency":  m.get("concurrency") or {"total_days_with_concurrency": 0, "groups": [], "by_job": []},
         "sub_stats":    sub_df.round({"total_hrs": 2}).to_dict(orient="records"),
         "anomalies":    m["anomalies"],
         "hourly_counts": _build_hourly_counts(_df_payload_scope),

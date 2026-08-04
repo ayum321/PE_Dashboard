@@ -186,6 +186,25 @@ flowchart TD
 Every exclusion is **named and surfaced to the reviewer** (`_build_excluded_jobs_list()`
 + the `excluded_jobs`/`excluded_sub_apps` payload) — nothing is silently dropped.
 
+**In plain terms:** a job is only ever removed from one specific number (e.g.
+"the compliance %"), never wiped from the dashboard entirely — except when a
+reviewer explicitly chooses to exclude it from analysis.
+
+```mermaid
+flowchart TD
+    J["Every job in the Ctrl-M file"] --> Q1{"Reviewer manually\nexcluded this job?"}
+    Q1 -->|yes| OUT1["Removed from SLA analysis\n(still visible in raw file/heatmap)"]
+    Q1 -->|no| Q2{"Utility/infra job?\n(file_watcher, backup, export_ ...)"}
+    Q2 -->|yes, and run was short| OUT2["Excluded — housekeeping,\nnot real batch work"]
+    Q2 -->|no, or ran too long to be housekeeping| Q3{"Cyclic/polling job?\n(>5 runs/day, avg <15 min)"}
+    Q3 -->|yes| OUT3["Dropped from window-elapsed\nmeasurement only"]
+    Q3 -->|no| Q4{"Out-of-scope schedule?\n(MONTHLY/ADHOC/OUTBOUND/...)"}
+    Q4 -->|yes| OUT4["Dropped from window-compliance\ndenominator only — still checked\nfor breach/anomaly"]
+    Q4 -->|no| Q5{"Too few/too short runs\nto trust a baseline?\n(SHORT_JOB / INSUFFICIENT)"}
+    Q5 -->|yes| OUT5["Excluded from compliance %\nonly — still listed"]
+    Q5 -->|no| KEEP["Counted everywhere:\nSLA, compliance, findings"]
+```
+
 | Exclusion | Mechanism | Verified |
 |---|---|---|
 | **User-picked jobs** | `config_store["exclude_jobs"]` — analyst opts a job out by name | applies to SLA analysis only; raw file/heatmap still shows it |
@@ -203,26 +222,46 @@ visible in the UI."*
 
 ## SLA After Upload — Exact Join First, Then Adaptive Fallback
 
-**Step 1 — Tier 1 join** (`routers/sla_matrix.py`, on BatchSLA_info.xlsx upload):
-1. **Exact match** — normalized workflow key (`_norm()`) hits the XLSX row directly
-2. **Anchor match** — the XLSX's `First_Job`/`Last_Job` sentinel names anchor a
-   Ctrl-M sub-app to its workflow even if the sub-app name itself doesn't match
-3. **Token match** — remaining unmatched workflows fall back to a token-overlap
-   fuzzy match
-4. **Collision guard** — if two different workflows would share the same
-   stripped secondary key (e.g. `PETBARN_DAILY` and `TESCO_DAILY` both reducing
-   to `DAILY`), that secondary key is **skipped entirely** rather than
-   last-writer-wins silently assigning the wrong SLA to one of them
+**In plain terms:** when a customer's SLA spreadsheet is uploaded, the dashboard
+tries four increasingly loose ways to match each Ctrl-M workflow to its SLA row
+— and refuses to guess if two workflows could plausibly match the same row.
 
-**Step 2 — sentinel-restricted window** (not naive min/max):
-- The wall-clock window opens at the **earliest** First_Job run and closes at
-  the **latest** Last_Job run (`.min()`/`.max()` respectively — deliberately
-  asymmetric so a Last_Job that fires from several parallel sub-workflows
-  doesn't truncate the window early)
-- Prevents pre-batch file-prep jobs from inflating the measured window
+```mermaid
+flowchart TD
+    U["BatchSLA_info.xlsx uploaded"] --> M1{"Exact key match?\n(normalized workflow name)"}
+    M1 -->|yes| HIT["Use this SLA row"]
+    M1 -->|no| M2{"Anchor match?\nFirst_Job / Last_Job names\nline up with Ctrl-M jobs"}
+    M2 -->|yes| HIT
+    M2 -->|no| M3{"Token match?\n(fuzzy word overlap)"}
+    M3 -->|yes| HIT
+    M3 -->|no| T2["No safe match —\nfall through to Tier 2 / Tier 3"]
+    HIT --> COL{"Would two different\nworkflows collide on the\nsame shortened key?\n(e.g. PETBARN_DAILY vs TESCO_DAILY\nboth reduce to 'DAILY')"}
+    COL -->|yes| DROP["Skip that key entirely —\nnever guess which workflow wins"]
+    COL -->|no| USE["SLA assigned to the workflow"]
+```
 
-**Step 3 — if no XLSX is uploaded at all (PATH C, adaptive)**:
-> Per job, from Ctrl-M run history alone: `STRONG` (≥14 OK runs) → p95 runtime · `MODERATE` (7–13) → max(p90, avg+2σ) · `WEAK` (3–6) → a blended peak/variance estimate · `INSUFFICIENT` (<3) → best-guess peak, excluded from compliance · always capped at the schedule's global ceiling.
+**The measured window itself** is anchored to named jobs, not just the earliest
+and latest timestamp in the file — a pre-batch file-prep job that starts hours
+early, or a cleanup job that finishes late, will not stretch the window:
+- Window **opens** at the earliest run of the SLA row's own `First_Job`
+- Window **closes** at the latest run of the SLA row's own `Last_Job`
+  (latest, not earliest — a `Last_Job` that fires from several parallel
+  sub-workflows should never truncate the window early)
+
+**If no SLA spreadsheet is uploaded at all** (adaptive fallback), each job gets
+its own SLA built from its own Ctrl-M run history — more history in, a tighter
+and more confident number out:
+
+| Runs available | Confidence label | SLA is set to |
+|---|---|---|
+| ≥ 14 OK runs | `STRONG` | 95th-percentile runtime (p95) |
+| 7–13 OK runs | `MODERATE` | the larger of p90, or average + 2 standard deviations |
+| 3–6 OK runs | `WEAK` | a blended peak/variance estimate |
+| < 3 OK runs | `INSUFFICIENT` | a best-guess peak — excluded from the compliance % |
+
+Every one of these is still capped at the schedule's global default ceiling
+(6h daily / 8h weekly) — a single noisy job can never claim a bigger SLA than
+the engagement's own default allows.
 
 ✅ **Tested**: 20 synthetic runs at ~4.0–4.4h → correctly classified `STRONG`,
 `sla_hrs = 4.4` (p95), capped under the 6h global ceiling supplied.
@@ -249,17 +288,31 @@ ceiling.*
 
 ## Concurrent & Overlapping Jobs — Busy-Time, Not a Naive Sum
 
-A day's "batch window" is not `sum(runtimes)` and not `last_end − first_start`
-either — both overstate reality when jobs run in parallel or in separated
-clusters.
+**In plain terms:** if two jobs overlap, the dashboard doesn't double-count the
+overlapping minutes, and it doesn't stretch the window across a long idle gap
+either. Neither "add up every job's runtime" nor "first start to last end" is
+accurate once jobs run in parallel or in separate clusters — so the dashboard
+does neither.
 
-- **`_merge_intervals()`**: unions all job `[start, end]` pairs for the day.
-  Two jobs that ran 01:00–02:00 and 01:30–03:00 in parallel count as **2h of
-  real busy time**, not 3h.
-- **Block detection**: runs separated by more than `BATCH_BLOCK_GAP_HRS` are
-  reported as **separate batch blocks** (e.g. a morning phase and an evening
-  phase) instead of one artificially long elapsed window spanning the idle gap
-  between them.
+```mermaid
+gantt
+    dateFormat HH:mm
+    axisFormat %H:%M
+    section Job A
+    01:00 - 02:00 (1h)      :a1, 01:00, 02:00
+    section Job B
+    01:30 - 03:00 (1.5h)    :a2, 01:30, 03:00
+    section Real busy time
+    Union = 2h, not 2.5h    :crit, a3, 01:00, 03:00
+```
+
+- **`_merge_intervals()`** unions every job's `[start, end]` pair for the day.
+  The two jobs above sum to 2.5h of individual runtime, but only occupy **2h**
+  of actual wall-clock time together — that 2h is what gets reported.
+- **Block detection** splits the day into separate batch blocks when the gap
+  between runs exceeds `BATCH_BLOCK_GAP_HRS` (e.g. a morning phase and an
+  evening phase), instead of treating the idle hours in between as if the
+  batch were still "running".
 
 ✅ **Tested**: three overlapping/adjacent runs (01:00–02:00, 01:30–03:00,
 04:00–04:30) → `busy_hrs = 2.5`, correctly the union, not the naive `3.5h` sum.
@@ -376,6 +429,18 @@ tool can do, because it needs both Ctrl-M **and** Azure Monitor data:
 | **CRS** (0–1) | Cascade Risk Score — likelihood a breach cascades downstream |
 | **OSHS** (0–100 → A–F) | Overall System Health Score — executive-dashboard grade |
 
+```mermaid
+flowchart LR
+    CM["Ctrl-M batch data\nfailures · runtimes · buffers"] --> RFCS
+    CM --> SRI
+    CM --> CRS
+    AZ["Azure Monitor data\nCPU · memory"] --> RFCS
+    AZ --> SRI
+    RFCS --> OSHS["OSHS\nexecutive grade A–F"]
+    SRI --> OSHS
+    CRS -.->|"per-job risk —\nfeeds findings, not OSHS directly"| FIND["Findings engine"]
+```
+
 ⚠️ **Calibration caveat**: across the real engagements reviewed so far
 (failure rates consistently <1%, average CPU consistently <5%), RFCS and
 SRI's amplification terms rarely activate — both formulas were designed
@@ -390,6 +455,8 @@ engagement before presenting either as a differentiated signal to a customer.
 ## Formula Detail (with the clamps that actually ship)
 
 **RFCS** — Resource-Failure Correlation Score
+*In plain terms: goes up only when servers are stressed AND jobs are failing
+at the same time. Failures alone, on calm servers, do not move it.*
 > `RFCS = cap100( failureRate × (0.6×avgCPU + 0.4×avgMem)/100 × (1 + 0.15×min(criticalServers,10)) )`
 - `failureRate` is a **percentage** (`100 − compliance_pct`), not a fraction.
 - Example: 20% failure rate, avgCPU=85, avgMem=70, 3 critical servers
@@ -398,6 +465,8 @@ engagement before presenting either as a differentiated signal to a customer.
 - Raw value can reach ~250 before the `cap100(...)` clamp caps it at 100.
 
 **SRI** — SLA Risk Index (per job)
+*In plain terms: how close this one job is to breaching its SLA, made worse
+if the server was also under heavy CPU load while the job ran.*
 > `SRI = (peakHours / slaCeilingHours) × (1 + max(0, (avgCPU−70)/100))` — `>1.0` = breach
 - `peakHours / slaCeilingHours` is algebraically `1 − bufferPct/100` — SRI
   deliberately **reuses** the same buffer fact (amplified by CPU pressure),
@@ -406,26 +475,34 @@ engagement before presenting either as a differentiated signal to a customer.
   → `5/6 = 0.833` × `(1 + max(0,0.15)) = 1.15` → **SRI ≈ 0.96** (still under 1.0)
 
 **CRS** — Cascade Risk Score (per job)
+*In plain terms: if this job fails, how many other jobs behind it in the same
+sub-application are put at risk — worse if the job's own SLA breach was deep.*
 > `CRS = cap1( failedFlag × (downstreamCount/(downstreamCount+5)) × (1 − clamp(slaBuffer,0,100)/100) )`
 - `slaBuffer` is clamped to `[0,100]` **before** use — a −200% (deep breach)
   buffer becomes `0`, not a negative that would push CRS past 1. The final
   result is clamped again to `≤ 1`.
 - Example: job failed, 8 downstream jobs, buffer was −200% (deep breach)
   → chain factor `8/13 = 0.615` × buffer risk `1 − 0/100 = 1.0` → **CRS ≈ 0.62**
-- **Verified against a real worst-case row** (a job at −3713.1% buffer):
-  `calc_crs(True, 8, -3713.1)` returns the **same 0.615** as a −20% breach
-  with the same downstream count. The clamp fixes boundedness completely,
-  but as a side effect **CRS can't distinguish "barely breached" from
-  "catastrophically breached"** — every breach past 0% buffer maxes out the
-  buffer-risk term identically. Chain size is the only thing still varying
-  CRS between two failed jobs.
+- **Known limitation, verified against a real worst-case row** (a job at
+  −3713.1% buffer): `calc_crs(True, 8, -3713.1)` returns the **same 0.615** as
+  a −20% breach with the same downstream count. The clamp keeps CRS bounded
+  correctly, but as a side effect **CRS can't tell "barely breached" apart
+  from "catastrophically breached"** — every breach past 0% buffer maxes out
+  the buffer-risk term identically. Only the chain size still varies CRS
+  between two failed jobs.
 
 **OSHS** — Overall System Health Score (executive grade)
+*In plain terms: one grade for the customer's whole engagement — 40% how
+batch jobs performed, 35% how SLA compliance looked, 25% how the servers held
+up — and it never invents a resource score when there's no resource data.*
 > `OSHS = 0.40×batchScore + 0.35×slaScore + 0.25×resourceScore`
 - Weights re-normalize over batch+SLA only (→ 0.53/0.47 proportional) when
   no resource data exists — **never fabricates** a resource score.
 
 **JRTOS** — Job-Resource Temporal Overlap (per hour-of-day bucket, 0–23)
+*In plain terms: for each hour of the day, how much do job volume, failure
+rate, and CPU pressure all pile up together — pinpoints the single riskiest
+hour, not just the riskiest day.*
 > `JRTOS[h] = (jobs[h]/maxJobsInAnyHour) × (failRate[h]/100) × (peakCPU/100)`
 - All three factors are ratios in `[0,1]`, so `JRTOS[h]` is naturally bounded
   to `[0,1]` — no clamp needed. The "0–23" in the summary table is the
@@ -476,7 +553,22 @@ flowchart LR
 **Worked example**: SOW contracted = 500,000 DFU/day, actual = 265,000
 → `265,000 / 500,000 × 100` = **53% → LOW**, under-utilized vs. contract
 
-Evaluated in strict order (first match wins — never double-fires):
+**In plain terms:** the same percentage is tested against four thresholds in
+a fixed order, and the **first one it satisfies wins** — so a number can never
+accidentally match two statuses at once.
+
+```mermaid
+flowchart TD
+    P["pct = actual ÷ SOW contracted × 100"] --> C1{"> CRITICAL threshold?"}
+    C1 -->|yes| R1["CRITICAL_OVER\nblocks sign-off without disclaimer"]
+    C1 -->|no| C2{"> OVER threshold?"}
+    C2 -->|yes| R2["OVER"]
+    C2 -->|no| C3{"< LOW threshold?"}
+    C3 -->|yes| R3["LOW — under-utilized vs. contract"]
+    C3 -->|no| C4{"< 90%?"}
+    C4 -->|yes| R4["ACCEPTABLE — inside window, lower end"]
+    C4 -->|no| R5["OPTIMAL — preferred zone"]
+```
 
 | Order | Condition | Status |
 |---|---|---|

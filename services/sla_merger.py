@@ -42,6 +42,56 @@ import io
 import re
 from typing import Any, Dict, List, Optional
 
+# ── Schedule day-of-week parsing ──────────────────────────────────────────────
+# Some customers define TWO (or more) XLSX rows for the SAME workflow name, each
+# scoped to a different subset of the week (e.g. "Sun to Thu" for the main demand
+# batch, "Fri, Sat" for a maintenance window). These must NOT collapse into one
+# row — each day's Ctrl-M run needs to be judged against its OWN contracted
+# window/anchors. _parse_schedule_days() extracts which weekdays a Schedule cell
+# actually applies to, so callers can route each run_date to the right row.
+_DAY_ALIASES = {
+    "SUNDAY": "SUN", "MONDAY": "MON", "TUESDAY": "TUE", "WEDNESDAY": "WED",
+    "THURSDAY": "THU", "FRIDAY": "FRI", "SATURDAY": "SAT",
+}
+_DAY_ORDER_SUN_START = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+_DAY_TO_PY_WEEKDAY = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+_ORDINAL_DAY_RE = re.compile(
+    r"\b(?:1ST|2ND|3RD|4TH|5TH|FIRST|SECOND|THIRD|FOURTH|FIFTH|LAST|OTHER)\s+"
+    r"(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b"
+)
+_DAY_RANGE_RE = re.compile(
+    r"\b(SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\s*(?:TO|[\-\u2013])\s*"
+    r"(SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b"
+)
+_DAY_TOKEN_RE = re.compile(r"\b(SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b")
+
+
+def _parse_schedule_days(schedule_text: str) -> Optional[frozenset]:
+    """Return the set of Python weekday ints (Mon=0..Sun=6) a Schedule cell
+    applies to, or None when the text doesn't specify a day-of-week subset
+    (blank, "Daily", or an nth-weekday-of-month phrase like "Last Sunday").
+
+    None means "applies every day" — callers must treat that as no restriction,
+    which is also how a customer's single-schedule-row workflow behaves today.
+    """
+    if not schedule_text:
+        return None
+    txt = schedule_text.upper().strip()
+    if _ORDINAL_DAY_RE.search(txt):
+        return None   # nth-weekday-of-month, not a weekly day-of-week subset
+    m = _DAY_RANGE_RE.search(txt)
+    if m:
+        start, end = m.group(1), m.group(2)
+        si, ei = _DAY_ORDER_SUN_START.index(start), _DAY_ORDER_SUN_START.index(end)
+        days = (_DAY_ORDER_SUN_START[si:ei + 1] if si <= ei
+                else _DAY_ORDER_SUN_START[si:] + _DAY_ORDER_SUN_START[:ei + 1])
+        return frozenset(_DAY_TO_PY_WEEKDAY[d] for d in days)
+    found = _DAY_TOKEN_RE.findall(txt)
+    if found:
+        return frozenset(_DAY_TO_PY_WEEKDAY[d] for d in found)
+    return None
+
+
 # ── Batch-type inference ──────────────────────────────────────────────────────
 
 # Fallback static patterns used only when pe_config is unavailable
@@ -654,6 +704,15 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
         s = _re.sub(r'\s*\([^)]*\)', '', s).strip()
         # Normalise "8.30 pm" → "8:30 pm" (dot used as colon separator)
         s = _re.sub(r'^(\d{1,2})\.(\d{2})\s*([AaPp][Mm])', r'\1:\2 \3', s)
+        # Malformed data-entry pattern: a 24-hour numeral (13-23) paired with a
+        # 12-hour meridiem suffix, e.g. "17:30 AM" (the source meant 5:30 AM —
+        # "17" is a stray 24-hour habit, "AM" is the intended half). pandas
+        # cannot parse this combination at all (returns NaT), silently dropping
+        # the row's own last-run duration. Normalize hour%12 so the stated
+        # meridiem still applies, instead of discarding the value entirely.
+        _mh = _re.match(r'^(\d{1,2})(:\d{2}(?::\d{2})?)\s*([AaPp][Mm])$', s)
+        if _mh and int(_mh.group(1)) > 12:
+            s = f"{int(_mh.group(1)) - 12}{_mh.group(2)} {_mh.group(3).upper()}"
         return s
 
     try:
@@ -937,6 +996,8 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             "workflow":           batch_name,
             "batch_type":         btype,
             "schedule":           schedule,
+            "schedule_days":      (sorted(_parse_schedule_days(schedule))
+                                    if _parse_schedule_days(schedule) else None),
             "timezone":           timezone,
             "first_job":          first_job,
             "last_job":           last_job,
@@ -1042,8 +1103,15 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
         _sh_wfs = _parse_sheet_workflows(_df, warnings, _sheet_name)
         _added = 0
         for wf in _sh_wfs:
-            _pkey = _strip_env_prefix(wf.get("workflow") or "").upper()
-            if _pkey and _pkey not in _seen_pkeys:
+            _wf_name = _strip_env_prefix(wf.get("workflow") or "").upper()
+            # Dedup key includes the (normalized) Schedule text, not just the
+            # workflow name — a customer can legitimately define TWO rows for
+            # the SAME workflow name with different day-of-week schedules
+            # (e.g. "Sun to Thu" main batch vs "Fri, Sat" maintenance window).
+            # Keying on name alone silently dropped the second row.
+            _sched_key = re.sub(r"\s+", " ", str(wf.get("schedule") or "").strip().upper())
+            _pkey = f"{_wf_name}|{_sched_key}"
+            if _wf_name and _pkey not in _seen_pkeys:
                 _seen_pkeys.add(_pkey)
                 workflows.append(wf)
                 _added += 1
@@ -1189,7 +1257,7 @@ def build_workflow_job_map(ctrlm_df, batch_sla_rows: list[dict]) -> dict:
 #  used only when pe_config import fails.
 GLOBAL_DEFAULTS: dict[str, float] = {
     "DAILY":       6.0,
-    "WEEKLY":      17.0,
+    "WEEKLY":      8.0,
     "BIWEEKLY":    17.0,
     "MONTHLY":     17.0,
     "QUARTERLY":   12.0,

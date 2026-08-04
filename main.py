@@ -214,12 +214,17 @@ async def get_audit_context() -> dict:
     ts = ac.pop("_timestamps", {})
 
     _f = lambda k: bool(ac.get(k))  # noqa: E731
+    # UAT evidence consists of explicit test cases and/or either performance
+    # benchmark source.  Keep the UI and batch uploads separate so Findings
+    # can state exactly which evidence was reviewed.
+    last_benchmark_ui = session_cache.get("last_benchmark_ui") or {}
+    last_benchmark_batch = session_cache.get("last_benchmark_batch") or {}
     status = {
         "batch":    "loaded" if _f("batch_kpis")        else "missing",
         "sla":      "loaded" if _f("sla_matrix_kpis")   else "missing",
         "resource": "loaded" if _f("resource_summary")  else "missing",
         "sow":      "loaded" if _f("sow_contract")      else "missing",
-        "uat":      "loaded" if _f("uat_df")             else "missing",
+        "uat":      "loaded" if (_f("uat_df") or last_benchmark_ui or last_benchmark_batch) else "missing",
     }
     loaded = sum(1 for v in status.values() if v == "loaded")
     total  = len(status)
@@ -228,6 +233,10 @@ async def get_audit_context() -> dict:
     # timeline restore on page reload (not stored in ac slots due to size).
     last_batch = session_cache.get("last_batch") or {}
     extra = {}
+    if last_benchmark_ui:
+        extra["last_benchmark_ui"] = last_benchmark_ui
+    if last_benchmark_batch:
+        extra["last_benchmark_batch"] = last_benchmark_batch
     if last_batch.get("daily_jobs"):
         extra["daily_jobs"] = last_batch["daily_jobs"]
     if last_batch.get("hourly_counts"):

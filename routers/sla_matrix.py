@@ -15,7 +15,7 @@ import io
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 import re
 
@@ -57,11 +57,9 @@ def _anchor_job_mask(jnames_upper: "pd.Series", anchor: str) -> "pd.Series":
          the right job instead of falling through to the full min/max window — and
          because it is equality (not containment) it never pulls in an unrelated
          job the way a substring match could.
-      3. Substring containment — last-resort fallback for genuine partial names.
-
-    Deliberately local to anchor narrowing: it does NOT touch ``_norm`` or the
-    token-split workflow matcher (both rely on underscores as token delimiters),
-    so global SLA resolution behaviour is unchanged.
+        Deliberately local to anchor narrowing: it does NOT touch ``_norm`` or the
+        token-split workflow matcher (both rely on underscores as token delimiters),
+        so global SLA resolution behaviour is unchanged.
     """
     _exact = jnames_upper == anchor
     if _exact.any():
@@ -71,7 +69,7 @@ def _anchor_job_mask(jnames_upper: "pd.Series", anchor: str) -> "pd.Series":
         _exact_us = jnames_upper.str.replace("_", "", regex=False) == _us_anchor
         if _exact_us.any():
             return _exact_us
-    return jnames_upper.str.contains(anchor, na=False, regex=False)
+    return jnames_upper.ne(jnames_upper)
 
 
 # ── Models ───────────────────────────────────────────────────────────────────
@@ -123,6 +121,7 @@ class SlaMatrixResponse(BaseModel):
     window_breach_pairs:   Optional[int]   = None
     window_detail:         Optional[List[Dict[str, Any]]] = None
     window_warnings:       Optional[List[str]] = None
+    user_excluded_job_names: List[str] = Field(default_factory=list)
     gate_audit:        Optional[Dict[str, Any]] = None
     explicit_sla_matrix: bool = False
     # "per_job" when job names present, "aggregated" when only sub-app-level data
@@ -143,7 +142,12 @@ class JsonSlaRequest(BaseModel):
 
 # ── Logic ────────────────────────────────────────────────────────────────────
 
-def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaMatrixResponse:
+def _compute_sla_matrix(
+    df,
+    sla_mode: str,
+    custom_sla_hrs: float | None,
+    user_excluded_job_names: Optional[List[str]] = None,
+) -> SlaMatrixResponse:
     import pandas as pd
 
     # ── Resolve SLA ceilings ─────────────────────────────────────────────
@@ -231,6 +235,12 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
     _bsla_by_job: dict[str, tuple[float, str]] = {}   # first_job / last_job anchors
     _bsla_anchor_wf: dict[str, str] = {}   # first/last job anchor -> owning workflow's norm key
     _bsla_tokens: list[tuple[frozenset, float, str]] = []
+    # ALL XLSX rows grouped by primary normalized workflow key — including
+    # multiple Schedule-day-range variants for the same workflow name (see
+    # _decompose_subgroup below). _bsla_exact/_bsla_by_job/_bsla_tokens only
+    # ever see the FIRST such row per workflow — this map keeps every row.
+    _bsla_variants: dict[str, list[dict]] = {}
+    _primary_key_seen: set[str] = set()
     # Track which secondary keys are produced by multiple workflows (collision detection).
     # When two XLSX workflows share a secondary stripped key (e.g. "DAILY_BATCH" from
     # both "PETBARN_DAILY_BATCH" and "TESCO_DAILY_BATCH"), indexing the secondary form
@@ -267,6 +277,23 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
             _wf_forms = _anf(wf_raw)
         except Exception:
             _wf_forms = [_norm(wf_raw)]
+        _primary_wf_norm = _wf_forms[0] if _wf_forms else _norm(wf_raw)
+        # Record EVERY XLSX row under its primary workflow key, even when a
+        # customer defines multiple rows for the SAME workflow name scoped to
+        # different Schedule day-ranges (e.g. "Sun to Thu" main batch vs
+        # "Fri, Sat" maintenance window). _decompose_subgroup uses this to
+        # route each Ctrl-M run_date to its own contracted row instead of
+        # letting every day silently fall back to whichever row is "generic".
+        if _primary_wf_norm:
+            _bsla_variants.setdefault(_primary_wf_norm, []).append(row)
+        # Only the FIRST row seen for a given workflow name feeds the generic
+        # exact/anchor/token lookups below — identical to the historical
+        # single-row-per-workflow behaviour. Additional schedule-variant rows
+        # are reachable exclusively through _bsla_variants / _row_override.
+        if _primary_wf_norm in _primary_key_seen:
+            continue
+        if _primary_wf_norm:
+            _primary_key_seen.add(_primary_wf_norm)
         for _i, wf_norm in enumerate(_wf_forms):
             if not wf_norm:
                 continue
@@ -698,13 +725,19 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         # run_date: group jobs that belong to the same workflow execution
         tdf["_run_date"] = tdf["_start"].dt.strftime("%Y-%m-%d").fillna("unknown")
 
+        # Synthetic-key -> exact XLSX row override, populated by _decompose_subgroup
+        # when a workflow name has multiple Schedule-day-range variants (e.g.
+        # "Sun to Thu" vs "Fri, Sat"). Bypasses _bulk_lookup_bsla's normal
+        # ambiguous name-only resolution for those specific synthetic groups.
+        _row_override: dict[str, dict] = {}
+
         def _decompose_subgroup(_sa: str, _sa_unknown: bool, _g):
             """Return list of (workflow_key, dataframe) pairs to process for one
             Ctrl-M Sub_Application group.
 
             Normally a Ctrl-M Sub_Application maps 1:1 to one XLSX workflow row,
-            so this returns [(sub_app, grp)] unchanged. Two real-world situations
-            need anchor-based decomposition instead:
+            so this returns [(sub_app, grp)] unchanged. Three real-world situations
+            need decomposition instead:
 
               1. Sub_Application is missing entirely ("UNKNOWN") -- every row in
                  the Ctrl-M export lacks that column.
@@ -714,20 +747,45 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                  contract defines several distinct batch windows -- SCPO_D1,
                  SCPO_D2(Clear CRTD), SCPO_W1(1st Sun), etc. -- each identified
                  only by its own first_job/last_job chain).
+              3. The SAME workflow name has multiple XLSX rows scoped to
+                 different Schedule day-ranges (e.g. "Sun to Thu" main batch
+                 vs "Fri, Sat" maintenance window, each with its OWN SLA hours
+                 and first/last job anchors). Each Ctrl-M run_date must be
+                 judged against ITS OWN contracted row, not whichever row
+                 happened to be listed first in the XLSX.
 
-            Without this, case 2 silently falls through to the Tier-3 global
-            default for every job in the group, even though each one has a real
-            XLSX-contracted SLA -- the Active SLA Commitments panel then shows
-            "DEFAULT" / flat system-default hours instead of "CONTRACT" / the
-            real per-workflow value, for every affected row.
-
-            We scan every distinct Job_Name present in the group against the
-            first_job/last_job anchor index (_bsla_by_job) and bucket by each
-            DISTINCT matched XLSX workflow, so ONE Ctrl-M group can expand into
-            several synthetic workflows, each keeping the full group so its own
-            anchor-narrowing (first_job start -> last_job end) still applies.
+            Without (2), Ctrl-M jobs silently fall through to the Tier-3 global
+            default even though a real XLSX-contracted SLA exists. Without (3),
+            every day of the week gets judged against one row's SLA/anchors,
+            producing false breaches (or false passes) on the days that
+            actually belong to the OTHER row.
             """
             if not _sa_unknown:
+                _norm_sa = _norm(_sa)
+                _variants = _bsla_variants.get(_norm_sa) or []
+                _dated_variants = [v for v in _variants if v.get("schedule_days")]
+                if len(_variants) > 1 and _dated_variants and "_run_date" in _g.columns:
+                    _g_dates = pd.to_datetime(_g["_run_date"], errors="coerce")
+                    _assigned = pd.Series(False, index=_g.index)
+                    _out: list[tuple[str, Any]] = []
+                    for _v in _dated_variants:
+                        _days = set(int(d) for d in (_v.get("schedule_days") or []))
+                        _mask = _g_dates.dt.dayofweek.isin(_days) & ~_assigned
+                        if not _mask.any():
+                            continue
+                        _assigned = _assigned | _mask
+                        _sched_label = re.sub(r"\s+", " ", str(_v.get("schedule") or "").strip()) or "variant"
+                        _syn_key = f"{_sa}::{_sched_label}"
+                        _row_override[_syn_key] = _v
+                        _out.append((_syn_key, _g.loc[_mask]))
+                    # Rows on a day not covered by any dated variant (or when a
+                    # variant's schedule_days is unset) fall back to the generic
+                    # lookup on the original sub_app, so nothing is silently lost.
+                    _remaining = _g.loc[~_assigned]
+                    if not _remaining.empty:
+                        _out.append((_sa, _remaining))
+                    if _out:
+                        return _out
                 if _bulk_lookup_bsla(_sa, _sa):
                     return [(_sa, _g)]
             if "Job_Name" not in _g.columns:
@@ -771,15 +829,27 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 # define each workflow's actual start and end time, exactly as the
                 # reference audit script does (first_job min(Start_Time) →
                 # last_job max(End_Time) per run date).
-                _bsla_pre = _bulk_lookup_bsla(sub_app, sub_app)
-                _anchor_row: dict = {}
-                if _bsla_pre:
-                    _pre_wf_raw = _bsla_pre[2]
-                    _anchor_row = (
-                        _bsla_full.get(_norm(_pre_wf_raw))
-                        or _bsla_full.get(norm_sub)
-                        or {}
+                _override_hit = _row_override.get(sub_app)
+                if _override_hit is not None:
+                    # Weekday-decomposed synthetic group — use the EXACT XLSX row
+                    # this group was split on, bypassing the generic name-only
+                    # lookup (which would be ambiguous between the row variants).
+                    _bsla_pre = (
+                        float(_override_hit.get("sla_hours") or 0.0),
+                        "batch_sla_xlsx_exact",
+                        _override_hit.get("workflow") or sub_app,
                     )
+                    _anchor_row = _override_hit
+                else:
+                    _bsla_pre = _bulk_lookup_bsla(sub_app, sub_app)
+                    _anchor_row = {}
+                    if _bsla_pre:
+                        _pre_wf_raw = _bsla_pre[2]
+                        _anchor_row = (
+                            _bsla_full.get(_norm(_pre_wf_raw))
+                            or _bsla_full.get(norm_sub)
+                            or {}
+                        )
                 _first_anchor = (_anchor_row.get("first_job") or "").strip().upper()
                 _last_anchor  = (_anchor_row.get("last_job")  or "").strip().upper()
                 # Real XLSX Schedule-column text (e.g. "1st Sunday", "Last Sunday of
@@ -801,11 +871,13 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                 per_run_windows: list[tuple] = []  # (start_ts, end_ts)
                 per_run_dates:   list[str]   = []  # run date strings
                 per_run_end_clk: list[int | None] = []  # end minute-of-day for clock-SLA check
+                per_run_anchor_used: list[bool] = []
 
                 for _rd, rg in grp.groupby("_run_date"):
                     if _rd == "unknown":
                         continue
 
+                    _anchor_pair_used = False
                     # ── Single-job workflow guard (fix #1 — runtime-attribution bug) ──
                     # When first_job == last_job (e.g. a lone "clear" job like
                     # SCPO_D2(Clear CRTD)), the workflow IS that one job — its elapsed
@@ -840,21 +912,23 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                         rg_starts = rg["_start"].dropna()
                         rg_ends   = rg["_end"].dropna()
 
-                        # Anchor narrowing — exact → underscore-insensitive exact → substring.
-                        # _anchor_job_mask keeps the precise EXACT-first ordering (str.contains
-                        # was matching "PROCESS" in "PRE_PROCESS_VALIDATE" etc., inflating the
-                        # window) while also catching XLSX-vs-Ctrl-M underscore mismatches.
-                        if _first_anchor and "Job_Name" in rg.columns:
+                        # Narrow with anchors only when the complete contracted
+                        # pair resolves. A partial pair would mix one anchored
+                        # endpoint with an unrelated retry/end marker.
+                        _fm = _lm = None
+                        if "Job_Name" in rg.columns:
                             _jnames = rg["Job_Name"].str.upper()
-                            _fm = _anchor_job_mask(_jnames, _first_anchor)
-                            if _fm.any():
-                                rg_starts = rg.loc[_fm, "_start"].dropna()
+                            _fm = _anchor_job_mask(_jnames, _first_anchor) if _first_anchor else None
+                            _lm = _anchor_job_mask(_jnames, _last_anchor) if _last_anchor else None
 
-                        if _last_anchor and "Job_Name" in rg.columns:
-                            _jnames = rg["Job_Name"].str.upper()
-                            _lm = _anchor_job_mask(_jnames, _last_anchor)
-                            if _lm.any():
-                                rg_ends = rg.loc[_lm, "_end"].dropna()
+                        if _first_anchor and _last_anchor:
+                            if _fm is not None and _lm is not None and _fm.any() and _lm.any():
+                                _anchor_starts = rg.loc[_fm, "_start"].dropna()
+                                _anchor_ends = rg.loc[_lm, "_end"].dropna()
+                                if not _anchor_starts.empty and not _anchor_ends.empty:
+                                    rg_starts = _anchor_starts
+                                    rg_ends = _anchor_ends
+                                    _anchor_pair_used = True
 
                         elapsed = None
                         if not rg_starts.empty and not rg_ends.empty:
@@ -927,6 +1001,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                             per_run_end_clk.append(
                                 _re.hour * 60 + _re.minute if pd.notna(_re) else None
                             )
+                            per_run_anchor_used.append(_anchor_pair_used)
                         elif elapsed > _cap:
                             # Include but tag as anomalous — do not silently discard
                             per_run_elapsed.append(elapsed)
@@ -935,6 +1010,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                             per_run_end_clk.append(
                                 _re.hour * 60 + _re.minute if pd.notna(_re) else None
                             )
+                            per_run_anchor_used.append(_anchor_pair_used)
 
                 if per_run_elapsed:
                     # Worst-case (max elapsed) run as representative runtime
@@ -944,7 +1020,10 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     wf_end    = per_run_windows[max_idx][1]
                     wf_start_s = wf_start.strftime("%Y-%m-%d %H:%M") if pd.notna(wf_start) else None
                     wf_end_s   = wf_end.strftime("%Y-%m-%d %H:%M")   if pd.notna(wf_end)   else None
-                    anchor_tag = "anchored" if (_first_anchor or _last_anchor) else "all_jobs"
+                    anchor_used = per_run_anchor_used[max_idx] if max_idx < len(per_run_anchor_used) else False
+                    anchor_tag = "anchored" if anchor_used else (
+                        "all_jobs_anchor_unmatched" if (_first_anchor or _last_anchor) else "all_jobs"
+                    )
                     runtime_src = f"per_run_max_elapsed/{anchor_tag} ({len(per_run_elapsed)} runs)"
                 elif "run_time_hrs" in grp.columns:
                     runtime_h    = round(float(grp["run_time_hrs"].fillna(0).max()), 4)
@@ -1137,11 +1216,21 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     except Exception:
                         pass
 
+                # Weekday-decomposed groups carry a "SUB_APP::Schedule" synthetic
+                # key internally (workflow_key / debug fields) so join lookups stay
+                # unique; user-facing name/sub_application get a readable form.
+                _display_sub_app = sub_app
+                _display_wf_name = raw_batch_name_wf or sub_app
+                if "::" in sub_app:
+                    _base_sa, _sched_part = sub_app.split("::", 1)
+                    _display_sub_app = f"{_base_sa} ({_sched_part})"
+                    _display_wf_name = f"{raw_batch_name_wf or _base_sa} ({_sched_part})"
+
                 workflow_summary.append({
                     # ── Canonical columns ──
                     "workflow_key":    norm_sub,
-                    "workflow_name":   raw_batch_name_wf or sub_app,
-                    "sub_application": sub_app,
+                    "workflow_name":   _display_wf_name,
+                    "sub_application": _display_sub_app,
                     "batch_type":      batch_type_wf or "UNKNOWN",
                     "workflow_start":  wf_start_s,
                     "workflow_end":    wf_end_s,
@@ -1159,7 +1248,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
                     # ── Anchor metadata ──────────────────────────────────────────
                     "first_job_anchor": _first_anchor or None,
                     "last_job_anchor":  _last_anchor  or None,
-                    "anchor_used":      bool(_first_anchor or _last_anchor),
+                    "anchor_used":      anchor_used,
                     # ── Clock-time SLA (reference midnight_diff check) ───────────
                     "clock_sla_end_m":   clock_sla_end_m,
                     "clock_buffer_mins": clock_buffer_mins,
@@ -1469,6 +1558,7 @@ def _compute_sla_matrix(df, sla_mode: str, custom_sla_hrs: float | None) -> SlaM
         window_breach_pairs=w_breach_pairs,
         window_detail=w_detail_list,
         window_warnings=window_warnings or None,
+        user_excluded_job_names=sorted(str(name) for name in (user_excluded_job_names or []) if name),
         explicit_sla_matrix=explicit_sla_matrix,
         data_format=data_format,
         workflow_summary=workflow_summary or None,
@@ -1585,16 +1675,19 @@ async def sla_matrix_upload(
 def sla_matrix_json(body: JsonSlaRequest) -> SlaMatrixResponse:
     """Accept pre-parsed Ctrl-M rows (same format as /api/process-batch JSON).
 
-    Prefers the full-run dataframe stored in session_cache (job_runs_df) over
-    the truncated body.rows sample, so compliance numbers reflect ALL runs.
+    Prefers the analyst-scoped dataframe stored at batch upload time over the
+    truncated body.rows sample, so refreshes keep the initial Matrix scope.
     """
     import pandas as pd
 
-    # Prefer the full-dataset stored at upload time over the truncated body.rows
+    # Prefer the scoped dataset stored at upload time over the truncated body.rows.
     _full_rows = None
+    _excluded_job_names: list[str] = []
     try:
         from services import session_cache as _sc_jrd
-        _full_rows = _sc_jrd.get("job_runs_df")
+        _full_rows = _sc_jrd.get("sla_matrix_runs_df")
+        _excluded_job_names = ((_sc_jrd.get("last_batch") or {})
+                               .get("user_excluded_job_names") or [])
     except Exception:
         pass
 
@@ -1624,7 +1717,12 @@ def sla_matrix_json(body: JsonSlaRequest) -> SlaMatrixResponse:
         _detected = (_sc_sm.ac_get("sla_detected_mode") or "").lower()
     except Exception:
         _detected = ""
-    return _compute_sla_matrix(df, body.sla_mode or _detected or "daily", custom)
+    return _compute_sla_matrix(
+        df,
+        body.sla_mode or _detected or "daily",
+        custom,
+        user_excluded_job_names=_excluded_job_names if _full_rows else None,
+    )
 
 
 @router.get(

@@ -1197,8 +1197,8 @@ _BP_RT_FRAGMENTS = ("runtime", "run_time", "run time", "elapsed", "duration",
 
 
 def _detect_batch_perf_headers(ws) -> tuple | None:
-    """Return (hdr_row, first_rt_col, second_rt_col) if the sheet looks like a
-    before/after batch runtime comparison, else None.
+    """Return (hdr_row, job_col, current_col, baseline_col) for a before/after
+    batch runtime comparison, else None.
 
     Detection is purely column-name based — no customer-specific strings.
     Scans the first 8 rows to handle files with date/run-label rows above headers.
@@ -1210,35 +1210,46 @@ def _detect_batch_perf_headers(ws) -> tuple | None:
     max_r = ws.max_row or 0
     for r in range(1, min(max_r + 1, 9)):
         vals = [str(ws.cell(r, c).value or "").strip() for c in range(1, 15)]
-        first = vals[0].lower().replace(" ", "_").replace("-", "_")
-        if first not in _BP_JOB_COLS:
+        normalised = [v.lower().replace(" ", "_").replace("-", "_") for v in vals]
+        job_col = next((index + 1 for index, value in enumerate(normalised)
+                        if value in _BP_JOB_COLS), None)
+        if job_col is None:
             continue
         # Collect columns whose names contain any runtime fragment
         rt_cols = [
             i + 1
-            for i, v in enumerate(vals)
-            if v and any(frag in v.lower().replace(" ", "_").replace("-", "_")
+            for i, v in enumerate(normalised)
+            if v and any(frag in v
                          for frag in _BP_RT_FRAGMENTS)
         ]
         if len(rt_cols) >= 2:
-            return r, rt_cols[0], rt_cols[1]   # (hdr_row, new_col, old_col)
+            current_col, baseline_col = rt_cols[0], rt_cols[1]
+            current_candidates = [col for col in rt_cols if any(
+                marker in normalised[col - 1] for marker in ("test", "uat", "current", "new", "after")
+            )]
+            baseline_candidates = [col for col in rt_cols if any(
+                marker in normalised[col - 1] for marker in ("prod", "baseline", "old", "before")
+            )]
+            if current_candidates and baseline_candidates:
+                current_col, baseline_col = current_candidates[0], baseline_candidates[0]
+            return r, job_col, current_col, baseline_col
     return None
 
 
 def _parse_batch_perf_sheet(ws, sheet_name: str) -> list[dict] | None:
-    """Parse a RUNTIME_<new>/RUNTIME_<old> batch comparison sheet.
+    """Parse a named before/after batch runtime comparison sheet.
     Returns a list of row dicts or None if the format is not detected."""
     detected = _detect_batch_perf_headers(ws)
     if detected is None:
         return None
-    hdr_row, new_col, old_col = detected
+    hdr_row, job_col, current_col, baseline_col = detected
     rows_out: list[dict] = []
     for r in range(hdr_row + 1, (ws.max_row or 0) + 1):
-        job = str(ws.cell(r, 1).value or "").strip()
+        job = str(ws.cell(r, job_col).value or "").strip()
         if not job:
             continue
-        raw_new = ws.cell(r, new_col).value
-        raw_old = ws.cell(r, old_col).value
+        raw_new = ws.cell(r, current_col).value
+        raw_old = ws.cell(r, baseline_col).value
         new_secs = _safe_float(raw_new) if raw_new is not None else 0.0
         old_secs = _safe_float(raw_old) if raw_old is not None else 0.0
         if new_secs == 0.0 and old_secs == 0.0:

@@ -1061,8 +1061,12 @@ def _parse_time(raw: str) -> Optional[dtime]:
     raw = _TZ_SUFFIX.sub('', raw).strip()
     # Strip parenthetical notes: "11:00 AM (Morning SLA)"
     raw = re.sub(r'\s*\([^)]*\)\s*$', '', raw).strip()
-    # Extract leading time token to drop trailing noise
-    _tm = re.match(r'^(\d{1,2}[.:]\d{2}(?::\d{2})?(?:\s*[AP]M)?|\d{1,2}\s*[AP]M|\d{1,2}[AP]M)', raw, re.I)
+    # Extract a time token from a free-text schedule cell. Customer workbooks
+    # commonly store values such as "Sunday 9:05 PM CST" or
+    # "Saturday start at 2PM CST", rather than a bare clock value.
+    _tm = re.search(
+        r'(?<![A-Za-z0-9])(\d{1,2}[.:]\d{2}(?::\d{2})?(?:\s*[AP]M)?|'
+        r'\d{1,2}\s*[AP]M)(?![A-Za-z0-9])', raw, re.I)
     if _tm:
         raw = _tm.group(1).strip()
     for fmt in _TIME_FORMATS:

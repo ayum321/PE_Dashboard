@@ -1,4 +1,4 @@
-﻿// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
 //  PE Audit Dashboard — Phase 2 frontend (Vanilla JS, ES2020+)
 //
 //  Replaces st.session_state with `window.appData`.
@@ -59,6 +59,9 @@ const THEME = {
   bg:     "#060914",
   card:   "#0d1526",
   card2:  "#111d36",
+  // Aliases kept for panel-level helpers that use semantic names.
+  bgApp:  "#060914",
+  bgCard: "#0d1526",
   border: "#213060",
   green:  "#10d96e",
   amber:  "#f59e0b",
@@ -288,10 +291,25 @@ function resourceSetAggMode(mode) {
   renderResourceHeatmap(window.appData?.resource?.servers || []);
 }
 
+/** Pin the KPI tile strip (+ its caption + drill-through panels) to the very
+ *  top of the Batch Review body, directly under the customer-name chip,
+ *  instead of its original position below the story/coverage/warnings blocks.
+ *  Runs once at load — these are static template nodes, never innerHTML-wiped. */
+function _pinKpiGridToTop() {
+  const body = document.getElementById("batch-review-body");
+  const grid = document.getElementById("batch-kpi-grid");
+  if (!body || !grid || body.firstElementChild === grid) return;
+  const caption = document.getElementById("batch-kpi-caption");
+  const drillWindow = document.getElementById("window-sla-drill");
+  const drillFailed = document.getElementById("failed-runs-drill");
+  [drillFailed, drillWindow, caption, grid].forEach(el => { if (el) body.prepend(el); });
+}
+
 // ─────────────────────────────────────────────────────────────
 // Bootstrap
 // ─────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  _pinKpiGridToTop();
   initNav();
   initDropZone();
   initResetButton();
@@ -340,7 +358,7 @@ async function _initAzureAuthFast() {
 // 1.  Navigation — show/hide view panels
 // ─────────────────────────────────────────────────────────────
 const VIEW_META = {
-  upload:      { title: "Upload & Intake",        sub: "Drop any PE file — auto-classified and routed" },
+  upload:      { title: "Upload & Intake",        sub: "Build the core evidence set, then add supporting audit context" },
   overview:    { title: "Executive Dashboard",    sub: "OSHS · RFCS · SRI · CRS — Batch × Resource × SLA correlation intelligence" },
   batch:       { title: "Batch Review",           sub: "Ctrl-M execution KPIs and SLA buffers" },
   resource:    { title: "Resource Review",        sub: "Server CPU, memory and disk health" },
@@ -353,6 +371,24 @@ const VIEW_META = {
   sow:         { title: "DFU / SKU vs SOW",       sub: "Volume achievement against Statement of Work baseline — DFU · SKU · Orders · Capacity" },
   settings:    { title: "Settings",               sub: "Gemini API key, SLA defaults and configuration" },
 };
+
+let _plotlyLoadPromise = null;
+function _ensurePlotly() {
+  if (typeof Plotly !== "undefined") return Promise.resolve();
+  if (_plotlyLoadPromise) return _plotlyLoadPromise;
+  _plotlyLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdn.plot.ly/plotly-2.35.2.min.js";
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Unable to load the Executive Dashboard chart library."));
+    document.head.appendChild(script);
+  }).catch((error) => {
+    _plotlyLoadPromise = null;
+    throw error;
+  });
+  return _plotlyLoadPromise;
+}
 
 function initNav() {
   document.querySelectorAll(".nav-btn").forEach((btn) => {
@@ -372,8 +408,14 @@ function setActiveView(view) {
   const sb = document.getElementById("sidebar");
   const ov = document.getElementById("sidebar-overlay");
   if (sb && !sb.classList.contains("-translate-x-full") && window.innerWidth < 1024) {
+    const focusWasInSidebar = sb.contains(document.activeElement);
     sb.classList.add("-translate-x-full");
     if (ov) ov.classList.add("hidden");
+    sb.setAttribute("inert", "");
+    const toggle = document.getElementById("sidebar-toggle");
+    toggle?.setAttribute("aria-expanded", "false");
+    toggle?.setAttribute("aria-label", "Open navigation");
+    if (focusWasInSidebar) toggle?.focus();
   }
 
   // Toggle sidebar button styling
@@ -504,6 +546,16 @@ function initDropZone() {
 function isAllowed(file) {
   const name = (file.name || "").toLowerCase();
   return name.endsWith(".docx");
+}
+
+function _enableDropZoneKeyboard(dropZone, fileInput) {
+  if (!dropZone || !fileInput || dropZone.dataset.keyboardReady === "true") return;
+  dropZone.dataset.keyboardReady = "true";
+  dropZone.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    fileInput.click();
+  });
 }
 
 
@@ -681,7 +733,6 @@ function renderUploadResult(payload) {
 
   // ── Unified intake page: show status card + resource dot ──
   document.getElementById("intake-status-row")?.classList.remove("hidden");
-  document.getElementById("upload-next-prompt")?.classList.remove("hidden");
   const dot = document.getElementById("res-status-dot");
   if (dot) { dot.classList.remove("bg-Cmuted/40"); dot.classList.add("bg-Cblue", "animate-pulse"); }
 }
@@ -699,7 +750,6 @@ function _renderBatchIntakeCard(payload) {
     breachEl.className   = `text-xl font-extrabold mt-0.5 ${payload.kpis.jobs_breach > 0 ? "text-Cred" : "text-Cgreen"}`;
   }
   document.getElementById("intake-status-row")?.classList.remove("hidden");
-  document.getElementById("upload-next-prompt")?.classList.remove("hidden");
   const dot = document.getElementById("batch-status-dot");
   if (dot) { dot.classList.remove("bg-Cmuted/40"); dot.classList.add("bg-Cgreen", "animate-pulse"); }
   // Batch tab: hide no-data prompt, show loaded chip
@@ -1210,11 +1260,24 @@ function escapeHtml(s) {
 }
 
 function hexA(hex, alpha) {
-  const h = hex.replace("#", "");
+  const a = Number.isFinite(Number(alpha)) ? Math.max(0, Math.min(1, Number(alpha))) : 1;
+  const src = String(hex ?? "").trim();
+
+  // Defensive fallback: callers occasionally pass an unset theme token.
+  if (!src) return `rgba(13,21,38,${a})`;
+
+  // Already in rgb/rgba form — preserve as-is to avoid brittle parsing.
+  if (/^rgba?\(/i.test(src)) return src;
+
+  // Support both #RGB and #RRGGBB inputs.
+  let h = src.replace("#", "");
+  if (h.length === 3) h = h.split("").map(ch => ch + ch).join("");
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return `rgba(13,21,38,${a})`;
+
   const r = parseInt(h.slice(0, 2), 16);
   const g = parseInt(h.slice(2, 4), 16);
   const b = parseInt(h.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
+  return `rgba(${r},${g},${b},${a})`;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1470,6 +1533,7 @@ function initBatchUploader() {
   const input = document.getElementById("batch-file-input");
   if (!dz || !input) return;
 
+  _enableDropZoneKeyboard(dz, input);
   dz.addEventListener("click", () => input.click());
 
   input.addEventListener("change", (e) => {
@@ -2076,6 +2140,12 @@ async function _refreshBatchFromServer(toastMsg) {
     const data = await res.json();
     window.appData.batch = data;
     renderBatchReview(data);
+    // Refresh the SLA Matrix tab's Active SLA Commitments table too — it reads
+    // window.appData.slaMatrix.workflow_summary, which this refresh just updated.
+    // Without this, the table keeps showing whatever it had at the moment the
+    // BatchSLA/SOW upload first responded, before this recompute settled.
+    if (data.sla_matrix) window.appData.slaMatrix = data.sla_matrix;
+    try { _renderSlaCommitmentsPanel(); } catch (_) {}
     // renderBatchReview calls _renderSlaStaleWarningBanner internally; that now
     // correctly hides the banner when sla_source.type is "batch_sla_xlsx" or
     // "sla_matrix". Explicit removal here as a safety net for any race.
@@ -2148,6 +2218,10 @@ function renderBatchReview(data) {
     return;
   }
 
+  for (const name of (Array.isArray(data.user_excluded_job_names) ? data.user_excluded_job_names : [])) {
+    if (name) _batchManualExclude.add(String(name));
+  }
+
   // Apply utility job exclusion filter
   const filtered = _filterBatchUtility(data);
 
@@ -2162,18 +2236,19 @@ function renderBatchReview(data) {
     chip.classList.remove("hidden");
   }
 
-  // ── Utility job exclusion panel (per-job chips) ──
+  // ── Exclusion data prep — consumed by the single unified table in
+  // renderExcludedJobsPanel() below. There used to be a second, separate
+  // "excluded from analysis" chip panel up here; it covered the same jobs as
+  // the compliance-exclusion table with a different UI, which was confusing.
+  // Now this only computes the data and hands it off — one panel, one table.
   const allJobs = data.top_jobs || [];
   const autoUtilJobs = allJobs.filter(j => j.is_utility);
   const excludedJobs = allJobs.filter(j => _isJobExcluded(j));
   // BUG FIX: once a manually-excluded job's backend sync completes, the server
   // drops it from df_analysis BEFORE ranking top_jobs — so it no longer appears
-  // ANYWHERE in `data.top_jobs`. That means the line above alone would silently
-  // lose track of it (filter finds nothing to exclude), the chip disappears, and
-  // the whole panel can even hide itself if nothing else is excluded — giving the
-  // false impression the exclusion was undone/forgotten. Re-add any manually
-  // excluded name missing from allJobs as a synthetic entry so it stays visible
-  // and re-includable even though it's no longer in the (already-filtered) list.
+  // ANYWHERE in `data.top_jobs`. Re-add any manually excluded name missing from
+  // allJobs as a synthetic entry so it stays visible and re-includable even
+  // though it's no longer in the (already-filtered) list.
   const _visibleNames = new Set(allJobs.map(j => j.Job_Name));
   for (const name of _batchManualExclude) {
     if (!_visibleNames.has(name)) {
@@ -2181,89 +2256,9 @@ function renderBatchReview(data) {
     }
   }
   const includedBackJobs = autoUtilJobs.filter(j => _batchManualInclude.has(j.Job_Name));
-
-  let utilPanel = document.getElementById("batch-utility-panel");
-  if (!utilPanel) {
-    utilPanel = document.createElement("div");
-    utilPanel.id = "batch-utility-panel";
-    const _srcWm = document.getElementById("batch-source-watermark");
-    const insertTarget = _srcWm?.parentElement || document.getElementById("batch-review-body");
-    if (insertTarget) {
-      const afterEl = _srcWm || chip;
-      if (afterEl?.nextSibling) insertTarget.insertBefore(utilPanel, afterEl.nextSibling);
-      else insertTarget.appendChild(utilPanel);
-    }
-  }
-
-  if (excludedJobs.length > 0 || includedBackJobs.length > 0 || autoUtilJobs.length > 0) {
-    // Excluded job chips — click ✕ to include back
-    const exChips = excludedJobs.map(j => {
-      const isAuto = !!j.is_utility && !_batchManualExclude.has(j.Job_Name);
-      return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono cursor-pointer group/chip hover:opacity-80 transition"
-                    style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.25)}"
-                    data-util-include="${escapeHtml(j.Job_Name)}"
-                    title="Click to include this job back in the analysis">
-                ${escapeHtml(j.Job_Name)}
-                <span class="text-[7px] text-Cmuted">${isAuto ? "auto" : "manual"}</span>
-                <span class="text-[11px] opacity-50 group-hover/chip:opacity-100">✕</span>
-              </span>`;
-    }).join("");
-
-    // Included-back chips — click ↩ to re-exclude
-    const inChips = includedBackJobs.map(j => {
-      return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono cursor-pointer group/chip hover:opacity-80 transition"
-                    style="color:${THEME.green};background:${hexA(THEME.green,0.12)};border:1px solid ${hexA(THEME.green,0.25)}"
-                    data-util-reexclude="${escapeHtml(j.Job_Name)}"
-                    title="Click to exclude this job again">
-                ${escapeHtml(j.Job_Name)}
-                <span class="text-[7px] text-Cmuted">included</span>
-                <span class="text-[11px] opacity-50 group-hover/chip:opacity-100">↩</span>
-              </span>`;
-    }).join("");
-
-    utilPanel.className = "rounded-lg px-3 py-2 space-y-1.5 mt-1";
-    utilPanel.style.cssText = `border:1px solid ${hexA(THEME.amber, 0.25)};background:${hexA(THEME.amber, 0.04)}`;
-    utilPanel.innerHTML = `
-      <div class="flex items-center justify-between gap-2 flex-wrap">
-        <div class="flex items-center gap-2">
-          <span class="text-[10px] font-bold uppercase tracking-wider text-Cmuted">Excluded Jobs</span>
-          <span class="text-[9px] font-mono px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}"
-                title="Removed from ALL batch metrics — utility/cyclic patterns (e.g. _export, housekeeping) plus any jobs you toggled off here. Distinct from 'excluded from compliance' below, where jobs stay in the data but aren't scored.">${excludedJobs.length} excluded from analysis <span class="opacity-70">· all metrics</span></span>
-        </div>
-        <div class="flex items-center gap-2">
-          <span class="text-[8px] text-Cmuted">Click job to include/exclude · Use ⊘ in table below to exclude any job</span>
-          ${(excludedJobs.length || _batchManualInclude.size || _batchManualExclude.size) ? `<button id="batch-util-reset" class="text-[8px] px-1.5 py-0.5 rounded hover:opacity-80 transition" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.2)}">Reset</button>` : ""}
-        </div>
-      </div>
-      <div class="flex flex-wrap gap-1">${exChips}${inChips}</div>
-    `;
-
-    // Wire: include back
-    utilPanel.querySelectorAll("[data-util-include]").forEach(el => {
-      el.addEventListener("click", () => {
-        const name = el.dataset.utilInclude;
-        _batchManualExclude.delete(name);
-        if (autoUtilJobs.some(j => j.Job_Name === name)) _batchManualInclude.add(name);
-        _reRenderBatch();
-      });
-    });
-    // Wire: re-exclude
-    utilPanel.querySelectorAll("[data-util-reexclude]").forEach(el => {
-      el.addEventListener("click", () => {
-        _batchManualInclude.delete(el.dataset.utilReexclude);
-        _reRenderBatch();
-      });
-    });
-    // Wire: reset all
-    utilPanel.querySelector("#batch-util-reset")?.addEventListener("click", () => {
-      _batchManualInclude.clear();
-      _batchManualExclude.clear();
-      _reRenderBatch();
-    });
-  } else {
-    utilPanel.className = "hidden";
-    utilPanel.innerHTML = "";
-  }
+  window._lastAllMetricsExcluded = excludedJobs;
+  window._lastIncludedBackJobs = includedBackJobs;
+  document.getElementById("batch-utility-panel")?.remove();
 
   // Data source watermark
   const srcWm = document.getElementById("batch-source-watermark");
@@ -2352,7 +2347,10 @@ function renderBatchReview(data) {
     };
   })();
 
-  renderBatchKpis(_displayKpis);
+  renderBatchKpis(
+    _displayKpis,
+    Array.isArray(data.user_excluded_job_names) ? data.user_excluded_job_names.length : 0,
+  );
   // Story header + computed micro-narrative — reads the SAME window records the
   // charts use (filtered set) so the plain-language verdict always reconciles.
   try { renderBatchStory(filtered, _displayKpis); } catch (_) {}
@@ -2366,6 +2364,7 @@ function renderBatchReview(data) {
   window._lastBatchWarnings = _batchWarnings;
   renderBatchDataWarnings(_batchWarnings);
   renderExcludedJobsPanel(data.data_coverage || null);
+  renderBatchConcurrencyEvidence(data.concurrency || null);
   renderBatchSlaSourceTags(data.sla_source || null, _displayKpis);
 
   // 2. Charts — use filtered data for job-level views
@@ -2750,7 +2749,7 @@ function _populateFailedRunsDrill() {
     </table>`;
 }
 
-function renderBatchKpis(k) {
+function renderBatchKpis(k, excludedJobCount = 0) {
   // ── FIX 6.3: ENV chip — show TEST or PROD badge ──────────────────────────
   const _env     = (k?.batch_env || k?.env_type || "").toUpperCase();
   const _envChip = document.getElementById("batch-env-chip");
@@ -2850,10 +2849,9 @@ function renderBatchKpis(k) {
   setText("bk-breach", String(k.jobs_breach));
   setText("bk-atrisk", String(k.jobs_at_risk));
   setText("bk-ok",     String(k.jobs_ok));
-  setText(
-    "bk-breach-sub",
-    _ceilingLabel(k, "SLA")
-  );
+  const scopeText = `${k.total_jobs || 0} in scope`;
+  const excludedText = excludedJobCount ? ` · ${excludedJobCount} excluded` : "";
+  setText("bk-breach-sub", `${_ceilingLabel(k, "SLA")} · ${scopeText}${excludedText}`);
 
   // Failed Runs (execution failures — ENDED NOT OK / ABENDED / TERMINATED).
   // Separate signal from SLA breach: a run can be FAILED without breaching
@@ -3050,7 +3048,7 @@ function renderBatchCoverageStrip(dc) {
                     batchSla.type === "customer_fallback" ? "partial" : "default";
   badge("cov-sla", "SLA Source", slaStatus);
 
-  badge("cov-confidence", `Confidence ${dc.confidence || 0}%`,
+  badge("cov-confidence", `Data Quality ${dc.confidence || 0}%`,
     dc.confidence >= 80 ? "loaded" : dc.confidence >= 60 ? "partial" : "missing");
 
   // Data integrity: flag synthetic timestamps prominently
@@ -3195,10 +3193,173 @@ window._toggleBatchWarnGroup = function(code) {
 };
 
 
-// ── Excluded Jobs Panel (SHORT_JOB / INSUFFICIENT / manual excludes) ──────
+// ── Excluded Jobs Panel (SHORT_JOB / INSUFFICIENT / utility patterns) ─────
+/** Derive a display category from a reason string like "purge_(0.051h<0.100h)"
+ *  or "file_watcher" — strips the threshold detail and leading/trailing
+ *  underscores so "_export" and "export_" collapse into one EXPORT group. */
+function _exclusionCategory(reason) {
+  const r = String(reason || "").trim();
+  if (!r) return "OTHER";
+  const base = r.split("(")[0].trim().replace(/^_+|_+$/g, "");
+  return (base || r).toUpperCase() || "OTHER";
+}
+
+function _exclusionCategoryTone(cat) {
+  if (cat === "INSUFFICIENT") return THEME.muted;
+  if (cat === "SHORT_JOB") return THEME.cyan;
+  if (cat === "FILE_WATCHER" || cat === "FW") return THEME.blue;
+  if (cat === "EXPORT") return THEME.purple;
+  if (["PURGE", "TRUNCATE", "ARCHIVE_LOG", "DELETE_TYPE", "BACKUP", "DB_BACKUP", "DB_RESTORE", "DB_CLEANUP"].includes(cat)) return THEME.amber;
+  return THEME.muted;
+}
+
+function _excludedJobsCsv(rows) {
+  const cols = ["job_name", "category", "why_excluded", "scope"];
+  const out = [cols.join(",")];
+  rows.forEach(r => {
+    out.push([r.name, r.category, r.why, r.scope]
+      .map(v => `"${String(v).replace(/"/g, '""')}"`).join(","));
+  });
+  return out.join("\n");
+}
+
+function downloadExcludedJobsCsv() {
+  const rows = window._lastMergedExcluded || [];
+  if (!rows.length) return;
+  const blob = new Blob([_excludedJobsCsv(rows)], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `excluded_jobs_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+
+window._toggleExcludedDetail = function() {
+  window._excludedDetailOpen = !window._excludedDetailOpen;
+  if (window._lastExcludedJobs) renderExcludedJobsPanel({ excluded_jobs: window._lastExcludedJobs });
+};
+
+// Quality-based exclusions (too few / too short runs) can't be "scored back in"
+// — re-including gives no baseline. Only utility-pattern jobs are re-includable.
+function _exclusionIsUtility(cat) {
+  return !["INSUFFICIENT", "SHORT_JOB"].includes(String(cat || "").toUpperCase());
+}
+
+/** Human-readable "why excluded" from a raw reason token. */
+function _exclusionWhy(reason) {
+  const r = String(reason || "").trim();
+  const up = r.toUpperCase();
+  if (up === "INSUFFICIENT") return "Fewer than 3 runs — no reliable SLA baseline to score against.";
+  if (up === "SHORT_JOB")    return "Near-zero duration — no measurable runtime to score.";
+  const m = r.match(/^(.*?)\(?\s*([\d.]+)\s*h?\s*<\s*([\d.]+)\s*h?\)?$/i);
+  if (m && m[2] && m[3]) {
+    const pat = m[1].replace(/[_\s]+$/, "") || r;
+    return `Runtime ${(+m[2]).toFixed(3)}h under the ${(+m[3]).toFixed(2)}h utility ceiling — matched pattern '${pat}', treated as housekeeping.`;
+  }
+  return `Matched utility pattern '${r}' — housekeeping job, not real batch work.`;
+}
+
+/** Re-include an auto-excluded utility job into scoring + all metrics. */
+window._excludedReinclude = function(name) {
+  if (!name) return;
+  _batchManualExclude.delete(name);
+  _batchManualInclude.add(name);
+  _reRenderBatch();
+};
+
+/** Undo a re-include — put a utility job back into the excluded set. */
+window._excludedReexclude = function(name) {
+  if (!name) return;
+  _batchManualInclude.delete(name);
+  _reRenderBatch();
+};
+
+/** Manually exclude a typed job name from all metrics. */
+window._excludedAddManual = function(rawVal) {
+  const val = String(rawVal || "").trim();
+  if (!val) return;
+  const known = new Set((window.appData?.batch?.top_jobs || []).map(j => String(j.Job_Name || "").toUpperCase()));
+  if (known.size && !known.has(val.toUpperCase())) {
+    toast("info", "Job not found", `No job named "${val}" in this batch. Pick from the suggestions.`);
+    return;
+  }
+  _batchManualInclude.delete(val);
+  _batchManualExclude.add(val);
+  _reRenderBatch();
+};
+
+/** Reset every manual include/exclude override back to the auto-detected state. */
+window._excludedResetAll = function() {
+  _batchManualInclude.clear();
+  _batchManualExclude.clear();
+  _reRenderBatch();
+};
+
+/** Live-filter the table rows by substring without a full re-render (keeps
+ *  the search box focused). */
+window._excludedApplyFilter = function(val) {
+  const q = String(val || "").trim().toLowerCase();
+  const panel = document.getElementById("batch-excluded-jobs-panel");
+  if (!panel) return;
+  panel.querySelectorAll("[data-exjob]").forEach(row => {
+    const hit = !q || row.getAttribute("data-exjob").toLowerCase().includes(q);
+    row.classList.toggle("hidden", !hit);
+  });
+};
+
+/** Single source of truth for "why is this job not fully counted" — merges the
+ *  two previously-separate signals (client-side all-metrics exclusion +
+ *  backend compliance-only exclusion) into one row set keyed by job name, so
+ *  a job never appears twice for what is really one concept: "excluded, and
+ *  here's how much of the dashboard that affects". */
+function _buildUnifiedExclusionRows(dataCoverage) {
+  const rows = new Map();
+
+  (window._lastAllMetricsExcluded || []).forEach(j => {
+    const name = j.Job_Name || j.job_name || "?";
+    if (_batchManualInclude.has(name)) return; // re-included — no longer excluded
+    const isManual = !j.is_utility;
+    const reason = j.is_utility ? (j.utility_reason || "utility pattern") : "";
+    rows.set(name.toUpperCase(), {
+      name,
+      category: isManual ? "MANUAL" : _exclusionCategory(reason),
+      why: isManual
+        ? "Manually excluded by the reviewer for this session — removed from every metric."
+        : _exclusionWhy(reason),
+      scope: "ALL_METRICS",
+      isUtil: true, // always round-trips client-side, always re-includable
+    });
+  });
+
+  (dataCoverage?.excluded_jobs || []).forEach(j => {
+    const name = j.job_name || j.name || "?";
+    const key = name.toUpperCase();
+    if (rows.has(key)) return; // already covered by the broader ALL_METRICS scope
+    const cat = _exclusionCategory(j.reason);
+    rows.set(key, {
+      name,
+      category: cat,
+      why: _exclusionWhy(j.reason),
+      scope: "COMPLIANCE_ONLY",
+      isUtil: _exclusionIsUtility(cat),
+    });
+  });
+
+  return Array.from(rows.values()).sort((a, b) => {
+    if (a.scope !== b.scope) return a.scope === "ALL_METRICS" ? -1 : 1;
+    if (a.category !== b.category) return a.category.localeCompare(b.category);
+    return a.name.localeCompare(b.name);
+  });
+}
+
 function renderExcludedJobsPanel(dataCoverage) {
-  // Inject panel adjacent to batch-data-warnings if not already present
-  const refEl = document.getElementById("batch-data-warnings");
+  // Sit directly under the KPI strip so the headline batch numbers are the
+  // thing immediately above this exclusion manager (falls back to the data
+  // warnings block if the KPI grid isn't in the DOM yet).
+  const refEl = document.getElementById("batch-kpi-grid")
+    || document.getElementById("batch-data-warnings");
   if (!refEl) return;
 
   let panel = document.getElementById("batch-excluded-jobs-panel");
@@ -3206,35 +3367,332 @@ function renderExcludedJobsPanel(dataCoverage) {
     panel = document.createElement("div");
     panel.id = "batch-excluded-jobs-panel";
     refEl.insertAdjacentElement("afterend", panel);
+  } else if (panel.previousElementSibling !== refEl) {
+    // KPI grid now exists — move the panel to just under it.
+    refEl.insertAdjacentElement("afterend", panel);
   }
 
-  const excluded = dataCoverage?.excluded_jobs || [];
-  if (!excluded.length) {
+  window._lastExcludedJobs = dataCoverage?.excluded_jobs || [];
+  const excluded = _buildUnifiedExclusionRows(dataCoverage);
+  window._lastMergedExcluded = excluded;
+  const includedBack = (window._lastIncludedBackJobs || []).filter(j => _batchManualInclude.has(j.Job_Name));
+
+  if (!excluded.length && !includedBack.length) {
     panel.innerHTML = "";
     panel.classList.add("hidden");
     return;
   }
 
   panel.classList.remove("hidden");
-  const rows = excluded.slice(0, 20).map(j => {
-    const reason  = (j.reason || "EXCLUDED").toUpperCase();
-    const badgeColor = reason === "SHORT_JOB"
-      ? THEME.cyan  : reason === "INSUFFICIENT"
-      ? THEME.muted : reason === "CYCLIC"
-      ? THEME.amber : THEME.blue;
-    return `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono mr-1 mb-1"
-                  style="background:${hexA(badgeColor,0.10)};border:1px solid ${hexA(badgeColor,0.25)};color:${badgeColor}">
-      ${escapeHtml(j.job_name || j.name || "?")}
-      <span class="text-[9px] opacity-70">${reason}</span>
-    </span>`;
-  }).join("");
 
-  panel.innerHTML = `<div class="rounded-lg border border-Cborder/20 px-3 py-2 mt-1 text-[11px]"
-                         style="background:${hexA(THEME.cyan,0.04)}">
-    <span class="text-Cmuted font-semibold mr-2"
-          title="Kept in the dataset and the run tables, but NOT scored in the SLA compliance % — too few runs (INSUFFICIENT, <3), zero/near-zero duration (SHORT_JOB), or cyclic with no SLA baseline. Distinct from 'excluded from analysis', which removes jobs from every metric.">⊘ ${excluded.length} job(s) excluded from compliance <span class="font-normal opacity-70">· kept in data, not scored</span>:</span>
-    ${rows}
-    ${excluded.length > 20 ? `<span class="text-Cmuted text-[10px]">…and ${excluded.length - 20} more</span>` : ""}
+  // Category pill strip — at-a-glance counts, grouped so "48 excluded" isn't
+  // one flat wall of names (thin-history INSUFFICIENT vs genuine utility
+  // patterns like PURGE_/EXPORT_/FILE_WATCHER read very differently).
+  const byCat = new Map();
+  excluded.forEach(r => {
+    if (!byCat.has(r.category)) byCat.set(r.category, 0);
+    byCat.set(r.category, byCat.get(r.category) + 1);
+  });
+  const cats = Array.from(byCat.keys()).sort((a, b) => byCat.get(b) - byCat.get(a));
+  const allMetricsCount = excluded.filter(r => r.scope === "ALL_METRICS").length;
+  const complianceOnlyCount = excluded.length - allMetricsCount;
+
+  const detailOpen = !!window._excludedDetailOpen;
+  const summaryPills = cats.map(cat => {
+    const tone = _exclusionCategoryTone(cat);
+    return `<span class="text-[12px] font-mono px-2 py-0.5 rounded-md"
+                  style="color:${tone};background:${hexA(tone,0.12)};border:1px solid ${hexA(tone,0.28)}">${escapeHtml(cat)} · ${byCat.get(cat)}</span>`;
+  }).join(" ");
+
+  // ── Detail — one table. Columns: Job | Category | Why excluded | Scope | Action.
+  let detailHtml = "";
+  if (detailOpen) {
+    const jobNames = Array.from(new Set((window.appData?.batch?.top_jobs || []).map(j => String(j.Job_Name || "")))).filter(Boolean).sort();
+    const datalist = `<datalist id="excluded-add-list">${jobNames.map(n => `<option value="${escapeHtml(n)}"></option>`).join("")}</datalist>`;
+
+    const bodyRows = excluded.map(r => {
+      const tone = _exclusionCategoryTone(r.category);
+      const scopeBadge = r.scope === "ALL_METRICS"
+        ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}" title="Removed from every metric, table and chart in this review">ALL METRICS</span>`
+        : `<span class="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)}" title="Still counted everywhere else — only skipped when scoring SLA compliance %">COMPLIANCE ONLY</span>`;
+      const action = r.isUtil
+        ? `<button type="button" onclick="window._excludedReinclude('${escapeHtml(r.name)}')"
+                   class="text-[10.5px] font-semibold px-2 py-0.5 rounded-md hover:opacity-80 transition whitespace-nowrap"
+                   style="color:${THEME.green};background:${hexA(THEME.green,0.12)};border:1px solid ${hexA(THEME.green,0.3)}"
+                   title="Put this job back into analysis + compliance scoring">↩ Re-include</button>`
+        : `<span class="text-[10.5px] text-Cmuted italic" title="Re-including gives no SLA baseline — needs ≥3 measurable runs">needs ≥3 runs</span>`;
+      return `<tr data-exjob="${escapeHtml(r.name)}" class="border-t hover:bg-white/[0.03] transition" style="border-color:${hexA(THEME.border,0.12)}">
+        <td class="px-2.5 py-1.5 font-mono font-semibold text-Cwhite whitespace-nowrap">${escapeHtml(r.name)}</td>
+        <td class="px-2.5 py-1.5 whitespace-nowrap"><span class="text-[10.5px] font-bold px-1.5 py-0.5 rounded" style="color:${tone};background:${hexA(tone,0.1)}">${escapeHtml(r.category)}</span></td>
+        <td class="px-2.5 py-1.5 text-[11.5px] text-Cmuted">${escapeHtml(r.why)}</td>
+        <td class="px-2.5 py-1.5">${scopeBadge}</td>
+        <td class="px-2.5 py-1.5 text-right">${action}</td>
+      </tr>`;
+    }).join("");
+
+    const reincludedStrip = includedBack.length
+      ? `<div class="flex items-center gap-1.5 flex-wrap mt-2 pt-2 border-t" style="border-color:${hexA(THEME.border,0.15)}">
+          <span class="text-[10.5px] text-Cmuted font-semibold">↩ Manually re-included (${includedBack.length}):</span>
+          ${includedBack.map(j => `<button type="button" onclick="window._excludedReexclude('${escapeHtml(j.Job_Name)}')"
+                class="text-[10.5px] font-mono px-1.5 py-0.5 rounded-md hover:opacity-80 transition"
+                style="color:${THEME.green};background:${hexA(THEME.green,0.1)};border:1px solid ${hexA(THEME.green,0.25)}"
+                title="Click to exclude this job again">${escapeHtml(j.Job_Name)} ✕</button>`).join("")}
+        </div>`
+      : "";
+
+    detailHtml = `<div class="mt-2 pt-2 border-t" style="border-color:${hexA(THEME.border,0.2)}">
+      <div class="flex items-center gap-2 flex-wrap mb-2">
+        <input type="text" placeholder="Filter excluded jobs…" oninput="window._excludedApplyFilter(this.value)"
+               class="text-[11.5px] px-2 py-1 rounded-md bg-Ccard2/60 border text-Cwhite placeholder:text-Cmuted focus:outline-none"
+               style="border-color:${hexA(THEME.border,0.4)};min-width:180px" />
+        <div class="flex items-center gap-1">
+          <input type="text" list="excluded-add-list" placeholder="Exclude a job by name…" id="excluded-add-input"
+                 onkeydown="if(event.key==='Enter'){window._excludedAddManual(this.value);this.value='';}"
+                 class="text-[11.5px] px-2 py-1 rounded-md bg-Ccard2/60 border text-Cwhite placeholder:text-Cmuted focus:outline-none"
+                 style="border-color:${hexA(THEME.border,0.4)};min-width:200px" />
+          <button type="button" onclick="const i=document.getElementById('excluded-add-input');window._excludedAddManual(i.value);i.value='';"
+                  class="text-[11.5px] font-semibold px-2 py-1 rounded-md hover:opacity-80 transition"
+                  style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.3)}">＋ Exclude</button>
+        </div>
+        <div class="ml-auto flex items-center gap-2">
+          <button type="button" onclick="window._excludedResetAll()" class="text-[10.5px] font-mono" style="color:${THEME.red}">Reset all</button>
+          <button type="button" onclick="downloadExcludedJobsCsv()" class="text-[10.5px] font-mono" style="color:${THEME.cyan}">⭳ CSV</button>
+        </div>
+      </div>
+      ${datalist}
+      <div class="overflow-x-auto overflow-y-auto rounded-lg border" style="border-color:${hexA(THEME.border,0.18)};max-height:22rem">
+        <table class="w-full border-collapse">
+          <thead class="sticky top-0 z-10" style="background:${THEME.card2 || THEME.card}">
+            <tr class="text-left text-Cmuted uppercase text-[10px] tracking-wide">
+              <th class="px-2.5 py-1.5 font-bold">Job</th>
+              <th class="px-2.5 py-1.5 font-bold">Category</th>
+              <th class="px-2.5 py-1.5 font-bold">Why excluded</th>
+              <th class="px-2.5 py-1.5 font-bold">Scope</th>
+              <th class="px-2.5 py-1.5 font-bold text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody>${bodyRows || `<tr><td colspan="5" class="px-2.5 py-3 text-center text-Cmuted text-[11.5px]">No excluded jobs match the current filter.</td></tr>`}</tbody>
+        </table>
+      </div>
+      ${reincludedStrip}
+    </div>`;
+  }
+
+  panel.innerHTML = `<div class="rounded-xl border px-4 py-3 mt-1"
+                         style="border-color:${hexA(THEME.cyan,0.28)};background:${hexA(THEME.cyan,0.05)}">
+    <div class="flex items-center justify-between gap-3 flex-wrap cursor-pointer" onclick="window._toggleExcludedDetail()">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="text-[22px] font-extrabold tabular-nums leading-none shrink-0" style="color:${THEME.cyan}">⊘ ${excluded.length}</span>
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-Cwhite leading-tight">Excluded Jobs</div>
+          <div class="text-[12px] text-Cmuted leading-tight"
+               title="ALL METRICS = removed from every metric, table and chart. COMPLIANCE ONLY = kept in the dataset and run tables, just not scored in the SLA compliance %.">
+            ${allMetricsCount} all-metrics · ${complianceOnlyCount} compliance-only · ${cats.length} categor${cats.length === 1 ? "y" : "ies"}
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center gap-1.5 flex-wrap justify-end">
+        ${summaryPills}
+        <span class="text-[11px] font-semibold shrink-0 ml-1" style="color:${THEME.cyan}">${detailOpen ? "Hide manager ▲" : "Manage ▾"}</span>
+      </div>
+    </div>
+    ${detailHtml}
+  </div>`;
+}
+
+
+// ── Concurrent Jobs Evidence ───────────────────────────────────────────────
+function _ensureConcurrencyPanelStyles() {
+  if (document.getElementById("batch-concurrency-styles")) return;
+  const st = document.createElement("style");
+  st.id = "batch-concurrency-styles";
+  st.textContent = `
+    ::view-transition-group(root),
+    ::view-transition-group(*),
+    ::view-transition-old(*),
+    ::view-transition-new(*) {
+      animation-duration: 0.25s;
+      animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+    }
+    #batch-concurrency-panel details > summary { list-style: none; cursor: pointer; }
+    #batch-concurrency-panel details > summary::-webkit-details-marker { display: none; }
+    #batch-concurrency-panel .conc-chevron { transition: transform .15s ease; }
+    #batch-concurrency-panel details[open] .conc-chevron { transform: rotate(90deg); }
+    #batch-concurrency-panel details > summary:hover { filter: brightness(1.15); }
+  `;
+  document.head.appendChild(st);
+}
+
+function _concSeverityTheme(level) {
+  const lv = String(level || "").toLowerCase();
+  if (lv === "high") return { label: "HIGH", color: THEME.red, border: hexA(THEME.red, 0.45), bg: hexA(THEME.red, 0.07) };
+  if (lv === "medium") return { label: "MED", color: THEME.amber, border: hexA(THEME.amber, 0.45), bg: hexA(THEME.amber, 0.07) };
+  return { label: "LOW", color: THEME.cyan, border: hexA(THEME.cyan, 0.38), bg: hexA(THEME.cyan, 0.06) };
+}
+
+/** Tiny inline occurrences-per-week bar sparkline (regression vs stable pattern). */
+function _concSparkline(trend, color) {
+  const vals = Array.isArray(trend) ? trend.map(n => Number(n) || 0) : [];
+  if (vals.length < 2) return "";
+  const max = Math.max(...vals, 1);
+  const w = 3, gap = 1, h = 12;
+  const bars = vals.slice(-16).map((v, i) => {
+    const bh = Math.max(1, Math.round((v / max) * h));
+    const x = i * (w + gap);
+    return `<rect x="${x}" y="${h - bh}" width="${w}" height="${bh}" rx="0.5" fill="${hexA(color, 0.7)}"/>`;
+  }).join("");
+  const totalW = Math.min(vals.length, 16) * (w + gap);
+  return `<svg width="${totalW}" height="${h}" viewBox="0 0 ${totalW} ${h}" class="shrink-0" aria-hidden="true">${bars}</svg>`;
+}
+
+function _concBarTone(peak) {
+  const p = Number(peak) || 0;
+  if (p >= 7) return THEME.red;
+  if (p >= 4) return THEME.amber;
+  return THEME.cyan;
+}
+
+/** Plain-language one-liner so a reviewer doesn't have to decode the numbers. */
+function _concExplainSentence(group) {
+  const peak   = Number(group?.peak_concurrent) || 0;
+  const days   = Number(group?.days_seen) || 0;
+  const avgMin = Number(group?.avg_duration_min) || 0;
+  const tight  = Number(group?.burst_tightness) || 0;
+  if (peak <= 0) return "No meaningful job overlap detected for this sub-application.";
+  const durText = avgMin < 1 ? `${Math.max(1, Math.round(avgMin * 60))}s` : `${avgMin.toFixed(1)}min`;
+  const dayText = `${days} day${days === 1 ? "" : "s"}`;
+  if (tight >= 3 || peak >= 6) {
+    return `${peak} jobs pile into the same ~${durText} window on ${dayText} — a short, sharp burst rather than sustained overlap, the pattern that causes I/O contention before it ever looks "slow".`;
+  }
+  if (peak >= 4) {
+    return `Up to ${peak} jobs overlap for ~${durText} at a time across ${dayText} — moderate contention; staggering start times would help.`;
+  }
+  return `Occasional overlap: up to ${peak} jobs together for ~${durText}, seen on ${dayText} — low risk.`;
+}
+
+/** Expand/collapse the remaining burst-day rows for one card without a re-render. */
+function _toggleConcMore(id) {
+  const wrap = document.getElementById(id);
+  const btn  = document.getElementById(id + "-btn");
+  if (!wrap) return;
+  const willShow = wrap.classList.contains("hidden");
+  wrap.classList.toggle("hidden");
+  if (btn) btn.textContent = willShow ? "Show fewer days ▲" : (btn.dataset.moreLabel || "Show more days ▼");
+}
+
+function _renderConcurrencyBurstCard(group, idx, maxPeakAll) {
+  const bursts   = Array.isArray(group?.bursts) ? group.bursts.filter(Boolean) : [];
+  const peak     = Number(group?.peak_concurrent) || 0;
+  const daysSeen = Number(group?.days_seen) || 0;
+  const occ      = Number(group?.occurrences) || bursts.length;
+  const distinct = Number(group?.distinct_jobs_total ?? group?.job_count) || 0;
+  const avgMin   = Number(group?.avg_duration_min) || 0;
+  const sev      = _concSeverityTheme(group?.severity_level);
+  const subApp   = escapeHtml(group?.example_sub_app || "Unassigned sub-application");
+  const cardId   = `conc-card-${idx}`;
+  const moreId   = `${cardId}-more`;
+  const scale    = Math.max(1, Number(maxPeakAll) || peak || 1);
+  const barWidth = Math.max(6, Math.min(100, (peak / scale) * 100));
+  const avgText  = avgMin < 1 ? `${Math.max(1, Math.round(avgMin * 60))}s` : `${avgMin.toFixed(1)}min`;
+  const explain  = _concExplainSentence(group);
+  const spark    = _concSparkline(group?.trend, sev.color);
+
+  const visible = bursts.slice(0, 3);
+  const rest    = bursts.slice(3);
+
+  // Each row = one occurrence (intraday repeats allowed). `peak` = jobs running
+  // at the same instant; `inWin` = distinct jobs active anywhere in the merged
+  // window — two different numbers, labelled as such so "peak 4" can never look
+  // like it contradicts a longer chip list.
+  const rowHtml = (b) => {
+    const p     = Number(b?.peak_concurrent) || 0;
+    const inWin = Number(b?.job_count) || 0;
+    const tone  = _concBarTone(p);
+    const jobs  = Array.isArray(b?.jobs) ? b.jobs : [];
+    const chips = jobs.slice(0, 2).map(j =>
+      `<span class="text-[8px] font-mono px-1 rounded" style="color:${THEME.blue};background:${hexA(THEME.blue,0.10)}">${escapeHtml(j)}</span>`
+    ).join("");
+    const moreJobs = jobs.length > 2 ? `<span class="text-[8px] text-Cmuted">+${jobs.length - 2}</span>` : "";
+    return `<div class="flex items-center gap-2 py-0.5 border-t border-Cborder/10 first:border-t-0">
+      <span class="text-[9px] font-mono text-Cmuted w-[62px] shrink-0">${escapeHtml(b?.run_date || "")}</span>
+      <span class="text-[9px] font-mono text-Cwhite/70 w-[84px] shrink-0">${escapeHtml(b?.start_clock || "")}–${escapeHtml(b?.end_clock || "")}</span>
+      <span class="text-[9px] font-bold w-[52px] shrink-0" style="color:${tone}" title="peak simultaneous jobs">peak ${p}</span>
+      <span class="text-[8px] text-Cmuted w-[74px] shrink-0" title="distinct jobs active anywhere in this window">· ${inWin} in window</span>
+      <span class="flex items-center gap-1 overflow-hidden">${chips}${moreJobs}</span>
+    </div>`;
+  };
+
+  const visibleHtml = visible.map(rowHtml).join("");
+  const restHtml = rest.map(rowHtml).join("");
+  const moreLabel = `+${rest.length} more occurrence${rest.length === 1 ? "" : "s"} ▼`;
+
+  return `<details class="rounded-lg border mt-1.5 overflow-hidden" style="border-color:${sev.border};background:${sev.bg}">
+    <summary class="flex items-center gap-2.5 px-2.5 py-1.5" style="box-shadow:inset 3px 0 0 ${sev.color}" title="${escapeHtml(explain)}">
+      <svg class="conc-chevron w-2.5 h-2.5 shrink-0" style="color:${THEME.muted}" viewBox="0 0 8 8" fill="currentColor"><path d="M1 0l6 4-6 4z"/></svg>
+      <span class="text-[11px] font-semibold text-Cwhite truncate flex-1 min-w-0">${subApp}</span>
+      <span class="hidden lg:inline-flex items-center shrink-0" title="occurrences per week">${spark}</span>
+      <div class="block w-16 sm:w-24 h-1.5 rounded overflow-hidden shrink-0" style="background:${hexA(THEME.border,0.3)}" title="peak ${peak} of worst-case ${scale}">
+        <div style="width:${barWidth.toFixed(0)}%;height:100%;background:${hexA(sev.color,0.9)}"></div>
+      </div>
+      <span class="text-[16px] font-extrabold tabular-nums leading-none shrink-0" style="color:${sev.color}">${peak}</span>
+      <span class="text-[8px] uppercase tracking-wide -ml-1.5 shrink-0" style="color:${sev.color}">peak</span>
+      <span class="text-[8px] font-bold uppercase tracking-wide shrink-0" style="color:${sev.color}">${sev.label}</span>
+      <span class="hidden md:inline text-[9px] font-mono text-Cmuted shrink-0">${daysSeen}d · ${occ} occ</span>
+    </summary>
+    <div class="px-2.5 pb-1.5 pt-1 border-t" style="border-color:${hexA(THEME.border,0.18)}">
+      <p class="text-[9px] text-Cmuted leading-snug mb-0.5">${escapeHtml(explain)}</p>
+      <p class="text-[8px] text-Cmuted/80 leading-snug mb-1">Sub-application <span class="font-mono text-Cwhite/70">${subApp}</span> is the workflow at risk; the chips below are the individual jobs colliding inside it. Peak ${peak} concurrent · ${distinct} distinct jobs across ${occ} occurrence${occ === 1 ? "" : "s"} on ${daysSeen} calendar day${daysSeen === 1 ? "" : "s"}.</p>
+      ${visibleHtml || `<div class="text-[9px] text-Cmuted py-1">No occurrence detail available.</div>`}
+      ${rest.length ? `<div id="${moreId}" class="hidden">${restHtml}</div>
+        <button id="${moreId}-btn" type="button" onclick="_toggleConcMore('${moreId}')" data-more-label="${escapeHtml(moreLabel)}"
+                class="text-[9px] mt-1 font-mono" style="color:${THEME.cyan}">${moreLabel}</button>` : ""}
+    </div>
+  </details>`;
+}
+
+function renderBatchConcurrencyEvidence(concurrency) {
+  const refEl = document.getElementById("batch-excluded-jobs-panel")
+    || document.getElementById("batch-data-warnings");
+  if (!refEl) return;
+
+  _ensureConcurrencyPanelStyles();
+
+  let panel = document.getElementById("batch-concurrency-panel");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "batch-concurrency-panel";
+    refEl.insertAdjacentElement("afterend", panel);
+  }
+
+  const groups = Array.isArray(concurrency?.groups) ? concurrency.groups : [];
+  if (!groups.length) {
+    panel.innerHTML = "";
+    panel.classList.add("hidden");
+    return;
+  }
+
+  const affectedDays = Number(concurrency?.total_days_with_concurrency);
+  const headingDays = Number.isFinite(affectedDays) ? affectedDays : 0;
+  // Sort by the peak count each row DISPLAYS (desc), tiebreak affected-day
+  // count then occurrences — the list can never contradict its own numbers.
+  const ranked = groups
+    .slice()
+    .sort((a, b) =>
+      (Number(b?.peak_concurrent) || 0) - (Number(a?.peak_concurrent) || 0)
+      || (Number(b?.days_seen) || 0) - (Number(a?.days_seen) || 0)
+      || (Number(b?.occurrences) || 0) - (Number(a?.occurrences) || 0));
+  const maxPeakAll = ranked.reduce((m, g) => Math.max(m, Number(g?.peak_concurrent) || 0), 1);
+  const cards = ranked.slice(0, 10).map((group, ix) => _renderConcurrencyBurstCard(group, ix, maxPeakAll)).join("");
+
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<div class="rounded-lg border px-3 py-2 mt-1" style="border-color:${hexA(THEME.cyan,0.28)};background:${hexA(THEME.cyan,0.04)};view-transition-name:batch-concurrency-panel">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+      <span class="text-[10px] font-bold uppercase tracking-wider" style="color:${THEME.cyan}">Concurrent Jobs</span>
+      <span class="text-[9px] font-mono text-Cmuted">${headingDays} affected day${headingDays === 1 ? "" : "s"}</span>
+    </div>
+    <div class="text-[9px] text-Cmuted mt-1">Ranked by peak simultaneity. The bar scales each row's peak against the worst case; the number is the most jobs running at the same instant. Severity tier is the tercile of peak across these groups. Click a row for occurrence-level detail.</div>
+    <div>${cards}</div>
+    ${ranked.length > 10 ? `<div class="text-[9px] text-Cmuted mt-1">+${ranked.length - 10} additional group(s) below the current peak cut</div>` : ""}
   </div>`;
 }
 
@@ -4339,6 +4797,27 @@ function verticalSlaLinePlugin(slaHrs) {
 // Shows true breaches (buffer<0) when present, otherwise shows
 // top 10 jobs by peak hours as a ranked heat-map fallback.
 // ─────────────────────────────────────────────────────────────
+/** Badge for a job row whose worst run overlapped with other jobs — a long
+ *  runtime spent alongside real concurrent work is a different signal than
+ *  the same job blocking the pipeline alone. Threshold: >3 min of overlap. */
+function _concurrentJobBadge(row) {
+  const overlapHrs = Number(row?.concurrent_overlap_hrs) || 0;
+  const jobCount   = Number(row?.concurrent_job_count) || 0;
+  if (overlapHrs < 0.05 || jobCount < 1) return "";
+  const peakHrs   = Number(row?.peak_hrs) || 0;
+  const pctOfPeak = peakHrs > 0 ? Math.min(100, (overlapHrs / peakHrs) * 100) : 0;
+  const sample    = Array.isArray(row?.concurrent_jobs_sample) ? row.concurrent_jobs_sample : [];
+  const title = `${overlapHrs.toFixed(2)}h of this job's worst run overlapped with ${jobCount} other job(s) `
+    + `(${pctOfPeak.toFixed(0)}% of its peak runtime) — running alongside real concurrent work, not blocking alone.`
+    + (sample.length ? `\nOverlapping jobs (sample): ${sample.join(", ")}` : "");
+  return `<div class="mt-0.5" title="${escapeHtml(title)}">
+    <span class="inline-flex items-center gap-1 px-1 py-0.5 rounded text-[8px] font-bold"
+          style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.1)};border:1px solid ${hexA(THEME.cyan,0.25)}">
+      ⚡ ${jobCount} concurrent · ${overlapHrs.toFixed(1)}h overlap
+    </span>
+  </div>`;
+}
+
 function renderTopBreachesTable(rows, kpis) {
   const tbody    = document.getElementById("top-jobs-tbody");
   const wrap     = document.getElementById("top-jobs-wrap");
@@ -4561,6 +5040,7 @@ function renderTopBreachesTable(rows, kpis) {
     tr.innerHTML = `
       <td class="px-3 py-2 font-mono text-Cwhite text-[11px]">
         <div class="truncate max-w-[150px]" title="${escapeHtml(jobName)}">${escapeHtml(jobName)}</div>
+        ${_concurrentJobBadge(row)}
       </td>
       <td class="px-3 py-2 text-right font-mono font-bold text-Cwhite text-[11px]" ${isAdaptiveMode ? slaCtx : ""}>
         ${peak.toFixed(2)}h
@@ -6614,7 +7094,7 @@ function loadMetricsDeepDive(forceRefresh) {
 
     // Phase 2: deferred — stagger heavy Plotly heatmaps + Chart.js cards
     const _ddDeferred = [
-      () => _renderDeepDiveHeatmap(data.heatmap),
+      () => _ensurePlotly().then(() => _renderDeepDiveHeatmap(data.heatmap)),
       () => _renderDeepDiveMemoryHeatmap(data.vms),
       () => _renderDeepDiveDiskHeatmap(),
       () => _renderDeepDiveCharts(data.vms, data.summary),
@@ -6640,13 +7120,17 @@ function loadMetricsDeepDive(forceRefresh) {
         // ReferenceError inside the memory heatmap (invisible to
         // `_validate_js.py`, which only checks syntax) took out the entire
         // rest of the Deep Dive panel with zero visible error to the user.
+        let stepResult;
         try {
-          _ddDeferred[_ddi++]();
+          stepResult = _ddDeferred[_ddi++]();
         } catch (e) {
           console.error(`Deep Dive render step ${_ddi - 1} failed:`, e);
           toast("error", "Deep Dive render error", `Step ${_ddi} failed (${e.message}) — later panels still attempted.`);
         }
-        requestAnimationFrame(_nextDD);
+        Promise.resolve(stepResult).catch((e) => {
+          console.error(`Deep Dive render step ${_ddi - 1} failed:`, e);
+          toast("error", "Deep Dive render error", `Step ${_ddi} failed (${e.message}) — later panels still attempted.`);
+        }).finally(() => requestAnimationFrame(_nextDD));
       }
     }
     requestAnimationFrame(_nextDD);
@@ -11226,6 +11710,9 @@ function renderPeReviewSections(findingsResp, smartVerdictData) {
     const wComp = _wcRaw != null ? Number(_wcRaw).toFixed(1) + "%" : "—";
     const breach   = bk.jobs_breach  ?? "—";
     const atRisk   = bk.jobs_at_risk ?? "—";
+    const excluded = Array.isArray(ad.batch?.user_excluded_job_names)
+      ? ad.batch.user_excluded_job_names.length : 0;
+    const breachLabel = excluded ? "In-Scope Peak Jobs" : "Peak Jobs";
     const slaSource = ad.slaCeilings ? "Customer XLSX" : "PE defaults";
     // Gap 4: wall-clock deadline compliance (single canonical source)
     const dl       = bk.deadline_compliance || {};
@@ -11257,9 +11744,10 @@ function renderPeReviewSections(findingsResp, smartVerdictData) {
           <div class="text-sm font-bold" style="color:${dlColor}">${dlComp}</div>
           <div class="text-[9px]" style="color:${dlSubColor}">${dlSub}</div>
         </div>
-        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
-          <div class="text-xs" style="color:#6b7db3">Breaches</div>
+        <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060" title="Distinct in-scope jobs whose peak runtime exceeded their SLA ceiling. Individual-run breaches are listed in the SLA Matrix.">
+          <div class="text-xs" style="color:#6b7db3">${breachLabel} Breached</div>
           <div class="text-sm font-bold" style="color:${breach === '—' ? '#6b7db3' : Number(breach) === 0 ? '#10d96e' : '#f43f5e'}">${breach}</div>
+          ${excluded ? `<div class="text-[9px]" style="color:#6b7db3">${excluded} excluded</div>` : ""}
         </div>
         <div class="rounded p-2 text-center" style="background:#0d1526;border:1px solid #213060">
           <div class="text-xs" style="color:#6b7db3">At Risk</div>
@@ -12556,7 +13044,8 @@ function refreshDataStatus() {
   const hasBatch     = !!(window.appData.batch);
   const hasIssues    = !!(window.appData.issues?.length);
   const hasBenchmark = !!(window.appData.benchmark);
-  const hasSla       = !!(window.appData.slaMatrix || window.appData.batchSlaInfo);
+  const hasSla       = (window.appData.batchSlaInfo?.workflows?.length || 0) > 0
+    || _isCustomerSlaType(window.appData.batch?.sla_source?.type);
   const hasSow       = !!(window.appData.sowCompare || window.appData.sow);
 
   const resourceCount = window.appData.servers?.length || 0;
@@ -12569,6 +13058,33 @@ function refreshDataStatus() {
   setDot("ds-benchmark", hasBenchmark);
   setDot("ds-sla",       hasSla,       slaJobs ? `${slaJobs} jobs` : "");
   setDot("ds-sow",       hasSow);
+
+  const prompt = document.getElementById("upload-next-prompt");
+  const title = document.getElementById("upload-readiness-title");
+  const detail = document.getElementById("upload-readiness-detail");
+  const action = document.getElementById("upload-readiness-action");
+  const core = [hasBatch, hasResource, hasSla];
+  const coreCount = core.filter(Boolean).length;
+  if (prompt) prompt.classList.toggle("hidden", coreCount === 0);
+  if (coreCount > 0) {
+    if (title) title.textContent = coreCount === 3
+      ? "Core audit evidence is ready"
+      : `${coreCount} of 3 core evidence sources loaded`;
+    const missing = [
+      !hasBatch ? "Ctrl-M history" : "",
+      !hasResource ? "resource evidence" : "",
+      !hasSla ? "workflow SLA" : "",
+    ].filter(Boolean);
+    if (detail) detail.textContent = missing.length
+      ? `Next: add ${missing.join(" and ")} to improve audit coverage.`
+      : "Batch, infrastructure, and customer-specific SLA evidence are available for review.";
+    if (action) {
+      action.textContent = coreCount === 3 ? "Open Executive Dashboard" : "Review available evidence";
+      action.onclick = coreCount === 3
+        ? () => setActiveView("overview")
+        : () => setActiveView(!hasBatch ? "upload" : hasResource ? "batch" : "resource");
+    }
+  }
 }
 
 // ── Shared chart palette ──────────────────────────────────────
@@ -12603,6 +13119,12 @@ async function renderOverview() {
     if (noData)  noData.classList.remove("hidden");
     if (content) content.classList.add("hidden");
     if (loading) loading.classList.add("hidden");
+    return;
+  }
+  try {
+    await _ensurePlotly();
+  } catch (error) {
+    toast("error", "Executive charts unavailable", error.message);
     return;
   }
   // Show loading spinner, hide content until API returns
@@ -16723,8 +17245,7 @@ function _updateUploadAzureStatus(connected, userName, extra) {
     else if (tenantEl) { tenantEl.textContent = ""; }
     // Card border glow
     if (card) { card.style.borderColor = "rgba(16,217,110,0.25)"; }
-    // Connect button → Open Azure
-    if (connectTxt) connectTxt.textContent = "Open Azure";
+    if (connectTxt) connectTxt.textContent = "Fetch live metrics";
     if (connectBtn) {
       connectBtn.className = connectBtn.className
         .replace(/border-Cblue\/40/g, "border-emerald-400/30")
@@ -16744,7 +17265,7 @@ function _updateUploadAzureStatus(connected, userName, extra) {
     if (userEl) { userEl.textContent = "Sign in to fetch live Azure VM metrics"; userEl.className = "text-[10px] text-Cmuted/60 mt-0.5 truncate"; }
     if (tenantEl) { tenantEl.textContent = ""; }
     if (card) { card.style.borderColor = ""; }
-    if (connectTxt) connectTxt.textContent = "Connect Azure";
+    if (connectTxt) connectTxt.textContent = "Connect for live metrics";
     if (connectBtn) {
       connectBtn.className = "flex-1 text-[10px] font-semibold py-2 rounded-lg border transition-all inline-flex items-center justify-center gap-1.5 " +
         "border-Cblue/40 bg-Cblue/10 text-Cblue hover:bg-Cblue/20";
@@ -17711,7 +18232,23 @@ function _renderSlaCommitmentsPanel() {
           const suffix = parts.slice(i + 1).join("_");
           if (suffix && canonicalMap[suffix]) return canonicalMap[suffix];
         }
-        // 3. Substring fallback — longest canonical key wins (most specific match first)
+        // 3. Schedule-disambiguated match — a customer can define MULTIPLE XLSX
+        // rows for the SAME workflow name, each scoped to a different Schedule
+        // day-range (e.g. "Sun to Thu" main batch vs "Fri, Sat" maintenance
+        // window). The backend keeps these as separate canonical entries whose
+        // workflow_key embeds the schedule text; use THIS row's own Schedule
+        // column to pick the matching one instead of an arbitrary substring hit.
+        if (wf.schedule) {
+          const schedNorm = String(wf.schedule).toLowerCase().replace(/\s+/g, " ").trim();
+          const candidates = Object.entries(canonicalMap).filter(
+            ([k]) => wfNorm && (k.includes(wfNorm) || wfNorm.includes(k))
+          );
+          if (candidates.length > 1 && schedNorm) {
+            const schedMatch = candidates.find(([k]) => k.includes(schedNorm));
+            if (schedMatch) return schedMatch[1];
+          }
+        }
+        // 4. Substring fallback — longest canonical key wins (most specific match first)
         const sorted = Object.entries(canonicalMap).sort((a, b) => b[0].length - a[0].length);
         for (const [k, e] of sorted) {
           if (wfNorm && (wfNorm.includes(k) || k.includes(wfNorm))) return e;
@@ -17820,7 +18357,7 @@ function _renderSlaCommitmentsPanel() {
               <th class="text-left py-1.5 px-2 text-Cmuted font-semibold">Workflow</th>
               <th class="text-left py-1.5 px-2 text-Cmuted font-semibold">Type</th>
               <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="SLA (Expected Completion) — the agreed time window by which this workflow must finish. Source tiers: 1 = XLSX contract · 2 = SOW ceiling · 3 = PE system default. Badge shows which tier was used.">SLA <span class="text-[8px] font-normal opacity-60">(Expected Completion)</span></th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Ctrl-M peak runtime: worst-case elapsed time per run across the observation period. XLSX tag = last-known run snapshot (not live Ctrl-M data).">Runtime</th>
+              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Worst observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used. XLSX tag = last-known snapshot, not live Ctrl-M data.">Worst Window</th>
               <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
               <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
               <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="Did the batch START on time? Duration compliance alone doesn't catch a late start that still finishes inside its window — downstream data is stale even though the run 'passed'. Compares the XLSX contracted Start_Time against the actual worst-case (latest) observed start clock time. Requires a Start_Time column in the SLA matrix file.">Start Time</th>
@@ -18371,16 +18908,9 @@ function _renderSlaMatrix(data) {
   if (drEl) { drEl.textContent = String(driftN); drEl.className = `text-2xl font-bold ${driftN > 0 ? "text-Camber" : "text-Cgreen"}`; }
 
   // ── Tightest Buffer — the single job closest to its SLA ceiling (job-level headroom) ──
-  // Honour the Batch Review exclusion set so an excluded utility job (file watcher,
-  // housekeeping) can't surface as the headline tightest job.
-  const _exSetTB = _excludedJobNameSet();
   const _allScored = (data.job_summary || [])
     .filter((j) => j.buffer_pct != null && !Number.isNaN(j.buffer_pct));
-  const _inScopeTB = _allScored.filter(
-    (j) => !_exSetTB.has(String(j.job_name || "").toUpperCase())
-  );
-  const _tightJobs = _inScopeTB.length ? _inScopeTB : _allScored;
-  const _tbExcluded = _allScored.length - _tightJobs.length;
+  const _tightJobs = _allScored;
   const tbEl = document.getElementById("slak-tightbuf");
   if (tbEl) {
     if (_tightJobs.length) {
@@ -18392,8 +18922,7 @@ function _renderSlaMatrix(data) {
       // unattributed "buffer %" figures on the page with no way to tell them apart.
       tbEl.title = `${_tight.job_name || "?"} — ${_n(_tight.peak_hrs).toFixed(2)}h peak vs `
         + `${_n(_tight.sla_limit).toFixed(2)}h ceiling = ${_minBuf.toFixed(1)}% headroom. `
-        + `Lowest (SLA−peak)/SLA across ${_tightJobs.length} scored jobs`
-        + (_tbExcluded > 0 ? ` (${_tbExcluded} excluded-from-analysis job(s) skipped).` : ".");
+        + `Lowest (SLA−peak)/SLA across ${_tightJobs.length} in-scope scored jobs.`;
     } else {
       tbEl.textContent = "—";
       tbEl.className = "text-2xl font-bold text-Cmuted";
@@ -20352,7 +20881,6 @@ async function _uploadSlaIntakeFile(file) {
 
     // Show intake status row + next prompt
     document.getElementById("intake-status-row")?.classList.remove("hidden");
-    document.getElementById("upload-next-prompt")?.classList.remove("hidden");
 
     toast("success", "SLA Matrix loaded",
       `${data.total_runs} runs · ${data.compliance_pct.toFixed(1)}% compliance`);
@@ -20851,6 +21379,7 @@ function _initBenchZone(kind, color) {
   if (!dz || !input) return;
   const onCls = [`border-C${color}`, `bg-C${color}/5`];
 
+  _enableDropZoneKeyboard(dz, input);
   dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
@@ -20938,7 +21467,6 @@ async function _uploadBenchFile(file, kind) {
     triggerGenerateFindings().catch(() => {});
 
     document.getElementById("intake-status-row")?.classList.remove("hidden");
-    document.getElementById("upload-next-prompt")?.classList.remove("hidden");
 
     const bp = data.batch_perf_summary;
     toast("success",
@@ -21112,6 +21640,7 @@ function initBatchSlaInfoUploader() {
   const input = document.getElementById("batch-sla-info-file-input");
   if (!dz || !input) return;
 
+  _enableDropZoneKeyboard(dz, input);
   dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
@@ -21335,6 +21864,7 @@ function initSowUploadZone() {
   const input = document.getElementById("sow-intake-file-input");
   if (!dz || !input) return;
 
+  _enableDropZoneKeyboard(dz, input);
   dz.addEventListener("click", () => input.click());
   input.addEventListener("change", (e) => {
     const f = e.target.files?.[0];
@@ -22867,18 +23397,26 @@ function _renderBenchIntakeCard(data, filename) {
   if (!card) return;
   card.classList.remove("hidden");
 
+  const batchSummary = data.batch_perf_summary;
+  const total = batchSummary?.total_jobs ?? data.total_transactions ?? 0;
+  const regressions = batchSummary?.regressions ?? data.degraded ?? 0;
+  const averageDelta = batchSummary
+    ? (batchSummary.comparable ? (batchSummary.net_delta_secs / batchSummary.comparable) : 0)
+    : (data.avg_delta_pct || 0);
+
   setText("bench-result-filename", filename || data.filename || "—");
-  setText("bench-result-total", String(data.total_transactions));
+  setText("bench-result-total-label", batchSummary ? "Jobs" : "Transactions");
+  setText("bench-result-delta-label", batchSummary ? "Net Delta / Job" : "Avg Delta");
+  setText("bench-result-total", String(total));
   const degEl = document.getElementById("bench-result-degraded");
   if (degEl) {
-    degEl.textContent = String(data.degraded);
-    degEl.className   = `text-lg font-extrabold mt-0.5 ${data.degraded > 0 ? "text-Cred" : "text-Cgreen"}`;
+    degEl.textContent = String(regressions);
+    degEl.className   = `text-lg font-extrabold mt-0.5 ${regressions > 0 ? "text-Cred" : "text-Cgreen"}`;
   }
   const dEl = document.getElementById("bench-result-delta");
   if (dEl) {
-    const v = data.avg_delta_pct || 0;
-    dEl.textContent = (v > 0 ? "+" : "") + v.toFixed(1) + "%";
-    dEl.className   = `text-lg font-extrabold mt-0.5 ${v > data.threshold_pct ? "text-Cred" : v > 0 ? "text-Camber" : "text-Cgreen"}`;
+    dEl.textContent = `${averageDelta > 0 ? "+" : ""}${averageDelta.toFixed(1)}${batchSummary ? "s" : "%"}`;
+    dEl.className   = `text-lg font-extrabold mt-0.5 ${averageDelta > 0 ? "text-Camber" : "text-Cgreen"}`;
   }
 }
 

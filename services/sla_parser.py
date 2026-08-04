@@ -268,7 +268,7 @@ def _config_fallback() -> dict[str, float]:
         from services.sla_merger import GLOBAL_DEFAULTS as _gd
         return {
             "DAILY":   _gd.get("DAILY", 6.0),
-            "WEEKLY":  _gd.get("WEEKLY", 17.0),
+            "WEEKLY":  _gd.get("WEEKLY", 8.0),
             "MONTHLY": _gd.get("MONTHLY", 17.0),
             "CUSTOM":  6.0,
         }

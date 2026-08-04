@@ -37,6 +37,9 @@ class RedFlagsRequest(BaseModel):
     sub_stats:     Optional[List[Dict[str, Any]]] = None
     # Hardwired interconnection — full SLA Matrix response from /api/sla-matrix
     sla_matrix:    Optional[Dict[str, Any]]       = None
+    # Merged benchmark contract: UI transaction rows and batch-runtime summary
+    # are kept distinct and drive UAT questions only when actually uploaded.
+    benchmark:     Optional[Dict[str, Any]]       = None
 
 
 class RedFlag(BaseModel):
@@ -112,6 +115,7 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
     issues      = [i for i in (body.issues or [])       if isinstance(i, dict)]
     top_breaches= [j for j in (body.top_breaches or []) if isinstance(j, dict)]
     sla_mx      = body.sla_matrix    or {}
+    benchmark   = body.benchmark     or {}
 
     flags:       List[RedFlag]   = []
     risk_matrix: List[RiskItem]  = []
@@ -645,31 +649,63 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
         logging.getLogger("pe_dashboard.redflags").warning(
             "batch question bank failed: %s", _qe)
 
-    # ── Standard PE pre-go-live questions ───────────────────────
-    add_flag(
-        "Testing",
-        "Production go-live requires validated performance under full concurrent user and batch load.",
-        "Has a performance test been executed simulating production peak load including batch execution? "
-        "What were the results and were they accepted?",
-        "HIGH", "Pre-go-live requirement",
-    )
+    # ── Evidence-driven UAT questions ──────────────────────────────────────
+    # Do not ask generic pre-go-live questions when no UAT evidence was
+    # uploaded.  Every question below is anchored to a UI benchmark row or a
+    # batch-runtime comparison supplied for this audit.
+    _ui_rows = [r for r in (benchmark.get("rows") or []) if isinstance(r, dict)]
+    _batch_perf = benchmark.get("batch_perf_summary") or {}
 
-    add_flag(
-        "DR",
-        "Production readiness requires a validated Disaster Recovery failover procedure.",
-        "Has DR failover been tested end-to-end in this environment? "
-        "What is the agreed RTO/RPO target and was it achieved in the test?",
-        "HIGH", "Pre-go-live requirement",
-    )
+    if _ui_rows:
+        _ui_total = _i(benchmark.get("total_transactions"), len(_ui_rows)) or len(_ui_rows)
+        _ui_breach = sum(1 for r in _ui_rows if str(r.get("status") or "").upper() in ("BREACH", "RED"))
+        _ui_watch = sum(1 for r in _ui_rows if str(r.get("status") or "").upper() in ("WATCH", "AMBER"))
+        _ui_ok = max(_ui_total - _ui_breach - _ui_watch, 0)
+        _ui_file = str(benchmark.get("ui_filename") or benchmark.get("filename") or "uploaded UI benchmark")
+        _ui_evidence = f"{_ui_ok} OK · {_ui_watch} WATCH · {_ui_breach} BREACH / {_ui_total} transactions"
+        if _ui_breach or _ui_watch:
+            _ui_focus = next((str(r.get("transaction") or "?") for r in _ui_rows
+                              if str(r.get("status") or "").upper() in ("BREACH", "RED", "WATCH", "AMBER")), "affected transaction")
+            add_flag(
+                "UAT UI Performance",
+                f"UI benchmark '{_ui_file}' recorded {_ui_breach} breach(es) and {_ui_watch} watch item(s) across {_ui_total} transaction(s).",
+                f"What remediation and customer acceptance decision is agreed for '{_ui_focus}' and the remaining UI performance exceptions?",
+                "HIGH" if _ui_breach else "MEDIUM", _ui_evidence,
+            )
+        else:
+            add_flag(
+                "UAT UI Performance",
+                f"UI benchmark '{_ui_file}' recorded {_ui_total} transaction(s) with no WATCH or BREACH result.",
+                "Has the customer reviewed and accepted the measured UI performance evidence for this test scope?",
+                "LOW", _ui_evidence,
+            )
 
-    add_flag(
-        "Monitoring",
-        "Proactive monitoring is required to detect performance degradation before users are impacted.",
-        "Are Zabbix/Azure Monitor alerts configured for CPU >80%, Memory >85%, Disk >85%, "
-        "and batch SLA breach? Who is the on-call escalation contact for alerts?",
-        "MEDIUM", "Pre-go-live requirement",
-    )
-
+    if isinstance(_batch_perf, dict) and (_i(_batch_perf.get("total_jobs")) or _i(_batch_perf.get("comparable"))):
+        _batch_total = _i(_batch_perf.get("total_jobs"))
+        _batch_comp = _i(_batch_perf.get("comparable"))
+        _batch_reg = _i(_batch_perf.get("regressions"))
+        _batch_imp = _i(_batch_perf.get("improvements"))
+        _batch_rate = round((_batch_reg / _batch_comp) * 100, 1) if _batch_comp else None
+        _batch_file = str(benchmark.get("batch_filename") or benchmark.get("filename") or "uploaded batch runtime comparison")
+        _batch_evidence = (
+            f"{_batch_reg} regressions / {_batch_comp} comparable"
+            + (f" ({_batch_rate:.1f}%)" if _batch_rate is not None else "")
+            + f" · {_batch_imp} improvements"
+        )
+        if _batch_reg:
+            add_flag(
+                "UAT Batch Performance",
+                f"Batch runtime comparison '{_batch_file}' found {_batch_reg} regression(s) across {_batch_comp} comparable job(s).",
+                "Which regressed batch jobs are accepted, remediated, or excluded with a documented customer decision before UAT sign-off?",
+                "HIGH", _batch_evidence,
+            )
+        else:
+            add_flag(
+                "UAT Batch Performance",
+                f"Batch runtime comparison '{_batch_file}' found no regressions across {_batch_comp} comparable job(s).",
+                "Has the customer reviewed and accepted the batch-runtime comparison for this UAT scope?",
+                "LOW", _batch_evidence,
+            )
     # ── Customer sign-off gate ───────────────────────────────────
     # A PE audit is not complete without formal customer approval of the batch
     # schedule and SLA window timings. Fires only when there IS batch/SLA data to

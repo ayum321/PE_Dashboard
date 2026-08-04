@@ -313,18 +313,24 @@ DEFAULT_STRONG_UTILITY_TOKENS: frozenset[str] = frozenset({
     "move_file_to_outbox", "outbound_file",
 })
 
+# AKA "UTILITY_PATTERN_THRESHOLDS": name-match pattern → max runtime (hours)
+# below which the job is a housekeeping utility, not real batch work. Exceeding
+# the threshold flags UTILITY_PATTERN_NOT_EXCLUDED (kept in scope + surfaced as
+# an info warning) rather than silently dropping the job — see
+# services/batch_calculator.py _utility_warnings. Override via config_store key
+# "runtime_gated_utility" (per-customer dict, same shape) — see reload() below.
 DEFAULT_RUNTIME_GATED_UTILITY: dict[str, float] = {
-    "_fw": 0.05,
+    "_fw": 0.05,              # file-watcher poll loop — a few seconds per check
     "fw_": 0.05,
-    "gather_db_stats": 0.25,
+    "gather_db_stats": 0.25,  # stats refresh — real gathers on large tables run longer
     "update_stats": 0.25,
     "rebuild_index": 0.25,
     "db_stats": 0.25,
-    "delete_type": 0.05,
-    "purge_": 0.10,
+    "delete_type": 0.05,      # single-table housekeeping delete
+    "purge_": 0.10,           # purge scans more rows than a plain delete — wider ceiling
     "truncate_": 0.05,
-    "archive_log": 0.05,
-    "batch_start": 0.02,
+    "archive_log": 0.05,      # log rotation/archival — near-instant metadata op
+    "batch_start": 0.02,      # sentinel/marker job — no real work, just a timestamp
     "batch_end": 0.02,
     "batchstart": 0.02,
     "batchend": 0.02,
@@ -332,19 +338,19 @@ DEFAULT_RUNTIME_GATED_UTILITY: dict[str, float] = {
     "post_batch_node": 0.02,
     "qwbatchstart": 0.02,
     "qwbatchend": 0.02,
-    "seq_disable_login": 0.05,
+    "seq_disable_login": 0.05,  # account lock/unlock toggle — single DDL/DML statement
     "seq_enable_users": 0.05,
     "disable_users": 0.05,
     "enable_users": 0.05,
     "disable_login": 0.05,
     "enable_login": 0.05,
-    "zabbix_monitors": 0.05,
-    "export_": 0.05,
-    "_export": 0.05,
-    "db_backup": 0.25,
+    "zabbix_monitors": 0.05,    # monitoring check-in ping
+    "export_": 0.05,            # generic export/outbound utility — real data exports
+    "_export": 0.05,            # that legitimately take longer are NOT excluded (see above)
+    "db_backup": 0.25,          # DB-level backup/restore/cleanup — larger I/O than a single table op
     "db_restore": 0.25,
     "db_cleanup": 0.25,
-    "backup": 0.10,
+    "backup": 0.10,             # broad keyword match — looser ceiling avoids false-excluding real backup jobs
 }
 
 # Mutable runtime copies used by the app. Legacy UTILITY_JOB_PATTERNS remains

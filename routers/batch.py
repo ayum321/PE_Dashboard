@@ -141,6 +141,11 @@ class BatchResponse(BaseModel):
     # matrix (longest single run per job per day) + per-job avg/max/window-share.
     # Drives the "which jobs eat the window, consistently?" heatmap on Batch Review.
     longpole_matrix: Optional[Dict[str, Any]] = None
+    # Explicit analyst exclusions that define the in-scope batch KPI population.
+    user_excluded_job_names: List[str] = Field(default_factory=list)
+    # Concurrent-job evidence: which distinct jobs genuinely overlapped in
+    # clock time, on how many days, and the peak simultaneous-run count.
+    concurrency: Optional[Dict[str, Any]] = None
 
 
 class BatchJsonRequest(BaseModel):
@@ -226,18 +231,23 @@ def _payload_to_response(
                 matrix_df = matrix_df[
                     ~matrix_df["Job_Name"].astype(str).isin(excluded_job_names)
                 ].copy()
-            sla_mx_dict = _compute_sla_matrix(matrix_df, sla_mode, custom).model_dump()
+            sla_mx_dict = _compute_sla_matrix(
+                matrix_df,
+                sla_mode,
+                custom,
+                user_excluded_job_names=sorted(excluded_job_names),
+            ).model_dump()
 
-            # Store a slim copy of the full run dataframe so /api/sla-matrix/json
-            # can always re-compute with the latest XLSX/SOW config (not just the
-            # truncated top_jobs sample).  Only the columns _compute_sla_matrix needs
-            # are kept to minimise memory footprint.
+            # Keep raw batch rows for Batch Refresh and a separately scoped copy
+            # for SLA Matrix recalculation; their populations serve different KPIs.
             _SLIM_COLS = ["Job_Name", "Sub_Application", "Status",
                           "Start_Time", "End_Time", "Run_Sec", "run_time_hrs"]
             try:
                 from services import session_cache as _sc2
-                _slim = df[[c for c in _SLIM_COLS if c in df.columns]].copy()
-                _sc2.set("job_runs_df", _slim.to_dict(orient="records"))
+                _raw_slim = df[[c for c in _SLIM_COLS if c in df.columns]].copy()
+                _matrix_slim = matrix_df[[c for c in _SLIM_COLS if c in matrix_df.columns]].copy()
+                _sc2.set("job_runs_df", _raw_slim.to_dict(orient="records"))
+                _sc2.set("sla_matrix_runs_df", _matrix_slim.to_dict(orient="records"))
             except Exception:
                 pass
         except Exception:
@@ -265,6 +275,8 @@ def _payload_to_response(
         window_sub_app=payload.get("window_sub_app", []),
         failure_grid=payload.get("failure_grid"),
         longpole_matrix=payload.get("longpole_matrix"),
+        user_excluded_job_names=payload.get("user_excluded_job_names") or [],
+        concurrency=payload.get("concurrency"),
     )
 
     # Cache the full batch response so the agent tools can query it
@@ -354,6 +366,8 @@ async def process_batch(file: UploadFile = File(...)) -> BatchResponse:
         _sc_reset.ac_clear()
         _sc_reset.set("last_batch", {})
         _sc_reset.set("last_sla_matrix", {})
+        _sc_reset.set("job_runs_df", [])
+        _sc_reset.set("sla_matrix_runs_df", [])
     except Exception:
         pass
 
@@ -426,6 +440,8 @@ async def process_batch_multi(
         _sc_reset.ac_clear()
         _sc_reset.set("last_batch", {})
         _sc_reset.set("last_sla_matrix", {})
+        _sc_reset.set("job_runs_df", [])
+        _sc_reset.set("sla_matrix_runs_df", [])
     except Exception:
         pass
 
@@ -527,6 +543,8 @@ async def process_batch_json(body: BatchJsonRequest) -> BatchResponse:
         _sc_reset.ac_clear()
         _sc_reset.set("last_batch", {})
         _sc_reset.set("last_sla_matrix", {})
+        _sc_reset.set("job_runs_df", [])
+        _sc_reset.set("sla_matrix_runs_df", [])
     except Exception:
         pass
     try:
