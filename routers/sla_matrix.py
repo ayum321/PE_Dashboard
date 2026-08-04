@@ -234,6 +234,16 @@ def _compute_sla_matrix(
     _bsla_exact:  dict[str, tuple[float, str]] = {}
     _bsla_by_job: dict[str, tuple[float, str]] = {}   # first_job / last_job anchors
     _bsla_anchor_wf: dict[str, str] = {}   # first/last job anchor -> owning workflow's norm key
+    # Every XLSX row that claims a given anchor job name as its first_job/last_job,
+    # keyed by the normalized anchor. Populated for ALL anchors (not just colliding
+    # ones) so _decompose_subgroup can always recover the candidate row(s) for a job.
+    # When len() > 1, the SAME physical Ctrl-M job is the sentinel for multiple
+    # distinct contracts differing only by a schedule qualifier (e.g. base
+    # "SCPO_D1" vs "SCPO_D1(SPD)" vs "SCPO_D1(Saturday)") — _bsla_by_job/
+    # _bsla_anchor_wf deliberately exclude these anchors (see indexing loop below)
+    # so nothing last-write-wins onto one arbitrary contract; _decompose_subgroup
+    # disambiguates by run-date weekday instead, or leaves the run unresolved.
+    _bsla_by_job_variants: dict[str, list[dict]] = {}
     _bsla_tokens: list[tuple[frozenset, float, str]] = []
     # ALL XLSX rows grouped by primary normalized workflow key — including
     # multiple Schedule-day-range variants for the same workflow name (see
@@ -316,14 +326,27 @@ def _compute_sla_matrix(
         for fld in ("first_job", "last_job"):
             anchor = _norm(row.get(fld) or "")
             if anchor and anchor not in ("UNKNOWN", ""):
-                _bsla_by_job[anchor] = (sla_f, "batch_sla_xlsx")
-                # Remember which XLSX workflow this anchor belongs to, so a group
-                # decomposed by anchor job name can be re-keyed to the workflow's
-                # OWN name (e.g. "scpo_d1(spd)") instead of the raw job name —
-                # collapsing first_job + last_job of the same workflow into ONE
-                # synthetic row instead of two duplicate rows.
-                if _primary_wf_norm:
-                    _bsla_anchor_wf[anchor] = _primary_wf_norm
+                _bsla_by_job_variants.setdefault(anchor, [])
+                # Only record each distinct claiming workflow once per anchor —
+                # a workflow's own first_job == last_job would otherwise double-count.
+                if not any(c is row for c in _bsla_by_job_variants[anchor]):
+                    _bsla_by_job_variants[anchor].append(row)
+                if len(_bsla_by_job_variants[anchor]) <= 1:
+                    _bsla_by_job[anchor] = (sla_f, "batch_sla_xlsx")
+                    # Remember which XLSX workflow this anchor belongs to, so a group
+                    # decomposed by anchor job name can be re-keyed to the workflow's
+                    # OWN name (e.g. "scpo_d1(spd)") instead of the raw job name —
+                    # collapsing first_job + last_job of the same workflow into ONE
+                    # synthetic row instead of two duplicate rows.
+                    if _primary_wf_norm:
+                        _bsla_anchor_wf[anchor] = _primary_wf_norm
+                else:
+                    # Collision: a second distinct workflow claims this same anchor
+                    # job. Remove any single-candidate assignment already made —
+                    # _decompose_subgroup must disambiguate by run-date instead of
+                    # silently keeping whichever workflow was indexed first.
+                    _bsla_by_job.pop(anchor, None)
+                    _bsla_anchor_wf.pop(anchor, None)
 
     # ── Also index first_job / last_job from _sla_intelligence contracts ──────
     # Dawn Foods-style SLA matrices (window model, no WESCO-style workflow rows)
@@ -790,8 +813,56 @@ def _compute_sla_matrix(
                     return [(_sa, _g)]
             if "Job_Name" not in _g.columns:
                 return [] if _sa_unknown else [(_sa, _g)]
+
+            _jnames_up = _g["Job_Name"].str.upper()
+
+            # ── Anchor-collision disambiguation ───────────────────────────
+            # The same physical Ctrl-M job can be the first_job/last_job anchor
+            # for MULTIPLE distinct XLSX contracts differing only by a schedule
+            # qualifier (e.g. base "SCPO_D1" vs "SCPO_D1(SPD)" vs
+            # "SCPO_D1(Saturday)"). Such anchors are deliberately absent from
+            # _bsla_by_job (see the indexing loop above) so nothing last-write-
+            # wins onto one arbitrary contract. Resolve them here by run-date
+            # weekday instead — a run whose weekday no candidate's Schedule
+            # column covers (e.g. a genuine calendar-based qualifier like "SPD"
+            # this pipeline can't parse into weekdays) is left UNRESOLVED
+            # rather than guessed; it falls through to the generic per-job
+            # lookup below, which reports it unmatched (SLA_MISSING downstream)
+            # instead of silently borrowing a neighbouring contract's SLA.
+            _collision_out: list[tuple[str, Any]] = []
+            if "_run_date" in _g.columns:
+                _g_dates2 = pd.to_datetime(_g["_run_date"], errors="coerce")
+                for _jn_up in _jnames_up.dropna().unique():
+                    _jn_norm2 = _norm(_jn_up)
+                    _candidates = _bsla_by_job_variants.get(_jn_norm2) or []
+                    if len(_candidates) <= 1:
+                        continue  # not a collision anchor — generic loop below handles it
+                    _job_rows_mask = _jnames_up == _jn_up
+                    _dated = [c for c in _candidates if c.get("schedule_days")]
+                    _assigned2 = pd.Series(False, index=_g.index)
+                    for _c in _dated:
+                        _days2 = set(int(d) for d in (_c.get("schedule_days") or []))
+                        _m = _job_rows_mask & _g_dates2.dt.dayofweek.isin(_days2) & ~_assigned2
+                        if not _m.any():
+                            continue
+                        _assigned2 = _assigned2 | _m
+                        _sched_label2 = re.sub(r"\s+", " ", str(_c.get("schedule") or "").strip()) or "variant"
+                        _syn_key2 = f"{_sa}::{_sched_label2}"
+                        _row_override[_syn_key2] = _c
+                        _collision_out.append((_syn_key2, _g.loc[_m]))
+                    _unresolved2 = _job_rows_mask & ~_assigned2
+                    if _unresolved2.any():
+                        import logging as _log_amb
+                        _log_amb.getLogger("pe_dashboard.sla_matrix").warning(
+                            "Anchor '%s' claimed by %d contracts (%s); %d run(s) not "
+                            "resolved by weekday and left unmatched rather than guessed",
+                            _jn_norm2, len(_candidates),
+                            ", ".join(str(c.get("workflow") or "?") for c in _candidates),
+                            int(_unresolved2.sum()),
+                        )
+
             _seen: dict[str, None] = {}
-            for _jn in _g["Job_Name"].dropna().str.upper().unique():
+            for _jn in _jnames_up.dropna().unique():
                 _jn_norm = _norm(_jn)
                 if _jn_norm not in _bsla_by_job:
                     continue
@@ -801,9 +872,12 @@ def _compute_sla_matrix(
                 # instead of two duplicate synthetic rows.
                 _wf_key = _bsla_anchor_wf.get(_jn_norm, _jn_norm)
                 _seen.setdefault(_wf_key, None)
-            if not _seen:
+
+            _generic_out = [(_wf_key, _g) for _wf_key in _seen] if _seen else []
+            _out_final = _collision_out + _generic_out
+            if not _out_final:
                 return [] if _sa_unknown else [(_sa, _g)]
-            return [(_wf_key, _g) for _wf_key in _seen]
+            return _out_final
 
         for sub_app_raw, grp in tdf.groupby("_sub"):
             sub_app = str(sub_app_raw or "").strip()

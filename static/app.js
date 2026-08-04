@@ -18292,11 +18292,18 @@ function _renderSlaCommitmentsPanel() {
       };
 
       // How many displayed contract workflows actually resolved to live Ctrl-M
-      // runtime (vs falling back to the XLSX last-run sample). The header must
-      // reflect the DISPLAYED rows — not merely whether any Ctrl-M data exists —
-      // otherwise it claims "matched" while every row shows an XLSX sample and the
-      // SLA Debug panel (Ctrl-M elapsed) reads as contradicting this table.
-      const _matchedCount = workflows.filter(w => entryOf(w) != null).length;
+      // runtime (vs falling back to the XLSX last-run sample). "Matched" must
+      // mean the row's runtime was actually computed, not just that a
+      // workflow_summary entry exists by name — a RUNTIME_MISSING/SLA_MISSING
+      // entry still has a canonicalMap hit (entryOf != null) but has NO usable
+      // runtime, so counting it here would let this badge claim "9/9 matched"
+      // while that same row's own status contradicts it.
+      const _matchedCount = workflows.filter(w => {
+        const entry = entryOf(w);
+        return entry != null
+          && typeof entry.runtime_h === "number" && entry.runtime_h > 0
+          && entry.status !== "RUNTIME_MISSING" && entry.status !== "SLA_MISSING";
+      }).length;
 
       batchEl.innerHTML = `
         <div class="text-[10px] text-Cmuted mb-1.5">
