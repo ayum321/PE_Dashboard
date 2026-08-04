@@ -27,8 +27,8 @@ from services.correlation_engine import (
     derive_resource_score,
     derive_sla_score,
     build_sub_app_metrics,
-    generate_narrative,
 )
+from services.exec_narrative import generate_narrative
 
 router = APIRouter()
 

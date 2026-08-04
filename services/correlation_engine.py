@@ -8,7 +8,10 @@ Five composite metrics:
   CRS   — Cascade Risk Score                  (0–1)
   OSHS  — Overall System Health Score         (0–100 → A/B/C/D/F)
 
-Plus a narrative generator for the executive dashboard text panel.
+The executive-narrative text generator lives in services/exec_narrative.py,
+not here — this module is pure scoring math, no prose/business-decision logic.
+All weights/thresholds are named constants in services/pe_config.py (RFCS_*,
+SRI_*, CRS_*, OSHS_*, RESSCORE_*) — never hardcode a formula weight here.
 """
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ import math
 from typing import Any
 
 from services.pe_utils import coerce_float as _f, coerce_int as _i
+from services import pe_config as _pc
 
 
 # ── Grade table ──────────────────────────────────────────────────────────────
@@ -24,6 +28,12 @@ from services.pe_config import score_to_grade as _score_to_grade
 
 def _grade(score: float) -> tuple[str, str]:
     return _score_to_grade(score)
+
+
+def _resource_pressure(avg_cpu: float, avg_mem: float) -> float:
+    """Shared CPU/mem weighted-pressure calc — used by calc_rfcs() AND
+    build_sub_app_metrics() so the two can never drift onto different weights."""
+    return avg_cpu * _pc.RFCS_CPU_WEIGHT + avg_mem * _pc.RFCS_MEM_WEIGHT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,13 +46,14 @@ def calc_rfcs(
     critical_server_count: int,
 ) -> float:
     """
-    RFCS = failure_rate × (avg_resource_pressure / 100) × (1 + 0.15 × critical_servers)
+    RFCS = failure_rate × (avg_resource_pressure / 100) × (1 + RFCS_CRITSERVER_AMPLIFIER × critical_servers)
 
     Clamped to 0–100. Measures how much resource stress correlates with failures.
+    Weights/amplifier/cap are the RFCS_ constants in pe_config.py — see _resource_pressure().
     """
-    resource_pressure = (avg_cpu * 0.6 + avg_mem * 0.4)  # weighted avg
+    resource_pressure = _resource_pressure(avg_cpu, avg_mem)
     base = failure_rate * (resource_pressure / 100.0)
-    amplifier = 1.0 + 0.15 * min(critical_server_count, 10)
+    amplifier = 1.0 + _pc.RFCS_CRITSERVER_AMPLIFIER * min(critical_server_count, _pc.RFCS_CRITSERVER_CAP)
     return round(min(100.0, max(0.0, base * amplifier)), 1)
 
 
@@ -57,12 +68,12 @@ def calc_sri(
     """
     SRI = (peak_hrs / sla_ceiling) × resource_amplifier
 
-    resource_amplifier = 1 + max(0, (avg_cpu - 70) / 100)
+    resource_amplifier = 1 + max(0, (avg_cpu - SRI_CPU_AMP_THRESHOLD) / 100)
     SRI > 1.0 → breach even with resource load factored in.
     """
     if sla_ceiling_hrs <= 0:
         return 0.0
-    resource_amp = 1.0 + max(0.0, (avg_cpu - 70.0) / 100.0)
+    resource_amp = 1.0 + max(0.0, (avg_cpu - _pc.SRI_CPU_AMP_THRESHOLD) / 100.0)
     return round(peak_hrs / sla_ceiling_hrs * resource_amp, 3)
 
 
@@ -107,13 +118,13 @@ def calc_crs(
     sla_buffer_pct: float,
 ) -> float:
     """
-    CRS = failed_flag × (downstream_count / (downstream_count + 5)) × (1 - sla_buffer / 100)
+    CRS = failed_flag × (downstream_count / (downstream_count + CRS_CHAIN_DENOM_OFFSET)) × (1 - sla_buffer / 100)
 
     Returns 0–1. A high CRS means this single job failure could collapse its chain.
     """
     if not is_failed or downstream_count <= 0:
         return 0.0
-    chain_factor = downstream_count / (downstream_count + 5.0)
+    chain_factor = downstream_count / (downstream_count + _pc.CRS_CHAIN_DENOM_OFFSET)
     buffer_risk = 1.0 - min(max(sla_buffer_pct, 0.0), 100.0) / 100.0
     return round(min(1.0, chain_factor * buffer_risk), 3)
 
@@ -138,7 +149,7 @@ def calc_oshs(
     when the truth is "no data". Returns {score, grade, label,
     resource_available, components}.
     """
-    W_BATCH, W_SLA, W_RES = 0.40, 0.35, 0.25
+    W_BATCH, W_SLA, W_RES = _pc.OSHS_W_BATCH, _pc.OSHS_W_SLA, _pc.OSHS_W_RES
     if resource_available:
         w_batch, w_sla, w_res = W_BATCH, W_SLA, W_RES
         oshs = batch_score * w_batch + sla_score * w_sla + resource_score * w_res
@@ -178,11 +189,18 @@ def calc_oshs(
 # ─────────────────────────────────────────────────────────────────────────────
 def derive_batch_score(compliance_pct: float, fail_rate: float) -> float:
     """0-100 batch health from compliance + inverse fail rate."""
-    return min(100.0, max(0.0, compliance_pct * 0.7 + (100.0 - fail_rate) * 0.3))
+    return min(100.0, max(0.0, compliance_pct * _pc.DERIVE_BATCH_COMPLIANCE_WEIGHT
+                          + (100.0 - fail_rate) * _pc.DERIVE_BATCH_FAILRATE_WEIGHT))
 
 def derive_resource_score(avg_cpu: float, avg_mem: float, avg_disk: float) -> float:
-    """0-100 resource health — higher is better (lower utilization)."""
-    pressure = avg_cpu * 0.40 + avg_mem * 0.35 + avg_disk * 0.25
+    """0-100 resource health — higher is better (lower utilization).
+
+    Weights are the RESSCORE_ constants in pe_config.py — numerically equal to
+    OSHS_W_BATCH/SLA/RES by coincidence only; kept as separate named constants
+    on purpose (see pe_config.py comment) since these two triads mean different things.
+    """
+    pressure = (avg_cpu * _pc.RESSCORE_CPU_WEIGHT + avg_mem * _pc.RESSCORE_MEM_WEIGHT
+                + avg_disk * _pc.RESSCORE_DISK_WEIGHT)
     return min(100.0, max(0.0, 100.0 - pressure))
 
 def derive_sla_score(compliance_pct: float, breach_count: int, total_jobs: int) -> float:
@@ -220,8 +238,8 @@ def build_sub_app_metrics(
 
     avg_cpu = _avg_metric(servers, "cpu_used")
     avg_mem = _avg_metric(servers, "mem_used")
-    resource_pressure = avg_cpu * 0.6 + avg_mem * 0.4
-    crit_count = sum(1 for s in servers if _f(s.get("cpu_used")) >= 90)
+    resource_pressure = _resource_pressure(avg_cpu, avg_mem)
+    crit_count = sum(1 for s in servers if _f(s.get("cpu_used")) >= _pc.CPU_CRIT)
 
     results = []
     for sa, jobs in groups.items():
@@ -254,7 +272,7 @@ def build_sub_app_metrics(
             "sla_ceiling":      round(sa_ceiling, 3),
             "sri":              round(sri, 3),
             "rfcs":             round(rfcs, 1),
-            "rfcs_band":        "red" if rfcs >= 60 else ("amber" if rfcs >= 30 else "green"),
+            "rfcs_band":        "red" if rfcs >= _pc.RFCS_BAND_RED else ("amber" if rfcs >= _pc.RFCS_BAND_AMBER else "green"),
             "resource_pressure": round(resource_pressure, 1),
             "crs":              round(crs, 3),
         })
@@ -266,191 +284,4 @@ def build_sub_app_metrics(
 def _avg_metric(servers: list[dict], key: str) -> float:
     vals = [_f(s.get(key)) for s in servers if _f(s.get(key)) > 0]
     return sum(vals) / len(vals) if vals else 0.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Narrative generator
-# ─────────────────────────────────────────────────────────────────────────────
-def generate_narrative(
-    rfcs: float,
-    oshs: dict,
-    batch_kpis: dict,
-    resource_kpis: dict,
-    servers: list[dict],
-    top_jobs: list[dict],
-    sla_data: dict | None,
-    sub_app_metrics: list[dict],
-) -> list[dict[str, str]]:
-    """Auto-generate executive narrative findings.
-
-    Always returns exactly 5 dicts — one per step in the Coverage→Risk→Cause→
-    Impact→Action framework — so the UI 5-step renderer always has clean data.
-    Each dict carries: {key, icon, level, text}.
-    """
-
-    score  = oshs.get("score", 0)
-    grade  = oshs.get("grade", "?")
-    label  = oshs.get("label", "")
-    comps  = oshs.get("components", {})
-    res_avail = oshs.get("resource_available", True)
-
-    # ── 1. COVERAGE — what we measured ───────────────────────────
-    total_runs  = batch_kpis.get("total_runs", 0) or 0
-    total_jobs  = batch_kpis.get("total_jobs", 0) or 0
-    srv_count   = len(servers)
-    sub_count   = len(sub_app_metrics)
-    sla_ceiling = batch_kpis.get("daily_limit_hrs") or batch_kpis.get("sla_daily_hrs") or 0
-    b_score = round(_f(comps.get("batch",    {}).get("contribution", 0)), 1)
-    r_score = round(_f(comps.get("resource", {}).get("contribution", 0)), 1)
-    s_score = round(_f(comps.get("sla",      {}).get("contribution", 0)), 1)
-    _split = (
-        f"Score split — batch {b_score}pts · resource {r_score}pts · SLA {s_score}pts."
-        if res_avail else
-        f"Score split — batch {b_score}pts · SLA {s_score}pts "
-        f"(resource pillar excluded — no measured utilization; weight re-normalised over batch + SLA)."
-    )
-    # Only claim servers were "analysed" when resource metrics are actually usable.
-    # An image-only / all-zero resource doc yields no measured utilization, so the
-    # coverage line must not imply a server was assessed (the score split below
-    # already explains the resource pillar was excluded).
-    _srv_clause = f"{srv_count} server(s), " if (res_avail and srv_count) else ""
-    coverage_text = (
-        f"Overall posture: OSHS {score:.1f}/100 → Grade {grade} ({label}). "
-        f"Analysed {total_runs} batch runs across {total_jobs} jobs, "
-        f"{_srv_clause}{sub_count} sub-application(s). "
-        f"SLA ceiling {sla_ceiling}h. "
-        f"{_split}"
-    )
-
-    # ── 2. RISK — what's at stake ─────────────────────────────────
-    breach_days = batch_kpis.get("window_breach_days", 0) or 0
-    total_days  = batch_kpis.get("window_total_days", 1) or 1
-    # Day-level window compliance — derived from the breach/total days shown beside it
-    # so the headline % and the "(breach/total breach days)" fraction always reconcile
-    # (e.g. 2/28 clean days == 7%). Pair-level is intentionally NOT used in this prose.
-    win_comp    = round((total_days - breach_days) / total_days * 100, 1) if total_days else (
-        batch_kpis.get("batch_window_compliance", 100) or 100
-    )
-    at_risk_subs = sorted(
-        [s for s in sub_app_metrics if s.get("sri", 0) > 0.85],
-        key=lambda x: x.get("sri", 0), reverse=True,
-    )
-    if at_risk_subs:
-        worst = at_risk_subs[0]
-        risk_text = (
-            f"Batch window compliance {win_comp:.0f}% ({breach_days}/{total_days} breach days). "
-            f"{len(at_risk_subs)} sub-app(s) at SRI > 0.85 — worst: "
-            f"'{worst['sub_app']}' SRI {worst['sri']:.2f} "
-            f"({'WILL BREACH' if worst['sri'] > 1.0 else 'AT RISK'}). "
-            f"RFCS = {rfcs:.1f}."
-        )
-    else:
-        risk_text = (
-            f"Batch window compliance {win_comp:.0f}% ({breach_days}/{total_days} breach days). "
-            f"No sub-applications currently at SRI risk threshold. "
-            f"RFCS = {rfcs:.1f}."
-        )
-
-    # ── 3. CAUSE — why it's happening ────────────────────────────
-    critical_servers = [s for s in servers if _f(s.get("cpu_used")) >= 90]
-    zero_dur = sum(1 for j in top_jobs if _f(j.get("avg_hrs")) == 0)
-    if critical_servers and rfcs >= 30:
-        names = ", ".join(s.get("host", "?") for s in critical_servers[:3])
-        cause_text = (
-            f"Resource saturation is a primary driver: {len(critical_servers)} server(s) "
-            f"({names}) at ≥90% CPU. RFCS {rfcs:.1f} confirms resource→failure coupling. "
-        )
-        if zero_dur:
-            cause_text += f"Additionally {zero_dur} jobs show zero-duration (pre-execution failure — Ctrl-M config issue)."
-    elif zero_dur:
-        cause_text = (
-            f"{zero_dur} job(s) show zero-second duration — pre-execution termination "
-            f"(Ctrl-M timeout/dependency config, NOT resource pressure). "
-        )
-        cause_text += (
-            f"Average fleet CPU {_avg_metric(servers, 'cpu_used'):.0f}%."
-            if res_avail else
-            "Resource utilization evidence not available — saturation not assessed."
-        )
-    else:
-        high_crs = sorted(
-            [s for s in sub_app_metrics if s.get("crs", 0) > 0.3],
-            key=lambda x: x.get("crs", 0), reverse=True,
-        )
-        if high_crs:
-            top = high_crs[0]
-            _cpu_clause = (
-                f"Fleet CPU avg {_avg_metric(servers, 'cpu_used'):.0f}% — "
-                f"no critical saturation detected."
-                if res_avail else
-                "Resource utilization evidence not available — saturation not assessed."
-            )
-            cause_text = (
-                f"Cascade risk in '{top['sub_app']}' (CRS {top['crs']:.2f}, "
-                f"{top['job_count']} jobs). {_cpu_clause}"
-            )
-        else:
-            cause_text = (
-                (
-                    f"No critical resource saturation (fleet CPU avg "
-                    f"{_avg_metric(servers, 'cpu_used'):.0f}%). "
-                    f"Compliance issues driven by schedule/volume, not hardware pressure."
-                )
-                if res_avail else
-                (
-                    "Resource utilization evidence not available — hardware pressure "
-                    "could not be evaluated. Compliance issues attributable to "
-                    "schedule/volume."
-                )
-            )
-
-    # ── 4. IMPACT — business effect ──────────────────────────────
-    fail_rate = _f(batch_kpis.get("fail_rate_pct", 0))
-    failed_runs = int(batch_kpis.get("failed_runs", 0) or 0)
-    ok_runs     = int(batch_kpis.get("ok_runs", 0) or 0)
-    worst_job_name = batch_kpis.get("worst_job_name") or (top_jobs[0].get("Job_Name") if top_jobs else "?")
-    worst_job_peak = _f(batch_kpis.get("worst_job_peak") or (top_jobs[0].get("peak_hrs") if top_jobs else 0))
-    impact_text = (
-        f"{failed_runs} failed runs ({fail_rate:.1f}% fail rate) vs {ok_runs} OK. "
-    )
-    if breach_days:
-        impact_text += (
-            f"SLA breach on {breach_days}/{total_days} run day(s) creates "
-            f"downstream delivery risk for business processes depending on batch completion. "
-        )
-    else:
-        impact_text += "All measured run days within SLA window — no immediate delivery impact. "
-    if worst_job_peak > 0:
-        impact_text += f"Longest job: '{worst_job_name}' peaked at {worst_job_peak:.2f}h."
-
-    # ── 5. ACTION — recommended decision ─────────────────────────
-    actions = []
-    if grade in ("D", "F"):
-        actions.append("escalate to emergency remediation")
-    elif grade == "C":
-        actions.append("schedule remediation sprint within 2 weeks")
-    if breach_days:
-        actions.append(f"investigate {breach_days} SLA breach day(s) — review elapsed window vs ceiling")
-    if critical_servers:
-        actions.append(f"right-size / scale {len(critical_servers)} CPU-saturated server(s)")
-    if zero_dur:
-        actions.append("audit Ctrl-M job pre-conditions causing zero-duration terminations")
-    if at_risk_subs:
-        actions.append(f"prioritise load testing for '{at_risk_subs[0]['sub_app']}'")
-    if not actions:
-        actions.append("maintain current monitoring cadence — posture is healthy")
-    action_text = "; ".join(actions[:3]).capitalize() + "."
-
-    level_map = {
-        "A": "info", "B": "info", "C": "warning", "D": "critical", "F": "critical",
-    }
-    overall_level = level_map.get(grade, "warning")
-
-    return [
-        {"key": "coverage", "icon": "🛡️", "level": "info",         "text": coverage_text},
-        {"key": "risk",     "icon": "⚠️", "level": overall_level,  "text": risk_text},
-        {"key": "cause",    "icon": "🔍", "level": overall_level,  "text": cause_text},
-        {"key": "impact",   "icon": "📉", "level": overall_level,  "text": impact_text},
-        {"key": "action",   "icon": "🎯", "level": "info",         "text": action_text},
-    ]
 

@@ -448,6 +448,41 @@ SOW_OVER_CRIT_PCT: float = 120.0
 # one named constant here so none of those five call sites can drift.
 SOW_ACCEPTABLE_PCT: float = 90.0
 
+# ── Correlation engine weights (services/correlation_engine.py) ──────────────
+# The 5 executive-dashboard formulas (RFCS/SRI/CRS/OSHS/JRTOS) previously
+# hardcoded every weight/threshold inline — the one file in the repo that most
+# contradicted this module's own "never hardcode thresholds" rule. Centralized
+# here so per-customer tuning is a config edit, not a code change, and so the
+# same weight can't drift between two call sites that both need it.
+RFCS_CPU_WEIGHT:          float = 0.6    # RFCS weighted-pressure: CPU share
+RFCS_MEM_WEIGHT:          float = 0.4    # RFCS weighted-pressure: memory share
+RFCS_CRITSERVER_AMPLIFIER: float = 0.15  # +15% RFCS per critical server, capped below
+RFCS_CRITSERVER_CAP:      int   = 10     # amplifier stops growing past this many critical servers
+# Same 60/30 bands used both for RFCS's red/amber/green display band AND
+# generate_narrative's "resource saturation is a primary driver" cause gate —
+# one constant each so the narrative can never disagree with the badge color.
+RFCS_BAND_RED:            float = 60.0
+RFCS_BAND_AMBER:          float = 30.0
+SRI_CPU_AMP_THRESHOLD:    float = 70.0   # SRI's CPU amplifier only kicks in above this
+CRS_CHAIN_DENOM_OFFSET:   float = 50.0    # CRS chain factor = downstream / (downstream + this)
+# OSHS executive-grade component weights — must sum to 1.0.
+OSHS_W_BATCH: float = 0.40
+OSHS_W_SLA:   float = 0.35
+OSHS_W_RES:   float = 0.25
+# derive_batch_score: compliance vs inverse-fail-rate split.
+DERIVE_BATCH_COMPLIANCE_WEIGHT: float = 0.7
+DERIVE_BATCH_FAILRATE_WEIGHT:   float = 0.3
+# derive_resource_score: CPU/mem/disk pressure weights. Numerically matched
+# OSHS_W_BATCH/SLA/RES by coincidence in the original code — named distinctly
+# here so centralizing never implies the two are the same tunable.
+RESSCORE_CPU_WEIGHT:  float = 0.40
+RESSCORE_MEM_WEIGHT:  float = 0.35
+RESSCORE_DISK_WEIGHT: float = 0.25
+# generate_narrative's own decision thresholds (separate from the formulas'
+# own math — these gate which prose branch fires).
+NARRATIVE_SRI_AT_RISK:         float = 0.85
+NARRATIVE_CRS_CAUSE_THRESHOLD: float = 0.3
+
 
 def reload() -> None:
     """
@@ -488,6 +523,12 @@ def reload() -> None:
     global STRONG_UTILITY_TOKENS, RUNTIME_GATED_UTILITY, UTILITY_JOB_PATTERNS
     global SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
     global SENTINEL_MIN_WINDOW_HRS, SENTINEL_MAX_WINDOW_HRS, CYCLIC_MAX_RUNTIME_HRS
+    global RFCS_CPU_WEIGHT, RFCS_MEM_WEIGHT, RFCS_CRITSERVER_AMPLIFIER, RFCS_CRITSERVER_CAP
+    global RFCS_BAND_RED, RFCS_BAND_AMBER, SRI_CPU_AMP_THRESHOLD, CRS_CHAIN_DENOM_OFFSET
+    global OSHS_W_BATCH, OSHS_W_SLA, OSHS_W_RES
+    global DERIVE_BATCH_COMPLIANCE_WEIGHT, DERIVE_BATCH_FAILRATE_WEIGHT
+    global RESSCORE_CPU_WEIGHT, RESSCORE_MEM_WEIGHT, RESSCORE_DISK_WEIGHT
+    global NARRATIVE_SRI_AT_RISK, NARRATIVE_CRS_CAUSE_THRESHOLD
 
     CPU_WARN          = _f("cpu_warning",       75.0)
     CPU_CRIT          = _f("cpu_critical",      90.0)
@@ -558,6 +599,27 @@ def reload() -> None:
         if _bam:
             BENCHMARK_ACTION_SLA = _bam
     ANOMALY_Z_THRESHOLD = _f("anomaly_z_threshold", 2.0)
+    RFCS_CPU_WEIGHT           = _f("rfcs_cpu_weight",           0.6)
+    RFCS_MEM_WEIGHT           = _f("rfcs_mem_weight",           0.4)
+    RFCS_CRITSERVER_AMPLIFIER = _f("rfcs_critserver_amplifier", 0.15)
+    try:
+        RFCS_CRITSERVER_CAP = int(_cfg("rfcs_critserver_cap", 10))
+    except (TypeError, ValueError):
+        RFCS_CRITSERVER_CAP = 10
+    RFCS_BAND_RED          = _f("rfcs_band_red",           60.0)
+    RFCS_BAND_AMBER        = _f("rfcs_band_amber",         30.0)
+    SRI_CPU_AMP_THRESHOLD  = _f("sri_cpu_amp_threshold",   70.0)
+    CRS_CHAIN_DENOM_OFFSET = _f("crs_chain_denom_offset",  5.0)
+    OSHS_W_BATCH = _f("oshs_w_batch", 0.40)
+    OSHS_W_SLA   = _f("oshs_w_sla",   0.35)
+    OSHS_W_RES   = _f("oshs_w_res",   0.25)
+    DERIVE_BATCH_COMPLIANCE_WEIGHT = _f("derive_batch_compliance_weight", 0.7)
+    DERIVE_BATCH_FAILRATE_WEIGHT   = _f("derive_batch_failrate_weight",   0.3)
+    RESSCORE_CPU_WEIGHT  = _f("resscore_cpu_weight",  0.40)
+    RESSCORE_MEM_WEIGHT  = _f("resscore_mem_weight",  0.35)
+    RESSCORE_DISK_WEIGHT = _f("resscore_disk_weight", 0.25)
+    NARRATIVE_SRI_AT_RISK         = _f("narrative_sri_at_risk",         0.85)
+    NARRATIVE_CRS_CAUSE_THRESHOLD = _f("narrative_crs_cause_threshold", 0.3)
     PATTERN_MIN_OCCURRENCES = int(_f("pattern_min_occurrences", 3))
     PATTERN_MIN_RATIO       = _f("pattern_min_ratio",       0.20)
     PREDICT_MIN_R2          = _f("predict_min_r2",          0.60)
