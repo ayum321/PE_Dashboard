@@ -2549,7 +2549,14 @@ function renderBatchSlaSourceTags(sla, kpis) {
 
     if (tag1) { tag1.textContent = label; tag1.classList.remove("hidden"); }
     if (tag2) { tag2.textContent = label; tag2.classList.remove("hidden"); }
-    if (ceiling) { ceiling.textContent = `${Number(labelCeil).toFixed(1)} h`; }
+    if (ceiling) {
+      // Multiple distinct SLA windows resolved → the chip and the chart's
+      // dashed reference line(s) should say the same thing: several ceilings,
+      // not one flat number that only matches some of the bars.
+      ceiling.textContent = _rcModel.length > 1
+        ? `${_rcModel.length} (${Number(sla.resolved_ceiling_min).toFixed(1)}–${Number(sla.resolved_ceiling_max).toFixed(1)}h)`
+        : `${Number(labelCeil).toFixed(1)} h`;
+    }
 
     if (sla.blocked) {
       if (tag1) tag1.style.color = THEME.red;
@@ -4140,6 +4147,17 @@ function renderWindowTrendChart(winData, topJobsData) {
   const _domCeilW = Number(_kp.window_dominant_ceiling_hrs);
   const winCeil = (Number.isFinite(_domCeilW) && _domCeilW > 0) ? _domCeilW : SLA_DAILY_HRS;
 
+  // Multiple SLA ceilings in scope (e.g. DAILY 6h + WEEKLY 9h sub-apps mixed
+  // on the same chart) → draw one dashed reference line per distinct ceiling
+  // instead of a single line that only matches SOME of the bars. Falls back
+  // to the single dominant-ceiling line (unchanged behaviour) whenever every
+  // in-scope day shares one ceiling.
+  const _dayCeilings = winData
+    .map(w => +(w.breach_sub_ceil || w.sla_hrs || w.sla_ceil || 0))
+    .filter(v => Number.isFinite(v) && v > 0);
+  const _distinctCeilings = Array.from(new Set(_dayCeilings.map(v => v.toFixed(2)))).map(Number).sort((a, b) => a - b);
+  const slaLineValues = _distinctCeilings.length > 1 ? _distinctCeilings : winCeil;
+
   // Build excluded set from ALL top_jobs (unfiltered) — caller must pass full list
   const excludedNameSet = new Set((topJobsData || []).filter(j => _isJobExcluded(j)).map(j => j.Job_Name));
   const labels   = winData.map((w) => w.run_date);
@@ -4545,7 +4563,7 @@ function renderWindowTrendChart(winData, topJobsData) {
         },
       },
     },
-    plugins: [slaLinePlugin(winCeil), enrichPlugin, crosshairPlugin],
+    plugins: [slaLinePlugin(slaLineValues), enrichPlugin, crosshairPlugin],
   });
 
   // ── Shared buffer-band legend (identical semantics to the SLA Buffer gauge) ──
@@ -4622,36 +4640,59 @@ function _roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-// Chart.js plugin: dashed horizontal SLA line on the y-axis
-function slaLinePlugin(slaHrs) {
+// Chart.js plugin: dashed horizontal SLA line(s) on the y-axis. Accepts a
+// single hour value (legacy, one ceiling) OR an array of hour values — pass
+// an array whenever more than one distinct SLA ceiling is actually in scope
+// for the plotted days (e.g. DAILY 6h + WEEKLY 9h sub-apps mixed on one
+// chart), so the reference line always matches the ceiling each bar was
+// actually judged against instead of implying a single blanket SLA.
+function slaLinePlugin(slaHrsOrList) {
+  const rawList = Array.isArray(slaHrsOrList) ? slaHrsOrList : [slaHrsOrList];
+  // Dedupe (rounded to 2dp so float noise doesn't spawn near-duplicate lines),
+  // drop non-positive values, sort ascending.
+  const seen = new Set();
+  const list = [];
+  for (const v of rawList) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const key = n.toFixed(2);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push(n);
+  }
+  list.sort((a, b) => a - b);
   return {
     id: "slaLine",
     afterDatasetsDraw(chart) {
       const yScale = chart.scales.y;
-      if (!yScale) return;
-      const y = yScale.getPixelForValue(slaHrs);
+      if (!yScale || !list.length) return;
       const { left, right } = chart.chartArea;
       const ctx = chart.ctx;
       ctx.save();
-      // Dashed line
-      ctx.strokeStyle = hexA(THEME.red, 0.7);
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.moveTo(left, y);
-      ctx.lineTo(right, y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Label badge
-      const label = `${slaHrs}h SLA`;
-      ctx.font = 'bold 9px "Sora", sans-serif';
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = hexA(THEME.red, 0.12);
-      _roundRect(ctx, left + 4, y - 16, tw + 10, 14, 3);
-      ctx.fill();
-      ctx.fillStyle = THEME.red;
-      ctx.textAlign = "left";
-      ctx.fillText(label, left + 9, y - 6);
+      list.forEach((slaHrs, idx) => {
+        const y = yScale.getPixelForValue(slaHrs);
+        // Dashed line
+        ctx.strokeStyle = hexA(THEME.red, 0.7);
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(left, y);
+        ctx.lineTo(right, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Label badge — multiple ceilings stagger their badges left-to-right
+        // along the SAME line so overlapping/adjacent hour values stay legible.
+        const label = list.length > 1 ? `${slaHrs}h` : `${slaHrs}h SLA`;
+        ctx.font = 'bold 9px "Sora", sans-serif';
+        const tw = ctx.measureText(label).width;
+        const bx = left + 4 + idx * (tw + 16);
+        ctx.fillStyle = hexA(THEME.red, 0.12);
+        _roundRect(ctx, bx, y - 16, tw + 10, 14, 3);
+        ctx.fill();
+        ctx.fillStyle = THEME.red;
+        ctx.textAlign = "left";
+        ctx.fillText(label, bx + 5, y - 6);
+      });
       ctx.restore();
     },
   };
