@@ -222,9 +222,9 @@ visible in the UI."*
 
 ## SLA After Upload — Exact Join First, Then Adaptive Fallback
 
-**In plain terms:** when a customer's SLA spreadsheet is uploaded, the dashboard
-tries four increasingly loose ways to match each Ctrl-M workflow to its SLA row
-— and refuses to guess if two workflows could plausibly match the same row.
+When a customer uploads an SLA spreadsheet, the dashboard tries four
+increasingly loose ways to match each Ctrl-M workflow to its SLA row. If two
+workflows could plausibly match the same row, it refuses to guess.
 
 ```mermaid
 flowchart TD
@@ -240,17 +240,15 @@ flowchart TD
     COL -->|no| USE["SLA assigned to the workflow"]
 ```
 
-**The measured window itself** is anchored to named jobs, not just the earliest
-and latest timestamp in the file — a pre-batch file-prep job that starts hours
-early, or a cleanup job that finishes late, will not stretch the window:
-- Window **opens** at the earliest run of the SLA row's own `First_Job`
-- Window **closes** at the latest run of the SLA row's own `Last_Job`
-  (latest, not earliest — a `Last_Job` that fires from several parallel
-  sub-workflows should never truncate the window early)
+The measured window itself is anchored to named jobs, not just the earliest
+and latest timestamp in the file, so a pre-batch prep job that starts hours
+early, or a cleanup job that finishes late, can't stretch it. The window opens
+at the earliest run of the row's own `First_Job` and closes at the latest run
+of its `Last_Job` (latest, not earliest, so a `Last_Job` firing from several
+parallel sub-workflows can't truncate the window early).
 
-**If no SLA spreadsheet is uploaded at all** (adaptive fallback), each job gets
-its own SLA built from its own Ctrl-M run history — more history in, a tighter
-and more confident number out:
+If no SLA spreadsheet is uploaded at all, each job builds its own SLA from its
+own Ctrl-M run history. More history means a tighter, more confident number:
 
 | Runs available | Confidence label | SLA is set to |
 |---|---|---|
@@ -259,30 +257,27 @@ and more confident number out:
 | 3–6 OK runs | `WEAK` | a blended peak/variance estimate |
 | < 3 OK runs | `INSUFFICIENT` | a best-guess peak — excluded from the compliance % |
 
-Every one of these is still capped at the schedule's global default ceiling
-(6h daily / 8h weekly) — a single noisy job can never claim a bigger SLA than
+Every one of these is still capped at the schedule's global default (6h
+daily / 8h weekly), so a single noisy job can never claim a bigger SLA than
 the engagement's own default allows.
 
-✅ **Tested**: 20 synthetic runs at ~4.0–4.4h → correctly classified `STRONG`,
-`sla_hrs = 4.4` (p95), capped under the 6h global ceiling supplied.
+✅ Tested with 20 synthetic runs at 4.0–4.4h: correctly classified `STRONG`,
+`sla_hrs = 4.4` (p95), capped under the 6h ceiling supplied.
 
-⚠️ **Known limitation, fixed**: a customer `BatchSLA_info.xlsx` used clock-time
-columns (`Start Time` = day-name + time, e.g. "Sunday 9:05 PM CST";
-`Expected End Time/SLA` = "6AM CST") instead of a numeric SLA column. The
-parser didn't strip the day-of-week name before parsing the time, so every
-row silently fell back to the generic Tier-3 default (17h/6h) instead of the
-real, computable per-workflow window.
-- **Fixed**: strip the day-name prefix before parsing. On re-test, workflows
-  correctly resolve to their genuine file-derived windows (e.g. 8.9h, 14.0h,
-  2.0h — not a blanket 17h/6h), tagged `sla_source = BATCH_SLA_XLSX`. Rows
-  with a genuinely blank/"NA" deadline correctly still use the default.
-- **Regression-checked**: existing SLA test suite gives an identical
-  pass/fail baseline before and after (confirmed via A/B comparison) — no
-  new failures introduced. Other SLA regression suites unaffected.
+⚠️ **A real bug found and fixed this session**: a customer's
+`BatchSLA_info.xlsx` used clock-time columns instead of a numeric SLA column —
+`Start Time` read "Sunday 9:05 PM CST", `Expected End Time/SLA` read
+"6AM CST". The parser never stripped the day name before parsing the time, so
+every row silently fell back to the generic 17h/6h default instead of
+computing the real per-workflow window. Fixed by stripping the day-name
+prefix first: workflows now resolve to their genuine windows (8.9h, 14.0h,
+2.0h — not a blanket 17h/6h), tagged `sla_source = BATCH_SLA_XLSX`. Rows with
+a genuinely blank or "NA" deadline still fall back correctly. The existing SLA
+test suite gives the same pass/fail baseline before and after, so nothing
+else broke.
 
-*Talk track: the dashboard never falls back to "one global SLA for every
-job" — even with zero uploads, every job gets its own history-derived
-ceiling.*
+*Talk track: even with zero uploads, every job still gets its own
+history-derived ceiling — never one blanket SLA for everyone.*
 
 ---
 
@@ -376,12 +371,16 @@ before presenting this row as a shipped protection.
 - Auth: `InteractiveBrowserCredential` (no `DefaultAzureCredential` — banned,
   it hangs 30s+ probing IMDS on non-Azure machines). Sign in once, silently
   restored from a local auth-record cache on reload/restart.
-- One Azure Monitor query per VM requests **AVERAGE + MAXIMUM + MINIMUM in a
-  single call** for CPU / Memory / Disk / Data-Disk-Bandwidth — not three
+- The one-line fleet summary (CPU/Memory/Disk snapshot) requests **AVERAGE +
+  MAXIMUM + MINIMUM in a single Azure Monitor call** per VM — not three
   separate round trips.
-- A brief spike that would average away to nothing over a 7/15/30-day window
-  is preserved via the Max series — critical for catching short nightly-batch
-  CPU spikes that a daily average hides.
+- The Deep Dive timeseries panel is a **different code path and deliberately
+  makes two calls per VM**: one for AVERAGE (the chart line), one for
+  MAXIMUM + MINIMUM (the true-peak overlay). They're kept independent so a
+  failure in one doesn't blank out the other — and the Max series is what
+  catches a brief spike that would otherwise average away to nothing over a
+  7/15/30-day window, critical for spotting a short nightly-batch CPU spike a
+  daily average would hide.
 
 ```mermaid
 sequenceDiagram
@@ -389,8 +388,10 @@ sequenceDiagram
     participant App as FastAPI backend
     participant Azure as Azure Monitor
     PE->>App: Sign in (InteractiveBrowserCredential)
-    App->>Azure: query metrics (Avg+Max+Min, N days back)
-    Azure-->>App: per-VM timeseries
+    App->>Azure: Query 1 — AVERAGE (chart line), N days back
+    Azure-->>App: per-VM average series
+    App->>Azure: Query 2 — MAXIMUM + MINIMUM (true-peak overlay)
+    Azure-->>App: per-VM max/min series
     App->>App: _compute_baseline_analysis()
     App-->>PE: Deep Dive panel (heatmaps, trends, hot hours)
 ```
@@ -454,63 +455,45 @@ engagement before presenting either as a differentiated signal to a customer.
 
 ## Formula Detail (with the clamps that actually ship)
 
-**RFCS** — Resource-Failure Correlation Score
-*In plain terms: goes up only when servers are stressed AND jobs are failing
-at the same time. Failures alone, on calm servers, do not move it.*
-> `RFCS = cap100( failureRate × (0.6×avgCPU + 0.4×avgMem)/100 × (1 + 0.15×min(criticalServers,10)) )`
-- `failureRate` is a **percentage** (`100 − compliance_pct`), not a fraction.
-- Example: 20% failure rate, avgCPU=85, avgMem=70, 3 critical servers
-  → weighted pressure = `0.6×85 + 0.4×70 = 79` → `20 × 79/100 = 15.8` →
-  amplifier `1 + 0.15×3 = 1.45` → `15.8 × 1.45 = 22.9` → **RFCS ≈ 23**
-- Raw value can reach ~250 before the `cap100(...)` clamp caps it at 100.
+**Read this table first — it's the whole section in one glance:**
 
-**SRI** — SLA Risk Index (per job)
-*In plain terms: how close this one job is to breaching its SLA, made worse
-if the server was also under heavy CPU load while the job ran.*
-> `SRI = (peakHours / slaCeilingHours) × (1 + max(0, (avgCPU−70)/100))` — `>1.0` = breach
-- `peakHours / slaCeilingHours` is algebraically `1 − bufferPct/100` — SRI
-  deliberately **reuses** the same buffer fact (amplified by CPU pressure),
-  it is not a second independent computation that could silently disagree.
-- Example: job ran 5h against a 6h ceiling, avgCPU=85
-  → `5/6 = 0.833` × `(1 + max(0,0.15)) = 1.15` → **SRI ≈ 0.96** (still under 1.0)
+| Formula | In plain English | Goes up when | Bounded to | Worked example |
+|---|---|---|---|---|
+| **RFCS** | Resource stress lining up with job failures | Servers are stressed **and** jobs are failing at the same time — failures alone on calm servers don't move it | 0–100 | 20% failure rate, 85% CPU, 70% mem, 3 critical servers → **≈ 23** |
+| **SRI** | How close one job is to breaching its SLA | Runtime nears the SLA ceiling, worse if CPU was also under load | `>1.0` = breach (no upper cap) | 5h job vs 6h ceiling, 85% CPU → **≈ 0.96** |
+| **CRS** | Odds a job's failure cascades to jobs behind it | Job fails **and** has many downstream jobs **and** its own SLA breach was deep | 0–1 | Failed job, 8 downstream jobs, −200% buffer → **≈ 0.62** |
+| **OSHS** | One executive grade for the engagement | A blend: 40% batch health + 35% SLA health + 25% resource health | 0–100 → A–F | Re-weights to ~0.53/0.47 batch/SLA if no resource data exists |
+| **JRTOS** | Which hour of the day is riskiest | Job volume, failure rate, and CPU pressure all peak in the same hour | 0–1 (naturally, no clamp needed) | 2am: busiest hour, 16.7% fail rate, 40% CPU → **≈ 0.067** |
 
-**CRS** — Cascade Risk Score (per job)
-*In plain terms: if this job fails, how many other jobs behind it in the same
-sub-application are put at risk — worse if the job's own SLA breach was deep.*
-> `CRS = cap1( failedFlag × (downstreamCount/(downstreamCount+5)) × (1 − clamp(slaBuffer,0,100)/100) )`
-- `slaBuffer` is clamped to `[0,100]` **before** use — a −200% (deep breach)
-  buffer becomes `0`, not a negative that would push CRS past 1. The final
-  result is clamped again to `≤ 1`.
-- Example: job failed, 8 downstream jobs, buffer was −200% (deep breach)
-  → chain factor `8/13 = 0.615` × buffer risk `1 − 0/100 = 1.0` → **CRS ≈ 0.62**
-- **Known limitation, verified against a real worst-case row** (a job at
-  −3713.1% buffer): `calc_crs(True, 8, -3713.1)` returns the **same 0.615** as
-  a −20% breach with the same downstream count. The clamp keeps CRS bounded
-  correctly, but as a side effect **CRS can't tell "barely breached" apart
-  from "catastrophically breached"** — every breach past 0% buffer maxes out
-  the buffer-risk term identically. Only the chain size still varies CRS
-  between two failed jobs.
+The raw math and the caveats worth knowing before quoting a number to a
+customer:
 
-**OSHS** — Overall System Health Score (executive grade)
-*In plain terms: one grade for the customer's whole engagement — 40% how
-batch jobs performed, 35% how SLA compliance looked, 25% how the servers held
-up — and it never invents a resource score when there's no resource data.*
-> `OSHS = 0.40×batchScore + 0.35×slaScore + 0.25×resourceScore`
-- Weights re-normalize over batch+SLA only (→ 0.53/0.47 proportional) when
-  no resource data exists — **never fabricates** a resource score.
+**RFCS** — `cap100( failureRate × (0.6×avgCPU + 0.4×avgMem)/100 × (1 + 0.15×min(criticalServers,10)) )`
+`failureRate` is a percentage (`100 − compliance_pct`), not a fraction. The
+raw value can reach ~250 before the clamp caps it at 100.
 
-**JRTOS** — Job-Resource Temporal Overlap (per hour-of-day bucket, 0–23)
-*In plain terms: for each hour of the day, how much do job volume, failure
-rate, and CPU pressure all pile up together — pinpoints the single riskiest
-hour, not just the riskiest day.*
-> `JRTOS[h] = (jobs[h]/maxJobsInAnyHour) × (failRate[h]/100) × (peakCPU/100)`
-- All three factors are ratios in `[0,1]`, so `JRTOS[h]` is naturally bounded
-  to `[0,1]` — no clamp needed. The "0–23" in the summary table is the
-  **hour index** (24 buckets/day), not the score's range — a labeling
-  ambiguity now fixed above.
-- Example: hour 2am has 12 jobs (busiest hour, so `jobs/max=1.0`), 2 of
-  those failed (`failRate=16.7%`), peak CPU that hour was 40%
-  → `1.0 × 0.167 × 0.40` → **JRTOS(2am) ≈ 0.067**
+**SRI** — `(peakHours / slaCeilingHours) × (1 + max(0, (avgCPU−70)/100))`
+`peakHours / slaCeilingHours` is algebraically `1 − bufferPct/100`, so SRI
+reuses the same buffer fact you already trust — it's not a second
+computation that could quietly disagree with the buffer number elsewhere.
+
+**CRS** — `cap1( failedFlag × (downstreamCount/(downstreamCount+5)) × (1 − clamp(slaBuffer,0,100)/100) )`
+`slaBuffer` is clamped to `[0,100]` before use, so a −200% (deep breach)
+becomes `0`, not a negative that could push CRS past 1.
+⚠️ **Known limitation**: because of that clamp, every breach past 0% buffer
+maxes out the buffer-risk term identically — verified with a real worst-case
+row (`calc_crs(True, 8, -3713.1)` returns the same `0.615` as a plain −20%
+breach with the same downstream count). CRS can't tell "barely breached"
+apart from "catastrophically breached." Only chain size still varies it
+between two failed jobs.
+
+**OSHS** — `0.40×batchScore + 0.35×slaScore + 0.25×resourceScore`
+Weights re-normalize over batch+SLA only when no resource data exists — it
+never fabricates a resource score just to fill the formula.
+
+**JRTOS** — `(jobs[h]/maxJobsInAnyHour) × (failRate[h]/100) × (peakCPU/100)`, one score per hour `h` (0–23)
+All three factors are ratios in `[0,1]`, so the result is naturally bounded
+with no clamp needed. The "0–23" is the hour index, not the score's range.
 
 *Talk track: every formula here is clamped at both ends in code — the deck
 now states the clamps and a worked example for each, instead of leaving the
