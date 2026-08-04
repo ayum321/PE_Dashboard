@@ -207,28 +207,25 @@ flowchart TD
     Q5 -->|no| KEEP["Counted everywhere:\nSLA, compliance, findings"]
 ```
 
-**Utility and cyclic checks run independently** — a job can be flagged by
-both at once (e.g. a "file_watcher"-named job that also polls 8×/day shows up
-as excluded-utility AND its sub-application is separately dropped from the
-window-elapsed measurement). They act on different scopes, so there's no
-single "winner" between them. The one place order *does* matter: if a job
-matches a utility pattern, its excluded-jobs reason always shows the utility
-label, not `SHORT_JOB`/`INSUFFICIENT`, even if it would also qualify for one —
-a job is either housekeeping or a data-quality gap, and housekeeping is
-checked first.
+**Utility and cyclic checks are independent** — a job can be flagged by both
+at once, since they act on different scopes (a job's own utility label vs. its
+sub-application's window measurement). The one place order matters: if a job
+matches a utility pattern, that's always the reason shown — never
+`SHORT_JOB`/`INSUFFICIENT` — since housekeeping is checked first.
 
-| Exclusion | Mechanism | Verified |
+| Exclusion | What triggers it | Effect |
 |---|---|---|
-| **User-picked jobs** | `config_store["exclude_jobs"]` — analyst opts a job out by name | applies to SLA analysis only; raw file/heatmap still shows it |
-| **Utility/infra jobs** | `is_utility_job()` — name-token match either always-excluded (`file_watcher`, `heartbeat`, `health_check`) or runtime-gated: `backup`/`db_backup`/`db_restore`, `export_`/`_export`, `gather_db_stats`/`update_stats`/`rebuild_index`, `batch_start`/`enable_users`, `zabbix_monitors`, … — only excluded if the run was short (e.g. a 3-min `db_backup` is excluded, a 3-hour one is kept as real work) | ✅ tested: `BATCH_START_NODE` at 0.01h → excluded; `CALCPLAN_Daily` at 4.2h → kept; a 3-min `NIGHTLY_DB_BACKUP` → excluded, the same job at 3h → kept |
-| **Cyclic/polling jobs** | `detect_cyclic_subs()` — median > 5 runs/day **and** avg runtime < 15 min (`CYCLIC_MAX_RUNTIME_HRS = 0.25h`) | ✅ verified live: constant reads as 0.25h (15 min), matches the docs |
-| **Retry storms — NOT excluded, flagged instead** | Same detector deliberately does **not** treat a 200-run spike on one bad day as cyclic — median stays ~1, so Guard 1 fails and it's tagged `RETRY_STORM` (surfaced as a warning, kept in the data) | ✅ tested: a 200-run single-day spike produced a `RETRY_STORM` warning; an ordinary job produced no warning at all |
-| **Out-of-scope schedule types** | `MONTHLY/QUARTERLY/ADHOC/CYCLIC/OUTBOUND/PIPELINE_STAGE/CALENDAR_BASED` sub-apps are dropped from the **window-compliance denominator** (they never had a daily SLA window) — but still counted for job-level breach/anomaly checks | matches architecture doc |
-| **Adaptive-SLA quality gate** | `SHORT_JOB` (avg < 5 min) and `INSUFFICIENT` (< 3 runs) baselines are excluded from **compliance %**, not from the job list — still visible, just not scored | ✅ tested: two distinct reason codes confirmed on real jobs — a 2-run job tagged `INSUFFICIENT`, a 10-run/1.2-min job tagged `SHORT_JOB` |
+| **User-picked jobs** | Analyst opts a job out by name | Removed from SLA analysis; still visible in the raw file/heatmap |
+| **Utility/infra jobs** | Name matches a known pattern (`file_watcher`, `backup`, `export_`, …), and — for runtime-gated patterns — the run was short | Excluded as housekeeping, not real batch work |
+| **Cyclic/polling jobs** | More than 5 runs/day **and** average runtime under 15 minutes | Dropped from window-elapsed measurement only |
+| **Retry storms** | A one-day spike in run count with no regular pattern — a failure retry cascade, not polling | Kept and flagged with a warning, not excluded |
+| **Out-of-scope schedule types** | `MONTHLY`/`QUARTERLY`/`ADHOC`/`OUTBOUND`/etc. — schedules with no daily SLA window | Dropped from the window-compliance denominator only; still checked for breach/anomaly |
+| **Adaptive-SLA quality gate** | Too few runs (`INSUFFICIENT`, < 3) or too short an average (`SHORT_JOB`, < 5 min) to trust a baseline | Excluded from the compliance % only; still listed |
 
 *Talk track: "excluded" never means "hidden" in this dashboard — it means
 "removed from a specific denominator, for a stated reason, with the reason
 visible in the UI."*
+
 
 
 ---
