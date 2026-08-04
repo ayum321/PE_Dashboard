@@ -222,64 +222,39 @@ visible in the UI."*
 
 ## SLA After Upload — Exact Join First, Then Adaptive Fallback
 
-When a customer uploads an SLA spreadsheet, the dashboard tries four
-increasingly loose ways to match each Ctrl-M workflow to its SLA row. If two
-workflows could plausibly match the same row, it refuses to guess.
+When a customer uploads an SLA spreadsheet, the dashboard matches each Ctrl-M
+workflow to its correct SLA contract using four progressively looser checks —
+and refuses to guess if two workflows could plausibly match the same row.
 
 ```mermaid
 flowchart TD
-    U["BatchSLA_info.xlsx uploaded"] --> M1{"Exact key match?\n(normalized workflow name)"}
+    U["BatchSLA_info.xlsx uploaded"] --> M1{"Exact name match?"}
     M1 -->|yes| HIT["Use this SLA row"]
-    M1 -->|no| M2{"Anchor match?\nFirst_Job / Last_Job names\nline up with Ctrl-M jobs"}
-    M2 -->|yes| ACOL{"Does this SAME anchor job\nbelong to MULTIPLE contract rows?\n(e.g. base 'SCPO_D1' vs\n'SCPO_D1(SPD)' vs 'SCPO_D1(Saturday)')"}
-    ACOL -->|no, one contract| HIT
-    ACOL -->|yes| QDAY{"Does each candidate's Schedule\ntext parse to a weekday set?\n(Mon-Fri, Saturday, 1st/2nd/3rd Sun, etc.)"}
-    QDAY -->|yes| FILTER["Split THIS job's Ctrl-M runs by\nrun-date weekday BEFORE scoring —\neach run judged against its own\ncontract, never averaged or last-write-wins"]
-    QDAY -->|"a candidate's qualifier isn't\na weekday (e.g. a calendar-based\n'SPD' designator)"| AMBIG["That run is left UNRESOLVED —\nno contract silently borrowed from\na neighbour; reported unmatched"]
+    M1 -->|no| M2{"Anchor match?\n(First/Last job names)"}
+    M2 -->|yes| ACOL{"Same job used by\nmultiple contracts?"}
+    ACOL -->|no| HIT
+    ACOL -->|yes| FILTER["Split by calendar day —\neach run scored against\nits own contract"]
     FILTER --> HIT
-    M2 -->|no| M3{"Token match?\n(fuzzy word overlap)"}
+    M2 -->|no| M3{"Token match?"}
     M3 -->|yes| HIT
-    M3 -->|no| T2["No safe match —\nfall through to Tier 2 / Tier 3"]
-    HIT --> COL{"Would two DIFFERENT workflow\nNAMES collide on the same\nshortened key?\n(e.g. PETBARN_DAILY vs TESCO_DAILY\nboth reduce to 'DAILY')"}
-    COL -->|yes| DROP["Skip that key entirely —\nnever guess which workflow wins"]
-    COL -->|no| USE["SLA assigned to the workflow"]
+    M3 -->|no| T2["Fall through to\nTier 2 / Tier 3"]
+    HIT --> COL{"Two different workflow\nnames collide on the\nsame key?"}
+    COL -->|yes| DROP["Skip — never guess\nwhich workflow wins"]
+    COL -->|no| USE["SLA assigned"]
 ```
 
-**This diagram had a real gap, now fixed in code, not just redrawn.** The
-original version stopped at `HIT`/`USE` — it answered "which sub-application
-does this SLA row belong to," but had no step for what happens when the SAME
-physical Ctrl-M job is the anchor for *multiple* contracts that only differ by
-a schedule qualifier in parentheses (a real customer pattern: `SCPO_D1` /
-`SCPO_D1(SPD)` / `SCPO_D1(Saturday)`, all three legitimately the same
-sub-application, each with its own SLA). That is not a naming problem — the
-name match is already correct — so the fix isn't fuzzier string matching, it's
-the `ACOL`/`QDAY`/`FILTER` path above: detect when one anchor job is claimed
-by more than one contract row, then split that job's own run history by
-calendar weekday *before* scoring, using each row's own Schedule-column text.
-A day whose qualifier can't be parsed into a weekday (a genuine calendar-based
-designator, not a recurring weekday) is left unresolved rather than guessed —
-the same honesty principle as the `COL`→`DROP` path below it, just triggered
-by an anchor collision instead of a name collision, and resolved at the
-per-run-date grain instead of dropped wholesale.
+Some customers run the same job under more than one contract, depending on
+the day (e.g. a weekday rate vs. a Saturday rate). The dashboard detects this
+automatically and scores each run against the contract for its own calendar
+day — never a single averaged or arbitrarily-picked number.
 
-⚠️ **Known remaining limitation**: `QDAY`'s weekday parser understands
-Mon–Sun, day ranges, and nth-weekday-of-month phrases — it cannot resolve a
-qualifier tied to an explicit calendar date list (a literal "SPD" designator
-with no recorded weekday pattern). Those runs report honestly as unmatched
-rather than being stamped with a neighbouring contract's SLA; resolving them
-fully would need the XLSX to carry actual calendar dates for that qualifier,
-which this pipeline doesn't yet ingest.
+The measured window itself is anchored to the contract's own named start/end
+jobs, not just the earliest and latest timestamp in the file — so a pre-batch
+prep job or a late cleanup job can't stretch the measured window.
 
-The measured window itself is anchored to named jobs, not just the earliest
-and latest timestamp in the file, so a pre-batch prep job that starts hours
-early, or a cleanup job that finishes late, can't stretch it. The window opens
-at the earliest run of the row's own `First_Job` and closes at the latest run
-of its `Last_Job` (latest, not earliest, so a `Last_Job` firing from several
-parallel sub-workflows can't truncate the window early).
-
-If no SLA spreadsheet is uploaded at all, each job builds its own SLA from its
-own Ctrl-M run history. More history means a tighter, more confident number:
-
+If no SLA spreadsheet is uploaded at all, each job builds its own SLA ceiling
+from its own Ctrl-M run history — more history in, a tighter and more
+confident number out:
 
 | Runs available | Confidence label | SLA is set to |
 |---|---|---|
@@ -291,31 +266,6 @@ own Ctrl-M run history. More history means a tighter, more confident number:
 Every one of these is still capped at the schedule's global default (6h
 daily / 8h weekly), so a single noisy job can never claim a bigger SLA than
 the engagement's own default allows.
-
-✅ Tested with 20 synthetic runs at 4.0–4.4h: correctly classified `STRONG`,
-`sla_hrs = 4.4` (p95), capped under the 6h ceiling supplied.
-
-⚠️ **A real bug found and fixed this session**: a customer's
-`BatchSLA_info.xlsx` used clock-time columns instead of a numeric SLA column —
-`Start Time` read "Sunday 9:05 PM CST", `Expected End Time/SLA` read
-"6AM CST". The parser never stripped the day name before parsing the time, so
-every row silently fell back to the generic 17h/6h default instead of
-computing the real per-workflow window. Fixed by stripping the day-name
-prefix first: workflows now resolve to their genuine windows (8.9h, 14.0h,
-2.0h — not a blanket 17h/6h), tagged `sla_source = BATCH_SLA_XLSX`. Rows with
-a genuinely blank or "NA" deadline still fall back correctly. The existing SLA
-test suite gives the same pass/fail baseline before and after, so nothing
-else broke.
-
-✅ **Also fixed this session — a "matched" badge that didn't mean what it
-said**: the SLA Matrix tab's green "✓ Ctrl-M runtime matched (9/9)" badge was
-counting any XLSX row that found a *name match* in `workflow_summary`, even
-when that row's own status was `RUNTIME_MISSING` (no valid Start/End time) or
-`SLA_MISSING`. A row could count toward "9/9 matched" while simultaneously
-showing an unscored status right below it — the badge and the row it was
-describing could contradict each other. "Matched" now requires the entry to
-also carry a real, positive `runtime_h` and a status that isn't
-`RUNTIME_MISSING`/`SLA_MISSING` — a name hit alone no longer inflates the count.
 
 *Talk track: even with zero uploads, every job still gets its own
 history-derived ceiling — never one blanket SLA for everyone.*
