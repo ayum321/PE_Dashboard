@@ -198,25 +198,38 @@ flowchart TD
     Q2 -->|yes, and run was short| OUT2["Excluded — housekeeping,\nnot real batch work"]
     Q2 -->|no, or ran too long to be housekeeping| Q3{"Cyclic/polling job?\n(>5 runs/day, avg <15 min)"}
     Q3 -->|yes| OUT3["Dropped from window-elapsed\nmeasurement only"]
+    Q3 -->|no, but retry-storm pattern| WARN["Kept, flagged RETRY_STORM —\nsurfaced as a warning"]
     Q3 -->|no| Q4{"Out-of-scope schedule?\n(MONTHLY/ADHOC/OUTBOUND/...)"}
     Q4 -->|yes| OUT4["Dropped from window-compliance\ndenominator only — still checked\nfor breach/anomaly"]
-    Q4 -->|no| Q5{"Too few/too short runs\nto trust a baseline?\n(SHORT_JOB / INSUFFICIENT)"}
-    Q5 -->|yes| OUT5["Excluded from compliance %\nonly — still listed"]
+    Q4 -->|no| Q5{"Too few or too short runs\nto trust a baseline?"}
+    Q5 -->|"< 3 runs"| OUT5A["INSUFFICIENT —\nexcluded from compliance %, still listed"]
+    Q5 -->|"avg < 5 min"| OUT5B["SHORT_JOB —\nexcluded from compliance %, still listed"]
     Q5 -->|no| KEEP["Counted everywhere:\nSLA, compliance, findings"]
 ```
+
+**Utility and cyclic checks run independently** — a job can be flagged by
+both at once (e.g. a "file_watcher"-named job that also polls 8×/day shows up
+as excluded-utility AND its sub-application is separately dropped from the
+window-elapsed measurement). They act on different scopes, so there's no
+single "winner" between them. The one place order *does* matter: if a job
+matches a utility pattern, its excluded-jobs reason always shows the utility
+label, not `SHORT_JOB`/`INSUFFICIENT`, even if it would also qualify for one —
+a job is either housekeeping or a data-quality gap, and housekeeping is
+checked first.
 
 | Exclusion | Mechanism | Verified |
 |---|---|---|
 | **User-picked jobs** | `config_store["exclude_jobs"]` — analyst opts a job out by name | applies to SLA analysis only; raw file/heatmap still shows it |
 | **Utility/infra jobs** | `is_utility_job()` — name-token match either always-excluded (`file_watcher`, `heartbeat`, `health_check`) or runtime-gated: `backup`/`db_backup`/`db_restore`, `export_`/`_export`, `gather_db_stats`/`update_stats`/`rebuild_index`, `batch_start`/`enable_users`, `zabbix_monitors`, … — only excluded if the run was short (e.g. a 3-min `db_backup` is excluded, a 3-hour one is kept as real work) | ✅ tested: `BATCH_START_NODE` at 0.01h → excluded; `CALCPLAN_Daily` at 4.2h → kept; a 3-min `NIGHTLY_DB_BACKUP` → excluded, the same job at 3h → kept |
-| **Cyclic/polling jobs** | `detect_cyclic_subs()` — median > 5 runs/day **and** avg runtime < 15 min (`CYCLIC_MAX_RUNTIME_HRS`) | ✅ tested: a 24-run/day, 2-min job flagged cyclic |
-| **Retry storms — NOT excluded, flagged instead** | Same detector deliberately does **not** treat a 200-run spike on one bad day as cyclic — median stays ~1, so Guard 1 fails and it's tagged `RETRY_STORM` (surfaced as a warning, kept in the data) | ✅ tested: 200-run single-day spike correctly separated from the 24-run/day cyclic job |
+| **Cyclic/polling jobs** | `detect_cyclic_subs()` — median > 5 runs/day **and** avg runtime < 15 min (`CYCLIC_MAX_RUNTIME_HRS = 0.25h`) | ✅ verified live: constant reads as 0.25h (15 min), matches the docs |
+| **Retry storms — NOT excluded, flagged instead** | Same detector deliberately does **not** treat a 200-run spike on one bad day as cyclic — median stays ~1, so Guard 1 fails and it's tagged `RETRY_STORM` (surfaced as a warning, kept in the data) | ✅ tested: a 200-run single-day spike produced a `RETRY_STORM` warning; an ordinary job produced no warning at all |
 | **Out-of-scope schedule types** | `MONTHLY/QUARTERLY/ADHOC/CYCLIC/OUTBOUND/PIPELINE_STAGE/CALENDAR_BASED` sub-apps are dropped from the **window-compliance denominator** (they never had a daily SLA window) — but still counted for job-level breach/anomaly checks | matches architecture doc |
-| **Adaptive-SLA quality gate** | `SHORT_JOB` (avg < 5 min) and `INSUFFICIENT` (< 3 runs) baselines are excluded from **compliance %**, not from the job list — still visible, just not scored | code-verified |
+| **Adaptive-SLA quality gate** | `SHORT_JOB` (avg < 5 min) and `INSUFFICIENT` (< 3 runs) baselines are excluded from **compliance %**, not from the job list — still visible, just not scored | ✅ tested: two distinct reason codes confirmed on real jobs — a 2-run job tagged `INSUFFICIENT`, a 10-run/1.2-min job tagged `SHORT_JOB` |
 
 *Talk track: "excluded" never means "hidden" in this dashboard — it means
 "removed from a specific denominator, for a stated reason, with the reason
 visible in the UI."*
+
 
 ---
 
