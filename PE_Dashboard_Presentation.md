@@ -32,14 +32,15 @@ audit with one deterministic pipeline that never disagrees with itself."*
 1. The problem this replaces
 2. Tech stack
 3. Architecture — one core pipeline, two independent read paths
-4. SLA resolution logic + the buffer formula
-5. Job exclusion, concurrent-job handling, false-signal negation, cyclic/multi-SLA batches
-6. Pulling & correlating Azure resource metrics
-7. Cross-source correlation formulas (RFCS / SRI / JRTOS / CRS / OSHS)
-8. SOW contract vs. actual volume
-9. Findings engine (automated audit rules)
-10. Governance, export & sign-off
-11. Roadmap / Q&A
+4. Six data sources (only 3 feed the shared table)
+5. SLA resolution — tiered fallback + the buffer formula
+6. Job exclusion, concurrent-job handling, false-signal negation, cyclic/multi-SLA batches
+7. Pulling Azure resource metrics
+8. Correlating batch, SLA & resource — 5 formulas (RFCS / SRI / JRTOS / CRS / OSHS)
+9. SOW contract vs. actual volume
+10. Findings engine — 14 automated rule sections
+11. Governance, export & sign-off
+12. Roadmap / Q&A
 
 ---
 
