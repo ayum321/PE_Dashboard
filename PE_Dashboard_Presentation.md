@@ -318,32 +318,34 @@ does neither.
 gantt
     dateFormat HH:mm
     axisFormat %H:%M
-    section Job A
+    section Job A / B (overlap)
     01:00 - 02:00 (1h)      :a1, 01:00, 02:00
-    section Job B
     01:30 - 03:00 (1.5h)    :a2, 01:30, 03:00
+    section Job C (separate cluster)
+    Idle gap                :crit, 03:00, 04:00
+    04:00 - 04:30 (0.5h)    :a3, 04:00, 04:30
     section Real busy time
-    Union = 2h, not 2.5h    :crit, a3, 01:00, 03:00
+    Block 1 = 2h            :done, b1, 01:00, 03:00
+    Block 2 = 0.5h          :done, b2, 04:00, 04:30
 ```
 
-- **`_merge_intervals()`** unions every job's `[start, end]` pair for the day.
-  The two jobs above sum to 2.5h of individual runtime, but only occupy **2h**
-  of actual wall-clock time together — that 2h is what gets reported.
-- **Block detection** splits the day into separate batch blocks when the gap
-  between runs exceeds `BATCH_BLOCK_GAP_HRS` (e.g. a morning phase and an
-  evening phase), instead of treating the idle hours in between as if the
-  batch were still "running".
+**Tested with 3 jobs** (01:00–02:00, 01:30–03:00, 04:00–04:30):
+- Naive sum of runtimes: 1.0h + 1.5h + 0.5h = **3.0h**
+- Naive span (first start to last end): 04:30 − 01:00 = **3.5h**
+- Actual reported busy time (two blocks, gap excluded): **2.5h** ✓
 
-✅ **Tested**: three overlapping/adjacent runs (01:00–02:00, 01:30–03:00,
-04:00–04:30) → `busy_hrs = 2.5`, correctly the union, not the naive `3.5h` sum.
+Both naive numbers are wrong in different ways — summing overstates by
+double-counting the overlap, and spanning overstates by counting the idle
+gap as if the batch were still running. The dashboard reports neither.
 
-⚠️ **Important distinction**: this real interval-union logic is what powers
-window-elapsed measurement. **CRS's "downstream count" is a different,
-simpler thing** — it's `len(jobs in the same sub-application)`, a proxy for
-blast radius, **not** a true dependency-graph traversal (Ctrl-M CSV exports
-carry no job-precedence/dependency column, so a real cascade graph isn't
-available to this pipeline). Worth stating plainly rather than implying CRS
-models actual job dependencies.
+- A one-hour or longer idle gap between runs splits the day into separate
+  batch blocks (e.g. a morning phase and an evening phase) instead of
+  treating the gap as if work was happening the whole time.
+- A separate risk score (CRS, used in the correlation formulas) estimates
+  blast radius as "how many other jobs share this one's sub-application" —
+  a practical proxy, not a true dependency chain (Ctrl-M exports don't
+  record job-to-job dependencies). That score is one shared number per
+  sub-application, not calculated separately for each job inside it.
 
 ---
 
