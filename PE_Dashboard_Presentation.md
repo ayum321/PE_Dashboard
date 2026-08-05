@@ -369,6 +369,28 @@ sees**, no confidence penalty applies, and the promised UI badge can never
 fire. This is dead code, not a working safety net — recommend wiring it
 before presenting this row as a shipped protection.
 
+⚠️ **Second confirmed gap, checked directly against the code**: does a
+missing-`Start_Time` row get misfiled as "corrupt pair, capped at 168h"
+instead of "synthetic timestamp"? Traced it — the answer is **no, it's a
+third, different outcome**, not the 168h cap:
+1. Every row gets `Start_Time = now()` (a single shared value for the whole file).
+2. For any row whose runtime must be derived (`Run_Sec` not reported in the
+   file), `elapsed = End_Time (real, historical) − Start_Time (now)` is a
+   large **negative** number — the midnight-crossover `+24h` correction only
+   shifts it by one day, nowhere near enough to fix a gap of days or weeks.
+3. `clip(lower=0, upper=168h)` then clips that large negative value to its
+   **lower** bound, `0` — not the 168h upper bound.
+4. Downstream, `Run_Sec == 0` on a non-failed job sets
+   `reason_code = "RUNTIME_ZERO"` and `status = "OK"` — the job is
+   silently recorded as "completed fine, no timing data," never flagged as
+   running on a synthetic Start_Time at all.
+
+So the corruption is real, but it lands as a **third, mislabeled outcome**
+(`RUNTIME_ZERO`, looks like a clean pass) rather than the 168h corrupt-pair
+path — arguably worse, since `RUNTIME_ZERO` currently reads as harmless.
+Fixing the missing-`has_synthetic_timestamps` wiring above should also stop
+these rows from being scored as `RUNTIME_ZERO` in the first place.
+
 ---
 
 ## Multi-SLA & Cyclic vs. Non-Cyclic Batches
