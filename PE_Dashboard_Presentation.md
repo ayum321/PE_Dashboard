@@ -186,25 +186,21 @@ there is never a dead end.
 
 | Condition | Status |
 |---|---|
+| Completion code indicates failure | **FAILED** (buffer not computed) |
 | `buffer_pct > 40%` | **OK** |
 | `15% < buffer_pct ≤ 40%` | **LONG_JOB** (getting close) |
 | `0% < buffer_pct ≤ 15%` | **AT_RISK** |
 | `buffer_pct ≤ 0%` | **BREACH** |
+| SLA = 0 or missing | **SLA_MISSING** (not a breach — flagged as a data gap) |
 
-- Thresholds (`SLA_ATRISK_PCT=15`, `SLA_LONGJOB_PCT=40`) live in **one file**
-  (`pe_config.py`) — every consumer (SLA matrix, compliance engine, findings
-  engine, frontend legend) reads the same constant, never a hardcoded copy.
-- Zero/missing SLA guard (`routers/sla_matrix.py`): `sla_hrs <= 0` never
-  computes a buffer number at all — `buffer_pct = None`,
-  `reason_code = "SLA_MISSING"`. A data-integrity gap is surfaced as
-  **missing data**, never silently manufactured into a BREACH verdict.
-- **This guard only catches literal-zero SLA.** A real, nonzero-but-tiny SLA
-  (e.g. a 10-minute/0.167h Tier-1 ceiling) passes the guard and can still
-  produce implausible-looking magnitudes (e.g. a job seen at −3713% buffer
-  on a real customer dashboard) — mathematically correct given the inputs,
-  but a value that large is itself a signal the Tier-1 SLA entry deserves a
-  second look, not evidence of a display bug. Not yet capped/flagged
-  separately from an ordinary breach.
+- Thresholds (`AT_RISK=15%`, `LONG_JOB=40%`) are defined once in `pe_config.py` and
+  read by every component — SLA matrix, findings engine, frontend — so the same
+  job can never show different statuses on different screens.
+- A zero or missing SLA never silently becomes a BREACH — it's flagged as
+  `SLA_MISSING` with no buffer computed at all.
+- A very tight SLA (e.g. 10-minute ceiling) can produce large negative buffers
+  (−3713% is a real example from a customer file). This is mathematically correct —
+  it's a signal the SLA entry itself needs a second look, not a display bug.
 
 ---
 
