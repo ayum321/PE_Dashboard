@@ -183,6 +183,9 @@ let _batchExcludeUtility = true;
 // Per-job overrides: user can re-include auto-detected utility jobs or manually exclude any job.
 const _batchManualInclude = new Set();  // jobs auto-detected as utility but user wants included
 const _batchManualExclude = new Set();  // jobs NOT auto-detected but user manually excluded
+// Optional custom reason typed by the reviewer for a manual exclusion — display-only,
+// keyed by job name. Falls back to a generic "manually excluded" note when absent.
+const _batchManualExcludeReasons = new Map();
 
 // Live Chart.js instances — re-created on every renderBatchReview() / renderResourceReview() call
 const charts = { slaBuffer: null, windowTrend: null, topJobs: null, resourceBars: null };
@@ -3272,6 +3275,7 @@ function _exclusionWhy(reason) {
 window._excludedReinclude = function(name) {
   if (!name) return;
   _batchManualExclude.delete(name);
+  _batchManualExcludeReasons.delete(name);
   _batchManualInclude.add(name);
   _reRenderBatch();
 };
@@ -3283,8 +3287,9 @@ window._excludedReexclude = function(name) {
   _reRenderBatch();
 };
 
-/** Manually exclude a typed job name from all metrics. */
-window._excludedAddManual = function(rawVal) {
+/** Manually exclude a typed job name from all metrics, with an optional
+ *  reviewer-typed reason so the panel can show WHY instead of a generic note. */
+window._excludedAddManual = function(rawVal, rawReason) {
   const val = String(rawVal || "").trim();
   if (!val) return;
   const known = new Set((window.appData?.batch?.top_jobs || []).map(j => String(j.Job_Name || "").toUpperCase()));
@@ -3294,6 +3299,9 @@ window._excludedAddManual = function(rawVal) {
   }
   _batchManualInclude.delete(val);
   _batchManualExclude.add(val);
+  const reason = String(rawReason || "").trim();
+  if (reason) _batchManualExcludeReasons.set(val, reason);
+  else _batchManualExcludeReasons.delete(val);
   _reRenderBatch();
 };
 
@@ -3301,6 +3309,7 @@ window._excludedAddManual = function(rawVal) {
 window._excludedResetAll = function() {
   _batchManualInclude.clear();
   _batchManualExclude.clear();
+  _batchManualExcludeReasons.clear();
   _reRenderBatch();
 };
 
@@ -3329,11 +3338,12 @@ function _buildUnifiedExclusionRows(dataCoverage) {
     if (_batchManualInclude.has(name)) return; // re-included — no longer excluded
     const isManual = !j.is_utility;
     const reason = j.is_utility ? (j.utility_reason || "utility pattern") : "";
+    const customReason = isManual ? _batchManualExcludeReasons.get(name) : null;
     rows.set(name.toUpperCase(), {
       name,
       category: isManual ? "MANUAL" : _exclusionCategory(reason),
       why: isManual
-        ? "Manually excluded by the reviewer for this session — removed from every metric."
+        ? (customReason || "Manually excluded by the reviewer for this session — removed from every metric.")
         : _exclusionWhy(reason),
       scope: "ALL_METRICS",
       isUtil: true, // always round-trips client-side, always re-includable
@@ -3403,6 +3413,11 @@ function renderExcludedJobsPanel(dataCoverage) {
   const cats = Array.from(byCat.keys()).sort((a, b) => byCat.get(b) - byCat.get(a));
   const allMetricsCount = excluded.filter(r => r.scope === "ALL_METRICS").length;
   const complianceOnlyCount = excluded.length - allMetricsCount;
+  // How many of these were the reviewer's OWN choice vs auto-detected — every
+  // other category (utility pattern, cyclic, insufficient baseline, …) is a
+  // system judgment call the reviewer never made, so this is worth calling
+  // out separately rather than lumping it into one undifferentiated count.
+  const manualCount = excluded.filter(r => r.category === "MANUAL").length;
 
   const detailOpen = !!window._excludedDetailOpen;
   const summaryPills = cats.map(cat => {
@@ -3454,10 +3469,14 @@ function renderExcludedJobsPanel(dataCoverage) {
                style="border-color:${hexA(THEME.border,0.4)};min-width:180px" />
         <div class="flex items-center gap-1">
           <input type="text" list="excluded-add-list" placeholder="Exclude a job by name…" id="excluded-add-input"
-                 onkeydown="if(event.key==='Enter'){window._excludedAddManual(this.value);this.value='';}"
+                 onkeydown="if(event.key==='Enter'){document.getElementById('excluded-add-reason').focus();}"
                  class="text-[11.5px] px-2 py-1 rounded-md bg-Ccard2/60 border text-Cwhite placeholder:text-Cmuted focus:outline-none"
                  style="border-color:${hexA(THEME.border,0.4)};min-width:200px" />
-          <button type="button" onclick="const i=document.getElementById('excluded-add-input');window._excludedAddManual(i.value);i.value='';"
+          <input type="text" placeholder="Why? (optional, shown to reviewers)" id="excluded-add-reason"
+                 onkeydown="if(event.key==='Enter'){const n=document.getElementById('excluded-add-input'),r=document.getElementById('excluded-add-reason');window._excludedAddManual(n.value,r.value);n.value='';r.value='';}"
+                 class="text-[11.5px] px-2 py-1 rounded-md bg-Ccard2/60 border text-Cwhite placeholder:text-Cmuted focus:outline-none"
+                 style="border-color:${hexA(THEME.border,0.4)};min-width:220px" />
+          <button type="button" onclick="const n=document.getElementById('excluded-add-input'),r=document.getElementById('excluded-add-reason');window._excludedAddManual(n.value,r.value);n.value='';r.value='';"
                   class="text-[11.5px] font-semibold px-2 py-1 rounded-md hover:opacity-80 transition"
                   style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)};border:1px solid ${hexA(THEME.amber,0.3)}">＋ Exclude</button>
         </div>
@@ -3493,8 +3512,9 @@ function renderExcludedJobsPanel(dataCoverage) {
         <div class="min-w-0">
           <div class="text-sm font-bold text-Cwhite leading-tight">Excluded Jobs</div>
           <div class="text-[12px] text-Cmuted leading-tight"
-               title="ALL METRICS = removed from every metric, table and chart. COMPLIANCE ONLY = kept in the dataset and run tables, just not scored in the SLA compliance %.">
+               title="ALL METRICS = removed from every metric, table and chart. COMPLIANCE ONLY = kept in the dataset and run tables, just not scored in the SLA compliance %. MANUAL = you chose to exclude this job; every other category was detected automatically.">
             ${allMetricsCount} all-metrics · ${complianceOnlyCount} compliance-only · ${cats.length} categor${cats.length === 1 ? "y" : "ies"}
+            ${manualCount ? ` · <span class="text-Cwhite font-semibold">${manualCount} chosen by you</span>` : ""}
           </div>
         </div>
       </div>
