@@ -14215,12 +14215,12 @@ function _renderExecSLABars(jobs) {
       textposition: "outside",
       textfont: { size: 9, color: "#6b7db3" },
       hovertemplate: isWin
-        ? "%{y}<br>Worst window: %{x:.2f}h<br>Ceiling: %{customdata[0]:.1f}h<br>Buffer: %{customdata[1]:.0f}%<br>%{customdata[2]} day(s) breached<extra></extra>"
+        ? "%{y}<br>Peak window: %{x:.2f}h<br>Ceiling: %{customdata[0]:.1f}h<br>Buffer: %{customdata[1]:.0f}%<br>%{customdata[2]} day(s) breached<extra></extra>"
         : "%{y}<br>Peak: %{x:.2f}h<br>Buffer: %{customdata:.0f}%<extra></extra>",
       customdata: isWin
         ? jobs.map(j => [_n(j.sla_ceiling), (j.buffer_pct ?? 0), (j.breach_days || 0)])
         : jobs.map(j => j.buffer_pct),
-      name: isWin ? "Worst Window" : "Peak Runtime",
+      name: isWin ? "Peak Window" : "Peak Runtime",
     },
   ];
 
@@ -14725,7 +14725,7 @@ function _renderExecTopRiskJobs(jobs) {
     const buffer = j.buffer_pct != null ? _n(j.buffer_pct).toFixed(1) : "—";
     const label = (j.job_name || j.sub_app || "Unknown");
     const name = label.length > 30 ? label.slice(0,27) + "…" : label;
-    const valLbl = isWin ? "Worst Window" : "Peak";
+    const valLbl = isWin ? "Peak Window" : "Peak";
     // Window context: how many days this sub-app's window breached + its window
     // compliance — so a red card always explains WHY (never just a bare status).
     const ctx = isWin
@@ -18445,23 +18445,23 @@ function _renderSlaCommitmentsPanel() {
             const alertClass = (cmp.breach_count > 0 || cmp.tighter_than_default > 0)
               ? "text-Camber/90 bg-Camber/5 border-Camber/20"
               : "text-Cmuted/80 bg-Cbg/40 border-Cborder/20";
-            return parts.length > 0 ? `<div class="text-[9px] px-3 py-2 border-b ${alertClass} flex flex-wrap items-center gap-x-3 gap-y-0.5">
-              <span class="font-bold text-[8px] uppercase tracking-wider opacity-70">SLA vs Baseline</span>
+            return parts.length > 0 ? `<div class="text-[10.5px] px-3 py-2 border-b ${alertClass} flex flex-wrap items-center gap-x-3 gap-y-0.5">
+              <span class="font-bold text-[9px] uppercase tracking-wider opacity-70">SLA vs Baseline</span>
               <span class="opacity-50">PE default: Daily ${defD}h &middot; Weekly ${defW}h</span>
               <span class="opacity-30">&bull;</span>
               ${parts.join(' <span class="opacity-30">&middot;</span> ')}
               <button onclick="triggerGenerateFindings().catch(()=>{})" class="ml-auto text-[8px] font-semibold text-Cgreen hover:underline cursor-pointer">Push to PE Findings &rarr;</button>
             </div>` : "";
           })()}
-          <table class="w-full text-[10px]">
-            <thead><tr class="border-b border-Cborder/40 bg-Cbg/60">
-              <th class="text-left py-1.5 px-2 text-Cmuted font-semibold">Workflow</th>
-              <th class="text-left py-1.5 px-2 text-Cmuted font-semibold">Type</th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="SLA (Expected Completion) — the agreed time window by which this workflow must finish. Source tiers: 1 = XLSX contract · 2 = SOW ceiling · 3 = PE system default. Badge shows which tier was used.">SLA <span class="text-[8px] font-normal opacity-60">(Expected Completion)</span></th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Worst observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used. XLSX tag = last-known snapshot, not live Ctrl-M data.">Worst Window</th>
-              <th class="text-right py-1.5 px-2 text-Cmuted font-semibold" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
-              <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
-              <th class="text-center py-1.5 px-2 text-Cmuted font-semibold" title="Did the batch START on time? Duration compliance alone doesn't catch a late start that still finishes inside its window — downstream data is stale even though the run 'passed'. Compares the XLSX contracted Start_Time against the actual worst-case (latest) observed start clock time. Requires a Start_Time column in the SLA matrix file.">Start Time</th>
+          <table class="w-full text-[12.5px]">
+            <thead><tr class="border-b-2 border-Cborder/50 bg-Cbg/70">
+              <th class="text-left py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]">Workflow</th>
+              <th class="text-left py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]">Type</th>
+              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="SLA (Expected Completion) — the agreed time window by which this workflow must finish. Source tiers: 1 = XLSX contract · 2 = SOW ceiling · 3 = PE system default. Badge shows which tier was used.">SLA <span class="text-[9px] font-normal opacity-60 normal-case">(Expected Completion)</span></th>
+              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Peak observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used. XLSX tag = last-known snapshot, not live Ctrl-M data.">Peak Window</th>
+              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
+              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
+              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Did the batch START on time? Duration compliance alone doesn't catch a late start that still finishes inside its window — downstream data is stale even though the run 'passed'. Compares the XLSX contracted Start_Time against the actual worst-case (latest) observed start clock time. Requires a Start_Time column in the SLA matrix file.">Start Time</th>
             </tr></thead>
             <tbody>
               ${topWfs.map(w => {
@@ -18481,15 +18481,15 @@ function _renderSlaCommitmentsPanel() {
                   const s = (_slaSrc || "").toLowerCase();
                   // batch_sla_xlsx* and sla_intelligence_anchor = SLA came from the customer file
                   if (s.startsWith("batch_sla_xlsx") || s === "xlsx" || s === "sla_intelligence_anchor")
-                    return `<span class="ml-1 text-[7px] font-bold text-Cgreen bg-Cgreen/10 px-0.5 rounded" title="Source: Customer SLA Matrix file — per-contract window">CONTRACT</span>`;
+                    return `<span class="ml-1 text-[9px] font-bold text-Cgreen bg-Cgreen/10 px-1 py-0.5 rounded" title="Source: Customer SLA Matrix file — per-contract window">CONTRACT</span>`;
                   if (s === "sow_extracted")
-                    return `<span class="ml-1 text-[7px] font-bold text-Cpurple bg-Cpurple/10 px-0.5 rounded" title="Source: SOW contract batch-type ceiling (no per-workflow SLA in XLSX)">SOW</span>`;
+                    return `<span class="ml-1 text-[9px] font-bold text-Cpurple bg-Cpurple/10 px-1 py-0.5 rounded" title="Source: SOW contract batch-type ceiling (no per-workflow SLA in XLSX)">SOW</span>`;
                   if (s === "sla_matrix" || s === "contract")
-                    return `<span class="ml-1 text-[7px] font-bold text-Cgreen bg-Cgreen/10 px-0.5 rounded" title="Source: Uploaded customer SLA matrix file">CONTRACT</span>`;
+                    return `<span class="ml-1 text-[9px] font-bold text-Cgreen bg-Cgreen/10 px-1 py-0.5 rounded" title="Source: Uploaded customer SLA matrix file">CONTRACT</span>`;
                   if (s === "global_default" || s.startsWith("global") || s === "assumed")
-                    return `<span class="ml-1 text-[7px] font-bold text-Camber bg-Camber/10 px-0.5 rounded" title="No contract SLA found — system default used. Upload SLA Matrix to override.">DEFAULT</span>`;
+                    return `<span class="ml-1 text-[9px] font-bold text-Camber bg-Camber/10 px-1 py-0.5 rounded" title="No contract SLA found — system default used. Upload SLA Matrix to override.">DEFAULT</span>`;
                   if (s && s !== "none")
-                    return `<span class="ml-1 text-[7px] font-bold text-Cmuted bg-Cmuted/10 px-0.5 rounded" title="SLA source: ${_esc(_slaSrc)}">${s.replace(/_/g," ").toUpperCase().slice(0,8)}</span>`;
+                    return `<span class="ml-1 text-[9px] font-bold text-Cmuted bg-Cmuted/10 px-1 py-0.5 rounded" title="SLA source: ${_esc(_slaSrc)}">${s.replace(/_/g," ").toUpperCase().slice(0,8)}</span>`;
                   return "";
                 })();
                 const sla       = _slaVal != null
@@ -18511,7 +18511,7 @@ function _renderSlaCommitmentsPanel() {
                 // Runtime cell: tag XLSX-sourced values so user knows provenance (Standard 2)
                 const rtStr     = rt != null
                   ? (rtSrc === "xlsx_last_run"
-                      ? `<span class="text-Cwhite/50" title="From XLSX BatchSLA_info Current end time − Start Time (last known run). Upload Ctrl-M for live data.">${rt.toFixed(3)}h <span class="text-[8px] text-Camber/80">XLSX</span></span>`
+                      ? `<span class="text-Cwhite/50" title="From XLSX BatchSLA_info Current end time − Start Time (last known run). Upload Ctrl-M for live data.">${rt.toFixed(3)}h <span class="text-[9px] text-Camber/80">XLSX</span></span>`
                       : `${rt.toFixed(3)}h`)
                   : "—";
                 // Buffer cell: typed failure state, never bare "—" (Standard 5)
@@ -18524,7 +18524,7 @@ function _renderSlaCommitmentsPanel() {
                 const _overageH  = (buf != null && rt != null && _slaVal != null) ? (rt - _slaVal) : null;
                 const bufStr    = buf != null
                   ? (_severeBuf && _overageH != null
-                      ? `${buf.toFixed(0)}% <span class="text-[8px] opacity-70">(+${_overageH.toFixed(1)}h over ${_slaVal}h)</span>`
+                      ? `${buf.toFixed(0)}% <span class="text-[10px] opacity-70">(+${_overageH.toFixed(1)}h over ${_slaVal}h)</span>`
                       : (buf < 0 ? `${buf.toFixed(1)}%` : `+${buf.toFixed(1)}%`))
                   : (status === "SLA_MISSING"     ? "SLA_MISSING"
                   :  status === "RUNTIME_MISSING" ? "RT_MISSING"
@@ -18542,7 +18542,7 @@ function _renderSlaCommitmentsPanel() {
                               : buf < 40   ? "text-Camber font-semibold"
                               : "text-Cteal";
                 const lowFlag = buf != null && buf < 15
-                  ? `<span class="ml-0.5 text-[8px] font-bold text-Cred bg-Cred/10 px-1 rounded">${_severeBuf ? "SEVERE BREACH" : (buf < 0 ? "BREACH" : "LOW")}</span>` : "";
+                  ? `<span class="ml-1 text-[9.5px] font-bold text-Cred bg-Cred/10 px-1.5 py-0.5 rounded">${_severeBuf ? "MAJOR BREACH" : (buf < 0 ? "BREACH" : "LOW")}</span>` : "";
                 const name  = w.workflow || w.sub_application || "—";
                 const btype = w.batch_type || "—";
                 // ── Start-time compliance cell ──────────────────────────────
@@ -18567,17 +18567,17 @@ function _renderSlaCommitmentsPanel() {
                     return `<span class="text-Camber font-semibold" title="${_title}">${_delayStr}</span>`;
                   return `<span class="text-Cred font-bold" title="${_title}">${_delayStr}</span>`;
                 })();
-                return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/30 ${status === 'BREACH' ? 'bg-Cred/5' : ''}">
-                  <td class="py-1.5 px-2 text-Cwhite/80 font-mono truncate max-w-[160px]" title="${_esc(name)}">${_esc(name)}</td>
-                  <td class="py-1.5 px-2 text-Cmuted">${_esc(btype)}</td>
-                  <td class="py-1.5 px-2 text-right font-mono font-bold text-Cteal">${sla}</td>
-                  <td class="py-1.5 px-2 text-right font-mono text-Cwhite/70">${rtStr}</td>
-                  <td class="py-1.5 px-2 text-right ${bCol}" title="${_esc(bufTitle)}">${bufStr}${lowFlag}</td>
-                  <td class="py-1.5 px-2 text-center font-semibold text-[9px] ${cCol}">${status}</td>
-                  <td class="py-1.5 px-2 text-center text-[9px]">${startTimeCell}</td>
+                return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/40 transition-colors ${status === 'BREACH' ? 'bg-Cred/5' : ''}">
+                  <td class="py-2.5 px-3 text-Cwhite font-mono font-medium truncate max-w-[200px]" title="${_esc(name)}">${_esc(name)}</td>
+                  <td class="py-2.5 px-3 text-Cmuted">${_esc(btype)}</td>
+                  <td class="py-2.5 px-3 text-right font-mono font-bold text-Cteal">${sla}</td>
+                  <td class="py-2.5 px-3 text-right font-mono text-Cwhite/80">${rtStr}</td>
+                  <td class="py-2.5 px-3 text-right ${bCol}" title="${_esc(bufTitle)}">${bufStr}${lowFlag}</td>
+                  <td class="py-2.5 px-3 text-center font-bold text-[11px] ${cCol}">${status}</td>
+                  <td class="py-2.5 px-3 text-center text-[11px]">${startTimeCell}</td>
                 </tr>`;
               }).join("")}
-              ${more > 0 ? `<tr><td colspan="7" class="py-1.5 px-2 text-[10px] text-Cmuted italic text-center">+ ${more} more workflows not shown</td></tr>` : ""}
+              ${more > 0 ? `<tr><td colspan="7" class="py-2 px-3 text-[11px] text-Cmuted italic text-center">+ ${more} more workflows not shown</td></tr>` : ""}
             </tbody>
           </table>
         </div>
@@ -18591,12 +18591,12 @@ function _renderSlaCommitmentsPanel() {
             let parts = [];
             if (_bc > 0) parts.push('<span class="text-Cred font-bold">' + _bc + ' BREACH \u2192 critical</span>');
             if (_ac > 0) parts.push('<span class="text-Camber">' + _ac + ' AT_RISK/LONG_JOB \u2192 warning</span>');
-            findingsLine = '<div class="mt-1 flex flex-wrap items-center gap-2 text-[9px] text-Cmuted">'
+            findingsLine = '<div class="mt-1 flex flex-wrap items-center gap-2 text-[10.5px] text-Cmuted">'
               + '<span>PE Findings impact:</span> ' + parts.join(' \u00b7 ')
               + ' <button onclick="triggerGenerateFindings().catch(()=>{})" class="text-Cgreen font-semibold hover:underline ml-2">Re-push to PE Findings \u2192</button></div>';
           }
           return `
-        <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] border-t border-Cborder/20 pt-2">
+        <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] border-t border-Cborder/20 pt-2">
           <span class="text-Cteal font-bold">OK</span><span class="text-Cmuted">&gt;${_lj}%</span>
           <span class="text-Cmuted/40">\u00b7</span>
           <span class="text-Corange font-bold">LONG_JOB</span><span class="text-Cmuted">${_at}\u2013${_lj}%</span>
@@ -18608,8 +18608,8 @@ function _renderSlaCommitmentsPanel() {
           <span class="text-Cmuted">Buffer=(SLA\u2212rt)\u00f7SLA\u00d7100</span>
           <span class="text-Cmuted/30 mx-1">|</span>
           <span class="text-Camber/70 font-semibold">XLSX</span><span class="text-Cmuted">=snapshot only</span>
-          <button id="sla-interpret-btn" onclick="_triggerSlaInterpret()" class="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-Cpurple/20 border border-Cpurple/40 text-Cpurple text-[9px] font-semibold hover:bg-Cpurple/30 transition-colors">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+          <button id="sla-interpret-btn" onclick="_triggerSlaInterpret()" class="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-Cpurple/20 border border-Cpurple/40 text-Cpurple text-[10.5px] font-semibold hover:bg-Cpurple/30 transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
             Interpret with AI
           </button>
         </div>
