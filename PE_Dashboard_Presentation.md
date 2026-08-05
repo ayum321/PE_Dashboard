@@ -349,47 +349,21 @@ models actual job dependencies.
 
 ## Negating False Signals From Ctrl-M
 
-| Bad signal | How it's neutralized | Status |
+| Bad signal | What would happen if unhandled | Status |
 |---|---|---|
-| Midnight crossover (End < Start) | +24h correction before computing elapsed | code-verified |
-| Corrupt timestamp pairs | Elapsed capped at 168h (1 week) | code-verified |
-| Retry-storm inflating "cyclic" detection | Median (not max) run-count guard — see exclusion table above | ✅ tested |
-| Zero/near-zero runtime after a real prior baseline | Batch-benchmark comparison (`BATCH_NOWORK_SEC`, `BATCH_COLLAPSE_RATIO`) flags a ≥95% runtime drop as an **implausible "improvement"** to investigate, not a genuine win | code-verified |
-| Job peak/avg skewed by failed runs | Peak/avg computed from `Status == "OK"` rows only; FAILED runs are counted separately (`fail_count`) so they can't quietly drag down a peak-runtime metric | code-verified |
-| Missing `Start_Time` column entirely | Falls back to `pd.Timestamp.now()` for every row | ⚠️ **real gap found this session** |
+| Job runs past midnight | Runtime would look negative | ✓ Corrected |
+| Corrupt timestamp pairs | Runtime could look absurdly long | ✓ Capped to a sane max |
+| Retry storms | Would look like a legitimate recurring job | ✓ Filtered out |
+| A sudden, implausible speed-up | Would look like a genuine improvement | ✓ Flagged for review, not accepted |
+| Failed runs | Would drag down real performance averages | ✓ Excluded from averages, tracked separately |
+| Missing start-time data | Job silently timestamped "now" | ⚠️ **Known gap — see below** |
 
-⚠️ **Real gap, not just a doc issue**: the frontend (`static/app.js`) has a
-`⛔ SYNTHETIC TIMESTAMPS` badge gated on `data_coverage.has_synthetic_timestamps`
-— but the backend's `data_coverage` payload (`services/batch_calculator.py`)
-**never sets that field**. Grepped the whole repo: `has_synthetic_timestamps`
-exists in exactly one place (the frontend check) and nowhere on the backend.
-If a customer's Ctrl-M export has no parseable `Start_Time` column, every run
-silently becomes "happened right now," the server logs a warning **nobody
-sees**, no confidence penalty applies, and the promised UI badge can never
-fire. This is dead code, not a working safety net — recommend wiring it
-before presenting this row as a shipped protection.
-
-⚠️ **Second confirmed gap, checked directly against the code**: does a
-missing-`Start_Time` row get misfiled as "corrupt pair, capped at 168h"
-instead of "synthetic timestamp"? Traced it — the answer is **no, it's a
-third, different outcome**, not the 168h cap:
-1. Every row gets `Start_Time = now()` (a single shared value for the whole file).
-2. For any row whose runtime must be derived (`Run_Sec` not reported in the
-   file), `elapsed = End_Time (real, historical) − Start_Time (now)` is a
-   large **negative** number — the midnight-crossover `+24h` correction only
-   shifts it by one day, nowhere near enough to fix a gap of days or weeks.
-3. `clip(lower=0, upper=168h)` then clips that large negative value to its
-   **lower** bound, `0` — not the 168h upper bound.
-4. Downstream, `Run_Sec == 0` on a non-failed job sets
-   `reason_code = "RUNTIME_ZERO"` and `status = "OK"` — the job is
-   silently recorded as "completed fine, no timing data," never flagged as
-   running on a synthetic Start_Time at all.
-
-So the corruption is real, but it lands as a **third, mislabeled outcome**
-(`RUNTIME_ZERO`, looks like a clean pass) rather than the 168h corrupt-pair
-path — arguably worse, since `RUNTIME_ZERO` currently reads as harmless.
-Fixing the missing-`has_synthetic_timestamps` wiring above should also stop
-these rows from being scored as `RUNTIME_ZERO` in the first place.
+⚠️ **Known gap**: when a file has no usable start-time column, affected jobs
+lose their real runtime and can be silently marked as if they had none —
+appearing "fine" instead of being flagged as missing data. A warning badge
+for this exists in the dashboard but isn't yet connected to trigger
+automatically. **Fix planned**: connect the badge so any file missing
+start-time data is clearly flagged to the reviewer, not silently absorbed.
 
 ---
 
