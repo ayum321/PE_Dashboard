@@ -31,7 +31,7 @@ audit with one deterministic pipeline that never disagrees with itself."*
 
 1. The problem this replaces
 2. Tech stack
-3. Architecture — one pipeline, six data pillars
+3. Architecture — one core pipeline, two independent read paths
 4. SLA resolution logic + the buffer formula
 5. Job exclusion, concurrent-job handling, false-signal negation, cyclic/multi-SLA batches
 6. Pulling & correlating Azure resource metrics
@@ -75,47 +75,79 @@ the whole tool runs from one Python process, easy to deploy per-engagement.*
 
 ---
 
-## Architecture — One Pipeline, Six Data Pillars
+## Architecture — One Core Pipeline, Two Independent Read Paths
+
+*Corrected version — the earlier draft drew SOW and Resource as dead ends and
+showed Issues Register as an upload. In plain terms: only 3 of the 6 pillars
+feed the one shared number everyone reads from. The other 3 are legitimately
+separate — but the diagram needs to say so honestly instead of implying one
+big connected pipeline.*
 
 ```mermaid
 flowchart LR
-    subgraph Uploads
+    subgraph Uploads["Uploads — feed the ONE shared table"]
         A[Ctrl-M Batch CSV]
-        B[Resource DOCX / Azure Live]
         C[SLA Matrix XLSX]
         D[SOW Contract PDF]
-        E[Benchmark XLSX]
-        F[Issues Register]
     end
     A --> P[batch_calculator.py]
     C --> M[sla_merger.py]
     D --> S[sow_parser.py]
-    B --> R[resource_calculator.py]
+    S --> CFG[(config_store:\n_sow_sla_windows)]
     P --> T[_compute_sla_matrix]
     M --> T
-    T --> X[(resolved_workflow_df\nsession cache)]
+    CFG -. "Tier 2 fallback, read back in" .-> T
+    T --> X[(resolved_workflow_df\nsession cache — THE shared table)]
     X --> U1[Batch SLA panel]
-    X --> U2[Executive dashboard]
-    X --> U3[Findings engine]
-    X --> U4[Exported report]
+    X --> U2[Findings engine]
+    X --> U3[Exported report]
+    X -. "joined client-side" .-> U4[Executive dashboard]
+
+    subgraph Independent["Independent paths — own data, own screen, never merged into the shared table"]
+        B[Resource DOCX / Azure Live] --> R[resource_calculator.py] --> RS[(resource_summary)]
+        E[Benchmark XLSX] --> BR[routers/benchmark.py] --> BS[(last_benchmark)]
+    end
+    RS --> N1[AI narrative / consultant]
+    BS --> N2[Findings engine + AI narrative]
+    RS -. "joined client-side" .-> U4
+
+    F["Issues Register\n(typed in the browser — no file, no parser, no cache)"]
 ```
 
-**Rule: every screen reads from `resolved_workflow_df`. No screen recomputes
-its own metrics.** This is the single fact that prevents panel-to-panel
-disagreement.
+**What this actually says, in a nutshell:**
+- **3 pillars share one number**: Batch CSV + SLA Matrix XLSX + SOW PDF all
+  feed `_compute_sla_matrix`, which writes ONE table (`resolved_workflow_df`)
+  that every batch/findings/report screen reads. SOW's path is real but
+  indirect — it's saved to a config store first, then read back in as a
+  fallback (Tier 2), not passed in directly like the other two.
+- **2 pillars are separate on purpose**: Resource and Benchmark are parsed
+  and cached independently. They power their own tabs and feed the AI
+  narrative, but they never rewrite the shared batch/SLA table. The
+  Executive dashboard is the one place batch + resource numbers appear
+  together — and even that join happens in the browser, not on the server.
+- **1 "pillar" isn't a pillar**: the Issues Register isn't uploaded or
+  parsed at all. It only exists as a list you type into the dashboard in
+  your browser tab — closing the tab loses it. It should not be listed
+  alongside the five real file uploads without saying that.
+
+**Rule: every batch/SLA screen reads from `resolved_workflow_df`. No screen
+recomputes its own metrics.** That rule holds for Batch, SLA Matrix, and SOW —
+it does not apply to Resource, Benchmark, or Issues Register, which are
+honestly separate and shouldn't be described as part of "one pipeline."
 
 ---
 
-## Six Data Pillars
+## Six Data Sources (only 3 feed the shared table)
 
-| Pillar | Source file | What it contributes |
-|---|---|---|
-| Batch | Ctrl-M CSV | Job runtimes, start/end, failures |
-| Resource | DOCX fleet report **or** direct Azure Monitor Live fetch (no upload needed) | CPU/mem/disk per server |
-| SLA Matrix | XLSX (BatchSLA_info) | Contracted SLA hours per workflow — **Tier 1** |
-| SOW Contract | PDF | Contracted DFU/SKU volumes, batch-window ceilings — **Tier 2** |
-| Benchmark | XLSX | Transaction/UI performance thresholds |
-| Issues Register | XLSX/CSV | Open tickets cross-referenced against findings |
+| Source | Feeds file | What it contributes | Joins `resolved_workflow_df`? |
+|---|---|---|---|
+| Batch | Ctrl-M CSV | Job runtimes, start/end, failures | ✓ Yes — direct |
+| SLA Matrix | XLSX (BatchSLA_info) | Contracted SLA hours per workflow — **Tier 1** | ✓ Yes — direct |
+| SOW Contract | PDF | Contracted DFU/SKU volumes, batch-window ceilings — **Tier 2** | ✓ Yes — via `config_store`, not direct |
+| Resource | DOCX fleet report **or** direct Azure Monitor Live fetch (no upload needed) | CPU/mem/disk per server | ✗ No — own cache key, own tab |
+| Benchmark | XLSX, parsed inline in `routers/benchmark.py` | Transaction/UI performance thresholds | ✗ No — own cache key, own tab |
+| Issues Register | Nothing — typed directly into the dashboard | Open tickets cross-referenced against findings | ✗ No upload/parser at all — browser-only list |
+
 
 *Talk track: each pillar is optional — the dashboard degrades gracefully and
 tells the PE reviewer exactly which pillar is missing, rather than guessing.*
