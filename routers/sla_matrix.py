@@ -44,6 +44,15 @@ def _mode_hrs(mode: str) -> float:
     return pe_config.SLA_MONTHLY_HRS
 
 
+_TRAILING_QUALIFIER_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _family_base(norm_name: str) -> str:
+    """Strip one trailing "(qualifier)" so schedule-qualifier siblings share a
+    key — "SCPO_D1", "SCPO_D1(SPD)", "SCPO_D1(SATURDAY)" all base to "SCPO_D1"."""
+    return _TRAILING_QUALIFIER_RE.sub("", norm_name).strip()
+
+
 def _anchor_job_mask(jnames_upper: "pd.Series", anchor: str) -> "pd.Series":
     """Boolean mask selecting rows whose (upper-cased) Job_Name matches `anchor`.
 
@@ -250,6 +259,15 @@ def _compute_sla_matrix(
     # _decompose_subgroup below). _bsla_exact/_bsla_by_job/_bsla_tokens only
     # ever see the FIRST such row per workflow — this map keeps every row.
     _bsla_variants: dict[str, list[dict]] = {}
+    # ALL XLSX rows grouped by their name with any trailing "(qualifier)"
+    # stripped — e.g. "SCPO_D1", "SCPO_D1(SPD)" and "SCPO_D1(SATURDAY)" all
+    # key to "SCPO_D1" here even though _bsla_variants treats them as three
+    # unrelated primary keys (parens aren't stripped by _norm()). Needed
+    # because the base row ("SCPO_D1") often exact-matches the Ctrl-M
+    # Sub_Application directly (Pass A in _bulk_lookup_bsla), which would
+    # otherwise short-circuit _decompose_subgroup before the qualifier
+    # variants ever get a chance to claim their own days.
+    _bsla_family: dict[str, list[dict]] = {}
     _primary_key_seen: set[str] = set()
     # Track which secondary keys are produced by multiple workflows (collision detection).
     # When two XLSX workflows share a secondary stripped key (e.g. "DAILY_BATCH" from
@@ -296,6 +314,7 @@ def _compute_sla_matrix(
         # letting every day silently fall back to whichever row is "generic".
         if _primary_wf_norm:
             _bsla_variants.setdefault(_primary_wf_norm, []).append(row)
+            _bsla_family.setdefault(_family_base(_primary_wf_norm), []).append(row)
         # Only the FIRST row seen for a given workflow name feeds the generic
         # exact/anchor/token lookups below — identical to the historical
         # single-row-per-workflow behaviour. Additional schedule-variant rows
@@ -785,7 +804,19 @@ def _compute_sla_matrix(
             """
             if not _sa_unknown:
                 _norm_sa = _norm(_sa)
-                _variants = _bsla_variants.get(_norm_sa) or []
+                # Family = base-name siblings ("SCPO_D1" + "SCPO_D1(SPD)" +
+                # "SCPO_D1(SATURDAY)") union'd with same-exact-key variants
+                # (the older "Sun to Thu" vs "Fri, Sat" case). The base row
+                # frequently exact-matches the Ctrl-M Sub_Application directly
+                # (Pass A below), so this must run BEFORE that short-circuit or
+                # the qualifier siblings never get a chance to claim their days.
+                # Split purely by run-date weekday (not by anchor identity) —
+                # verified against real customer data where the XLSX's declared
+                # first_job/last_job sentinels for a qualifier family don't even
+                # appear as Job_Name values inside the Ctrl-M Sub_Application
+                # group itself (the only real signal available is the calendar
+                # weekday the shared jobs happened to run on).
+                _variants = _bsla_family.get(_family_base(_norm_sa)) or _bsla_variants.get(_norm_sa) or []
                 _dated_variants = [v for v in _variants if v.get("schedule_days")]
                 if len(_variants) > 1 and _dated_variants and "_run_date" in _g.columns:
                     _g_dates = pd.to_datetime(_g["_run_date"], errors="coerce")
@@ -801,8 +832,9 @@ def _compute_sla_matrix(
                         _syn_key = f"{_sa}::{_sched_label}"
                         _row_override[_syn_key] = _v
                         _out.append((_syn_key, _g.loc[_mask]))
-                    # Rows on a day not covered by any dated variant (or when a
-                    # variant's schedule_days is unset) fall back to the generic
+                    # Rows on a day not covered by any dated variant (e.g. a
+                    # genuine calendar-based qualifier like "SPD" this pipeline
+                    # can't parse into a weekday) fall back to the generic
                     # lookup on the original sub_app, so nothing is silently lost.
                     _remaining = _g.loc[~_assigned]
                     if not _remaining.empty:

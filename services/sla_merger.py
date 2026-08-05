@@ -55,15 +55,28 @@ _DAY_ALIASES = {
 }
 _DAY_ORDER_SUN_START = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
 _DAY_TO_PY_WEEKDAY = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+# Full names first in the alternation — "(?:SUN|...)(?:DAY)?" silently failed
+# on TUESDAY/WEDNESDAY/THURSDAY/SATURDAY (their full spelling isn't the 3-letter
+# code + literal "DAY", e.g. "SAT" + "DAY" != "SATURDAY") while happening to
+# work for SUNDAY/MONDAY/FRIDAY, which are. Real bug: a customer's "Saturday"-
+# scheduled SLA row silently parsed to schedule_days=None (no weekday
+# restriction) instead of {5}, breaking any weekday-based disambiguation.
+_DAY_NAMES_ALT = "SUNDAY|MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUN|MON|TUE|WED|THU|FRI|SAT"
 _ORDINAL_DAY_RE = re.compile(
     r"\b(?:1ST|2ND|3RD|4TH|5TH|FIRST|SECOND|THIRD|FOURTH|FIFTH|LAST|OTHER)\s+"
-    r"(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b"
+    rf"(?:{_DAY_NAMES_ALT})\b"
 )
 _DAY_RANGE_RE = re.compile(
-    r"\b(SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\s*(?:TO|[\-\u2013])\s*"
-    r"(SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b"
+    rf"\b({_DAY_NAMES_ALT})\s*(?:TO|[\-\u2013])\s*"
+    rf"({_DAY_NAMES_ALT})\b"
 )
-_DAY_TOKEN_RE = re.compile(r"\b(SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b")
+_DAY_TOKEN_RE = re.compile(rf"\b({_DAY_NAMES_ALT})\b")
+
+# Strips a trailing human-readable annotation some customers append to a
+# sentinel job cell, e.g. "SCPO_W2_001 (Disable User)" -> "SCPO_W2_001".
+# Ctrl-M Job_Name values never carry this, so leaving it in breaks any
+# exact-match anchor lookup against real run data.
+_TRAILING_QUALIFIER_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 def _parse_schedule_days(schedule_text: str) -> Optional[frozenset]:
@@ -81,14 +94,14 @@ def _parse_schedule_days(schedule_text: str) -> Optional[frozenset]:
         return None   # nth-weekday-of-month, not a weekly day-of-week subset
     m = _DAY_RANGE_RE.search(txt)
     if m:
-        start, end = m.group(1), m.group(2)
+        start, end = _DAY_ALIASES.get(m.group(1), m.group(1)), _DAY_ALIASES.get(m.group(2), m.group(2))
         si, ei = _DAY_ORDER_SUN_START.index(start), _DAY_ORDER_SUN_START.index(end)
         days = (_DAY_ORDER_SUN_START[si:ei + 1] if si <= ei
                 else _DAY_ORDER_SUN_START[si:] + _DAY_ORDER_SUN_START[:ei + 1])
         return frozenset(_DAY_TO_PY_WEEKDAY[d] for d in days)
     found = _DAY_TOKEN_RE.findall(txt)
     if found:
-        return frozenset(_DAY_TO_PY_WEEKDAY[d] for d in found)
+        return frozenset(_DAY_TO_PY_WEEKDAY[_DAY_ALIASES.get(d, d)] for d in found)
     return None
 
 
@@ -275,7 +288,7 @@ def detect_batch_type(batch_name: str, schedule: str = "") -> str:
             return "MONTHLY"
         if re.search(
             r"\b(?:1ST|2ND|3RD|4TH|5TH|FIRST|SECOND|THIRD|FOURTH|FIFTH|LAST|OTHER)\s+"
-            r"(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b",
+            rf"(?:{_DAY_NAMES_ALT})\b",
             _sched_up,
         ):
             return "MONTHLY"
@@ -283,8 +296,8 @@ def detect_batch_type(batch_name: str, schedule: str = "") -> str:
         # is a DAILY cadence (runs most days of the week), not a once-a-week
         # WEEKLY schedule — must be checked before the single-day-name shortcut.
         if re.search(
-            r"\b(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\s*(?:TO|[\-–])\s*"
-            r"(?:SUN|MON|TUE|WED|THU|FRI|SAT)(?:DAY)?\b",
+            rf"\b(?:{_DAY_NAMES_ALT})\s*(?:TO|[\-–])\s*"
+            rf"(?:{_DAY_NAMES_ALT})\b",
             _sched_up,
         ):
             return "DAILY"
@@ -846,6 +859,14 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
 
         first_jobs = _split_sentinels(first_job_raw)
         last_jobs  = _split_sentinels(last_job_raw)
+        # Strip a trailing human-readable annotation some customers add to the
+        # sentinel cell (e.g. "SCPO_W2_001 (Disable User)") — Ctrl-M Job_Name
+        # values never carry this, so leaving it in means the anchor can NEVER
+        # exact-match a real run and every anchor-based feature (window
+        # narrowing, schedule-qualifier disambiguation) silently falls back to
+        # "no anchor matched" instead of the real job.
+        first_jobs = [_TRAILING_QUALIFIER_RE.sub("", j).strip() for j in first_jobs]
+        last_jobs  = [_TRAILING_QUALIFIER_RE.sub("", j).strip() for j in last_jobs]
         is_parallel = len(first_jobs) > 1 or len(last_jobs) > 1
         # Store primary sentinel (first element) for backward compat;
         # full lists stored as first_jobs_list / last_jobs_list
