@@ -77,12 +77,6 @@ the whole tool runs from one Python process, easy to deploy per-engagement.*
 
 ## Architecture — One Core Pipeline, Two Independent Read Paths
 
-*Corrected version — the earlier draft drew SOW and Resource as dead ends and
-showed Issues Register as an upload. In plain terms: only 3 of the 6 pillars
-feed the one shared number everyone reads from. The other 3 are legitimately
-separate — but the diagram needs to say so honestly instead of implying one
-big connected pipeline.*
-
 ```mermaid
 flowchart LR
     subgraph Uploads["Uploads — feed the ONE shared table"]
