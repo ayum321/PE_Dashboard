@@ -148,23 +148,42 @@ tells the PE reviewer exactly which pillar is missing, rather than guessing.*
 
 ---
 
-## SLA Resolution — Tiered, Never Hardcoded
+## SLA Resolution — Tiered Fallback, Every Default Documented
 
 ```mermaid
 flowchart TD
-    Q{SLA hours for this workflow?}
-    Q -->|found| T1[Tier 1: BatchSLA_info.xlsx\nexact key match]
-    Q -->|not found| T2[Tier 2: SOW PDF\nbatch-type ceiling]
-    Q -->|not found| T3[Tier 3: pe_config global default\nDAILY=6h / WEEKLY=8h]
-    T1 --> V[sla_h + sla_source tag]
+    Q1{Tier 1: BatchSLA_info.xlsx\nexact key match found?}
+    Q1 -->|yes| T1[Use Tier 1 value]
+    Q1 -->|no| Q2{Tier 2: SOW PDF\nbatch-type ceiling found?}
+    Q2 -->|yes| T2[Use Tier 2 value]
+    Q2 -->|no| T3[Tier 3: pe_config global default\nDAILY=6h / WEEKLY=8h — always resolves]
+    T1 --> V[sla_h + sla_source + reason_code + debug_runtime_source]
     T2 --> V
     T3 --> V
 ```
 
+Tier 3 has no "not found" branch — a global default is terminal by
+construction, it always resolves. T1/T2 are conditional gates in sequence;
+T3 is the guaranteed floor, never a dead end.
+
 - Every workflow key is normalized before lookup:
   `_norm(name)` = strip environment prefix (`PROD_`/`TEST_`/`UAT_`/`DEV_`/`STG_`)
-  → uppercase. Same function mirrored in JS as `_normWf()` — a single naming
-  convention across backend and frontend.
+  → uppercase, following the shared `_strip_env_prefix()` helper
+  (`services/sla_merger.py`). This is a **followed convention re-implemented
+  per file** (`routers/sla_matrix.py`, the JS render path), not one shared
+  function — there is currently no test enforcing the two stay in lockstep,
+  and one unrelated subsystem (`routers/pe_consultant.py`'s own `_norm()`,
+  used only for matching findings text to job names) does **not** strip the
+  prefix at all. Scoped risk, not zero risk — worth a parity check, not a
+  rewrite.
+- Confirmed separately: `_norm()` only strips the prefix and uppercases —
+  it does not touch trailing qualifiers. So `SCPO_D1`, `SCPO_D1(SPD)`, and
+  `SCPO_D1(SATURDAY)` normalize to three distinct keys and Tier 1 correctly
+  resolves each to its own `sla_h` (14h / 5h / 1h). **Tier 1 key resolution
+  is not where the SCPO_D1 collapsing bug lived** — that bug was downstream,
+  in matching each row's calendar qualifier to the right Ctrl-M execution
+  dates before scoring completion time (already fixed — see the SLA Matrix
+  section).
 - **Every value carries provenance**: `sla_source`, `reason_code`,
   `debug_runtime_source` — a reviewer can always see *why* a number is what it is.
 - **Tier 1 is externally verified** across real customer engagements —
@@ -172,7 +191,9 @@ flowchart TD
   wired, but not yet empirically validated** — every real engagement
   reviewed so far showed "No SOW contract uploaded yet," so this fallback
   path has never actually been exercised against a live SOW PDF. State it at
-  that confidence level, not the same as Tier 1, until it has been.
+  that confidence level, not the same as Tier 1, until it has been. Run a
+  dry pass against a synthetic SOW PDF before the first real one — that
+  first execution shouldn't happen live in front of a customer.
 
 ---
 
