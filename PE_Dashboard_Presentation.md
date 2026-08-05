@@ -372,21 +372,42 @@ before presenting this row as a shipped protection.
 
 ## Multi-SLA & Cyclic vs. Non-Cyclic Batches
 
-- **Schedule classification** (`classify_schedule()` / `detect_batch_type()`):
-  `DAILY`/`WEEKLY`/`BIWEEKLY`/`MONTHLY`/`MONTHLY_WORKDAY`/`QUARTERLY`/`ADHOC`/
-  `CYCLIC`/`OUTBOUND` — inferred from workflow name + schedule text, with a
-  fixed detection priority (`ADHOC` checked before `DAILY` so compound names
-  like `BIWEEKLY_ADHOC` resolve correctly).
-- **Different SLA windows coexist honestly**: when more than one distinct
-  resolved ceiling is in scope for a review, the dashboard tracks
-  `window_inscope_ceiling_count` and changes the headline wording from a
-  single "within the 6h window" claim to "each within its own ceiling
-  (min–max)" — it does not force multiple real SLA windows into one
-  misleading number.
-- **Cyclic ≠ excluded from everything** — a cyclic sub-app is dropped from the
-  *window-elapsed* measurement only (it would otherwise inflate the window to
-  ~24h and manufacture a false 0% compliance day); its individual job runs
-  are still counted for job-level breach/anomaly/failure-rate purposes.
+- **Schedule classification** — two separate functions, not one:
+  - `services/sla_merger.py: detect_batch_type(name, schedule)` — full
+    extended classifier used when parsing SLA XLSX files. Priority order:
+    `ADHOC` → `CYCLIC_INTERVAL` → `CYCLIC/INTRADAY` → `CALENDAR_BASED` →
+    `ANNUAL` → `MONTHLY_WORKDAY` → `DATE_SPECIFIC_MONTHLY` → `PERIODIC` →
+    `SEQUENCING` → then the standard keyword loop (`BIWEEKLY`/`WEEKLY`/
+    `MONTHLY`/`QUARTERLY`/`OUTBOUND`/`DAILY`). `ADHOC` wins if both `ADHOC`
+    and `DAILY` appear in the same name — e.g. `DAILY_ADHOC_RECON` → `ADHOC`.
+  - `services/pe_utils.py: detect_batch_type(job_name)` — lightweight
+    4-type classifier (DAILY/WEEKLY/BIWEEKLY/MONTHLY) used when scoring
+    individual Ctrl-M jobs with no schedule text available. Simpler rules,
+    different scope. Two independently maintained functions, not aliases.
+  - `services/sla_engine.py: classify_schedule(text)` — a third function
+    operating on raw schedule text strings, used by the SLA engine layer.
+  These three are separate implementations for different inputs and call
+  sites. No parity test currently enforces they agree on the same name.
+
+- **Multiple SLA ceilings in one review** (`window_inscope_ceiling_count`):
+  this tracks the number of *distinct resolved ceilings across different
+  sub-applications* in a single review — e.g. if one sub-app has a 6h
+  ceiling and another has a 14h ceiling, it reports 2 and changes the
+  headline from "within the 6h window" to "each within its own ceiling
+  (6h–14h)." This operates at the **cross-sub-application level only**.
+  It does NOT cover calendar-variant rows for the same workflow name
+  (e.g. `SCPO_D1` vs `SCPO_D1(Saturday)` — different ceilings for the
+  same sub-app depending on the day of week). That is handled by
+  `_decompose_subgroup()` in `routers/sla_matrix.py` — a separate
+  mechanism, separately fixed.
+
+- **Cyclic ≠ excluded from everything** — a cyclic sub-app is dropped from
+  the *window-elapsed* measurement only (it would otherwise inflate the
+  window to ~24h and manufacture a false 0% compliance day). Individual
+  job runs are still counted for job-level breach/anomaly/failure-rate.
+  The cyclic threshold is **0.25h (15 minutes)** — confirmed in
+  `pe_config.py: CYCLIC_MAX_RUNTIME_HRS = 0.25`. A job averaging under
+  15 minutes AND running more than 5 times per day is classified cyclic.
 
 ---
 
@@ -411,7 +432,13 @@ sequenceDiagram
     participant PE as PE Reviewer (browser)
     participant App as FastAPI backend
     participant Azure as Azure Monitor
-    PE->>App: Sign in (InteractiveBrowserCredential)
+    note over App: Deep Dive panel — auth + fetch flow
+    alt cached credential valid
+        App->>App: restore from local auth-record cache
+    else first use / cache expired
+        PE->>App: Sign in (InteractiveBrowserCredential)
+        App-->>PE: session established
+    end
     App->>Azure: Query 1 — AVERAGE (chart line), N days back
     Azure-->>App: per-VM average series
     App->>Azure: Query 2 — MAXIMUM + MINIMUM (true-peak overlay)
