@@ -479,6 +479,33 @@ sequenceDiagram
 
 ---
 
+## Corporate-Machine Auth Safeguards
+
+Four known hang points on corporate machines — all permanently patched in
+`services/azure_monitor.py` before any Azure SDK import runs:
+
+```mermaid
+flowchart TD
+    START([azure_monitor.py loads]) --> F1
+
+    F1["Fix 1 — IPv4 Force\nCorporate DNS returns IPv6 for login.microsoftonline.com\nbut IPv6 is broken → 83–180s timeout\nPatch: override socket.getaddrinfo to prefer AF_INET"]
+    F1 --> F2
+
+    F2["Fix 2 — platform stub\nAzure identity calls platform.platform() at import time\nWMI hang under corporate group policy\nPatch: replace with a static string before import"]
+    F2 --> F3
+
+    F3["Fix 3 — MSAL DPAPI bypass\nTokenCachePersistenceOptions triggers CryptProtectData\nHangs on Python 3.14 free-threaded\nPatch: swap in UTF-8 FilePersistence, self-heals corrupt cache"]
+    F3 --> F4
+
+    F4["Fix 4 — No DefaultAzureCredential\nIMDS probe hangs 30s+ on non-Azure machines\nPatch: use InteractiveBrowserCredential only\nOne sign-in → token cached per session, silently restored on restart"]
+    F4 --> DONE([Azure SDK ready — no hangs])
+```
+
+*All four patches are in place before any `azure.identity` import. Removing
+any one of them restores the hang it was written to prevent.*
+
+---
+
 ## Azure Baseline Intelligence
 
 `_compute_baseline_analysis()` turns raw timeseries into judgment-grade
