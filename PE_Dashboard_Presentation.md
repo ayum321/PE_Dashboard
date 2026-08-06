@@ -60,6 +60,37 @@ design and the correlation formulas that follow.*
 
 ---
 
+## Why FastAPI, Not Streamlit
+
+| | FastAPI (this project) | Streamlit (legacy) |
+|---|---|---|
+| Model | Real HTTP API + separate frontend | Script re-executed top-to-bottom on every widget event |
+| Frontend | Full control — vanilla JS, Tailwind, Chart.js/Plotly | Fixed widget set, limited layout control |
+| Concurrency | Async, isolated per-request/session | Single-threaded per session, global state bleeds across users |
+| Multi-customer isolation | Explicit session boundary (`session_cache.py`) | `st.session_state` — easy to leak between users |
+| API surface | Real REST endpoints, callable by other tools | None — UI and logic are inseparable |
+| Fit for 250–300 customers | Scales — deployable via uvicorn/Docker | Prototype-grade, not built for concurrent multi-tenant use |
+
+```mermaid
+flowchart LR
+    U[Analyst uploads files] --> R[FastAPI routers/*.py]
+    R --> S[services/*.py business logic]
+    S --> C[session_cache.py\nin-memory audit context]
+    C --> W[resolved_workflow_df\nsingle source of truth]
+    W --> J["/api/* JSON response"]
+    J --> F[static/app.js\nrenders panels + charts]
+    F --> B[Browser — Tailwind, Chart.js, Plotly]
+```
+
+Every panel reads from the same `resolved_workflow_df` computed once per upload —
+no screen recomputes its own numbers, so no two panels can ever disagree.
+
+*Talk track: the Streamlit version had panels recomputing metrics independently.
+Two screens would show different compliance numbers for the same job. This
+architecture makes that impossible by design.*
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -445,6 +476,18 @@ sequenceDiagram
     App->>App: _compute_baseline_analysis()
     App-->>PE: Deep Dive panel (heatmaps, trends, hot hours)
 ```
+
+### Corporate-Machine Auth Safeguards (baked into `services/azure_monitor.py`)
+
+| Safeguard | Problem it fixes |
+|---|---|
+| `DefaultAzureCredential` banned | IMDS probe hangs 30s+ on non-Azure machines |
+| IPv4 forced for DNS | Corporate DNS returns only IPv6 for `login.microsoftonline.com`; IPv6 broken → 83–180s timeout |
+| `platform.platform()` stubbed | Azure identity calls this at import time; WMI hang under corporate group policy |
+| MSAL DPAPI bypassed | `TokenCachePersistenceOptions` hangs on Python 3.14 free-threaded; replaced with UTF-8 `FilePersistence` |
+| Per-session credentials | Concurrent analysts never share or overwrite each other's Azure token |
+| Failure-isolated metric groups | One unsupported metric on a VM doesn't fail the entire query call |
+| Percentage-only grading | Raw byte/ops counters are chart-only — never fed into severity classifier (byte values would grade every point as critical) |
 
 ---
 
