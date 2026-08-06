@@ -457,6 +457,36 @@ start-time data is clearly flagged to the reviewer, not silently absorbed.
   7/15/30-day window, critical for spotting a short nightly-batch CPU spike a
   daily average would hide.
 
+### Step 1 — Authentication
+
+```mermaid
+flowchart TD
+    A["User clicks 'Connect Azure' in UI"] --> B["InteractiveBrowserCredential\n(azure-identity SDK)"]
+    B --> C["Opens browser → user logs in\nwith their own Azure AD account"]
+    C --> D["Token stored in .cache/\n(session-scoped, not shared between analysts)"]
+    D --> E["All subsequent API calls use that token"]
+```
+
+### Step 2 — Fetching VM Metrics
+
+```mermaid
+flowchart TD
+    F["fetch_vm_metrics(subscription_id, resource_group, hours_back)"] --> G["1. azure-mgmt-compute\nlists all VMs in subscription/resource group"]
+    G --> H["2. azure-mgmt-resource\nreads VM size metadata (RAM, CPU cores)"]
+    H --> I["3. azure-monitor-query (MetricsQueryClient)\nqueries each VM's resource URI, metrics in small groups"]
+    I --> I1["Percentage CPU — always available"]
+    I --> I2["Available Memory Bytes / Percentage — needs Azure Monitor Agent"]
+    I --> I3["OS/Data Disk Bandwidth Consumed % — needs AMA"]
+    I --> I4["Disk Read/Write Bytes & Ops/Sec — chart-only, raw bytes"]
+    I --> I5["Network In/Out Total — chart-only, raw bytes"]
+    I --> I6["VmAvailabilityMetric — availability preview"]
+    I1 & I2 & I3 & I4 & I5 & I6 --> J["4. Results → time-series dicts\nsame shape as resource_parser_generic.py"]
+    J --> K["5. resource_calculator.build_resource_payload()\nsame pipeline as DOCX upload"]
+```
+
+*Talk track: this is why Azure Live and a manual DOCX resource upload produce
+identical downstream panels — step 5 is the same function call either way.*
+
 ```mermaid
 sequenceDiagram
     participant PE as PE Reviewer (browser)
