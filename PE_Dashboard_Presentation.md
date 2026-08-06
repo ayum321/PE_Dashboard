@@ -477,18 +477,6 @@ sequenceDiagram
     App-->>PE: Deep Dive panel (heatmaps, trends, hot hours)
 ```
 
-### Corporate-Machine Auth Safeguards (baked into `services/azure_monitor.py`)
-
-| Safeguard | Problem it fixes |
-|---|---|
-| `DefaultAzureCredential` banned | IMDS probe hangs 30s+ on non-Azure machines |
-| IPv4 forced for DNS | Corporate DNS returns only IPv6 for `login.microsoftonline.com`; IPv6 broken → 83–180s timeout |
-| `platform.platform()` stubbed | Azure identity calls this at import time; WMI hang under corporate group policy |
-| MSAL DPAPI bypassed | `TokenCachePersistenceOptions` hangs on Python 3.14 free-threaded; replaced with UTF-8 `FilePersistence` |
-| Per-session credentials | Concurrent analysts never share or overwrite each other's Azure token |
-| Failure-isolated metric groups | One unsupported metric on a VM doesn't fail the entire query call |
-| Percentage-only grading | Raw byte/ops counters are chart-only — never fed into severity classifier (byte values would grade every point as critical) |
-
 ---
 
 ## Azure Baseline Intelligence
