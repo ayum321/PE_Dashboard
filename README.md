@@ -30,6 +30,68 @@
 
 ---
 
+## Why FastAPI, Not Streamlit
+
+The legacy tool was a Streamlit monolith. It broke down at 250–300 customers because Streamlit re-runs the entire script on every interaction and shares state across users by default.
+
+| | FastAPI (this project) | Streamlit (legacy) |
+|---|---|---|
+| Model | Real HTTP API + separate frontend | Script re-executed top-to-bottom on every widget event |
+| Frontend | Full control — vanilla JS, Tailwind, Chart.js/Plotly | Fixed widget set, limited layout control |
+| Concurrency | Async, isolated per-request/session | Single-threaded per session, global state bleeds across users |
+| Multi-customer isolation | Explicit session boundary (`session_cache.py`) | `st.session_state` — easy to leak between users |
+| API surface | Real REST endpoints, callable by other tools/scripts | None — UI and logic are inseparable |
+| Fit for 250–300 customers | Scales — deployable via uvicorn/Docker | Prototype-grade, not built for concurrent multi-tenant use |
+
+### Request/Render Architecture
+
+```mermaid
+flowchart LR
+    U[Analyst uploads files] --> R[FastAPI routers/*.py]
+    R --> S[services/*.py business logic]
+    S --> C[session_cache.py<br/>in-memory audit context]
+    C --> W[resolved_workflow_df<br/>single source of truth]
+    W --> J["/api/* JSON response"]
+    J --> F[static/app.js<br/>renders panels + charts]
+    F --> B[Browser — Tailwind, Chart.js, Plotly]
+```
+
+Every panel reads from the same `resolved_workflow_df` computed once per upload — no screen recomputes its own numbers, so no two panels can disagree.
+
+---
+
+## Azure Monitor Data Pull (Resource Deep-Dive)
+
+Resource metrics can come from an uploaded DOCX/PDF **or** be pulled live from Azure Monitor using the analyst's own Azure AD identity — no service principal, no shared credentials.
+
+```mermaid
+sequenceDiagram
+    participant Analyst
+    participant Dashboard as FastAPI (azure_resource.py)
+    participant AAD as Azure AD (InteractiveBrowserCredential)
+    participant Mgmt as azure-mgmt-compute/resource
+    participant Monitor as azure-monitor-query
+
+    Analyst->>Dashboard: Click "Connect Azure"
+    Dashboard->>AAD: Open browser sign-in
+    AAD-->>Dashboard: Token (session-scoped, cached in .cache/)
+    Dashboard->>Mgmt: List VMs + size metadata (RAM/cores)
+    Mgmt-->>Dashboard: VM inventory
+    Dashboard->>Monitor: Query metrics per VM (grouped, failure-isolated)
+    Note right of Monitor: Percentage CPU, Available Memory %,<br/>Disk Bandwidth %, Disk/Network bytes,<br/>Availability
+    Monitor-->>Dashboard: Time-series per metric
+    Dashboard->>Dashboard: resource_calculator.build_resource_payload()
+    Dashboard-->>Analyst: Same fleet-health payload as a DOCX upload
+```
+
+Key points baked into `services/azure_monitor.py`:
+- Metrics are queried in small groups so one unsupported metric on a VM doesn't fail the whole call.
+- Only percentage metrics feed the severity classifier (warn/crit bands); raw byte/ops counters are chart-only.
+- Credentials and tokens are keyed per session id — concurrent analysts never share or overwrite each other's Azure identity.
+- Four corporate-machine auth hangs (IPv6 DNS, `platform.platform()` WMI call, MSAL DPAPI, `DefaultAzureCredential` IMDS probe) are permanently patched before any Azure import — see `services/azure_monitor.py` module docstring.
+
+---
+
 ## Project Structure
 
 ```
