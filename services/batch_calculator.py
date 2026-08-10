@@ -2041,14 +2041,12 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     specific values.  Falls back to schedule-type ceiling, then pe_config
     default.  Source is tagged on every resolved value.
     """
-    # ── Stage 2A: User-specified job exclusions (config_store["exclude_jobs"]) ─
-    # Jobs the analyst has explicitly excluded from SLA/buffer analysis.
-    # Applied to the ANALYSIS copy only — raw df is preserved for fail_count,
-    # heatmap, and time-series charts so excluded jobs remain visible there.
+    # ── Stage 2A: Session-scoped reviewer job exclusions ───────────────────
+    # Active-review decisions from /batch/refresh, not persisted settings.
     _user_excl_jobs: set = set()
     try:
-        from services import config_store as _cfg_excl
-        _excl_list = _cfg_excl.get("exclude_jobs") or []
+        from services import session_cache as _session_excl
+        _excl_list = _session_excl.ac_get("manual_excluded_jobs") or []
         if isinstance(_excl_list, list):
             _user_excl_jobs = {str(j).strip() for j in _excl_list if j and str(j).strip()}
     except Exception:
@@ -2335,9 +2333,33 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                 # Which specific jobs actually overlapped in clock time on this
                 # (sub_app, date) — distinct from the aggregate busy/block stats
                 # above, which only ever carry counts, never job names.
+                #
+                # Utility/sentinel jobs (file watchers, heartbeats, batch-start/
+                # end markers — is_utility_job()) are excluded from this specific
+                # detection ONLY. They are already recognized dashboard-wide as
+                # not real batch work (excluded from SLA/compliance scoring), so
+                # a 2-second marker job overlapping 8 real jobs is not genuine
+                # I/O contention — it would inflate "peak concurrent" and clutter
+                # the job chips with names a reviewer can't act on. Jobs excluded
+                # from SLA scoring for OTHER reasons (SHORT_JOB/INSUFFICIENT
+                # baseline) are real executions with real resource footprint and
+                # are deliberately kept here — that exclusion is about not having
+                # a trustworthy SLA baseline for them, not about whether they ran.
                 if "Job_Name" in _g_b.columns:
+                    _g_conc = _g_b
+                    if "run_time_hrs" in _g_b.columns:
+                        _util_mask = _g_b.apply(
+                            lambda r: is_utility_job(
+                                str(r["Job_Name"]),
+                                float(r["run_time_hrs"]) if pd.notna(r["run_time_hrs"]) else float("nan"),
+                                float(r["run_time_hrs"]) if pd.notna(r["run_time_hrs"]) else float("nan"),
+                            )[0],
+                            axis=1,
+                        )
+                        if _util_mask.any():
+                            _g_conc = _g_b[~_util_mask]
                     for _cg in _concurrent_job_groups_for_day(
-                        list(_g_b["Job_Name"]), list(_g_b["Start_Time"]), list(_g_b["End_Time"])
+                        list(_g_conc["Job_Name"]), list(_g_conc["Start_Time"]), list(_g_conc["End_Time"])
                     ):
                         _concurrency_rows.append({
                             "sub_application": str(_sa_b),
@@ -3197,6 +3219,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # heatmap/gantt/hourly-density chart even though it was correctly removed
         # from top_jobs/window/compliance. See build_batch_payload for the fix.
         "user_excluded_job_names": sorted(_user_excl_jobs),
+        "manual_exclusion_audit": _session_excl.ac_get("batch_manual_exclusion_audit", []) if "_session_excl" in locals() else [],
         # Sub-application rollup
         "sub_stats":        sub,
         "top_jobs":         top_jobs,
@@ -4047,6 +4070,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         # distinct from out_of_scope_subs (Sub_Application-keyed). Lets the
         # frontend confirm which per-job exclusions the server already applied.
         "user_excluded_job_names": sorted(str(j) for j in m.get("user_excluded_job_names", [])),
+        "manual_exclusion_audit": m.get("manual_exclusion_audit") or [],
         "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
         "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
         "window":       window_records,

@@ -369,6 +369,13 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         # Passthrough fields for Azure re-fetch
         "resource_id":   s.get("resource_id") or None,
         "source":        s.get("source") or "",
+        # Passthrough fields for VM hardware identity / tag-based filtering
+        # (e.g. filtering the Resource Review table to one product's servers
+        # via a customer's own tag convention, not a hardcoded value here)
+        "vm_size":       s.get("vm_size") or "",
+        "vm_size_desc":  s.get("vm_size_desc") or "",
+        "tags":          s.get("tags") or {},
+        "product_group": s.get("product_group") or "",
     }
 
 

@@ -259,7 +259,7 @@ function _simpleHash(str) {
 }
 
 // Resource Review · table view state
-const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "" };
+const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "", filterProductGroup: "" };
 const RESOURCE_TABLE_PREVIEW = 25; // initial lazy slice
 const AZURE_REQUIRE_FRESH_LOGIN = false; // persist sign-in across reloads/restarts (fast). Use the Sign out button to switch accounts.
 
@@ -1924,8 +1924,8 @@ function _filterBatchUtility(data) {
   };
 }
 
-/** Debounced push of the current manual-exclusion set to the backend config
- *  (persists per-engagement) + full server recompute via /api/batch/refresh.
+/** Debounced push of reviewer decisions to the active audit session + full
+ *  server recompute. These choices are never written to persistent config.
  *
  *  WHY: client-side filtering (_filterBatchUtility) only patches job-keyed
  *  arrays/grids (top_jobs, window tooltip, sla_heatmap, longpole_matrix). It
@@ -1962,15 +1962,15 @@ async function _syncBatchExclusionsToServer() {
     const _origChipText = chip?.textContent || "";
     if (chip) chip.textContent = "⟳ Applying exclusions…";
     try {
-      const excludeList = Array.from(_batchManualExclude);
-      const cfgRes = await fetch("/api/config", {
+      const manualExclusions = Array.from(_batchManualExclude).map(name => ({
+        name,
+        reason: _batchManualExcludeReasons.get(name) || "",
+      }));
+      const refRes = await fetch("/api/batch/refresh", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ exclude_jobs: excludeList }),
+        body: JSON.stringify({ manual_exclusions: manualExclusions }),
       });
-      if (!cfgRes.ok) throw new Error(`config HTTP ${cfgRes.status}`);
-
-      const refRes = await fetch("/api/batch/refresh", { method: "POST" });
       if (!refRes.ok) {
         // 404 = session cache doesn't have job_runs_df (e.g. server restarted) —
         // the client-side filtered view is all the user gets until re-upload.
@@ -2223,6 +2223,9 @@ function renderBatchReview(data) {
 
   for (const name of (Array.isArray(data.user_excluded_job_names) ? data.user_excluded_job_names : [])) {
     if (name) _batchManualExclude.add(String(name));
+  }
+  for (const record of (Array.isArray(data.manual_exclusion_audit) ? data.manual_exclusion_audit : [])) {
+    if (record?.name && record?.reason) _batchManualExcludeReasons.set(String(record.name), String(record.reason));
   }
 
   // Apply utility job exclusion filter
@@ -3292,16 +3295,20 @@ window._excludedReexclude = function(name) {
 window._excludedAddManual = function(rawVal, rawReason) {
   const val = String(rawVal || "").trim();
   if (!val) return;
-  const known = new Set((window.appData?.batch?.top_jobs || []).map(j => String(j.Job_Name || "").toUpperCase()));
-  if (known.size && !known.has(val.toUpperCase())) {
+  const known = new Map((window.appData?.batch?.top_jobs || [])
+    .map(j => [String(j.Job_Name || "").toUpperCase(), String(j.Job_Name || "")])
+    .filter(([key]) => key));
+  const name = known.get(val.toUpperCase());
+  if (known.size && !name) {
     toast("info", "Job not found", `No job named "${val}" in this batch. Pick from the suggestions.`);
     return;
   }
-  _batchManualInclude.delete(val);
-  _batchManualExclude.add(val);
+  const canonicalName = name || val;
+  _batchManualInclude.delete(canonicalName);
+  _batchManualExclude.add(canonicalName);
   const reason = String(rawReason || "").trim();
-  if (reason) _batchManualExcludeReasons.set(val, reason);
-  else _batchManualExcludeReasons.delete(val);
+  if (reason) _batchManualExcludeReasons.set(canonicalName, reason);
+  else _batchManualExcludeReasons.delete(canonicalName);
   _reRenderBatch();
 };
 
@@ -3343,7 +3350,7 @@ function _buildUnifiedExclusionRows(dataCoverage) {
       name,
       category: isManual ? "MANUAL" : _exclusionCategory(reason),
       why: isManual
-        ? (customReason || "Manually excluded by the reviewer for this session — removed from every metric.")
+        ? (customReason || "Reviewer-selected for this review session — excluded after recalculation from batch KPIs, charts, SLA matrix, concurrency evidence and findings. Re-include at any time.")
         : _exclusionWhy(reason),
       scope: "ALL_METRICS",
       isUtil: true, // always round-trips client-side, always re-includable
@@ -5436,8 +5443,8 @@ function initResourceView() {
     }
   });
 
-  // Dropdown filters: Type, Env, Status
-  for (const [id, key] of [["resource-filter-type", "filterType"], ["resource-filter-env", "filterEnv"], ["resource-filter-status", "filterStatus"]]) {
+  // Dropdown filters: Type, Env, Status, Product Group
+  for (const [id, key] of [["resource-filter-type", "filterType"], ["resource-filter-env", "filterEnv"], ["resource-filter-status", "filterStatus"], ["resource-filter-product-group", "filterProductGroup"]]) {
     const sel = document.getElementById(id);
     sel?.addEventListener("change", () => {
       resourceTableState[key] = sel.value;
@@ -5453,10 +5460,12 @@ function initResourceView() {
     resourceTableState.filterType = "";
     resourceTableState.filterEnv = "";
     resourceTableState.filterStatus = "";
+    resourceTableState.filterProductGroup = "";
     if (search) search.value = "";
     document.getElementById("resource-filter-type").value = "";
     document.getElementById("resource-filter-env").value = "";
     document.getElementById("resource-filter-status").value = "";
+    document.getElementById("resource-filter-product-group").value = "";
     _updateClearButton();
     if (window.appData.resource) renderResourceTable(window.appData.resource.servers);
   });
@@ -5481,7 +5490,7 @@ function initResourceView() {
 function _updateClearButton() {
   const btn = document.getElementById("resource-clear-filters");
   if (!btn) return;
-  const hasFilters = resourceTableState.filter || resourceTableState.filterType || resourceTableState.filterEnv || resourceTableState.filterStatus;
+  const hasFilters = resourceTableState.filter || resourceTableState.filterType || resourceTableState.filterEnv || resourceTableState.filterStatus || resourceTableState.filterProductGroup;
   btn.classList.toggle("hidden", !hasFilters);
 }
 
@@ -5595,6 +5604,7 @@ function renderResourceReview(data) {
   // ── Phase 1: instant — lightweight KPI DOM writes (fast first paint)
   renderResourceKpis(data.kpis || {});
   _renderPriorityAction(data);
+  _populateProductGroupFilter(data.servers || []);
 
   // ── Phase 2: deferred — heavy renders staggered across frames
   //    Prevents Firefox "this page is slowing down" warning by yielding
@@ -6711,6 +6721,21 @@ function drawDonutRing(canvasId, value, threshold = 80) {
 }
 
 // ── Lazy server detail table ──────────────────────────────────
+// Builds the "Product Group" filter dropdown from whatever tag values are
+// actually present on this engagement's servers — generic across any
+// customer's own tag convention, never a hardcoded option list.
+function _populateProductGroupFilter(servers) {
+  const sel = document.getElementById("resource-filter-product-group");
+  if (!sel) return;
+  const groups = [...new Set((servers || []).map(s => s.product_group).filter(Boolean))].sort();
+  const current = sel.value;
+  sel.innerHTML = `<option value="">All Product Groups</option>` +
+    groups.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
+  if (groups.includes(current)) sel.value = current;
+  else { resourceTableState.filterProductGroup = ""; }
+  sel.classList.toggle("hidden", groups.length === 0);
+}
+
 function renderResourceTable(servers) {
   const tbody = document.getElementById("resource-tbody");
   const empty = document.getElementById("resource-table-empty");
@@ -6765,6 +6790,9 @@ function renderResourceTable(servers) {
   }
   if (resourceTableState.filterStatus) {
     rows = rows.filter(s => s.status === resourceTableState.filterStatus);
+  }
+  if (resourceTableState.filterProductGroup) {
+    rows = rows.filter(s => (s.product_group || "") === resourceTableState.filterProductGroup);
   }
 
   // ── Show count ───────────────────────────────────────────
@@ -6887,6 +6915,7 @@ function renderResourceTable(servers) {
         ${_dispStatus === "DB Normal" ? `<div class="text-[8px] mt-0.5 leading-tight" style="color:${DB_EXPECTED_COLOR}">SGA/PGA steady — high memory by design</div>` : ""}
         ${_memConflictLine}
       </td>
+      <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[220px]" title="${escapeHtml(r.vm_size_desc || r.vm_size || "")}">${escapeHtml(r.vm_size_desc || r.vm_size || "—")}</td>
       <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[180px]" title="${escapeHtml(r.source_env || "")}">${escapeHtml(truncate(r.source_env || "", 28))}</td>
     `;
     tbody.appendChild(tr);
@@ -8690,12 +8719,17 @@ function _baselineBadge(bc, opts = {}) {
   if (!bc || !Number.isFinite(bc.pulls)) return "";
   const minP = bc.min_pulls || 3;
   const degraded = bc.pulls < minP;
+  // The backend deliberately uses Percentage CPU as the representative
+  // confidence baseline for each VM card. Keep that scope visible: an
+  // unqualified "Baseline" beside memory/disk evidence implies all metrics
+  // share this mean and sigma, which is not true.
+  const metricLabel = opts.metricLabel || "CPU";
   const muSig = (bc.baseline_mean != null && bc.baseline_std != null)
     ? ` · μ=${bc.baseline_mean}% σ=${bc.baseline_std}%` : "";
-  const sz = opts.compact ? "text-[7px] px-1" : "text-[9px] px-2";
+  const sz = opts.compact ? "text-[8px] px-1.5" : "text-[9px] px-2";
   return degraded
-    ? `<span class="${sz} py-0.5 rounded-full font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} pulls stored — anomaly detection uses session-only baseline (degraded).">Baseline: ${bc.pulls}/${minP} pulls — session only</span>`
-    : `<span class="${sz} py-0.5 rounded-full font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} pulls / ${bc.retention_days}d.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
+    ? `<span class="${sz} py-0.5 rounded-full font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} ${metricLabel} pulls stored — anomaly detection uses a session-only ${metricLabel} baseline (degraded).">${metricLabel} baseline: ${bc.pulls}/${minP} pulls — session only</span>`
+    : `<span class="${sz} py-0.5 rounded-full font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical ${metricLabel} baseline from ${bc.pulls} pulls / ${bc.retention_days}d. The mean and sigma shown are ${metricLabel}, not memory or disk.">${metricLabel} baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
 }
 
 function _renderVmServerCard(vmName, vmData, metricConfig, container) {
@@ -8734,17 +8768,29 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     : 100;
   const diskStats = stats["OS Disk Bandwidth Consumed Percentage"];
   const diskP95 = diskStats?.p95 ?? diskStats?.max ?? 0;
-  let domLabel, domVal, domColor, domStatType;
+  let domLabel, domVal, domColor, domStatType, domStatTitle;
   // Pick the metric under most pressure:
   // CPU/Disk: highest % = worst; Memory: lowest available % = worst
   // Convert to a common "pressure" score for comparison
   const memPressure = 100 - memLowest;  // high pressure = low available
   if (memPressure >= cpuP95 && memPressure >= diskP95) {
-    domLabel = "MEM"; domVal = memLowest; domColor = THEME.cyan; domStatType = "min avail";
+    const memUsesP5 = Boolean(memAvailStats?.min_anomalous && memAvailStats?.p5 != null);
+    domLabel = "MEM";
+    domVal = memLowest;
+    domColor = THEME.cyan;
+    // The fleet headline deliberately uses P5 when Azure's raw minimum is a
+    // one-bucket outlier. Make that statistic and its full-query scope visible
+    // next to the value; the sparkline below is a separate, recent trend.
+    domStatType = memUsesP5 ? "P5 avail · full window" : "raw min avail · full window";
+    domStatTitle = memUsesP5
+      ? "P5 available memory across the full selected query window. The raw minimum is shown in detail when it is a one-bucket outlier."
+      : "Raw minimum available memory across the full selected query window.";
   } else if (cpuP95 >= diskP95) {
-    domLabel = "CPU"; domVal = cpuP95; domColor = THEME.blue; domStatType = "P95";
+    domLabel = "CPU"; domVal = cpuP95; domColor = THEME.blue; domStatType = "P95 · full window";
+    domStatTitle = "P95 CPU across the full selected query window.";
   } else {
-    domLabel = "DISK"; domVal = diskP95; domColor = THEME.amber; domStatType = "P95";
+    domLabel = "DISK"; domVal = diskP95; domColor = THEME.amber; domStatType = "P95 · full window";
+    domStatTitle = "P95 disk bandwidth consumed across the full selected query window.";
   }
   // If P95 < max by a large margin, note the outlier
   const domMaxVal = domLabel === "CPU" ? cpuMax : domLabel === "DISK" ? (diskStats?.max ?? 0) : 0;
@@ -8880,8 +8926,9 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     domWave = _rewriteWaveformForDb(domWave, role, 100 - domVal, _thr);
   }
   const waveRiskColors = { none: THEME.green, low: THEME.cyan, medium: THEME.amber, high: THEME.red, critical: THEME.purple };
+  const domWaveIcon = domWave?.shape === "plateau" ? "≋" : (domWave?.icon || "•");
   const waveBadge = domWave
-    ? `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded cursor-help" style="color:${waveRiskColors[domWave.risk] || THEME.muted};background:${hexA(waveRiskColors[domWave.risk] || THEME.muted, 0.12)}" title="${domWave.meaning}">${domWave.icon} ${domWave.label}</span>`
+    ? `<span class="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded cursor-help" style="color:${waveRiskColors[domWave.risk] || THEME.muted};background:${hexA(waveRiskColors[domWave.risk] || THEME.muted, 0.12)}" title="${domWave.meaning}">${escapeHtml(domWaveIcon)} ${domWave.label}</span>`
     : "";
 
   card.innerHTML = `
@@ -8894,9 +8941,9 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           ${waveBadge}
         </div>
         <div class="flex items-center gap-2 mt-1 flex-wrap">
-          <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase cursor-help" title="${_severityHelpText(sevLabel)}" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
+          <span class="px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase cursor-help" title="${_severityHelpText(sevLabel)}" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
           <span class="text-[9px] text-Cmuted">${spikeEventCount} spike event${spikeEventCount > 1 ? "s" : ""} · ${thresholdCrossCount} threshold crossing${thresholdCrossCount !== 1 ? "s" : ""}</span>
-          ${breachLabel ? `<span class="text-[8px] font-bold px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
+          ${breachLabel ? `<span class="text-[9px] font-bold px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
           ${_baselineBadge(vmData.baseline_confidence, { compact: true })}
         </div>
       </div>
@@ -8906,7 +8953,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           <span class="text-xs font-bold" style="color:${trendColor}">${trendArrow}</span>
         </div>
         <div class="flex items-center gap-1 justify-end">
-          <span class="text-[8px] font-bold uppercase tracking-wider" style="color:${domColor}">${domLabel} ${domStatType}</span>
+          <span class="text-[8px] font-bold uppercase tracking-wider" style="color:${domColor}" title="${domStatTitle}">${domLabel} ${domStatType}</span>
           ${trendDelta ? `<span class="text-[8px] font-mono" style="color:${trendColor}">${trendDelta}</span>` : ""}
         </div>
         ${domHasOutlier ? `<div class="text-[7px] text-Cmuted mt-0.5" title="Single-point spike to ${domMaxVal.toFixed(0)}% — P95 shown instead">peak ${domMaxVal.toFixed(0)}% ⚠</div>` : ""}
@@ -8915,7 +8962,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     <div class="flex items-center justify-between">
       ${sparkSvg}
       <div class="flex items-center gap-2">
-        <span class="text-[8px] text-Cmuted">${recentSeries.length > 4 ? "last 6h" : "full window"}</span>
+        <span class="text-[8px] text-Cmuted">${recentSeries.length > 4 ? "trend: last 6h" : "trend: full window"}</span>
         <button type="button" class="dd-open-detail-btn text-[8px] font-semibold px-1.5 py-0.5 rounded border border-Cblue/35 text-Cblue hover:bg-Cblue/10 transition">Show detail ▸</button>
       </div>
     </div>
@@ -8999,7 +9046,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   let headerStats = "";
   if (cpuStatsH) {
     const maxTag = cpuStatsH.max_anomalous
-      ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Max ${cpuStatsH.max}% may be a single-point spike — P95 is ${cpuStatsH.p95}%">single-point</span>`
+      ? `<span class="text-[9px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Max ${cpuStatsH.max}% may be a single-point spike — P95 is ${cpuStatsH.p95}%">single-point</span>`
       : "";
     const maxSrc = cpuStatsH.max_source === "azure_max_agg" ? "" : "";
     const maxSrcTitle = cpuStatsH.max_source === "azure_max_agg" ? " title=\"Max from Azure Maximum aggregation (true peak, not average)\"" : "";
@@ -9007,9 +9054,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   }
   if (memStats) {
     const memMinTag = memStats.min_anomalous
-      ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Min ${memStats.min}% may be a single-point dip — P5 is ${memStats.p5 ?? 'N/A'}%">single-point</span>`
+      ? `<span class="text-[9px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Raw minimum ${memStats.min}% came from one Azure minimum bucket and may be a momentary dip — P5 of the Average series is ${memStats.p5 ?? 'N/A'}%">single bucket</span>`
       : "";
-    headerStats += `${cpuStatsH ? " · " : ""}<span class="text-Ccyan">Mem avail ${memStats.mean}% · min ${memStats.min}% ${memMinTag}</span> <span class="text-[7px] px-0.5 rounded cursor-help" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)}" title="Source: Available Memory Percentage (Azure Monitor Average). Higher = more free memory.">ℹ</span>`;
+    headerStats += `${cpuStatsH ? " · " : ""}<span class="text-Ccyan">Mem avail avg ${memStats.mean}% · raw min ${memStats.min}% ${memMinTag}</span> <span class="text-[7px] px-0.5 rounded cursor-help" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)}" title="Average is from Azure Monitor Average. Raw min is the Azure Minimum extreme and is not a sustained-window value. Higher available % means more free memory.">ℹ</span>`;
   }
 
   // Count by real severity so the badge matches the spike table exactly.
@@ -9189,13 +9236,13 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const _activeByWindow = Number.isFinite(_winEndMs) && Number.isFinite(_endMs) && (_winEndMs - _endMs) >= 0 && (_winEndMs - _endMs) <= (90 * 60 * 1000);
         const _stillActive = sev.includes("SUSTAINED") && _activeByWindow;
         const activeBadge = _stillActive
-          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[8px] font-extrabold" style="color:${THEME.red};background:${hexA(THEME.red,0.15)};border:1px solid ${hexA(THEME.red,0.45)}">STILL ACTIVE</span>`
+          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-extrabold" style="color:${THEME.red};background:${hexA(THEME.red,0.15)};border:1px solid ${hexA(THEME.red,0.45)}">STILL ACTIVE</span>`
           : "";
         const durLabel = _humanizeDurationMin(s.duration_min, {
           ongoing: _stillActive,
         });
         const detectionTag = s.detection === "absolute_threshold"
-          ? `<span class="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
+          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
           : "";
 
         // Source lineage tooltip
@@ -9416,8 +9463,11 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       if (det.peak_used_pct != null) {
         const pv = det.peak_used_pct;
         const pc = pv >= 85 ? THEME.red : pv >= 65 ? THEME.amber : THEME.green;
-        const hd = det.headroom_pct != null ? ` <span class="text-Cmuted">(${det.headroom_pct.toFixed(0)}% free)</span>` : "";
-        peakClause = `<span style="color:${pc}">peak ${pv.toFixed(0)}%</span>${hd}`;
+        const hd = det.headroom_pct != null ? ` <span class="text-Cmuted">(${det.headroom_pct.toFixed(0)}% avail)</span>` : "";
+        // Waveform peaks come from the Average time-series. Say so explicitly
+        // so this value is never mistaken for the raw Azure Minimum/Maximum in
+        // the VM header or for an entire sustained incident window.
+        peakClause = `<span style="color:${pc}">worst avg bucket ${pv.toFixed(0)}% used</span>${hd}`;
       }
 
       // Confidence is a DATA-QUALITY signal, not a severity signal — giving it
@@ -9425,7 +9475,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       // sitting next to the real one. Rendered as plain muted text instead.
       const confLabel = dWf.confidence_label || (dWf.confidence >= 0.75 ? "observed" : dWf.confidence >= 0.55 ? "inferred" : "weak-signal");
       const confPct = dWf.confidence != null ? `${(dWf.confidence * 100).toFixed(0)}%` : "";
-      const confClause = confPct ? `${confLabel} ${confPct}`
+      const confClause = confPct ? `confidence ${confPct} (${confLabel})`
         : "";
 
       const recurDays = wf.recurrence_days || 0;
@@ -9457,19 +9507,19 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
       const evidenceParts = [confClause, peakClause, durClause, recurClause, secClause].filter(Boolean);
       const evidenceLine = evidenceParts.length
-        ? `<div class="text-[9px] text-Cmuted mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap" title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${recurDays} breach days, ${(det.cv || 0).toFixed(2)} CV.">
+        ? `<div class="text-[10px] text-Cmuted mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap" title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${recurDays} breach days, ${(det.cv || 0).toFixed(2)} CV.">
             ${evidenceParts.map((p, i) => i === 0 ? p : `<span class="text-Cborder">·</span> ${p}`).join(" ")}
           </div>`
         : "";
 
       wfRows += `
         <div class="flex items-start gap-3 py-2 border-b border-Cborder/20 last:border-0 hover:bg-white/[0.015] rounded transition">
-          <span class="text-lg shrink-0 mt-0.5">${dWf.icon}</span>
+          <span class="text-lg shrink-0 mt-0.5" aria-hidden="true">${dWf.shape === "plateau" ? "≋" : escapeHtml(dWf.icon || "•")}</span>
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-1.5 flex-wrap">
               <span class="text-[11px] font-bold text-Cwhite">${metricShort(metric)}</span>
-              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
-              <span class="text-[8px] font-bold uppercase px-1 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
+              <span class="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
               ${cpTag}${concTag}${dbBandTag}
             </div>
             ${evidenceLine}
@@ -9729,10 +9779,10 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
             content: labelContent,
             position: { x: "start", y: "start" },
             yAdjust: yOffset,
-            font: { size: 9, weight: "bold" },
+            font: { size: 10, weight: "bold" },
             color: THEME.white,
             backgroundColor: bgColor,
-            padding: { top: 2, bottom: 2, left: 6, right: 4 },
+            padding: { top: 3, bottom: 3, left: 7, right: 5 },
             borderRadius: 3,
           },
         };
@@ -9813,11 +9863,11 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       ${_maxOverlayFacts.length ? `
       <div class="text-[8px] text-Cmuted mb-2 leading-relaxed">
         <span class="font-bold uppercase tracking-wider" style="color:${THEME.muted}">Why the shaded band exists</span> —
-        the average bucket briefly ran hotter than its own average shows:
+        Azure Maximum for one bucket exceeded that bucket's Average:
         ${_maxOverlayFacts
           .sort((a, b) => b.gap - a.gap)
           .slice(0, 3)
-          .map(f => `<span style="color:${f.color}">${escapeHtml(f.label)}</span> hit ${f.maxVal.toFixed(0)}% at ${f.time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} while that bucket averaged ${f.avgVal.toFixed(0)}% (+${f.gap.toFixed(0)}pp)`)
+          .map(f => `<span style="color:${f.color}">${escapeHtml(f.label)}</span> bucket max ${f.maxVal.toFixed(0)}% at ${f.time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} vs avg ${f.avgVal.toFixed(0)}% (+${f.gap.toFixed(0)}pp) <span class="text-[8px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}" title="One Azure Maximum aggregation bucket; not a sustained-window peak.">single bucket</span>`)
           .join(" · ")}
       </div>` : ""}
       <div class="deepdive-chart-container">
@@ -17259,13 +17309,14 @@ function openAzureModal() {
   if (step2) step2.classList.add("hidden");
   if (statusDiv) { statusDiv.textContent = ""; statusDiv.classList.add("hidden"); }
   // Reset all filters (type, env, region) to ALL and clear search
-  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL" };
+  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL", productGroup: "ALL" };
   document.querySelectorAll('.azure-type-filter').forEach(b => b.classList.remove("az-active"));
   document.querySelector('.azure-type-filter[data-type="ALL"]')?.classList.add("az-active");
   document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("az-active"));
   document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("az-active");
   document.querySelectorAll('.azure-region-filter:not([data-region="ALL"])').forEach(b => b.remove());
   const srch = document.getElementById("azure-vm-search"); if (srch) srch.value = "";
+  _syncAzureFilterPressedState();
   // Refresh auth bar and load subscriptions
   _refreshModalAuthBar();
 }
@@ -17526,7 +17577,7 @@ async function azureLoadRGs() {
 /* ── Cached discovered VMs ── */
 let _discoveredVMs = [];
 let _selectedVmIds = new Set();   // Persistent selection — survives filter switches
-let _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL" };
+let _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL", productGroup: "ALL" };
 let _collapsedCustomers = new Set(); // Customer group names currently collapsed in the VM table
 
 /* ── Detect VM environment from Azure tags or name prefix ── */
@@ -17588,6 +17639,7 @@ function _showDiscoveredVMs(data, statusEl, statusMsg) {
 
   _updateFilterCounts();
   _updateRegionFilterButtons();
+  _updatePgFilterButtons();
   _renderVMTable(_discoveredVMs);
   _updateSelectedCount();
   const dupNote = dupCount > 0 ? ` (${dupCount} duplicate${dupCount>1?'s':''} removed)` : "";
@@ -17918,6 +17970,65 @@ function _updateRegionFilterButtons() {
   });
 }
 
+/* Stable color assignment for dynamic Product Group values (unlike Type/Env,
+   the set of groups isn't a fixed known enum). Each distinct name seen gets
+   the next unused palette color (not a hash — a raw hash can collide two
+   real groups onto the same color even with few groups), so any two groups
+   visible at once always look different until the palette is exhausted. */
+const _PG_PALETTE = ["#2dd4bf","#a78bfa","#fbbf24","#f472b6","#38bdf8","#a3e635","#fb923c","#818cf8","#fb7185","#34d399"];
+const _pgColorAssignments = new Map();
+function _pgColorFor(name) {
+  if (_pgColorAssignments.has(name)) return _pgColorAssignments.get(name);
+  const clr = _PG_PALETTE[_pgColorAssignments.size % _PG_PALETTE.length];
+  _pgColorAssignments.set(name, clr);
+  return clr;
+}
+/* Applies/clears the colored + ambient-glow active style for one PG button. */
+function _stylePgButton(btn, active) {
+  const clr = btn.dataset.pgColor;
+  if (!clr) return;
+  if (active) {
+    btn.style.color = clr;
+    btn.style.background = hexA(clr, 0.12);
+    btn.style.borderBottomColor = clr;
+    btn.style.boxShadow = `0 0 10px ${hexA(clr, 0.45)}, inset 0 0 10px ${hexA(clr, 0.08)}`;
+  } else {
+    btn.style.color = ""; btn.style.background = ""; btn.style.borderBottomColor = ""; btn.style.boxShadow = "";
+  }
+}
+
+/* ── Product Group filter buttons — built dynamically per subscription/search
+   result, same reasoning as region: not a fixed enum, and hidden entirely
+   when no VM in this set carries a 'Product Group' tag at all. ── */
+function _updatePgFilterButtons() {
+  const group = document.getElementById("az-pg-seg-group");
+  if (!group) return;
+  const counts = {};
+  _discoveredVMs.forEach(v => {
+    const pg = (v.product_group || "").trim();
+    if (pg) counts[pg] = (counts[pg] || 0) + 1;
+  });
+  const groups = Object.keys(counts).sort();
+  const allBtn = group.querySelector('.azure-pg-filter[data-pg="ALL"]');
+  group.querySelectorAll('.azure-pg-filter:not([data-pg="ALL"])').forEach(b => b.remove());
+  const row = document.getElementById("az-pg-filter-row");
+  if (row) row.classList.toggle("hidden", groups.length === 0);
+  document.querySelectorAll('.azure-pg-filter').forEach(b => _stylePgButton(b, false));
+  if (allBtn) allBtn.classList.add("az-active");
+  _activeVmFilters.productGroup = "ALL";
+  groups.forEach(pg => {
+    const clr = _pgColorFor(pg);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.pg = pg;
+    btn.dataset.pgColor = clr;
+    btn.className = "azure-pg-filter az-seg-btn";
+    btn.onclick = () => azureFilterProductGroup(pg);
+    btn.innerHTML = `<span class="az-dot" style="background:${clr};opacity:0.8"></span>${_escHtml(pg)}<span class="az-chip">${counts[pg]}</span>`;
+    group.appendChild(btn);
+  });
+}
+
 /* ── Region filter — single-select radio style (same pattern as env) ── */
 function azureFilterRegion(region) {
   const allBtn  = document.querySelector('.azure-region-filter[data-region="ALL"]');
@@ -17934,6 +18045,23 @@ function azureFilterRegion(region) {
   _applyVmFilters();
 }
 
+/* ── Product Group filter — single-select radio style (same pattern as region) ── */
+function azureFilterProductGroup(pg) {
+  const allBtn  = document.querySelector('.azure-pg-filter[data-pg="ALL"]');
+  const clicked = document.querySelector(`.azure-pg-filter[data-pg="${CSS.escape(pg)}"]`);
+  const wasActive = clicked?.classList.contains("az-active") && pg !== "ALL";
+  document.querySelectorAll('.azure-pg-filter').forEach(b => { b.classList.remove("az-active"); _stylePgButton(b, false); });
+  if (pg === "ALL" || wasActive) {
+    allBtn?.classList.add("az-active");
+    _activeVmFilters.productGroup = "ALL";
+  } else {
+    clicked?.classList.add("az-active");
+    _stylePgButton(clicked, true);
+    _activeVmFilters.productGroup = pg;
+  }
+  _applyVmFilters();
+}
+
 /* ── Combined filter: respects type + env + region + name search ── */
 function _applyVmFilters() {
   const activeTypes = [...document.querySelectorAll('.azure-type-filter.az-active')].map(b => b.dataset.type);
@@ -17946,6 +18074,9 @@ function _applyVmFilters() {
   if (_activeVmFilters.region !== "ALL") {
     filtered = filtered.filter(v => ((v.location || "unknown").trim() || "unknown") === _activeVmFilters.region);
   }
+  if (_activeVmFilters.productGroup !== "ALL") {
+    filtered = filtered.filter(v => (v.product_group || "").trim() === _activeVmFilters.productGroup);
+  }
   if (searchQ) {
     filtered = filtered.filter(v =>
       (v.name || "").toLowerCase().includes(searchQ) ||
@@ -17955,6 +18086,11 @@ function _applyVmFilters() {
   }
   _renderVMTable(filtered);
   _updateSelectedCount();
+  const filterResult = document.getElementById("azure-filter-result-count");
+  if (filterResult) {
+    filterResult.textContent = `${filtered.length} of ${_discoveredVMs.length} VM${_discoveredVMs.length === 1 ? "" : "s"} shown`;
+  }
+  _syncAzureFilterPressedState();
   // Sync header checkbox state to visible rows
   const allCb = document.getElementById("azure-vm-checkall");
   if (allCb && filtered.length > 0) {
@@ -17963,6 +18099,34 @@ function _applyVmFilters() {
     allCb.checked       = allVisible;
     allCb.indeterminate = !allVisible && anyVisible;
   }
+}
+
+// Keep every filter group operable as a true pressed-button set. The Type
+// group is multi-select; Environment, Region and Product Group are exclusive.
+// The visual active state and assistive state must therefore share this source.
+function _syncAzureFilterPressedState() {
+  document.querySelectorAll(".azure-type-filter, .azure-env-filter, .azure-region-filter, .azure-pg-filter")
+    .forEach(button => button.setAttribute("aria-pressed", button.classList.contains("az-active") ? "true" : "false"));
+}
+
+function azureResetVmFilters() {
+  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL", productGroup: "ALL" };
+  const activateAll = (selector) => {
+    const buttons = document.querySelectorAll(selector);
+    buttons.forEach(button => button.classList.remove("az-active"));
+    buttons[0]?.classList.add("az-active");
+  };
+  activateAll(".azure-type-filter[data-type='ALL'], .azure-type-filter:not([data-type='ALL'])");
+  activateAll(".azure-env-filter[data-env='ALL'], .azure-env-filter:not([data-env='ALL'])");
+  activateAll(".azure-region-filter[data-region='ALL'], .azure-region-filter:not([data-region='ALL'])");
+  document.querySelectorAll(".azure-pg-filter").forEach(button => {
+    button.classList.remove("az-active");
+    _stylePgButton(button, false);
+  });
+  document.querySelector(".azure-pg-filter[data-pg='ALL']")?.classList.add("az-active");
+  const search = document.getElementById("azure-vm-search");
+  if (search) search.value = "";
+  _applyVmFilters();
 }
 
 /* ── Env filter — single-select radio style ── */
@@ -18402,9 +18566,9 @@ function _renderSlaCommitmentsPanel() {
       batchEl.innerHTML = `
         <div class="text-[10px] text-Cmuted mb-1.5">
           ${workflows.length} workflow(s) loaded ·
-          ${batchSlaInfo.with_explicit_sla || batchSlaInfo.with_sla_count || 0} with explicit SLA
+          ${batchSlaInfo.with_explicit_sla || 0} with explicit SLA
           ${(batchSlaInfo.with_fallback_sla || 0) > 0
-            ? ` · <span class="text-Camber font-semibold" title="These workflows have no SLA column in the XLSX — using SOW ceiling or global defaults">${batchSlaInfo.with_fallback_sla} using fallback SLA</span>`
+            ? ` · <span class="text-Camber font-semibold" title="These workflows have no column the customer explicitly labelled as the SLA target ('Expected SLA'/'Expected End Time') — using SOW ceiling or the generic PE default instead. A Start/End window or Duration column alone is NOT treated as the SLA.">${batchSlaInfo.with_fallback_sla} using fallback SLA</span>`
             : ""} ·
           types: <span class="text-Cteal font-semibold">${(batchSlaInfo.batch_types || []).join(", ") || "—"}</span>
           ${Object.keys(canonicalMap).length > 0
@@ -18413,7 +18577,45 @@ function _renderSlaCommitmentsPanel() {
                 : `· <span class="text-Camber font-semibold" title="Ctrl-M runtime is loaded, but its sub-application names don't match these XLSX contract names — so the rows below show XLSX last-run samples. The SLA Debug panel shows the live Ctrl-M elapsed-time verdict for the actual sub-applications.">⚠ Ctrl-M loaded but unmatched — rows show XLSX last-run</span>`)
             : `· <span class="text-Camber" title="Showing XLSX last-run data. Run SLA Matrix with Ctrl-M upload for live runtime.">⚠ using XLSX last-run — upload Ctrl-M for live data</span>`}
         </div>
-        <div class="overflow-x-auto rounded-lg border border-Cborder/40">
+        ${(() => {
+          // ── Backend diagnostic warnings (parse_batch_sla_xlsx) ──────────────
+          // sla_merger.py generates specific, evidence-based warnings (e.g. "no
+          // column was explicitly labelled as the SLA target", placeholder-data
+          // detection, collapsed historical rows) — these were computed but
+          // never rendered anywhere, so a reviewer had no way to see WHY every
+          // row shows DEFAULT/UNVERIFIED. Surfaced as one consolidated notice
+          // per severity (not a tile per message) — legible body copy, a real
+          // stroke icon (no emoji), generous padding.
+          const _warns = batchSlaInfo.warnings || [];
+          if (!_warns.length) return "";
+          const _critical = _warns.filter(w => /^CRITICAL:/.test(w)).map(w => w.replace(/^CRITICAL:\s*/, ""));
+          const _other = _warns.filter(w => !/^CRITICAL:/.test(w));
+          const _triangleIcon = `<svg viewBox="0 0 24 24" fill="none" stroke-width="1.75" stroke="currentColor" class="w-5 h-5 shrink-0 mt-0.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>`;
+          const _infoIcon = `<svg viewBox="0 0 24 24" fill="none" stroke-width="1.75" stroke="currentColor" class="w-5 h-5 shrink-0 mt-0.5"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>`;
+          return `
+            <div class="mt-2 space-y-2">
+              ${_critical.length ? `
+                <div class="rounded-xl border border-Cred/30 bg-Cred/[0.07] px-4 py-3.5">
+                  <div class="flex items-start gap-3 text-Cred">
+                    ${_triangleIcon}
+                    <div class="min-w-0">
+                      <div class="text-[13px] font-bold tracking-tight mb-1.5">Data quality issue — SLA not populated</div>
+                      ${_critical.map(w => `<p class="text-[13px] leading-relaxed text-Cwhite/90 mb-1.5 last:mb-0">${_esc(w)}</p>`).join("")}
+                    </div>
+                  </div>
+                </div>` : ""}
+              ${_other.length ? `
+                <div class="rounded-xl border border-Camber/25 bg-Camber/[0.05] px-4 py-3">
+                  <div class="flex items-start gap-3 text-Camber">
+                    ${_infoIcon}
+                    <div class="min-w-0 space-y-1">
+                      ${_other.map(w => `<p class="text-[12.5px] leading-relaxed text-Cwhite/80">${_esc(w)}</p>`).join("")}
+                    </div>
+                  </div>
+                </div>` : ""}
+            </div>`;
+        })()}
+        <div class="overflow-x-auto rounded-lg border border-Cborder/40 mt-2">
           ${(() => {
             // ── SLA Standard vs Matrix comparison notice ──────────────────
             // Shows inline when both batch and SLA matrix are loaded.
@@ -18458,10 +18660,10 @@ function _renderSlaCommitmentsPanel() {
               <th class="text-left py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]">Workflow</th>
               <th class="text-left py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]">Type</th>
               <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="SLA (Expected Completion) — the agreed time window by which this workflow must finish. Source tiers: 1 = XLSX contract · 2 = SOW ceiling · 3 = PE system default. Badge shows which tier was used.">SLA <span class="text-[9px] font-normal opacity-60 normal-case">(Expected Completion)</span></th>
-              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Peak observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used. XLSX tag = last-known snapshot, not live Ctrl-M data.">Peak Window</th>
+              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="${Object.keys(canonicalMap).length > 0 ? "Peak observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used." : "Runtime taken from the uploaded SLA file's own Duration/End−Start column (last-known snapshot, not live Ctrl-M data). Upload Ctrl-M for live runtime."}">${Object.keys(canonicalMap).length > 0 ? "Peak Window" : `Runtime <span class="text-[9px] font-normal opacity-60 normal-case">(SLA file)</span>`}</th>
               <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
-              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
-              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Did the batch START on time? Duration compliance alone doesn't catch a late start that still finishes inside its window — downstream data is stale even though the run 'passed'. Compares the XLSX contracted Start_Time against the actual worst-case (latest) observed start clock time. Requires a Start_Time column in the SLA matrix file.">Start Time</th>
+              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="How far the runtime finished inside (or outside) the SLA window, in plain time — e.g. '2h before deadline', '15m over', or 'on the edge' when it exactly fills the window.">Margin</th>
+              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · NO_BUFFER (exactly 0% — runs to the edge, zero slack) · BREACH (runtime over the window) · SLA_MISSING · RUNTIME_MISSING">Status</th>
             </tr></thead>
             <tbody>
               ${topWfs.map(w => {
@@ -18479,6 +18681,13 @@ function _renderSlaCommitmentsPanel() {
                 // global*/assumed = no contract found, system default → DEFAULT (amber warning)
                 const _slaBadge = (() => {
                   const s = (_slaSrc || "").toLowerCase();
+                  // INFERRED = no explicit "Expected SLA"/"Expected End Time" column
+                  // exists in this file — sla_h was derived from a bare Start/End
+                  // window (an interpretation, not a customer-labelled target).
+                  // Shown distinctly from CONTRACT so a reviewer never mistakes
+                  // this for the same certainty as an explicit SLA column.
+                  if (w.sla_confidence === "INFERRED")
+                    return `<span class="ml-1 text-[9px] font-bold text-Cteal bg-Cteal/10 px-1 py-0.5 rounded" title="No 'Expected SLA'/'Expected End Time' column found in this file — this value was INFERRED as the plain Start Time \u2192 End Time window. Confirm the exact SLA with the customer if uncertain.">SCHEDULE (inferred)</span>`;
                   // batch_sla_xlsx* and sla_intelligence_anchor = SLA came from the customer file
                   if (s.startsWith("batch_sla_xlsx") || s === "xlsx" || s === "sla_intelligence_anchor")
                     return `<span class="ml-1 text-[9px] font-bold text-Cgreen bg-Cgreen/10 px-1 py-0.5 rounded" title="Source: Customer SLA Matrix file — per-contract window">CONTRACT</span>`;
@@ -18500,9 +18709,21 @@ function _renderSlaCommitmentsPanel() {
                                 : status === "AT_RISK" ? "text-Camber"
                                 : status === "LONG_JOB" ? "text-Corange"
                                 : status === "OK" ? "text-Cteal"
+                                : status === "NO_BUFFER" ? "text-Camber"
                                 : status === "RUNTIME_MISSING" ? "text-Cmuted"
                                 : status === "SLA_MISSING" ? "text-Cpurple"
                                 : "text-Cmuted";
+                // UNVERIFIED = sla_merger.py found no contract SLA anywhere in the
+                // file (no Expected End Time/SLA/Deadline column) and fell back to
+                // the generic pe_config default — this status is comparing an
+                // observed XLSX sample against an assumption, not a confirmed
+                // customer target. Softened so a reviewer doesn't mistake it for a
+                // verified contract breach. Applies to any customer's file, not one.
+                const _unverified = w.sla_confidence === "UNVERIFIED"
+                  && ["BREACH", "AT_RISK", "LONG_JOB"].includes(status);
+                const unverifiedTag = _unverified
+                  ? `<span class="ml-1 text-[8px] font-bold text-Cmuted/80 bg-Cmuted/10 px-1 py-0.5 rounded align-middle" title="No contracted SLA/Expected End Time/Deadline column was found in this file — ${_esc(status)} compares an observed sample against a generic PE default, not a confirmed customer target. Upload a file with an explicit SLA column, or confirm the SLA with the customer.">UNVERIFIED</span>`
+                  : "";
                 const bufResult = bufOf(w);       // { val, src }
                 const rtResult  = runtimeOf(w);   // { val, src }
                 const buf       = bufResult.val;
@@ -18545,36 +18766,35 @@ function _renderSlaCommitmentsPanel() {
                   ? `<span class="ml-1 text-[9.5px] font-bold text-Cred bg-Cred/10 px-1.5 py-0.5 rounded">${_severeBuf ? "MAJOR BREACH" : (buf < 0 ? "BREACH" : "LOW")}</span>` : "";
                 const name  = w.workflow || w.sub_application || "—";
                 const btype = w.batch_type || "—";
-                // ── Start-time compliance cell ──────────────────────────────
-                // entry.start_time_status is only populated when the XLSX has a
-                // fixed Start_Time AND at least one observed Ctrl-M run for this
-                // workflow — otherwise show a neutral "no data" state instead of
-                // silently implying compliance.
-                const _stStatus = entry?.start_time_status || null;
-                const _stDelay  = entry?.start_delay_mins;
-                const _stContract = entry?.contract_start_time;
-                const startTimeCell = (() => {
-                  if (!_stStatus) {
-                    return `<span class="text-Cmuted italic" title="No contracted Start_Time in the SLA matrix, or no matching Ctrl-M run observed for this workflow.">—</span>`;
-                  }
-                  const _delayStr = typeof _stDelay === "number"
-                    ? (_stDelay <= 0 ? `${Math.abs(_stDelay)}m early` : `+${_stDelay}m late`)
-                    : "";
-                  const _title = `Contracted start: ${_esc(_stContract || "—")}. Worst observed start was ${_delayStr || "on time"} vs contract.`;
-                  if (_stStatus === "ON_TIME")
-                    return `<span class="text-Cteal font-semibold" title="${_title}">ON TIME</span>`;
-                  if (_stStatus === "LATE_START")
-                    return `<span class="text-Camber font-semibold" title="${_title}">${_delayStr}</span>`;
-                  return `<span class="text-Cred font-bold" title="${_title}">${_delayStr}</span>`;
-                })();
+                // ── Margin cell: plain-English early/late vs the SLA window ──
+                // Prefer the backend's sla_margin_desc (XLSX rows); else derive
+                // from the live SLA − runtime for the Ctrl-M path so both modes
+                // read the same. Colour: red = ran over, amber = zero slack,
+                // teal = finished inside the window.
+                const _marginH = (rt != null && _slaVal != null) ? (_slaVal - rt) : null;
+                const _fmtMargin = (h) => {
+                  const tot = Math.round(Math.abs(h) * 60);
+                  if (tot < 1) return "on the edge (0 slack)";
+                  const hh = Math.floor(tot / 60), mm = tot % 60;
+                  const span = ((hh ? hh + "h " : "") + ((mm || !hh) ? mm + "m" : "")).trim();
+                  return h > 0 ? span + " before deadline" : span + " over";
+                };
+                const _marginDesc = w.sla_margin_desc || (_marginH != null ? _fmtMargin(_marginH) : null);
+                const _marginCol = _marginH == null ? "text-Cmuted italic"
+                                 : _marginH < -0.008 ? "text-Cred"
+                                 : Math.abs(_marginH) < 0.008 ? "text-Camber"
+                                 : "text-Cteal";
+                const marginCell = _marginDesc
+                  ? `<span class="${_marginCol}" title="Runtime vs the SLA window (positive = finished before the window closed, negative = ran over).">${_esc(_marginDesc)}</span>`
+                  : `<span class="text-Cmuted italic">—</span>`;
                 return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/40 transition-colors ${status === 'BREACH' ? 'bg-Cred/5' : ''}">
                   <td class="py-2.5 px-3 text-Cwhite font-mono font-medium truncate max-w-[200px]" title="${_esc(name)}">${_esc(name)}</td>
                   <td class="py-2.5 px-3 text-Cmuted">${_esc(btype)}</td>
                   <td class="py-2.5 px-3 text-right font-mono font-bold text-Cteal">${sla}</td>
                   <td class="py-2.5 px-3 text-right font-mono text-Cwhite/80">${rtStr}</td>
                   <td class="py-2.5 px-3 text-right ${bCol}" title="${_esc(bufTitle)}">${bufStr}${lowFlag}</td>
-                  <td class="py-2.5 px-3 text-center font-bold text-[11px] ${cCol}">${status}</td>
-                  <td class="py-2.5 px-3 text-center text-[11px]">${startTimeCell}</td>
+                  <td class="py-2.5 px-3 text-right text-[11px]">${marginCell}</td>
+                  <td class="py-2.5 px-3 text-center font-bold text-[11px] ${cCol}">${status}${unverifiedTag}</td>
                 </tr>`;
               }).join("")}
               ${more > 0 ? `<tr><td colspan="7" class="py-2 px-3 text-[11px] text-Cmuted italic text-center">+ ${more} more workflows not shown</td></tr>` : ""}
@@ -18602,6 +18822,8 @@ function _renderSlaCommitmentsPanel() {
           <span class="text-Corange font-bold">LONG_JOB</span><span class="text-Cmuted">${_at}\u2013${_lj}%</span>
           <span class="text-Cmuted/40">\u00b7</span>
           <span class="text-Camber font-bold">AT_RISK</span><span class="text-Cmuted">0\u2013${_at}%</span>
+          <span class="text-Cmuted/40">\u00b7</span>
+          <span class="text-Camber font-bold">NO_BUFFER</span><span class="text-Cmuted">runs to edge (0%)</span>
           <span class="text-Cmuted/40">\u00b7</span>
           <span class="text-Cred font-bold">BREACH</span><span class="text-Cmuted">&lt;0%</span>
           <span class="text-Cmuted/30 mx-1">|</span>

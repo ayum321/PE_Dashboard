@@ -42,6 +42,28 @@ import io
 import re
 from typing import Any, Dict, List, Optional
 
+# A genuine SLA contract states a repeatable clock time ("9:00 PM") — it does
+# not carry a specific calendar date, since the same window applies every
+# day/week/month. A Start/End cell that DOES carry a calendar date
+# (e.g. "2026-04-09 00:29:00") is an OBSERVED timestamp of one historical
+# execution, not a contract term. Used below to let a plain "Start Time" /
+# "End Time" pair (no "Expected" prefix) count as the SLA window when the
+# values are pure time-of-day — mirrors the same signal in sla_engine.py.
+_DATED_VALUE_RE = re.compile(
+    r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}-\d{1,2}-\d{2,4}"
+)
+_EXCEL_EPOCH_DATES = ("1899-12-30", "1899-12-31", "1900-01-00", "1900-01-01")
+
+
+def _looks_dated(raw) -> bool:
+    """True when a Start/End cell carries a calendar date, not just a
+    repeatable clock time — i.e. it's an observed run, not an SLA term."""
+    m = _DATED_VALUE_RE.search(str(raw or ""))
+    if not m:
+        return False
+    return not m.group(0).startswith(_EXCEL_EPOCH_DATES)
+
+
 # ── Schedule day-of-week parsing ──────────────────────────────────────────────
 # Some customers define TWO (or more) XLSX rows for the SAME workflow name, each
 # scoped to a different subset of the week (e.g. "Sun to Thu" for the main demand
@@ -306,12 +328,15 @@ def detect_batch_type(batch_name: str, schedule: str = "") -> str:
             return "WEEKLY"
         if re.match(r"^MON[\s\-]*FRI", _sched_up):
             return "DAILY"
-        # "Runs every Monday" / "Every Tuesday & Wednesday"
-        _DAYS = {"MONDAY": "WEEKLY", "TUESDAY": "PERIODIC", "WEDNESDAY": "PERIODIC",
-                 "THURSDAY": "PERIODIC", "FRIDAY": "WEEKLY"}
-        for _day, _dtyp in _DAYS.items():
+        # "Runs every Monday" / "Every Tuesday & Wednesday" — any single named
+        # weekday in the schedule text is a once-a-week cadence. There is no
+        # principled reason one weekday would differ from another here — a
+        # batch that runs every Tuesday is exactly as WEEKLY as one that runs
+        # every Monday, so all seven map to the same type.
+        _DAYS = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+        for _day in _DAYS:
             if _day in _sched_up:
-                return _dtyp
+                return "WEEKLY"
 
     for btype in _DETECT_PRIORITY:
         keywords = patterns.get(btype, [])
@@ -386,6 +411,16 @@ def parse_sla_hours(value: Any) -> Optional[float]:
     # Caller (FLATS Expected End Time) must handle these as deadline times
     if re.match(r'^\d{1,2}(?::\d{2})?\s*(?:am|pm)$', s):
         return None
+    # "H:MM:SS hrs" / "HH:MM:SS hrs." / "H:MM hrs" — a clock-style duration
+    # combined with a unit suffix (CCBA: "06:00:00 hrs."). MUST be checked
+    # BEFORE the generic single-number "hrs" regex below — that regex is
+    # unanchored and greedily matches whichever digit run sits immediately
+    # before "hrs", which for "06:00:00 hrs." is the trailing seconds field
+    # ("00"), silently returning 0.0 instead of 6.0.
+    m = re.match(r'^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*h[ro]?u?r?s?\.?\s*$', s)
+    if m:
+        hh, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+        return round(hh + mm / 60 + ss / 3600, 4)
     # "X hr" / "X hrs" / "X hour(s)"
     m = re.search(r"([\d.]+)\s*h[ro]?u?r?s?", s)
     if m:
@@ -481,6 +516,21 @@ def parse_start_time(value: Any) -> Any:
     s = str(value).strip()
     if not s or s.lower() in ("nan", "none", "n/a", "tbd", "-", "adhoc", "on demand"):
         return None
+    # Strip a leading weekday name (and connector/filler words) before matching
+    # a clock time — any customer's Start Time column may state the cadence
+    # inline with the time, e.g. "Sunday 9:05 PM CST", "Monday/Wednesday 9:05 PM
+    # CST", "Saturday start at 2PM CST". Without this, strptime fails on the
+    # leading day-name text and the whole cell is silently dropped as None.
+    # Full names MUST be checked before abbreviations (TUE+DAY != TUESDAY).
+    s = re.sub(
+        rf'^(?:(?:{_DAY_NAMES_ALT})[\s/,&\-]*)+(?:START\s+AT\s+)?',
+        "", s, flags=re.IGNORECASE,
+    ).strip()
+    if not s:
+        return None
+    # Normalise NO-BREAK / NARROW NO-BREAK spaces from Excel/Word exports
+    # (e.g. CCBA "09:00\u202fPM SAST") so strptime can parse the clock time.
+    s = s.replace("\xa0", " ").replace("\u202f", " ").strip()
 
     # Multiple times in one cell (Dole: "6:30 AM PHT & 1 PM PHT")
     _separators = re.split(r'\s*[&,/]\s*', s)
@@ -695,6 +745,11 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
         if not s or s.lower() in ("nan", "none", "nat"):
             return ""
         import re as _re
+        # Excel/Word exports embed NO-BREAK (\xa0) and NARROW NO-BREAK (\u202f)
+        # spaces between the time and its AM/PM or timezone (e.g. CCBA:
+        # "09:00\u202fPM SAST\u202f\xa0"). pandas can't parse a time containing
+        # those, so normalise them to plain spaces before anything else.
+        s = s.replace("\xa0", " ").replace("\u202f", " ").strip()
         # Strip a leading day-of-week name/phrase (handles "Monday/Wednesday ",
         # "Saturday start at ", "Sunday "), and repeated day tokens joined by
         # "/", "-", "," or "&". Iterative: keeps stripping while a day-name
@@ -708,9 +763,15 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
             if s2 == s:
                 break
             s = s2
-        # Strip trailing timezone qualifiers: "EST", "CST", "IST", "UTC+5:30", etc.
+        # Strip trailing timezone qualifiers: "EST", "CST", "IST", "SAST",
+        # "UTC+5:30", etc. Whitelisted (never a bare [A-Z]{2,4} catch-all) so a
+        # real "AM"/"PM" is never mistaken for a timezone and stripped.
         s = _re.sub(
-            r'\s+(?:CST|CDT|EST|EDT|PST|PDT|MST|MDT|IST|GMT|UTC[+-]?\d*)\s*$',
+            r'\s+(?:CST|CDT|EST|EDT|PST|PDT|MST|MDT|IST|GMT|UTC[+-]?\d*'
+            r'|SAST|CET|CEST|WET|WEST|EET|EEST|BST|WAT|CAT|EAT'
+            r'|AEST|AEDT|ACST|ACDT|AWST|NZST|NZDT'
+            r'|JST|KST|SGT|HKT|PHT|MYT|WIB|WITA|WIT|ICT|MMT|NPT|PKT|BDT|SLST'
+            r'|MSK|GST|BRT|ART|CLT|COT|PET|VET)\s*$',
             '', s, flags=_re.IGNORECASE,
         ).strip()
         # Strip parenthetical notes like "(next day)"
@@ -928,29 +989,126 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         except Exception:
             contract_start_time = None
 
-        # Actual runtime from XLSX own timestamps (optional)
-        # Uses overnight-aware delta so batches crossing midnight are handled correctly.
-        actual_h: Optional[float] = None
+        # ── Separate the TWO distinct runtime-ish signals a file can carry ──────
+        # window_h   = Start Time → End Time wall-clock span = the allowed
+        #              completion WINDOW (a deadline / SLA candidate).
+        # duration_h = the explicit "Duration"/"Total batch time" column = how
+        #              long the batch actually/typically RUNS (a runtime figure).
+        # These are DIFFERENT facts: a batch may be allowed a 6h window
+        # (7pm→1am) yet run only 4h — that 2h (33%) is the real buffer. Keeping
+        # them apart lets the SLA panel show SLA-vs-runtime like Batch Review,
+        # instead of collapsing both into one number.
+        window_h: Optional[float] = None
+        _win_dated = False
         try:
             if start_series is not None and end_series is not None:
                 st_val = start_series.iloc[idx]
                 en_val = end_series.iloc[idx]
                 if st_val and en_val:
-                    delta_h = _overnight_delta_hours(st_val, en_val)
-                    if delta_h is not None and delta_h > 0:
-                        actual_h = delta_h
+                    _win_dated = _looks_dated(st_val) or _looks_dated(en_val)
+                    _wd = _overnight_delta_hours(st_val, en_val)
+                    if _wd is not None and _wd > 0:
+                        window_h = _wd
         except Exception:
             pass
 
-        # Fallback: use pre-computed duration column when Start/End delta gave nothing
-        # (handles summary sheets with "Total batch time", "Duration" etc.)
-        if actual_h is None and actual_dur_series is not None:
+        duration_h: Optional[float] = None
+        if actual_dur_series is not None:
             try:
                 dur_val = actual_dur_series.iloc[idx]
                 if dur_val is not None:
-                    actual_h = parse_sla_hours(dur_val)
+                    _dh = parse_sla_hours(dur_val)
+                    if _dh is not None and _dh > 0:
+                        duration_h = _dh
             except Exception:
                 pass
+
+        # ── Placeholder-data guard: Expected End Time == Current end time ──────
+        # Some customer files (e.g. USF, per their own comment column: "Expected
+        # end & Current end time is mentioned as same due to UAT... anticipating
+        # that... the current end time can then be updated to reflect the recent
+        # timestamps") copy the contracted deadline into the "actual" column as
+        # a placeholder before real observations exist. Because sla_h and
+        # window_h are BOTH derived from Start_Time, an identical Expected/
+        # Current cell value makes window_h mathematically equal to sla_h by
+        # construction — not a real "runs to the exact edge every time"
+        # measurement. Treating it as real would show a fabricated 0%-buffer
+        # NO_BUFFER on every row instead of "no runtime observed yet".
+        _placeholder_end_time = False
+        if (
+            sla_h is not None and window_h is not None
+            and end_series is not None and expected_end_series is not None
+        ):
+            _end_cmp = str(end_series.iloc[idx] or "").strip().lower()
+            _exp_cmp = str(expected_end_series.iloc[idx] or "").strip().lower()
+            if _end_cmp and _exp_cmp and _end_cmp == _exp_cmp:
+                _placeholder_end_time = True
+
+        # actual_h = the RUNTIME figure carried into last_run_hours_xlsx and the
+        # buffer/status comparison. Two distinct file shapes:
+        #   • sla_h ALREADY resolved above (explicit "Expected SLA"/"Expected End
+        #     Time" column exists, e.g. USF) → End_Time is a SEPARATE, unambiguous
+        #     canonical column (aliases include "current end time" — literally
+        #     the observed value). window_h (Start→End_Time) IS the runtime,
+        #     regardless of whether it's dated — the contract/observation split
+        #     was already made by the file's own column naming, not by dates —
+        #     UNLESS the placeholder guard above fired, in which case there is
+        #     no real observation and duration_h (if any) is used instead.
+        #   • sla_h still None (no explicit "Expected" column anywhere — CCBA and
+        #     Wella both land here) → whatever window/duration signal exists is
+        #     OBSERVATIONAL ONLY. It is never promoted to be the SLA target
+        #     (see below) — a bare Start/End window or a Duration column tells
+        #     you how long something took or is scheduled to run, NOT what the
+        #     customer contracted as acceptable. Prefer the window as the
+        #     observed/typical runtime figure, falling back to Duration.
+        if sla_h is not None:
+            actual_h: Optional[float] = (
+                window_h if window_h is not None else duration_h
+            )
+        else:
+            actual_h = window_h if window_h is not None else duration_h
+
+        # True only when sla_h below came from a bare Start/End window (or a
+        # Duration-only column) with NO explicit "Expected"/"SLA"-named column
+        # anywhere in the file — the dashboard INFERRED the target rather than
+        # reading a column the customer explicitly labelled as the SLA.
+        # Surfaced via sla_confidence so the UI never claims machine-verified
+        # certainty for something that required interpretation.
+        _sla_inferred_from_bare_window = False
+
+        # ── Do NOT promote a bare Start/End window or Duration column to the SLA ──
+        # A customer's Start Time + End Time + Duration columns tell you how a
+        # batch is scheduled to run or how long it took — neither one is the
+        # same fact as "the contracted target the customer agreed to". Without a
+        # column the customer explicitly labelled as the target ("Expected SLA",
+        # "Expected End Time", "SLA", "SLA Deadline"), the dashboard does not
+        # know what a compliant runtime actually is: a 6h window observed today
+        # could have a 30-minute SLA or a 4-hour SLA — the file simply does not
+        # say. Populating a confident "6h CONTRACT" badge from that window alone
+        # was over-inference; sla_h stays None here and resolves to the PE
+        # default further below, clearly tagged UNVERIFIED/DEFAULT so a reviewer
+        # is told plainly this file cannot answer the SLA question, rather than
+        # being shown a manufactured number. `sla_schema` records WHY — the
+        # dashboard's own diagnostic of "what kind of file is this", exposed per
+        # row (traceable) and aggregated file-wide below in parse_batch_sla_xlsx.
+        if sla_h is not None:
+            _sla_schema = "EXPLICIT_COLUMN"
+        elif window_h is not None and not _win_dated:
+            # Bare, undated Start/End window with no "Expected" column anywhere
+            # — e.g. CCBA. This is a schedule window or an observed sample, NOT
+            # a stated target. Left unresolved (falls to GLOBAL_DEFAULT below).
+            _sla_schema = "WINDOW_NO_EXPECTED_COLUMN"
+        elif duration_h is not None and window_h is None:
+            # Duration-only file, no "Expected" column anywhere — Duration is
+            # how long the batch runs, not what was contracted. Left unresolved.
+            _sla_schema = "DURATION_NO_EXPECTED_COLUMN"
+        elif window_h is not None and _win_dated:
+            # Dated Start/End with no explicit SLA column anywhere — an
+            # observed-execution report (Wella), not a contract. sla_h stays
+            # None here (resolved to GLOBAL_DEFAULT further below).
+            _sla_schema = "OBSERVED_HISTORY"
+        else:
+            _sla_schema = "NO_SIGNAL"
 
         btype = detect_batch_type(batch_name, schedule)
 
@@ -985,7 +1143,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
                     f"Row {idx} '{batch_name}': SLA={sla_h:.3f}h ({sla_h*60:.0f} min) "
                     f"seems too small — verify source. Falling back to defaults."
                 )
-                sla_h = GLOBAL_DEFAULTS.get(btype, 6.0)
+                sla_h = _default_sla_for(btype)
                 sla_source = "GLOBAL_DEFAULT"
             elif sla_h > 48.0:
                 warnings.append(
@@ -1010,7 +1168,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             except Exception:
                 pass
         if sla_h is None:
-            sla_h = GLOBAL_DEFAULTS.get(btype, 6.0)
+            sla_h = _default_sla_for(btype)
             sla_source = "GLOBAL_DEFAULT"
 
         workflows.append({
@@ -1027,10 +1185,38 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             "is_parallel":        is_parallel,
             "sla_hours":          sla_h,
             "sla_source":         sla_source,
+            # VERIFIED   = the file has an explicit "Expected SLA"/"Expected End
+            #              Time"/"SLA" column the customer labelled as the target
+            #              (or a SOW ceiling) — no interpretation was required.
+            # UNVERIFIED = no such explicit column exists anywhere in the file —
+            #              a bare Start/End window or Duration column is NEVER
+            #              treated as the SLA target (see sla_schema below); this
+            #              status compares an observed sample against the
+            #              generic PE default, not a confirmed customer target.
+            "sla_confidence": (
+                "VERIFIED" if sla_source in ("BATCH_SLA_XLSX", "SOW_EXTRACTED") else "UNVERIFIED"
+            ),
+            # Which file-shape case this row was classified as — the dashboard's
+            # own diagnostic of "what kind of SLA data is this", not just a
+            # confidence label. One of EXPLICIT_COLUMN / WINDOW_NO_EXPECTED_COLUMN
+            # / OBSERVED_HISTORY / DURATION_NO_EXPECTED_COLUMN / NO_SIGNAL.
+            # Aggregated file-wide in parse_batch_sla_xlsx to decide whether to
+            # raise a critical "this file has no usable SLA data" warning.
+            "sla_schema":         _sla_schema,
+            # True when this row's "Current end time" was found to be a literal
+            # copy of "Expected End Time/SLA" — placeholder data, not a real
+            # observed run (see the guard above). Exposed so a reviewer/UI can
+            # tell "no runtime shown" apart from "runtime happens to equal SLA".
+            "runtime_is_placeholder": _placeholder_end_time,
             "sla_end_time":       sla_end_time_raw,   # clock-time deadline ("07:00") or None
             "sla_start_time":     contract_start_time, # contracted start-of-window clock time ("14:00:00") or None
             "last_run_hours_xlsx": actual_h,
             "compliance":         compliance_label(actual_h, sla_h),
+            # Human-readable margin of the runtime against the SLA window, in
+            # plain time units — e.g. "2h 0m early" / "15m over" / "on the edge".
+            # Positive = finished before the window closed; negative = ran over.
+            # None when there is no runtime to compare (UNKNOWN rows).
+            "sla_margin_desc":    _format_sla_margin(sla_h, actual_h),
             "source":             "BATCH_SLA_XLSX",
             "source_sheet":       sheet_name,
             # ADHOC/CALENDAR/CYCLIC_INTERVAL workflows excluded from SLA compliance denominator
@@ -1112,10 +1298,16 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
 
     # ── Parse each sheet, deduplicate across sheets ────────────────────────────
     # Primary-normalized workflow name (strip env prefix → UPPER) is the dedup key.
-    # First occurrence wins — sheets are processed in workbook order.
+    # A customer's run-history report commonly repeats the SAME workflow label
+    # across many rows (one per historical execution date) — generic across
+    # any customer, not specific to one file. When that happens, keep the row
+    # with the WORST (largest) observed actual runtime, not just the first
+    # occurrence — "first wins" silently discarded the customer's own
+    # worst-case sample, understating risk in the wrong direction for an audit.
     _all_col_found: set[str] = set()
     _sheets_used: list[str] = []
-    _seen_pkeys: set[str] = set()
+    _pkey_index: dict[str, int] = {}   # pkey -> index into `workflows`
+    _collapsed_counts: dict[str, int] = {}
     workflows: list[dict] = []
 
     for _df, _sheet_name in _dfs_to_process:
@@ -1132,12 +1324,34 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
             # Keying on name alone silently dropped the second row.
             _sched_key = re.sub(r"\s+", " ", str(wf.get("schedule") or "").strip().upper())
             _pkey = f"{_wf_name}|{_sched_key}"
-            if _wf_name and _pkey not in _seen_pkeys:
-                _seen_pkeys.add(_pkey)
+            if not _wf_name:
+                continue
+            if _pkey not in _pkey_index:
+                _pkey_index[_pkey] = len(workflows)
                 workflows.append(wf)
                 _added += 1
+            else:
+                _collapsed_counts[_pkey] = _collapsed_counts.get(_pkey, 0) + 1
+                _existing = workflows[_pkey_index[_pkey]]
+                _new_h = wf.get("last_run_hours_xlsx")
+                _old_h = _existing.get("last_run_hours_xlsx")
+                if isinstance(_new_h, (int, float)) and (
+                    not isinstance(_old_h, (int, float)) or _new_h > _old_h
+                ):
+                    workflows[_pkey_index[_pkey]] = wf
         if _added > 0:
             _sheets_used.append(_sheet_name)
+
+    if _collapsed_counts:
+        for _pkey, _n in _collapsed_counts.items():
+            _wf_label = _pkey.split("|", 1)[0]
+            warnings.append(
+                f"Workflow '{_wf_label}': {_n} additional historical row(s) with the "
+                "same workflow/schedule were found — the worst (longest) observed "
+                "runtime among them was kept for buffer/status, the rest were "
+                "collapsed. Upload a file with one row per contracted SLA "
+                "definition (not per execution date) for a precise ceiling."
+            )
 
     _explicit = sum(1 for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX")
     _fallback = sum(1 for w in workflows if w.get("sla_source") in ("SOW_EXTRACTED", "GLOBAL_DEFAULT"))
@@ -1148,6 +1362,61 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
             f"or 'SLA' column for explicit per-workflow targets."
         )
 
+    # ── File-shape diagnostic: what kind of SLA data does this file actually
+    # contain, and is any of it usable? Aggregated from the per-row sla_schema
+    # tag so this works for ANY customer's column naming, not just the ones
+    # seen so far — the classification is driven by which canonical columns
+    # were found (Batch_Name/Start_Time/End_Time/Expected_SLA/Expected_End_
+    # Time/Actual_Duration), not by hardcoded per-customer logic.
+    _schema_counts: dict[str, int] = {}
+    for w in workflows:
+        _s = w.get("sla_schema") or "NO_SIGNAL"
+        _schema_counts[_s] = _schema_counts.get(_s, 0) + 1
+    _no_signal = _schema_counts.get("NO_SIGNAL", 0)
+    _window_only = _schema_counts.get("WINDOW_NO_EXPECTED_COLUMN", 0)
+    _duration_only = _schema_counts.get("DURATION_NO_EXPECTED_COLUMN", 0)
+    if workflows and _no_signal == len(workflows):
+        warnings.append(
+            f"CRITICAL: none of the {len(workflows)} workflow(s) in this file have "
+            f"ANY usable SLA/runtime signal. Searched for — an explicit target "
+            f"('Expected SLA'/'Expected End Time'/'SLA' column), a Start Time + "
+            f"End Time window, or a Duration/'Total batch time' column — and "
+            f"found none. Columns actually detected: {sorted(_all_col_found) or '(none)'}. "
+            f"Every workflow will use the generic PE default threshold until a "
+            f"file containing one of these is uploaded — confirm the file "
+            f"format with the customer."
+        )
+    elif workflows and _no_signal > 0:
+        warnings.append(
+            f"{_no_signal} of {len(workflows)} workflow(s) have no usable SLA/"
+            f"runtime signal (no Expected SLA, no Start+End window, no Duration "
+            f"column for that specific row) and will use the generic PE default."
+        )
+    if _window_only + _duration_only > 0:
+        warnings.append(
+            f"CRITICAL: {_window_only + _duration_only} workflow(s) have a Start "
+            f"Time/End Time window and/or a Duration column, but NO column the "
+            f"customer explicitly labelled as the SLA target ('Expected SLA', "
+            f"'Expected End Time', 'SLA', 'SLA Deadline'). A Start/End window or "
+            f"a Duration figure tells you how long a batch runs or is scheduled "
+            f"to run — it does NOT tell you what was contracted as acceptable "
+            f"(a 6h observed window could have a 30-minute SLA or a 4-hour SLA; "
+            f"the file does not say). No SLA was populated for these — they use "
+            f"the generic PE default, clearly flagged, until the correct file "
+            f"(with an explicit target column) is provided."
+        )
+
+    _placeholder_count = sum(1 for w in workflows if w.get("runtime_is_placeholder"))
+    if _placeholder_count > 0:
+        warnings.append(
+            f"{_placeholder_count} workflow(s) have a 'Current end time' that is "
+            f"a literal copy of 'Expected End Time/SLA' — this is placeholder "
+            f"data, not a real observed run (matching by construction always "
+            f"produces a fabricated 0% buffer). RUNTIME is shown as unavailable "
+            f"for these rows until a real observed timestamp is provided or "
+            f"Ctrl-M data is uploaded."
+        )
+
     return {
         "workflows": workflows,
         "row_count": len(workflows),
@@ -1155,6 +1424,10 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
         "columns_found": list(_all_col_found),
         "source_sheet": ", ".join(_sheets_used) if _sheets_used else None,
         "warnings":  warnings,
+        # Counts per sla_schema classification — lets a caller (or future UI)
+        # show "14 explicit, 6 inferred-from-window, 0 no-signal" at a glance
+        # instead of re-deriving it from the workflow list.
+        "schema_summary": _schema_counts,
     }
 
 
@@ -1273,9 +1546,12 @@ def build_workflow_job_map(ctrlm_df, batch_sla_rows: list[dict]) -> dict:
 # ── 3-tier SLA resolver ───────────────────────────────────────────────────────
 
 #  Global defaults (last resort — Tier 3)
-#  Must match pe_config.SLA_DEFAULTS — single source of truth.
-#  pe_config reads from config_store at runtime; these are compile-time fallbacks
-#  used only when pe_config import fails.
+#  Compile-time fallbacks only — DAILY/WEEKLY/BIWEEKLY/MONTHLY are Settings-
+#  overridable and must be read live via _default_sla_for() below, not this
+#  dict directly, or a per-engagement override in pe_config silently fails to
+#  reach this file (this dict used to be read unconditionally — see
+#  _test_algorithm_audit.py issue #1, which caught the same bug in
+#  routers/sla_matrix.py; that fix never touched sla_merger.py until now).
 GLOBAL_DEFAULTS: dict[str, float] = {
     "DAILY":       6.0,
     "WEEKLY":      8.0,
@@ -1285,6 +1561,26 @@ GLOBAL_DEFAULTS: dict[str, float] = {
     "OUTBOUND":    1.0,
     "SEQUENCING":  3.0,   # Sequencing windows are typically shorter than main daily batch
 }
+
+
+def _default_sla_for(batch_type: str) -> float:
+    """Tier-3 default SLA hours for a batch type — reads live pe_config for the
+    Settings-overridable types, falls back to GLOBAL_DEFAULTS for the rest
+    (QUARTERLY/OUTBOUND/SEQUENCING have no pe_config setting) or if the import
+    fails."""
+    try:
+        from services import pe_config as _pc
+        _live = {
+            "DAILY":    _pc.SLA_DAILY_HRS,
+            "WEEKLY":   _pc.SLA_WEEKLY_HRS,
+            "BIWEEKLY": _pc.SLA_BIWEEKLY_HRS,
+            "MONTHLY":  _pc.SLA_MONTHLY_HRS,
+        }
+        if batch_type in _live:
+            return float(_live[batch_type])
+    except Exception:
+        pass
+    return GLOBAL_DEFAULTS.get(batch_type, 6.0)
 
 
 def resolve_sla_tier(
@@ -1411,7 +1707,7 @@ def resolve_sla_tier(
 
     # Tier 3: Global defaults
     return {
-        "limit_hours": GLOBAL_DEFAULTS.get(batch_type, 6.0),
+        "limit_hours": _default_sla_for(batch_type),
         "batch_type":  batch_type,
         "workflow":    None,
         "source":      "GLOBAL_DEFAULT",
@@ -1421,16 +1717,40 @@ def resolve_sla_tier(
 
 # ── Compliance ────────────────────────────────────────────────────────────────
 
+def _format_sla_margin(sla_h: Optional[float], actual_h: Optional[float]) -> Optional[str]:
+    """Plain-English margin of runtime vs the SLA window.
+
+    Returns e.g. "2h 0m before deadline", "15m over", "on the edge (0 slack)",
+    or None when there is nothing to compare (no runtime).
+    Positive margin (sla − actual) = finished early; negative = ran over.
+    """
+    if actual_h is None or sla_h is None or sla_h <= 0:
+        return None
+    margin_h = sla_h - actual_h
+    total_min = round(abs(margin_h) * 60)
+    if total_min < 1:
+        return "on the edge (0 slack)"
+    hh, mm = divmod(total_min, 60)
+    parts = []
+    if hh:
+        parts.append(f"{hh}h")
+    if mm or not hh:
+        parts.append(f"{mm}m")
+    span = " ".join(parts)
+    return f"{span} before deadline" if margin_h > 0 else f"{span} over"
+
+
 def compliance_label(actual_h: Optional[float], sla_h: Optional[float]) -> str:
     """Classify a workflow's last-known run against its SLA.
 
     Thresholds read from pe_config (single canonical source).
     Falls back to module-level defaults if pe_config is unavailable.
     Formula: buffer_pct = (sla_h - actual_h) / sla_h * 100
-      buffer <= 0%            → BREACH
-      0% < buffer <= AT_RISK  → AT_RISK
-      AT_RISK < buffer <= LJ  → LONG_JOB
-      buffer > LJ             → OK
+      buffer < 0%            → BREACH   (runtime exceeded the window)
+      buffer == 0% (±0.5%)   → NO_BUFFER (runs to the exact edge — zero slack)
+      0% < buffer <= AT_RISK → AT_RISK
+      AT_RISK < buffer <= LJ → LONG_JOB
+      buffer > LJ            → OK
     """
     if actual_h is None or sla_h is None or sla_h <= 0:
         return "UNKNOWN"
@@ -1441,7 +1761,13 @@ def compliance_label(actual_h: Optional[float], sla_h: Optional[float]) -> str:
     except Exception:
         _at, _lj = 15.0, 40.0     # safe fallback if circular import
     buffer_pct = (sla_h - actual_h) / sla_h * 100
-    if buffer_pct <= 0:
+    # NO_BUFFER: runtime == window (file stated the same span twice, or the
+    # batch is genuinely designed to fill its entire window). Zero contractual
+    # slack is a real PE concern, but it is NOT a breach — reserve red BREACH
+    # for a genuinely negative buffer (runtime actually longer than the window).
+    if abs(buffer_pct) < 0.5:
+        return "NO_BUFFER"
+    if buffer_pct < 0:
         return "BREACH"
     if buffer_pct <= _at:
         return "AT_RISK"

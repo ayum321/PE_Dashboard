@@ -143,6 +143,8 @@ class BatchResponse(BaseModel):
     longpole_matrix: Optional[Dict[str, Any]] = None
     # Explicit analyst exclusions that define the in-scope batch KPI population.
     user_excluded_job_names: List[str] = Field(default_factory=list)
+    # Session-only reviewer decision trail; never persisted as configuration.
+    manual_exclusion_audit: List[Dict[str, str]] = Field(default_factory=list)
     # Concurrent-job evidence: which distinct jobs genuinely overlapped in
     # clock time, on how many days, and the peak simultaneous-run count.
     concurrency: Optional[Dict[str, Any]] = None
@@ -152,6 +154,11 @@ class BatchJsonRequest(BaseModel):
     """JSON body for the pre-parsed endpoint."""
     filename: Optional[str] = None
     rows: List[Dict[str, Any]]
+
+
+class BatchRefreshRequest(BaseModel):
+    """Session-only reviewer exclusions supplied when Batch Review is refreshed."""
+    manual_exclusions: List[Dict[str, str]] = Field(default_factory=list)
 
 
 # ── Helpers ─────────────────────────────────────────────────────
@@ -276,6 +283,7 @@ def _payload_to_response(
         failure_grid=payload.get("failure_grid"),
         longpole_matrix=payload.get("longpole_matrix"),
         user_excluded_job_names=payload.get("user_excluded_job_names") or [],
+        manual_exclusion_audit=payload.get("manual_exclusion_audit") or [],
         concurrency=payload.get("concurrency"),
     )
 
@@ -573,7 +581,7 @@ async def process_batch_json(body: BatchJsonRequest) -> BatchResponse:
     status_code=status.HTTP_200_OK,
     summary="Re-run batch KPIs using cached run data + current SLA config",
 )
-def refresh_batch() -> BatchResponse:
+def refresh_batch(body: BatchRefreshRequest | None = None) -> BatchResponse:
     """Re-compute the batch payload from the job_runs_df stored in session cache.
 
     Called automatically by the frontend after the SLA matrix is uploaded or
@@ -610,6 +618,19 @@ def refresh_batch() -> BatchResponse:
             df["Sub_Application"] = "UNKNOWN"
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error restoring cached data: {exc}") from exc
+
+    # Reviewer exclusions belong to this audit session, never persistent configuration.
+    if body is not None:
+        known_names = {str(name).strip().upper(): str(name).strip() for name in df.get("Job_Name", pd.Series(dtype=str)).dropna().unique() if str(name).strip()}
+        audit: list[dict[str, str]] = []
+        for item in body.manual_exclusions:
+            canonical = known_names.get(str(item.get("name") or "").strip().upper())
+            if canonical:
+                audit.append({"name": canonical, "reason": str(item.get("reason") or "").strip(), "scope": "ALL_BATCH_METRICS", "recorded_at": pd.Timestamp.now(tz="UTC").isoformat()})
+        by_name = {item["name"].upper(): item for item in audit}
+        audit = [by_name[key] for key in sorted(by_name)]
+        _sc.ac_set("batch_manual_exclusion_audit", audit)
+        _sc.ac_set("manual_excluded_jobs", [item["name"] for item in audit])
 
     payload = build_batch_payload(df)
     filename = (_sc.get("last_batch") or {}).get("filename") or "cached_batch.csv"

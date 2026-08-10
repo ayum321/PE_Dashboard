@@ -2398,6 +2398,19 @@ def _vm_total_memory_bytes(credential, subscription_id: str, vm_size: str) -> Op
     return None
 
 
+def _extract_product_group(tags: dict) -> str:
+    """Read a 'Product Group' tag under any real-world key casing/spacing a
+    customer might use (ProductGroup, product_group, Product-Group, ...) —
+    generic across every customer's own tagging convention, not one literal
+    key name."""
+    if not tags:
+        return ""
+    for k, v in tags.items():
+        if k.replace("_", "").replace("-", "").replace(" ", "").lower() == "productgroup":
+            return v or ""
+    return ""
+
+
 def _infer_server_type(name: str, tags: Optional[dict] = None, rg: str = "") -> str:
     """
     Classify VM role from its name, Azure tags, and resource group.
@@ -2483,6 +2496,7 @@ def discover_vms(cfg: dict, resource_group: Optional[str] = None,
             "vm_size":       vm["vm_size"],
             "resource_group": vm["rg"],
             "tags":          vm.get("tags", {}),
+            "product_group": _extract_product_group(vm.get("tags") or {}),
         })
 
     # Sort: DB first, then SRE, then APP, then alphabetically
@@ -2563,6 +2577,7 @@ def search_vms(credential, query: str,
             "resource_group": rg,
             "subscription_id": row.get("subscriptionId", ""),
             "tags":           tags,
+            "product_group":  _extract_product_group(tags),
             "customer":       tags.get("CustomerName") or tags.get("customerName") or "",
             "application":    tags.get("Application") or tags.get("application") or "",
             "environment":    tags.get("Environment_Type") or tags.get("environment_type")
@@ -2701,6 +2716,7 @@ def _build_server_records(credential, vms: List[dict],
     resource_ids = [v["resource_id"] for v in vms]
 
     t0 = _time.perf_counter()
+
     metrics_map = _query_metrics(credential, resource_ids, hours_back)
     t_metrics = _time.perf_counter() - t0
     logger.info("Metrics query took %.1fs for %d VMs", t_metrics, len(vms))
@@ -2775,6 +2791,7 @@ def _build_server_records(credential, vms: List[dict],
         disk_max_pct = round(_disk_max, 2) if _disk_max is not None else None
         disk_min_pct = round(_disk_min, 2) if _disk_min is not None else None
 
+        _tags = vm.get("tags") or {}
         servers.append({
             "host":          name.lower(),
             "server":        name.lower(),
@@ -2796,7 +2813,13 @@ def _build_server_records(credential, vms: List[dict],
             "resource_id":   rid,
             "location":      vm["location"],
             "vm_size":       vm["vm_size"],
+            # The ARM size name is already known. Do not block this critical
+            # collection path on a subscription-wide Compute SKU catalogue
+            # scan merely to decorate it with vCPU metadata.
+            "vm_size_desc":  (vm["vm_size"] or "").replace("_", " "),
             "resource_group":vm["rg"],
+            "tags":          _tags,
+            "product_group": _extract_product_group(_tags),
             "source":        "azure_monitor",
             "hours_back":    hours_back,
         })

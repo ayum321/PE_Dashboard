@@ -620,11 +620,17 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
         "DAILY": "daily_sla_hrs", "WEEKLY": "weekly_sla_hrs",
         "MONTHLY": "monthly_sla_hrs", "CUSTOM": "custom_sla_hrs",
     }
+    # Only feed back rows genuinely stated in the file (VERIFIED — an explicit
+    # SLA/Expected-End column, or a SOW ceiling). A row that only resolved via
+    # the Tier-3 generic-default fallback (UNVERIFIED) carries no customer
+    # signal — feeding it back would silently overwrite a real Settings
+    # override (or a prior upload's genuine ceiling) with the engine's own
+    # generic default on every re-upload of a file with no SLA column.
     _ceil: dict[str, float] = {}
     for w in (result.get("workflows") or []):
         sla_h = w.get("sla_hours")
         sched = (w.get("batch_type") or "").upper()
-        if sla_h and sla_h > 0 and sched in _SLA_KEY_MAP:
+        if sla_h and sla_h > 0 and sched in _SLA_KEY_MAP and w.get("sla_confidence") == "VERIFIED":
             if sched not in _ceil or sla_h > _ceil[sched]:
                 _ceil[sched] = sla_h
     for sla_key, hrs in _ceil.items():

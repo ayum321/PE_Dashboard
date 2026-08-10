@@ -91,6 +91,10 @@ def update_config(payload: ConfigPayload) -> dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
     for k, v in updates.items():
         config_store.set(k, v)
+    # Hot-reload pe_config so a Settings save (e.g. daily_sla_hrs) takes effect
+    # on the running server immediately, not just on the next restart/upload.
+    from services import pe_config
+    pe_config.reload()
     return {"status": "ok", "updated": list(updates.keys())}
 
 

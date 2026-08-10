@@ -2179,6 +2179,11 @@
                     <option value="TEST">TEST</option>
                     <option value="DEV">DEV</option>
                   </select>
+                  <select id="resource-filter-product-group"
+                          class="bg-Cbg border border-Cborder rounded-md px-2 py-1.5 text-xs text-Cwhite focus:outline-none focus:border-Cblue"
+                          title="Filter by the 'Product Group' Azure tag (e.g. SCPO) — options populate from this engagement's actual tagged servers.">
+                    <option value="">All Product Groups</option>
+                  </select>
                   <select id="resource-filter-status"
                           class="bg-Cbg border border-Cborder rounded-md px-2 py-1.5 text-xs text-Cwhite focus:outline-none focus:border-Cblue">
                     <option value="">All Status</option>
@@ -2208,6 +2213,7 @@
                       <th class="py-2 pr-3 text-right cursor-pointer select-none hover:text-Cwhite transition" data-sort="mem_gb">Mem GB <span class="sort-arrow"></span></th>
                       <th class="py-2 pr-3 text-right cursor-pointer select-none hover:text-Cwhite transition" data-sort="disk_pct">Disk % <span class="sort-arrow"></span></th>
                       <th class="py-2 pr-3 cursor-pointer select-none hover:text-Cwhite transition" data-sort="status">Status <span class="sort-arrow"></span></th>
+                      <th class="py-2 pr-3" title="Azure VM size and hardware spec (vCPUs / memory) pulled from the Compute SKU catalogue.">Size</th>
                       <th class="py-2 pr-3">Source</th>
                     </tr>
                   </thead>
@@ -4120,9 +4126,9 @@
     .az-seg-group {
       display: inline-flex;
       border: 1px solid rgba(51,65,85,0.7);
-      border-radius: 4px;
+      border-radius: 8px;
       overflow: hidden;
-      background: rgba(10,11,15,0.6);
+      background: rgba(2,6,14,0.72);
     }
     .az-seg-group .az-seg-btn + .az-seg-btn { border-left: 1px solid rgba(51,65,85,0.5); }
 
@@ -4137,14 +4143,19 @@
       gap: 5px;
       user-select: none;
       font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
-      font-size: 10px;
+      min-height: 36px;
+      font-size: 11px;
       font-weight: 600;
       letter-spacing: 0.05em;
-      padding: 6px 12px;
+      padding: 8px 13px;
       border-bottom: 2px solid transparent;
-      transition: color 0.12s, background 0.12s, border-color 0.12s;
+      transition: color 0.12s, background 0.12s, border-color 0.12s, box-shadow 0.12s;
     }
-    .az-seg-btn:hover { color: #cbd5e1; background: rgba(255,255,255,0.05); }
+    .az-seg-btn:hover { color: #e2e8f0; background: rgba(148,163,184,0.10); }
+    .az-seg-btn:focus-visible, .az-action-btn:focus-visible, .az-filter-reset:focus-visible {
+      outline: 2px solid #60a5fa;
+      outline-offset: 2px;
+    }
 
     /* Dot indicator */
     .az-dot { width:5px; height:5px; border-radius:50%; display:inline-block; flex-shrink:0; opacity:0.55; transition: opacity 0.12s; }
@@ -4152,8 +4163,8 @@
 
     /* Count chip — Industrial: tabular, tight border */
     .az-chip {
-      font-size: 9px; padding: 1px 5px;
-      border-radius: 2px; margin-left: 2px;
+      font-size: 10px; padding: 1px 6px;
+      border-radius: 4px; margin-left: 3px;
       min-width: 18px; text-align: center;
       color: inherit; font-variant-numeric: tabular-nums;
       display: inline-block;
@@ -4164,7 +4175,7 @@
     .az-chip:empty { display:none; }
 
     /* Active — All (neutral): white bottom bar */
-    .az-seg-btn.az-active { color:#e2e8f0; background:rgba(255,255,255,0.08); border-bottom-color: rgba(148,163,184,0.55); }
+    .az-seg-btn.az-active { color:#f8fafc; background:rgba(148,163,184,0.15); border-bottom-color: rgba(226,232,240,0.85); box-shadow: inset 0 1px 0 rgba(255,255,255,0.09); }
     .az-seg-btn.az-active .az-chip { background:rgba(255,255,255,0.12); border-color:rgba(255,255,255,0.18); }
 
     /* Active — Type: signal bottom bar + fill + chip tint */
@@ -4189,15 +4200,31 @@
 
     /* Filter panel container */
     .az-filter-panel {
-      background: rgba(5,7,12,0.5);
+      background: rgba(5,7,12,0.72);
       border: 1px solid rgba(51,65,85,0.65);
-      border-radius: 6px;
-      padding: 0 12px;
+      border-radius: 10px;
+      padding: 0 14px;
     }
+    .az-filter-toolbar {
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      padding:12px 0 10px; border-bottom:1px solid rgba(51,65,85,0.42);
+    }
+    .az-filter-title { font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:10px; font-weight:700; letter-spacing:0.10em; text-transform:uppercase; color:#cbd5e1; }
+    .az-filter-result { margin-left:8px; color:#64748b; font-size:10px; font-weight:500; letter-spacing:0.02em; }
+    .az-filter-reset, .az-action-btn {
+      font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:10px; font-weight:700;
+      letter-spacing:0.04em; border-radius:6px; transition:color 0.12s, background 0.12s, border-color 0.12s;
+    }
+    .az-filter-reset { color:#94a3b8; padding:6px 9px; border:1px solid rgba(71,85,105,0.75); background:rgba(15,23,42,0.48); }
+    .az-filter-reset:hover { color:#f8fafc; border-color:rgba(96,165,250,0.6); background:rgba(59,130,246,0.12); }
+    .az-action-btn { padding:7px 10px; border:1px solid rgba(71,85,105,0.72); color:#cbd5e1; background:rgba(15,23,42,0.52); }
+    .az-action-btn:hover { color:#f8fafc; border-color:rgba(96,165,250,0.60); background:rgba(59,130,246,0.12); }
+    .az-action-btn-primary { color:#93c5fd; border-color:rgba(59,130,246,0.56); background:rgba(37,99,235,0.14); }
+    .az-action-btn-primary:hover { color:#dbeafe; background:rgba(37,99,235,0.25); }
     /* Filter rows with dividers */
     .az-filter-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 8px 0;
+      display: flex; align-items: center; gap: 14px;
+      padding: 10px 0;
       border-bottom: 1px solid rgba(51,65,85,0.3);
     }
     .az-filter-row:last-child { border-bottom: none; }
@@ -4205,10 +4232,10 @@
     /* Row label — mono, uppercase, muted */
     .az-row-label {
       font-family: 'IBM Plex Mono', ui-monospace, monospace;
-      font-size: 8px; font-weight: 700;
+      font-size: 9px; font-weight: 700;
       letter-spacing: 0.14em; text-transform: uppercase;
       color: rgba(71,85,105,0.9);
-      width: 30px; flex-shrink: 0;
+      width: 74px; flex-shrink: 0;
     }
 
     /* Search input — mono, Industrial */
@@ -4223,6 +4250,13 @@
     }
     .az-search::placeholder { color: rgba(71,85,105,0.7); }
     .az-search:focus { border-color: rgba(59,130,246,0.55); box-shadow: 0 0 0 2px rgba(59,130,246,0.1); }
+    @media (max-width: 640px) {
+      .az-filter-toolbar { align-items:flex-start; }
+      .az-filter-row { align-items:flex-start; flex-direction:column; gap:7px; }
+      .az-row-label { width:auto; }
+      .az-seg-group { max-width:100%; overflow-x:auto; }
+      .az-action-btn { padding:6px 8px; font-size:9px; }
+    }
 
     /* Table row styling */
     #azure-vm-table-body tr:nth-child(even) { background: rgba(255,255,255,0.016); }
@@ -4358,27 +4392,34 @@
           </div>
           <div id="azure-vm-env-badges" class="flex items-center gap-1 flex-wrap pl-2 border-l border-slate-700/60"></div>
           <div class="ml-auto flex items-center gap-3">
-            <button onclick="azureSelectAll(true)"  class="text-[10px] font-mono font-semibold text-blue-400 hover:text-white transition-colors tracking-wide">Select all</button>
-            <span class="text-slate-700">·</span>
-            <button onclick="azureSelectAll(false)" class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Clear</button>
+            <div class="flex items-center gap-2" role="group" aria-label="VM selection actions">
+              <button onclick="azureSelectAll(true)" class="az-action-btn az-action-btn-primary">Select all VMs</button>
+              <button onclick="azureSelectAll(false)" class="az-action-btn">Clear selection</button>
+            </div>
             <span class="text-slate-700 hidden" id="azure-group-sep">·</span>
             <div id="azure-group-toggle-wrap" class="hidden items-center gap-2" title="Collapse/expand customer groups to bifurcate a large VM list">
-              <button onclick="azureExpandAllCustomers(true)"  class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Expand all</button>
-              <span class="text-slate-700">·</span>
-              <button onclick="azureExpandAllCustomers(false)" class="text-[10px] font-mono text-slate-500 hover:text-white transition-colors tracking-wide">Collapse all</button>
+              <button onclick="azureExpandAllCustomers(true)" class="az-action-btn">Expand groups</button>
+              <button onclick="azureExpandAllCustomers(false)" class="az-action-btn">Collapse groups</button>
             </div>
           </div>
         </div>
 
         <!-- Filter panel — Industrial segmented controls -->
         <div class="az-filter-panel">
+          <div class="az-filter-toolbar">
+            <div>
+              <span class="az-filter-title">Fleet filters</span>
+              <span id="azure-filter-result-count" class="az-filter-result" aria-live="polite"></span>
+            </div>
+            <button type="button" onclick="azureResetVmFilters()" class="az-filter-reset" title="Clear Type, Environment, Region, Product Group and search filters">Reset filters</button>
+          </div>
 
           <!-- TYPE row -->
           <div class="az-filter-row">
             <span class="az-row-label">Type</span>
-            <div class="az-seg-group" role="group">
+            <div class="az-seg-group" role="group" aria-label="VM type filters">
               <button onclick="azureFilterType('ALL')" data-type="ALL"
-                class="azure-type-filter az-seg-btn az-active">All</button>
+                class="azure-type-filter az-seg-btn az-active" aria-pressed="true">All</button>
               <button onclick="azureFilterType('APP')" data-type="APP"
                 class="azure-type-filter az-seg-btn az-type-app">
                 <span class="az-dot" style="background:#10b981"></span>APP<span class="az-chip" id="az-cnt-app"></span>
@@ -4397,9 +4438,9 @@
           <!-- ENV row -->
           <div class="az-filter-row">
             <span class="az-row-label">Env</span>
-            <div class="az-seg-group" role="group">
+            <div class="az-seg-group" role="group" aria-label="VM environment filter">
               <button onclick="azureFilterEnv('ALL')" data-env="ALL"
-                class="azure-env-filter az-seg-btn az-active">All</button>
+                class="azure-env-filter az-seg-btn az-active" aria-pressed="true">All</button>
               <button onclick="azureFilterEnv('PROD')" data-env="PROD"
                 class="azure-env-filter az-seg-btn az-env-prod">PROD<span class="az-chip" id="az-cnt-prod"></span></button>
               <button onclick="azureFilterEnv('TEST')" data-env="TEST"
@@ -4418,10 +4459,23 @@
                regions can be bifurcated and audited one region at a time. -->
           <div class="az-filter-row" id="az-region-filter-row">
             <span class="az-row-label">Region</span>
-            <div class="az-seg-group flex-wrap" role="group" id="az-region-seg-group">
+            <div class="az-seg-group flex-wrap" role="group" aria-label="Azure region filter" id="az-region-seg-group">
               <button onclick="azureFilterRegion('ALL')" data-region="ALL"
-                class="azure-region-filter az-seg-btn az-active">All</button>
+                class="azure-region-filter az-seg-btn az-active" aria-pressed="true">All</button>
               <!-- Region buttons injected by _updateRegionFilterButtons() -->
+            </div>
+          </div>
+
+          <!-- PRODUCT GROUP row — built dynamically from each VM's 'Product Group'
+               Azure tag (e.g. SCPO), so a specific product's servers can be
+               selected without hand-picking rows out of a 200+ VM list. Hidden
+               entirely when no VM in this subscription carries the tag. -->
+          <div class="az-filter-row hidden" id="az-pg-filter-row">
+            <span class="az-row-label">Product Group</span>
+            <div class="az-seg-group flex-wrap" role="group" aria-label="Product group filter" id="az-pg-seg-group">
+              <button onclick="azureFilterProductGroup('ALL')" data-pg="ALL"
+                class="azure-pg-filter az-seg-btn az-active" aria-pressed="true">All</button>
+              <!-- Product Group buttons injected by _updatePgFilterButtons() -->
             </div>
           </div>
 

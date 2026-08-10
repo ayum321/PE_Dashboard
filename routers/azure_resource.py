@@ -839,7 +839,7 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
 
             # Phase 2: Metrics query
             t_metrics = time.perf_counter()
-            yield _sse("progress", {"phase": "Querying metrics", "done": 0, "total": total})
+            yield _sse("progress", {"phase": "Querying Azure Monitor metrics", "done": 0, "total": total})
 
             servers = _build_server_records(credential, vms, body.hours_back)
             metrics_elapsed = round(time.perf_counter() - t_metrics, 1)

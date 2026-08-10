@@ -887,7 +887,7 @@ _COL_PATTERNS: List[Tuple[re.Pattern, str]] = [
                 r"|window[\s_-]?end|sla[\s_-]?end|sla[\s_-]?time$|^sla$"
                 r"|due[\s_-]?by|due[\s_-]?time|due[\s_-]?date|^due$"
                 r"|complete[\s_-]?by|must[\s_-]?complete[\s_-]?by"
-                r"|^end$|^finish$|^closes?$"
+                r"|^end$|^finish$|^closes?$|^end[\s_-]?time$"
                 r"|completion[\s_-]?time|end[\s_-]?by|finish[\s_-]?by|close[\s_-]?time"
                 r"|must[\s_-]?end[\s_-]?by", re.I), "sla_end_time"),
     # ── Target / expected completion (when separate from hard deadline) ───────
@@ -960,6 +960,22 @@ def _extract_tz_from_value(raw: str) -> str:
     return m.group(0).strip().upper() if m else ""
 
 
+# Header names that unambiguously denote an OBSERVED/ACTUAL elapsed duration
+# of one historical run (e.g. "Live GMP run time", "Total batch time") rather
+# than a wall-clock SLA/schedule field. These must never be value-inferred
+# into start_time/sla_end_time/expected_completion_time — the header itself
+# already tells us what the column is, and its values (e.g. "3:50:02") often
+# *look* like clock times even though they are a sub-phase runtime, not a
+# contracted deadline. Caught real bug: 'Live GMP run time' was silently
+# swept into 'expected_completion_time' by the value-based fallback below,
+# fabricating a bogus contractual buffer from an unrelated duration column.
+_OBSERVED_DURATION_HEADER = re.compile(
+    r"run[\s_-]?time|runtime|elapsed|batch[\s_-]?time|total[\s_-]?time"
+    r"|actual[\s_-]?duration|actual[\s_-]?run",
+    re.I,
+)
+
+
 def _infer_unmapped_columns(
     df: "pd.DataFrame",
     existing_canonical: "set[str]",
@@ -981,6 +997,12 @@ def _infer_unmapped_columns(
     for col in df.columns:
         if col in existing_canonical:
             continue  # already mapped by header
+        # Header-name veto: a column literally named "Live GMP run time" /
+        # "Total batch time" is an OBSERVED duration of one execution, never
+        # a schedule/SLA field — regardless of what its stringified values
+        # look like. Skip it entirely so it can't be swept into a time slot.
+        if _OBSERVED_DURATION_HEADER.search(str(col)):
+            continue
         series = df[col].dropna()
         if len(series) < 2:
             continue
@@ -1216,6 +1238,30 @@ def _detect_business_ack(comments: str) -> bool:
     return bool(_ACK_PATTERNS.search(comments or ""))
 
 
+# A genuine SLA contract states a repeatable clock time ("9:00 PM", "6:00 AM")
+# — it does not carry a specific calendar date, because the same window
+# applies every day/week/month. When a Start/End cell instead carries a full
+# calendar date (e.g. "2026-04-09 00:29:00", "4/9/2026 12:29 AM"), that is
+# strong evidence the value is an OBSERVED timestamp of one historical
+# execution, not the contracted SLA definition.
+_DATED_TIMESTAMP = re.compile(
+    r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}-\d{1,2}-\d{2,4}"
+)
+# Excel serializes a "time only" formatted cell with a null/epoch date —
+# these carry a date-shaped substring but are NOT evidence of an observed
+# historical run; treat them as plain time-of-day values.
+_EXCEL_EPOCH_DATES = ("1899-12-30", "1899-12-31", "1900-01-00", "1900-01-01")
+
+
+def _looks_like_dated_timestamp(raw: str) -> bool:
+    """True when a Start/End cell carries a calendar date, not just a
+    repeatable clock time — i.e. it's an observed run, not an SLA term."""
+    m = _DATED_TIMESTAMP.search(str(raw or ""))
+    if not m:
+        return False
+    return not m.group(0).startswith(_EXCEL_EPOCH_DATES)
+
+
 def _has_unmatched_comment(comments: str, business_ack: bool) -> bool:
     """True when a business/analyst left free-text comment context on this
     row that the ACK regex did NOT recognise (e.g. "OK per business",
@@ -1361,6 +1407,12 @@ class SlaContract:
     #                   → this is the signed contract ceiling, breach = contract violation
     #   INFERRED      — could not determine which tier this belongs to
     sla_source_type: str = "INFERRED"         # JOB_SPECIFIC | SOW_SCHEDULE | INFERRED
+    # True when this row's Start/End cells carry a calendar date (an OBSERVED
+    # execution timestamp) AND the same batch/schedule label repeats across
+    # multiple distinct dates — i.e. this is a run-history log, not a
+    # repeatable SLA contract term. Rows flagged True are EXCLUDED from
+    # ceiling/named_ceiling derivation — see ingest_sla_file().
+    is_observed_history: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1394,6 +1446,7 @@ class SlaContract:
             "health_reason": self.health_reason,
             "has_unmatched_comment": self.has_unmatched_comment,
             "sla_source_type": self.sla_source_type,
+            "is_observed_history": self.is_observed_history,
         }
 
 
@@ -1633,12 +1686,15 @@ def _ingest_sla_sheet(df_raw, sheet_name: str, result: "SlaIngestResult") -> int
         return s
 
     added = 0
+    _sheet_contracts: List["SlaContract"] = []
+    _dated_dates_by_group: Dict[str, set] = {}
     for idx, row in df.iterrows():
         batch_name    = _cell(row, "batch_name")    if has_batch_name else ""
         schedule_raw  = _cell(row, "schedule_text") if has_schedule   else ""
         schedule_type = classify_schedule(schedule_raw or batch_name)
 
-        start_t = _parse_time(_cell(row, "start_time"))   if has_start    else None
+        _raw_start_cell = _cell(row, "start_time") if has_start else ""
+        start_t = _parse_time(_raw_start_cell)   if has_start    else None
         end_cell = _cell(row, "sla_end_time") if has_end else ""
         end_t    = _parse_time(end_cell) if end_cell else None
         dur_hrs  = _parse_duration_hrs(_cell(row, "sla_duration")) if has_duration else None
@@ -1796,11 +1852,47 @@ def _ingest_sla_sheet(df_raw, sheet_name: str, result: "SlaIngestResult") -> int
             else ("INFERRED" if _is_placeholder else "JOB_SPECIFIC")
         )
 
+        # ── Observed-run-history detection ──────────────────────────────────
+        # A Start/End cell carrying a calendar date (not just a repeatable
+        # clock time) is an OBSERVED timestamp of one historical execution —
+        # flagged on its own, per row. ingest_sla_file() excludes these rows
+        # from ceiling derivation so a customer's fastest historical run never
+        # gets silently promoted to "the contracted SLA."
+        _group_key = _bn_upper or schedule_type
+        _date_m = _DATED_TIMESTAMP.search(_raw_start_cell) or _DATED_TIMESTAMP.search(end_cell)
+        _row_is_dated = _looks_like_dated_timestamp(_raw_start_cell) or _looks_like_dated_timestamp(end_cell)
+        if _row_is_dated:
+            contract.is_observed_history = True
+        if _date_m:
+            _dated_dates_by_group.setdefault(_group_key, set()).add(_date_m.group(0))
+
         result.contracts.append(contract)
+        _sheet_contracts.append(contract)
         added += 1
 
         if batch_name:
             result.schedule_map[batch_name] = schedule_type
+
+    # Build a clear, single warning summarizing which groups were affected.
+    _observed_groups = {
+        c.batch_name.upper().strip() or c.schedule_type
+        for c in _sheet_contracts if c.is_observed_history
+    }
+    if _observed_groups:
+        _n_flagged = sum(1 for c in _sheet_contracts if c.is_observed_history)
+        result.warnings.append({
+            "code": "ACTUAL_RUN_HISTORY_DETECTED",
+            "text": (
+                f"Sheet '{sheet_name}': {_n_flagged} row(s) for "
+                f"{', '.join(sorted(_observed_groups))} carry dated, historical "
+                "Start/End timestamps (an observed execution's actual clock time), "
+                "not a repeatable contracted SLA window. No SLA ceiling was derived "
+                "from these rows — upload a file with an explicit "
+                "SLA/Expected/Target/Deadline column, or confirm the customer's "
+                "contracted SLA separately."
+            ),
+            "severity": "critical",
+        })
 
     return added
 
@@ -1907,7 +1999,12 @@ def ingest_sla_file(raw_bytes: bytes, filename: str) -> SlaIngestResult:
     # drowning out a 6h nightly batch) and cause everything to appear compliant.
     # Also store per-batch-name ceilings in named_ceilings so job-level lookup
     # can resolve individual contracts beyond the coarse DAILY/WEEKLY/MONTHLY keys.
+    # Rows flagged is_observed_history are historical execution timestamps, not
+    # a contracted SLA term — never let them define the ceiling (would fabricate
+    # a "contract" out of whichever historical run happened to be fastest).
     for contract in result.contracts:
+        if contract.is_observed_history:
+            continue
         if contract.sla_window_hrs and contract.sla_window_hrs > 0:
             sched = contract.schedule_type
             if sched in ("DAILY", "WEEKLY", "MONTHLY"):
@@ -1941,6 +2038,18 @@ def ingest_sla_file(raw_bytes: bytes, filename: str) -> SlaIngestResult:
             "text": "No MONTHLY SLA found in file — no default applied. Monthly jobs will be assessed without a ceiling.",
             "severity": "warning",
         })
+    for _sched in ("DAILY", "WEEKLY"):
+        if _sched not in result.ceilings:
+            result.missing_ceilings.append(_sched)
+            result.warnings.append({
+                "code": f"MISSING_{_sched}",
+                "text": f"No {_sched} SLA ceiling could be confidently derived from this file "
+                        f"(either no {_sched} rows were found, or the only {_sched} rows were "
+                        "dated historical run timestamps, not a contracted SLA term) — "
+                        f"{_sched} jobs will fall back to the pe_config default until a proper "
+                        "SLA/Expected/Target/Deadline column is provided.",
+                "severity": "warning",
+            })
 
     # ── Compute file-level contract_type from the mix of sla_source_type labels ──
     # JOB_MATRIX   ≥ 70% of contracts are JOB_SPECIFIC
