@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import os
 
+from routers import archive as archive_router
 from routers import batch as batch_router
 from routers import benchmark as benchmark_router
 from routers import config as config_router
@@ -153,6 +154,7 @@ async def serve_static(file_path: str):
 
 # ── Routers ─────────────────────────────────────────────────────
 app.include_router(upload_router.router,      prefix="/api", tags=["upload"])
+app.include_router(archive_router.router,     prefix="/api", tags=["archive"])
 app.include_router(batch_router.router,       prefix="/api", tags=["batch"])
 app.include_router(resource_router.router,    prefix="/api", tags=["resource"])
 app.include_router(export_router.router,      prefix="/api", tags=["export"])
@@ -280,6 +282,16 @@ async def index(request: Request) -> HTMLResponse:
     """Render the SPA shell. Cache-bust key via content hash of app.js."""
     _v = _file_content_hash(STATIC_DIR / "app.js")
     response = templates.TemplateResponse(request, "index.html", {"static_v": _v})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/archive", response_class=HTMLResponse, include_in_schema=False)
+async def report_archive_page(request: Request) -> HTMLResponse:
+    """Standalone local Report Archive page — separate from the main
+    dashboard SPA on purpose, so browsing past reports never risks the
+    main app's state/tabs. Data comes from /api/report-archive*."""
+    response = templates.TemplateResponse(request, "report_archive.html", {})
     response.headers["Cache-Control"] = "no-store"
     return response
 

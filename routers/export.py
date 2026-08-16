@@ -13,6 +13,7 @@ JS framework, no external assets — safe to email or archive.
 from __future__ import annotations
 
 import html as html_lib
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict
 
 from services import pe_config
+from services import report_archive
 from services.pe_utils import coerce_float as _f
 from services.resource_calculator import (
     role_cpu_thresholds as _role_cpu_thr,
@@ -43,7 +45,6 @@ MEM_WARN = pe_config.MEM_CRIT
 DISK_OK  = pe_config.DISK_WARN
 DISK_WARN = pe_config.DISK_CRIT
 DAILY_LIMIT_HRS   = pe_config.SLA_DAILY_HRS
-MONTHLY_LIMIT_HRS = pe_config.SLA_MONTHLY_HRS
 
 
 # ── Pydantic models ────────────────────────────────────────────
@@ -211,27 +212,87 @@ def _iss_rows(issues: List[dict]) -> str:
 
 def _top_rows(top_jobs: List[dict]) -> str:
     if not top_jobs:
-        return "<tr><td colspan='5' class='dim' style='text-align:center;padding:20px'>No batch data</td></tr>"
+        return "<tr><td colspan='6' class='dim' style='text-align:center;padding:20px'>No batch data</td></tr>"
+
+    source_labels = {
+        "sla_matrix": "Contracted",
+        "batch_sla_xlsx": "Contracted",
+        "batch_sla_xlsx_tokens": "Contracted",
+        "customer_fallback": "Customer fallback",
+        "sow_extracted": "SOW extracted",
+        "global": "Global default",
+        "adaptive": "Adaptive",
+        "assumed": "Assumed",
+        "default": "Default",
+    }
+    schedule_labels = {"DAILY": "Daily", "WEEKLY": "Weekly", "MONTHLY": "Monthly"}
+    status_tags = {
+        "BREACH": ("tag-red", "BREACH"),
+        "AT_RISK": ("tag-amber", "AT RISK"),
+        "LONG_JOB": ("tag-amber", "LONG JOB"),
+        "OK": ("tag-green", "OK"),
+        "SLA_MISSING": ("tag-gray", "SLA MISSING"),
+    }
+
+    def _finite(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    def _legacy_status(peak: float, sla: float, buffer_pct: float | None) -> str:
+        """Compatibility only for payloads predating canonical buffer_status."""
+        if sla <= 0:
+            return "SLA_MISSING"
+        buffer_value = buffer_pct if buffer_pct is not None else (sla - peak) / sla * 100
+        if buffer_value < 0:
+            return "BREACH"
+        if buffer_value <= float(pe_config.SLA_ATRISK_PCT):
+            return "AT_RISK"
+        if buffer_value <= float(pe_config.SLA_LONGJOB_PCT):
+            return "LONG_JOB"
+        return "OK"
+
     rows = []
     for r in top_jobs[:20]:
-        peak  = _f(r.get("peak_hrs", 0))
-        avg   = _f(r.get("avg_hrs",  0))
-        buf   = _f(r.get("buffer_pct", (DAILY_LIMIT_HRS - peak) / DAILY_LIMIT_HRS * 100))
-        name  = _esc(r.get("Job_Name") or r.get("job_name") or "?")
-        if peak > DAILY_LIMIT_HRS:
-            status = '<span class="tag tag-red">BREACH</span>'
-            peak_style = 'style="color:#ef4444;font-weight:700"'
-        elif buf < 15:
-            status = '<span class="tag tag-amber">AT RISK</span>'
-            peak_style = ""
-        else:
-            status = '<span class="tag tag-green">OK</span>'
-            peak_style = ""
+        peak = _finite(r.get("peak_hrs")) or 0.0
+        avg = _finite(r.get("avg_hrs")) or 0.0
+        canonical_status = str(r.get("buffer_status") or "").strip().upper()
+        # Current payloads always carry both sla_hrs and buffer_status.  The
+        # configured daily ceiling is strictly a legacy-payload fallback.
+        sla_was_supplied = "sla_hrs" in r
+        supplied_sla = _finite(r.get("sla_hrs"))
+        # A missing key is a legacy-payload compatibility case.  An explicit
+        # null, NaN, infinity, zero, or negative ceiling is not: surface it as
+        # missing rather than inventing a configured default in the report.
+        missing_sla = ((canonical_status == "SLA_MISSING" and (supplied_sla is None or supplied_sla <= 0))
+                       or (sla_was_supplied and (supplied_sla is None or supplied_sla <= 0)))
+        sla = supplied_sla
+        if not missing_sla and (sla is None or sla <= 0):
+            sla = float(pe_config.SLA_DAILY_HRS)
+        buf = _finite(r.get("buffer_pct"))
+        if buf is None and not missing_sla:
+            buf = (sla - peak) / sla * 100 if sla > 0 else 0.0
+        status_key = ("SLA_MISSING" if missing_sla else
+                      (canonical_status if canonical_status in status_tags else _legacy_status(peak, sla, buf)))
+        tag_class, status_text = status_tags[status_key]
+        status = f'<span class="tag {tag_class}">{status_text}</span>'
+        peak_style = 'style="color:#ef4444;font-weight:700"' if status_key == "BREACH" else ""
+        name = _esc(r.get("Job_Name") or r.get("job_name") or "?")
+        source_key = str(r.get("sla_source") or "default").strip().lower()
+        source = source_labels.get(source_key, _esc(source_key.replace("_", " ").title()))
+        schedule = schedule_labels.get(str(r.get("schedule_type") or "").strip().upper())
+        schedule_tag = (f' <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">{schedule}</span>'
+                        if schedule else "")
+        sla_cell = (f'{sla:.2f}h' if not missing_sla else '<span class="tag tag-gray">N/A</span>')
+        buffer_cell = f'{buf:.1f}%' if buf is not None else '—'
         rows.append(f"""<tr>
-          <td><b>{name}</b></td>
+          <td><b>{name}</b>{schedule_tag}</td>
           <td {peak_style}>{peak:.3f}h</td>
           <td class="dim">{avg:.3f}h</td>
-          <td>{buf:.1f}%</td>
+          <td class="dim">{sla_cell} <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">{source}</span></td>
+          <td>{buffer_cell}</td>
           <td>{status}</td>
         </tr>""")
     return "".join(rows)
@@ -365,7 +426,8 @@ def _bench_rows(rows_in: List[dict]) -> str:
     return "".join(rows)
 
 
-def _checklist_rows(checklist: dict) -> str:
+def _checklist_rows(checklist: dict, evidence: dict) -> tuple[str, int]:
+    """Render evidence-backed checklist claims and return their mismatch count."""
     labels = {
         "batch":   "Batch SLA validated (daily/weekly/monthly)",
         "res":     "Resource utilization within thresholds",
@@ -378,15 +440,22 @@ def _checklist_rows(checklist: dict) -> str:
         "res15":   f"Resource utilization (last {pe_config.RESOURCE_CAPTURE_DAYS} days) reviewed",
     }
     rows = []
+    mismatch_count = 0
     for key, label in labels.items():
-        checked = bool(checklist.get(key, False))
-        cls  = "check--on" if checked else "check--off"
-        mark = "✓" if checked else ""
+        claimed = bool(checklist.get(key, False))
+        backed = bool(evidence.get(key, True))
+        checked = claimed and backed
+        mismatch = claimed and not backed
+        if mismatch:
+            mismatch_count += 1
+        cls = "check--on" if checked else ("check--mismatch" if mismatch else "check--off")
+        mark = "✓" if checked else ("⚠" if mismatch else "")
+        suffix = " — no supporting data in this export" if mismatch else ""
         rows.append(
             f'<div class="check {cls}"><span class="check__mark">{mark}</span>'
-            f'<span>{_esc(label)}</span></div>'
+            f'<span>{_esc(label)}{_esc(suffix)}</span></div>'
         )
-    return "".join(rows)
+    return "".join(rows), mismatch_count
 
 
 # ── Endpoint ───────────────────────────────────────────────────
@@ -425,16 +494,23 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         # clean approval.
         pe_override  = bool(pe_info.get("override_blockers", False))
 
-        customer   = _esc(approvals.get("customer_name", "") or "Unknown Customer")
+        # Retain the raw values for local archive metadata. The report body
+        # remains escaped below, but archive browsing must not show HTML entity
+        # sequences in actual customer/reviewer names.
+        raw_customer = str(approvals.get("customer_name", "") or "").strip()
+        raw_env = str(approvals.get("env_type", "") or "Not Detected")
+        raw_pe_name = str(pe_info.get("name", "") or "—")
+        raw_cust_name = str(cust_info.get("name", "") or "—")
+        customer   = _esc(raw_customer or "Customer not specified")
         # "Production" used to be a silent fallback here even when nothing had
         # actually been detected — for real customer data that reads as a
         # confident claim the report never verified. "Not Detected" is honest;
         # the frontend now auto-derives the real value before this is ever hit
         # (see exportHtmlReport() in static/app.js), so this fallback should be
         # rare in practice, not the normal path.
-        env        = _esc(approvals.get("env_type",       "") or "Not Detected")
-        pe_name    = _esc(pe_info.get("name",   "") or "—")
-        cust_name  = _esc(cust_info.get("name", "") or "—")
+        env        = _esc(raw_env)
+        pe_name    = _esc(raw_pe_name)
+        cust_name  = _esc(raw_cust_name)
         pe_date    = _esc(pe_info.get("date",   ""))
         cust_date  = _esc(cust_info.get("date", ""))
 
@@ -450,6 +526,7 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         comp_pct  = _f(batch_kpis.get("compliance_pct", 0))
         comp_col  = "#22c55e" if comp_pct >= 99 else ("#f59e0b" if comp_pct >= 85 else "#ef4444")
         n_breach  = int(batch_kpis.get("jobs_breach", 0))
+        n_at_risk = int(batch_kpis.get("jobs_at_risk", 0))
         n_ok_jobs = int(batch_kpis.get("jobs_ok", 0))
         n_jobs    = int(batch_kpis.get("total_jobs", 0))
         total_hrs = _f(batch_kpis.get("total_hrs", 0))
@@ -497,9 +574,24 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         # Derive the worst per-metric status instead of ever defaulting to
         # "not assessed" when metrics are actually present.
         _SOW_SEVERITY = {"CRITICAL_OVER": 4, "OVER": 3, "LOW": 2, "ACCEPTABLE": 1, "OPTIMAL": 0}
-        if sow_status not in ("OPTIMAL", "ACCEPTABLE", "LOW", "OVER", "CRITICAL_OVER") and sow_metrics:
-            resolved = [_sow_resolve(m)[3] for m in sow_metrics]
-            sow_status = max(resolved, key=lambda s: _SOW_SEVERITY.get(s, 0))
+        resolved_sow_statuses = [_sow_resolve(m)[3] for m in sow_metrics]
+        if sow_status not in ("OPTIMAL", "ACCEPTABLE", "LOW", "OVER", "CRITICAL_OVER") and resolved_sow_statuses:
+            sow_status = max(resolved_sow_statuses, key=lambda s: _SOW_SEVERITY.get(s, 0))
+        elif "CRITICAL_OVER" in resolved_sow_statuses:
+            # A client-side summary can be stale after an upload or browser
+            # restore.  Never let a green/amber header conceal a rendered
+            # critical over-consumption row.
+            sow_status = "CRITICAL_OVER"
+            sow_summary = ""
+        elif "OVER" in resolved_sow_statuses and sow_status not in ("CRITICAL_OVER", "OVER"):
+            # The same rule applies to non-critical contract overages.
+            sow_status = "OVER"
+            sow_summary = ""
+        elif sow_status == "OPTIMAL" and resolved_sow_statuses and "OPTIMAL" not in resolved_sow_statuses:
+            # A stale overall badge must not call the report OPTIMAL/HIGH when
+            # every displayed metric is only in the lower acceptable band.
+            sow_status = "ACCEPTABLE"
+            sow_summary = ""
         # Disclaimer text — always shown, so a reader unfamiliar with the
         # audit's internal vocabulary knows exactly what each verdict means
         # before deciding whether it's acceptable, instead of just seeing a
@@ -555,6 +647,17 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         except Exception:
             reviewed_product_labels = []
 
+        checklist_rows, checklist_mismatches = _checklist_rows(checklist, {
+            "batch": bool(top_jobs_data),
+            "ctrlm": bool(top_jobs_data),
+            "res": bool(resource_kpis),
+            "res15": bool(resource_kpis),
+            "data": bool(sow_metrics),
+            "sow": bool(sow_metrics),
+            "perf": bool(batch_perf),
+            "ui": bool(bench_rows_data),
+        })
+
         ctx = dict(
             customer=customer, env=env, gen_date=gen_date,
             reviewed_product_labels=reviewed_product_labels,
@@ -577,9 +680,9 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             top_rows=_top_rows(top_jobs_data),
             n_jobs_shown=n_jobs_shown,
             iss_rows=_iss_rows(issues),
-            checklist_rows=_checklist_rows(checklist),
+            checklist_rows=checklist_rows,
+            checklist_mismatches=checklist_mismatches,
             daily_limit=DAILY_LIMIT_HRS,
-            monthly_limit=MONTHLY_LIMIT_HRS,
             capture_days=pe_config.RESOURCE_CAPTURE_DAYS,
             cpu_ok_t=cpu_ok_t, cpu_warn_t=cpu_warn_t,
             mem_ok_t=mem_ok_t, mem_warn_t=mem_warn_t,
@@ -601,12 +704,63 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
         )
 
         html = templates.get_template("report_export.html").render(**ctx)
+        # A registry row is a customer record, so an unnamed download must not
+        # create a misleading "Unknown Customer" historical entry.  It remains
+        # downloadable; supplying the customer name and exporting again records
+        # the complete snapshot under the real customer.
+        archive_status = "skipped"
+        if raw_customer:
+            try:
+                archive_result = report_archive.save(raw_customer, html, {
+                    "generated_at": datetime.now().astimezone().isoformat(),
+                    "env": raw_env,
+                    "pe_approved": pe_approved,
+                    "cust_approved": cust_approved,
+                    "pe_name": raw_pe_name,
+                    "cust_name": raw_cust_name,
+                    "checklist_mismatches": checklist_mismatches,
+                    "sla_breach_count": n_breach,
+                    "sla_at_risk_count": n_at_risk,
+                    "sla_total_jobs": n_jobs,
+                    # Archive only the values already calculated above and rendered
+                    # in this exact HTML export.  The registry never recomputes a
+                    # dashboard verdict from an old session after the fact.
+                    "batch_metrics_captured": bool(batch_kpis),
+                    "batch_compliance_pct": comp_pct,
+                    "batch_total_jobs": n_jobs,
+                    "batch_total_runs": total_runs,
+                    "batch_total_hrs": total_hrs,
+                    "batch_breach_count": n_breach,
+                    "batch_at_risk_count": n_at_risk,
+                    "batch_ok_count": n_ok_jobs,
+                    "resource_metrics_captured": bool(resource_kpis),
+                    "resource_fleet_grade": fleet_grade,
+                    "resource_fleet_score": fleet_score,
+                    "resource_total_servers": n_srv,
+                    "resource_critical_count": n_crit,
+                    "resource_warning_count": n_warn_s,
+                    "sow_metrics_captured": bool(sow_metrics),
+                    "sow_status": sow_status,
+                    "sow_metrics_count": n_sow,
+                    "benchmark_metrics_captured": bool(bench_rows_data) or has_batch_perf,
+                    "benchmark_total_transactions": n_bench_total,
+                    "benchmark_sla_breach_count": n_bench_breach,
+                    "benchmark_degraded_count": n_bench_degraded,
+                    "batch_perf_regression_count": n_batch_perf_regr,
+                    "batch_perf_total_jobs": int(batch_perf.get("total_jobs", 0)),
+                    "issues_count": len(issues),
+                })
+                archive_status = "saved" if archive_result.get("ok") else "failed"
+            except Exception:
+                # The archive is supplementary; it must never block the download.
+                archive_status = "failed"
         filename = f"PE_Audit_{customer.replace(' ','_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
         return HTMLResponse(
             content=html,
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Content-Type": "text/html; charset=utf-8",
+                "X-Archive-Status": archive_status,
             },
         )
     except Exception as exc:

@@ -571,6 +571,15 @@
           </svg>
           <span>Governance</span>
         </button>
+
+        <a href="/archive"
+           class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-Cmuted hover:text-Cwhite hover:bg-Ccard/40 transition-colors"
+           title="View the latest exported audit review for each customer">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-[18px] h-[18px]" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25V6.75A2.25 2.25 0 0 0 17.25 4.5h-10.5A2.25 2.25 0 0 0 4.5 6.75v10.5a2.25 2.25 0 0 0 2.25 2.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-1.5m-9-9h9m0 0-3-3m3 3-3 3M8.25 12h6m-6 3h4.5" />
+          </svg>
+          <span>Review Registry</span>
+        </a>
       </nav>
 
       <!-- Sidebar data-status strip (Grafana-style datasource health) -->
@@ -2029,7 +2038,7 @@
                 </svg>
                 Fetch from Azure Monitor (Live)
               </button>
-              <p class="text-[10px] text-Cmuted">Requires Azure access — run <code>az login</code> in terminal, then configure in Settings → Azure Connection</p>
+              <p class="text-[10px] text-Cmuted">Requires Azure access — sign in with Browser, then configure Settings → Azure Connection</p>
             </div>
           </div>
 
@@ -3502,14 +3511,14 @@
                 <span id="azure-config-status-badge" class="text-[10px] px-2 py-0.5 rounded-full border border-Cmuted/40 text-Cmuted">checking…</span>
               </div>
 
-              <!-- Identity card — shows who is logged in via az login -->
+              <!-- Identity card — shows the current browser-authenticated Azure identity -->
               <div id="az-identity-card" class="rounded-lg border border-Cborder bg-Cbg px-4 py-3 space-y-1">
                 <div class="flex items-center justify-between">
                   <span class="text-[10px] font-bold uppercase tracking-widest text-Cmuted">Azure Identity</span>
                   <button onclick="checkAzureIdentity()"
                           class="text-[10px] text-Cblue hover:underline">Refresh</button>
                 </div>
-                <div id="az-identity-status" class="text-xs text-Cmuted">Checking az login status…</div>
+                <div id="az-identity-status" class="text-xs text-Cmuted">Checking browser sign-in status…</div>
               </div>
 
               <!-- Browser sign-in button -->
@@ -4322,7 +4331,7 @@
         <div class="az-filter-panel" style="padding: 16px 20px;">
           <label style="font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:8px; font-weight:700; letter-spacing:0.14em; text-transform:uppercase; color:rgba(71,85,105,0.9); display:block; margin-bottom:10px;">
             Search by customer, server name, or tag
-            <span style="font-weight:400; margin-left:6px; color:rgba(71,85,105,0.6)">(all subscriptions)</span>
+            <span style="font-weight:400; margin-left:6px; color:rgba(71,85,105,0.6)">(selected subscription by default)</span>
           </label>
           <div class="flex gap-3 items-stretch">
             <input id="azure-search-input" type="text"
@@ -4340,6 +4349,10 @@
               Search
             </button>
           </div>
+          <label class="mt-2 flex items-center gap-2 cursor-pointer text-[10px] text-Cmuted">
+            <input id="azure-search-all-subscriptions" type="checkbox" class="rounded border-Cborder bg-Cbg text-Cblue focus:ring-Cblue">
+            <span>Search every accessible subscription <span class="text-Cmuted/70">(slower; use only when the customer may be outside the selected subscription)</span></span>
+          </label>
         </div>
 
         <div class="flex items-center gap-4">

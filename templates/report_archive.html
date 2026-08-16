@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PE Audit — Review Registry</title>
+<style>
+:root[data-theme="dark"] {
+  --bg:#070b18; --panel:#0e1627; --panel-raised:#111c31; --panel-hover:#14213a;
+  --border:#213252; --border-soft:#172542; --ink:#eef3ff; --muted:#aab8d4; --dim:#7180a2;
+  --green:#10d96e; --amber:#f59e0b; --red:#f43f5e; --blue:#57a0ff; --purple:#b178ff;
+}
+* { box-sizing:border-box; }
+html,body { margin:0; min-height:100%; }
+body {
+  background:var(--bg); color:var(--ink); font:14px/1.45 "Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button,input,select { font:inherit; }
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+.tabnum { font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1; }
+
+.topbar { min-height:54px; border-bottom:1px solid var(--border-soft); background:#090f20; }
+.topbar__inner { max-width:1440px; min-height:54px; margin:auto; padding:0 28px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.brand { color:var(--ink); text-decoration:none; font-weight:750; letter-spacing:-.01em; }
+.brand span { color:var(--dim); font-size:12px; font-weight:600; margin-left:8px; }
+.toplink { color:var(--muted); font-size:12px; text-decoration:none; }
+.toplink:hover { color:var(--ink); }
+
+.page { max-width:1440px; margin:auto; padding:34px 28px 64px; }
+.page-head { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:26px; }
+h1 { margin:0; font-size:28px; line-height:1.1; letter-spacing:-.025em; }
+.lede { max-width:730px; margin:9px 0 0; color:var(--muted); font-size:14px; }
+.lede strong { color:var(--ink); font-weight:650; }
+.head-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dashboard-link { color:var(--blue); border:1px solid color-mix(in srgb,var(--blue) 48%,var(--border)); padding:8px 12px; text-decoration:none; white-space:nowrap; font-size:12px; font-weight:700; }
+.dashboard-link:hover { color:var(--ink); background:rgba(87,160,255,.1); }
+.reset-session { cursor:pointer; color:var(--red); border:1px solid color-mix(in srgb,var(--red) 48%,var(--border)); background:transparent; padding:8px 12px; white-space:nowrap; font-size:12px; font-weight:700; }
+.reset-session:hover { color:var(--ink); background:rgba(244,63,94,.11); }
+.reset-session:disabled { cursor:wait; opacity:.65; }
+.reset-status { min-height:16px; margin:8px 0 -12px; color:var(--red); font-size:11px; }
+
+.summary-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:1px solid var(--border); background:var(--panel); margin-bottom:18px; }
+.summary-item { min-width:0; padding:15px 18px; border-right:1px solid var(--border); }
+.summary-item:last-child { border-right:0; }
+.summary-label { color:var(--dim); font-size:10px; font-weight:750; letter-spacing:.09em; text-transform:uppercase; }
+.summary-value { margin-top:5px; font-size:22px; line-height:1.05; font-weight:760; letter-spacing:-.025em; }
+.summary-value--date { font-size:16px; line-height:1.3; }
+.summary-note { margin-top:4px; color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.registry { border:1px solid var(--border); background:var(--panel); }
+.registry__bar { display:flex; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.search-wrap { flex:1 1 270px; position:relative; }
+.search { width:100%; min-height:38px; color:var(--ink); background:#0a1222; border:1px solid var(--border); padding:8px 11px; }
+.search::placeholder { color:var(--dim); }
+.search:focus { border-color:var(--blue); outline:none; }
+.filters { display:flex; gap:5px; flex-wrap:wrap; }
+.filter { cursor:pointer; color:var(--muted); background:transparent; border:1px solid transparent; padding:7px 9px; font-size:12px; font-weight:650; }
+.filter:hover { color:var(--ink); background:var(--panel-hover); }
+.filter.is-active { color:var(--ink); border-color:var(--border); background:var(--panel-raised); }
+.sort { min-height:36px; min-width:178px; color:var(--muted); background:#0a1222; border:1px solid var(--border); padding:7px 9px; font-size:12px; }
+.registry__count { color:var(--dim); font-size:12px; padding:0 16px 12px; }
+
+.table-wrap { overflow:auto; max-height:calc(100vh - 310px); }
+table { width:100%; min-width:1280px; border-collapse:collapse; }
+th { position:sticky; top:0; z-index:1; color:var(--dim); background:var(--panel-raised); border-bottom:1px solid var(--border); padding:10px 16px; text-align:left; font-size:10px; font-weight:750; letter-spacing:.09em; text-transform:uppercase; }
+td { border-bottom:1px solid var(--border-soft); padding:14px 16px; vertical-align:middle; }
+tbody tr { transition:background-color .15s ease; }
+tbody tr:hover { background:var(--panel-hover); }
+tbody tr.row--attention { background:rgba(245,158,11,.025); }
+tbody tr.row--attention:hover { background:rgba(245,158,11,.065); }
+.customer-name { color:var(--ink); font-size:14px; font-weight:720; }
+.customer-meta,.cell-note { margin-top:3px; color:var(--dim); font-size:11px; }
+.status-stack,.evidence-stack,.team-stack { display:flex; flex-direction:column; gap:5px; align-items:flex-start; }
+.evidence-stack { min-width:280px; gap:8px; }
+.snapshot-group { display:flex; width:100%; flex-direction:column; gap:3px; padding-bottom:7px; border-bottom:1px solid var(--border-soft); }
+.snapshot-group:last-child { padding-bottom:0; border-bottom:0; }
+.snapshot-line { display:flex; align-items:baseline; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; line-height:1.35; }
+.snapshot-line__label { color:var(--dim); white-space:nowrap; }
+.snapshot-line__value { color:var(--muted); text-align:right; font-variant-numeric:tabular-nums; }
+.team-stack { gap:2px; }
+.team-line { max-width:190px; color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.team-line b { color:var(--dim); font-size:10px; letter-spacing:.05em; text-transform:uppercase; margin-right:5px; }
+.tag { display:inline-flex; align-items:center; min-height:22px; border:1px solid transparent; padding:2px 7px; font-size:10px; font-weight:750; letter-spacing:.025em; white-space:nowrap; }
+.tag--green { color:var(--green); border-color:color-mix(in srgb,var(--green) 42%,transparent); background:color-mix(in srgb,var(--green) 10%,transparent); }
+.tag--amber { color:var(--amber); border-color:color-mix(in srgb,var(--amber) 42%,transparent); background:color-mix(in srgb,var(--amber) 10%,transparent); }
+.tag--red { color:var(--red); border-color:color-mix(in srgb,var(--red) 44%,transparent); background:color-mix(in srgb,var(--red) 10%,transparent); }
+.tag--blue { color:var(--blue); border-color:color-mix(in srgb,var(--blue) 44%,transparent); background:color-mix(in srgb,var(--blue) 10%,transparent); }
+.tag--gray { color:var(--dim); border-color:var(--border); background:rgba(255,255,255,.025); }
+.actions { display:flex; align-items:center; gap:8px; }
+.action { display:inline-flex; align-items:center; justify-content:center; min-height:32px; border:1px solid var(--border); padding:6px 10px; color:var(--muted); background:#0a1222; font-size:11px; font-weight:700; text-decoration:none; white-space:nowrap; }
+.action:hover { color:var(--ink); border-color:var(--blue); }
+.action--primary { color:var(--blue); border-color:color-mix(in srgb,var(--blue) 48%,var(--border)); }
+.empty { padding:72px 20px; text-align:center; color:var(--muted); }
+.empty h2 { margin:0; color:var(--ink); font-size:16px; }
+.empty p { max-width:470px; margin:8px auto 0; color:var(--dim); font-size:12px; }
+.registry-note { margin:13px 1px 0; color:var(--dim); font-size:11px; }
+
+@media (max-width:900px) {
+  .summary-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .summary-item:nth-child(2) { border-right:0; }
+  .summary-item:nth-child(-n+2) { border-bottom:1px solid var(--border); }
+  .page-head { align-items:flex-start; flex-direction:column; }
+  .table-wrap { max-height:none; }
+}
+@media (max-width:620px) {
+  .topbar__inner,.page { padding-left:16px; padding-right:16px; }
+  .page { padding-top:24px; }
+  h1 { font-size:24px; }
+  .summary-item { padding:13px; }
+  .summary-value { font-size:19px; }
+  .registry__bar { align-items:stretch; }
+  .sort { width:100%; }
+}
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms !important; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="/">PE Audit <span>Control Tower</span></a>
+    <a class="toplink" href="/">Return to dashboard</a>
+  </div>
+</header>
+
+<main class="page">
+  <section class="page-head" aria-labelledby="registry-title">
+    <div>
+      <h1 id="registry-title">Review Registry</h1>
+      <p class="lede">The latest <strong>exported HTML audit</strong> for every reviewed customer. Each record keeps its export-time batch, resource, SOW, benchmark, and issue snapshot alongside direct report access.</p>
+    </div>
+    <div class="head-actions">
+      <button id="resetSession" class="reset-session" type="button">Reset active dashboard</button>
+      <a class="dashboard-link" href="/">Open dashboard</a>
+    </div>
+  </section>
+  <div id="resetStatus" class="reset-status" role="status" aria-live="polite"></div>
+
+  <section class="summary-strip" aria-label="Review Registry summary">
+    <div class="summary-item"><div class="summary-label">Customers reviewed</div><div id="summaryCustomers" class="summary-value tabnum">0</div><div class="summary-note">Latest export per customer</div></div>
+    <div class="summary-item"><div class="summary-label">Signed off</div><div id="summarySignedOff" class="summary-value tabnum">0</div><div class="summary-note">PE and customer approval recorded</div></div>
+    <div class="summary-item"><div class="summary-label">Needs attention</div><div id="summaryAttention" class="summary-value tabnum">0</div><div class="summary-note">Recorded exceptions or evidence gaps</div></div>
+    <div class="summary-item"><div class="summary-label">Latest export</div><div id="summaryLatest" class="summary-value summary-value--date">—</div><div id="summaryLatestNote" class="summary-note">No exported audit yet</div></div>
+  </section>
+
+  <section class="registry" aria-label="Customer audit reviews">
+    <div class="registry__bar">
+      <label class="search-wrap"><input id="search" class="search" type="search" autocomplete="off" placeholder="Search customer, environment, or reviewer"></label>
+      <div class="filters" aria-label="Filter customer reviews">
+        <button class="filter is-active" type="button" data-filter="all" aria-pressed="true">All exports</button>
+        <button class="filter" type="button" data-filter="signed" aria-pressed="false">Signed off</button>
+        <button class="filter" type="button" data-filter="pending" aria-pressed="false">Awaiting sign-off</button>
+        <button class="filter" type="button" data-filter="attention" aria-pressed="false">Needs attention</button>
+      </div>
+      <select id="sort" class="sort" aria-label="Sort customer reviews">
+        <option value="recent">Newest export first</option>
+        <option value="attention">Highest attention first</option>
+        <option value="customer">Customer name</option>
+      </select>
+    </div>
+    <div id="registryCount" class="registry__count tabnum">0 customers</div>
+    <div id="tableWrap" class="table-wrap">
+      <table id="registryTable">
+        <thead><tr><th>Customer</th><th>Review completion</th><th>Exported audit snapshot</th><th>Review team</th><th>Last exported</th><th>Report access</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div id="emptyState" class="empty" hidden>
+      <h2 id="emptyTitle">No customer reviews found</h2>
+      <p id="emptyDetail">Generate a PE Audit HTML report from the dashboard. Its customer review record will appear here automatically.</p>
+    </div>
+  </section>
+  <p class="registry-note">Snapshot metrics are frozen when the HTML report is exported; they are not re-graded from a later dashboard session. Open full HTML for the supporting rows and audit narrative. Re-exporting replaces that customer’s prior report; no historical report versions are created.</p>
+</main>
+
+<script>
+let ALL_REPORTS = [];
+let ACTIVE_FILTER = "all";
+
+function textValue(value, fallback = "—") {
+  return value === null || value === undefined || value === "" ? fallback : String(value);
+}
+
+function countValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0;
+}
+
+function formatCount(value) {
+  return new Intl.NumberFormat().format(countValue(value));
+}
+
+function numberValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatDecimal(value, maximumFractionDigits = 1, fallback = "—") {
+  const number = numberValue(value);
+  return number === null
+    ? fallback
+    : new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(number);
+}
+
+function isCaptured(record, key) {
+  return record[key] === true || record[key] === 1 || record[key] === "1";
+}
+
+function dateValue(value) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
+function fmtDate(value, fallback = "—") {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed.toLocaleString(undefined, { year:"numeric", month:"short", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+}
+
+function element(name, className, text) {
+  const node = document.createElement(name);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function tag(tone, label) {
+  return element("span", `tag tag--${tone}`, label);
+}
+
+function isSignedOff(record) {
+  return Boolean(record.pe_approved && record.cust_approved);
+}
+
+function attentionScore(record) {
+  const breaches = countValue(record.sla_breach_count);
+  const atRisk = countValue(record.sla_at_risk_count);
+  const mismatches = countValue(record.checklist_mismatches);
+  const resourceCritical = countValue(record.resource_critical_count);
+  const benchmarkBreaches = countValue(record.benchmark_sla_breach_count);
+  const regressions = countValue(record.batch_perf_regression_count);
+  const sowStatus = textValue(record.sow_status, "").toUpperCase();
+  const sowWeight = sowStatus === "CRITICAL_OVER" ? 10000000 : (sowStatus === "OVER" ? 1000000 : 0);
+  return sowWeight + breaches * 10000 + resourceCritical * 1000 + benchmarkBreaches * 100 + regressions * 10 + atRisk + mismatches;
+}
+
+function needsAttention(record) {
+  return attentionScore(record) > 0;
+}
+
+function reviewState(record) {
+  if (isSignedOff(record)) return { tone:"green", label:"Signed off", detail:"PE and customer approval recorded" };
+  if (record.pe_approved) return { tone:"amber", label:"Awaiting customer", detail:"PE approval recorded; customer sign-off pending" };
+  if (record.cust_approved) return { tone:"amber", label:"Awaiting PE", detail:"Customer approval recorded; PE sign-off pending" };
+  return { tone:"gray", label:"Exported — sign-off pending", detail:"No approval recorded on this exported audit" };
+}
+
+function matchesFilter(record) {
+  if (ACTIVE_FILTER === "signed") return isSignedOff(record);
+  if (ACTIVE_FILTER === "pending") return !isSignedOff(record);
+  if (ACTIVE_FILTER === "attention") return needsAttention(record);
+  return true;
+}
+
+function matchesSearch(record, query) {
+  if (!query) return true;
+  const searchable = [record.customer, record.env, record.pe_name, record.cust_name]
+    .map(value => textValue(value, "")).join(" ").toLowerCase();
+  return searchable.includes(query);
+}
+
+function createCell(content, className) {
+  const cell = element("td", className || "");
+  if (content instanceof Node) cell.appendChild(content);
+  else cell.textContent = textValue(content);
+  return cell;
+}
+
+function customerCell(record) {
+  const stack = element("div", "");
+  stack.append(
+    element("div", "customer-name", textValue(record.customer, "Unknown customer")),
+    element("div", "customer-meta", `Environment: ${textValue(record.env, "Not detected")}`),
+  );
+  return stack;
+}
+
+function completionCell(record) {
+  const state = reviewState(record);
+  const stack = element("div", "status-stack");
+  stack.append(tag(state.tone, state.label), element("div", "cell-note", state.detail));
+  return stack;
+}
+
+function snapshotLine(label, value) {
+  const line = element("div", "snapshot-line");
+  line.append(
+    element("span", "snapshot-line__label", label),
+    element("span", "snapshot-line__value", value),
+  );
+  return line;
+}
+
+function snapshotGroup(tone, label, lines) {
+  const group = element("div", "snapshot-group");
+  group.appendChild(tag(tone, label));
+  lines.forEach(line => group.appendChild(snapshotLine(line[0], line[1])));
+  return group;
+}
+
+function fleetTone(grade) {
+  if (grade === "A") return "green";
+  if (grade === "B") return "blue";
+  if (grade === "C") return "amber";
+  if (grade === "D" || grade === "F") return "red";
+  return "gray";
+}
+
+function sowPresentation(status) {
+  const normalized = textValue(status, "NOT ASSESSED").toUpperCase();
+  const labels = {
+    OPTIMAL: "OPTIMAL",
+    ACCEPTABLE: "ACCEPTABLE",
+    LOW: "UNDER-UTILISED",
+    OVER: "OVER CONTRACT",
+    CRITICAL_OVER: "CRITICAL OVER",
+  };
+  const tones = { OPTIMAL:"green", ACCEPTABLE:"green", LOW:"blue", OVER:"amber", CRITICAL_OVER:"red" };
+  return { label:labels[normalized] || "NOT ASSESSED", tone:tones[normalized] || "gray" };
+}
+
+function evidenceCell(record) {
+  const stack = element("div", "evidence-stack");
+  const mismatches = countValue(record.checklist_mismatches);
+
+  if (isCaptured(record, "batch_metrics_captured")) {
+    const breaches = countValue(record.batch_breach_count);
+    const atRisk = countValue(record.batch_at_risk_count);
+    const tone = breaches ? "red" : (atRisk ? "amber" : "green");
+    stack.appendChild(snapshotGroup(tone, "Batch SLA snapshot", [
+      ["Compliance", `${formatDecimal(record.batch_compliance_pct)}%`],
+      ["Jobs", `${formatCount(record.batch_total_jobs)} total · ${formatCount(record.batch_ok_count)} within SLA`],
+      ["Exceptions", `${formatCount(atRisk)} at risk · ${formatCount(breaches)} breach`],
+      ["Runs / runtime", `${formatCount(record.batch_total_runs)} / ${formatDecimal(record.batch_total_hrs, 2)} h`],
+    ]));
+  } else {
+    stack.appendChild(snapshotGroup("gray", "Batch SLA not captured", [["Snapshot", "Not available on this export"]]));
+  }
+
+  if (isCaptured(record, "resource_metrics_captured")) {
+    const grade = textValue(record.resource_fleet_grade, "—").toUpperCase();
+    stack.appendChild(snapshotGroup(fleetTone(grade), `Resource fleet · ${grade}`, [
+      ["Fleet score", formatDecimal(record.resource_fleet_score)],
+      ["Servers", formatCount(record.resource_total_servers)],
+      ["Exceptions", `${formatCount(record.resource_critical_count)} critical · ${formatCount(record.resource_warning_count)} warning`],
+    ]));
+  } else {
+    stack.appendChild(snapshotGroup("gray", "Resource not captured", [["Snapshot", "Not available on this export"]]));
+  }
+
+  if (isCaptured(record, "sow_metrics_captured")) {
+    const sow = sowPresentation(record.sow_status);
+    stack.appendChild(snapshotGroup(sow.tone, `SOW · ${sow.label}`, [["Contract metrics", formatCount(record.sow_metrics_count)]]));
+  } else {
+    stack.appendChild(snapshotGroup("gray", "SOW not captured", [["Snapshot", "Not available on this export"]]));
+  }
+
+  if (isCaptured(record, "benchmark_metrics_captured")) {
+    const benchmarkBreaches = countValue(record.benchmark_sla_breach_count);
+    const regressions = countValue(record.batch_perf_regression_count);
+    const tone = benchmarkBreaches || regressions ? "red" : (countValue(record.benchmark_degraded_count) ? "amber" : "green");
+    stack.appendChild(snapshotGroup(tone, "Benchmark snapshot", [
+      ["Transactions", formatCount(record.benchmark_total_transactions)],
+      ["SLA / degraded", `${formatCount(benchmarkBreaches)} breach · ${formatCount(record.benchmark_degraded_count)} degraded`],
+      ["Batch performance", `${formatCount(record.batch_perf_total_jobs)} jobs · ${formatCount(regressions)} regression`],
+    ]));
+  } else {
+    stack.appendChild(snapshotGroup("gray", "Benchmark not captured", [["Snapshot", "Not available on this export"]]));
+  }
+
+  const issueTone = countValue(record.issues_count) ? "amber" : "gray";
+  const checklistTone = mismatches ? "amber" : "gray";
+  stack.appendChild(snapshotGroup(issueTone, `Issues · ${formatCount(record.issues_count)} logged`, [["Recorded issue entries", formatCount(record.issues_count)]]));
+  stack.appendChild(snapshotGroup(checklistTone, `Checklist · ${formatCount(mismatches)} evidence gap${mismatches === 1 ? "" : "s"}`, [["Supporting evidence", mismatches ? "Review required" : "No recorded gap"]]));
+  if (mismatches) stack.appendChild(element("div", "cell-note", "Checklist claim(s) without supporting data in this export."));
+  return stack;
+}
+
+function teamCell(record) {
+  const stack = element("div", "team-stack");
+  const pe = element("div", "team-line", textValue(record.pe_name, "Not recorded"));
+  pe.prepend(element("b", "", "PE"));
+  const customer = element("div", "team-line", textValue(record.cust_name, "Not recorded"));
+  customer.prepend(element("b", "", "Customer"));
+  stack.append(pe, customer);
+  return stack;
+}
+
+function actionCell(record) {
+  const slug = encodeURIComponent(textValue(record.customer_slug, "unknown"));
+  const actions = element("div", "actions");
+  const open = element("a", "action action--primary", "Open full HTML");
+  open.href = `/api/report-archive/${slug}`;
+  open.target = "_blank";
+  open.rel = "noopener";
+  open.setAttribute("aria-label", `Open exported audit report for ${textValue(record.customer, "customer")}`);
+  const download = element("a", "action", "Download");
+  download.href = `/api/report-archive/${slug}/download`;
+  download.setAttribute("aria-label", `Download exported audit report for ${textValue(record.customer, "customer")}`);
+  actions.append(open, download);
+  return actions;
+}
+
+function registryRow(record) {
+  const row = document.createElement("tr");
+  if (needsAttention(record)) row.classList.add("row--attention");
+  row.append(
+    createCell(customerCell(record)),
+    createCell(completionCell(record)),
+    createCell(evidenceCell(record)),
+    createCell(teamCell(record)),
+    createCell(element("div", "tabnum", fmtDate(record.generated_at))),
+    createCell(actionCell(record)),
+  );
+  return row;
+}
+
+function updateSummary() {
+  const signedOff = ALL_REPORTS.filter(isSignedOff).length;
+  const attention = ALL_REPORTS.filter(needsAttention).length;
+  const latest = [...ALL_REPORTS].sort((a, b) => dateValue(b.generated_at) - dateValue(a.generated_at))[0];
+  document.getElementById("summaryCustomers").textContent = formatCount(ALL_REPORTS.length);
+  document.getElementById("summarySignedOff").textContent = formatCount(signedOff);
+  document.getElementById("summaryAttention").textContent = formatCount(attention);
+  document.getElementById("summaryLatest").textContent = latest ? fmtDate(latest.generated_at) : "—";
+  document.getElementById("summaryLatestNote").textContent = latest
+    ? textValue(latest.customer, "Unknown customer")
+    : "No exported audit yet";
+}
+
+function sortedRows(rows) {
+  const mode = document.getElementById("sort").value;
+  return [...rows].sort((left, right) => {
+    if (mode === "customer") return textValue(left.customer, "").localeCompare(textValue(right.customer, ""));
+    if (mode === "attention") {
+      const difference = attentionScore(right) - attentionScore(left);
+      if (difference) return difference;
+    }
+    return dateValue(right.generated_at) - dateValue(left.generated_at);
+  });
+}
+
+function render() {
+  const query = document.getElementById("search").value.trim().toLowerCase();
+  const rows = sortedRows(ALL_REPORTS.filter(record => matchesFilter(record) && matchesSearch(record, query)));
+  const body = document.getElementById("tbody");
+  const tableWrap = document.getElementById("tableWrap");
+  const empty = document.getElementById("emptyState");
+  const count = document.getElementById("registryCount");
+  count.textContent = `${formatCount(rows.length)} of ${formatCount(ALL_REPORTS.length)} customer${ALL_REPORTS.length === 1 ? "" : "s"}`;
+  body.replaceChildren(...rows.map(registryRow));
+  const hasRows = rows.length > 0;
+  tableWrap.hidden = !hasRows;
+  empty.hidden = hasRows;
+  if (!hasRows) {
+    const title = document.getElementById("emptyTitle");
+    const detail = document.getElementById("emptyDetail");
+    if (ALL_REPORTS.length) {
+      title.textContent = "No customer reviews match these controls";
+      detail.textContent = "Change the search, filter, or sort selection to view another exported customer review.";
+    } else {
+      title.textContent = "No customer reviews exported yet";
+      detail.textContent = "Generate a PE Audit HTML report from the dashboard. Its customer review record will appear here automatically.";
+    }
+  }
+}
+
+function setFilter(filter) {
+  ACTIVE_FILTER = filter;
+  document.querySelectorAll(".filter").forEach(button => {
+    button.classList.toggle("is-active", button.dataset.filter === filter);
+    button.setAttribute("aria-pressed", String(button.dataset.filter === filter));
+  });
+  render();
+}
+
+document.querySelectorAll(".filter").forEach(button => button.addEventListener("click", () => setFilter(button.dataset.filter)));
+document.getElementById("search").addEventListener("input", render);
+document.getElementById("sort").addEventListener("change", render);
+
+async function resetDashboardSession() {
+  const confirmed = window.confirm(
+    "Clear the active dashboard session?\n\n" +
+    "This removes the current upload, findings, SOW, resource, and batch data so a new engagement can start clean.\n\n" +
+    "Review Registry records and exported HTML reports will remain available."
+  );
+  if (!confirmed) return;
+
+  const button = document.getElementById("resetSession");
+  const status = document.getElementById("resetStatus");
+  button.disabled = true;
+  button.textContent = "Resetting dashboard…";
+  status.textContent = "";
+  try {
+    const response = await fetch("/api/clear-session", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body:JSON.stringify({}),
+    });
+    if (!response.ok) throw new Error(`Reset failed (${response.status})`);
+    window.location.assign("/");
+  } catch (error) {
+    status.textContent = "The active dashboard session could not be reset. Your Review Registry records were not changed.";
+    button.disabled = false;
+    button.textContent = "Reset active dashboard";
+  }
+}
+
+document.getElementById("resetSession").addEventListener("click", resetDashboardSession);
+
+async function load() {
+  try {
+    const response = await fetch("/api/report-archive", { cache:"no-store" });
+    if (!response.ok) throw new Error(`Archive request failed (${response.status})`);
+    const payload = await response.json();
+    ALL_REPORTS = Array.isArray(payload.reports) ? payload.reports : [];
+  } catch (error) {
+    ALL_REPORTS = [];
+    document.getElementById("emptyTitle").textContent = "Review Registry is unavailable";
+    document.getElementById("emptyDetail").textContent = "The local archive could not be loaded. Return to the dashboard and try again.";
+  }
+  updateSummary();
+  render();
+}
+
+load();
+</script>
+</body>
+</html>

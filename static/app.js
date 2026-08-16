@@ -313,6 +313,7 @@ function _pinKpiGridToTop() {
 // ─────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   _pinKpiGridToTop();
+  if (_archiveFailureWasRecorded()) _showArchiveSaveFailureBanner();
   initNav();
   initDropZone();
   initResetButton();
@@ -1142,6 +1143,64 @@ function _showServerDownBanner() {
   }, 5000);
 }
 
+// Keep an archive-write failure visible for this browser tab until the user
+// dismisses it or a later export confirms the archive was saved. The download
+// remains the primary deliverable and is never gated by this indicator.
+const ARCHIVE_FAILURE_SESSION_KEY = "pe-dashboard:archive-save-failed";
+
+function _archiveFailureWasRecorded() {
+  try { return window.sessionStorage.getItem(ARCHIVE_FAILURE_SESSION_KEY) === "1"; }
+  catch { return false; }
+}
+
+function _showArchiveSaveFailureBanner() {
+  if (document.getElementById("archive-save-failure-banner")) return;
+
+  const banner = document.createElement("div");
+  banner.id = "archive-save-failure-banner";
+  banner.setAttribute("role", "alert");
+  banner.className = "shrink-0 border-b border-Camber/50 bg-Camber/10 px-4 py-3 text-Camber flex items-start justify-between gap-4";
+
+  const message = document.createElement("div");
+  message.className = "flex items-start gap-3 min-w-0";
+  const icon = document.createElement("span");
+  icon.className = "text-base leading-none";
+  icon.textContent = "⚠";
+  const copy = document.createElement("div");
+  const title = document.createElement("div");
+  title.className = "text-[12px] font-bold";
+  title.textContent = "Report Archive was not updated";
+  const detail = document.createElement("div");
+  detail.className = "mt-0.5 text-[11px] text-Camber/85";
+  detail.textContent = "The signed HTML report downloaded successfully. Restore local archive write access, then export again to save its archive copy.";
+  copy.append(title, detail);
+  message.append(icon, copy);
+
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "shrink-0 rounded px-2 py-1 text-[11px] font-semibold text-Camber hover:bg-Camber/15 transition-colors";
+  dismiss.setAttribute("aria-label", "Dismiss archive save warning");
+  dismiss.textContent = "Dismiss";
+  dismiss.addEventListener("click", _clearArchiveSaveFailureBanner);
+  banner.append(message, dismiss);
+
+  const header = document.querySelector("header");
+  if (header) header.after(banner);
+  else document.body.prepend(banner);
+}
+
+function _recordArchiveSaveFailure() {
+  try { window.sessionStorage.setItem(ARCHIVE_FAILURE_SESSION_KEY, "1"); }
+  catch { /* session storage can be unavailable in locked-down browser profiles */ }
+  _showArchiveSaveFailureBanner();
+}
+
+function _clearArchiveSaveFailureBanner() {
+  try { window.sessionStorage.removeItem(ARCHIVE_FAILURE_SESSION_KEY); }
+  catch { /* banner removal still works without session storage */ }
+  document.getElementById("archive-save-failure-banner")?.remove();
+}
+
 /**
  * Central handler for all fetch/XHR catch blocks.
  * Distinguishes "server not running" from other errors and shows
@@ -1189,6 +1248,10 @@ const TOAST_STYLES = {
   success: {
     bar:  "bg-Cgreen",
     icon: '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-5 h-5 text-Cgreen"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>',
+  },
+  warning: {
+    bar:  "bg-Camber",
+    icon: '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-5 h-5 text-Camber"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 3.75h.008M10.29 3.86 1.82 18a2.25 2.25 0 0 0 1.93 3.38h16.5A2.25 2.25 0 0 0 22.18 18L13.71 3.86a2.25 2.25 0 0 0-3.42 0Z"/></svg>',
   },
   error: {
     bar:  "bg-Cred",
@@ -10468,6 +10531,7 @@ async function exportHtmlReport() {
       return;
     }
     const blob     = await res.blob();
+    const archiveStatus = res.headers.get("X-Archive-Status");
     const url      = URL.createObjectURL(blob);
     const anchor   = document.createElement("a");
     // The server already names this file "PE_Audit_{Customer}_{yyyymmdd_hhmm}.html"
@@ -10482,6 +10546,17 @@ async function exportHtmlReport() {
     anchor.click();
     URL.revokeObjectURL(url);
     toast("success", "Report downloaded", `Saved as ${anchor.download}`, 5000);
+    if (archiveStatus === "saved") {
+      _clearArchiveSaveFailureBanner();
+      toast("success", "Report archived", "A copy is available in Review Registry.");
+    } else if (archiveStatus === "skipped") {
+      toast("warning", "Review Registry skipped",
+        "The report downloaded, but no customer name was available to create an accurate registry record. Add the customer name and export again.", 7000);
+    } else if (archiveStatus === "failed") {
+      _recordArchiveSaveFailure();
+      toast("warning", "Archive unavailable",
+        "The report downloaded, but its archive copy could not be saved.", 7000);
+    }
   } catch (err) {
     _handleFetchError(err);
   } finally {
@@ -16813,7 +16888,7 @@ async function saveConfig() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  AZURE MONITOR — live-fetch integration (personal identity via az login)
+//  AZURE MONITOR — live-fetch integration (session-scoped browser identity)
 // ═══════════════════════════════════════════════════════════════
 
 async function checkAzureIdentity(opts = {}) {
@@ -16871,6 +16946,28 @@ async function checkAzureIdentity(opts = {}) {
 }
 function _esc(s) { const d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
 
+// Both Settings and the live-metrics modal can start Azure sign-in.  Keep one
+// browser-auth request per dashboard tab so rapid clicks, or clicking both
+// surfaces, cannot open competing Microsoft login windows.
+let _azureBrowserLoginInFlight = null;
+function _requestAzureBrowserLogin() {
+  if (_azureBrowserLoginInFlight) return _azureBrowserLoginInFlight;
+  _azureBrowserLoginInFlight = (async () => {
+    const ctl = new AbortController();
+    const timeout = setTimeout(() => ctl.abort(), 300000);
+    try {
+      const response = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
+      let data = {};
+      try { data = await response.json(); } catch (_) {}
+      return { response, data };
+    } finally {
+      clearTimeout(timeout);
+      _azureBrowserLoginInFlight = null;
+    }
+  })();
+  return _azureBrowserLoginInFlight;
+}
+
 // ── Browser-based Azure login ────────────────────────────────────────────────
 async function azureBrowserLogin() {
   const btn      = document.getElementById("az-browser-login-btn");
@@ -16915,20 +17012,19 @@ async function azureBrowserLogin() {
     if (statusEl) {
       statusEl.innerHTML =
         `<span>Complete MFA in your browser, then return here.</span>` +
-        `<br><span class="text-Cmuted">If the page says "connection refused" after sign-in, ` +
-        `click <strong>Try Again</strong> below — a different port will be used.</span>`;
+        `<br><span class="text-Cmuted">Keep this request open. The dashboard will update after the Microsoft sign-in window completes.</span>`;
       statusEl.className = "text-xs text-Camber";
     }
   }, 60000);
 
   try {
-    const ctl = new AbortController();
-    const timeoutMs = 300000; // 5 minutes — allows for slow AV-scanned SDK import + MFA
-    const tm = setTimeout(() => ctl.abort(), timeoutMs);
-    const res  = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
-    clearTimeout(tm);
+    const joiningExistingLogin = Boolean(_azureBrowserLoginInFlight);
+    if (joiningExistingLogin && statusEl) {
+      statusEl.textContent = "A Microsoft sign-in window is already open. Waiting for it to complete…";
+      statusEl.className = "text-xs text-Camber";
+    }
+    const { response: res, data } = await _requestAzureBrowserLogin();
     clearTimeout(sdkHintTimer);
-    const data = await res.json();
     if (!res.ok) {
       const msg = data?.detail || `HTTP ${res.status}`;
       if (statusEl) { statusEl.textContent = `❌ ${msg}`; statusEl.className = "text-xs text-Cred"; }
@@ -17074,7 +17170,7 @@ async function azureBrowserLogout() {
     _stopAzureAutoSync();
     // Refresh identity
     checkAzureIdentity({ loadSubscriptions: false });
-    toast("info", "Signed out", "Browser credential cleared. Will fall back to az login.");
+    toast("info", "Signed out", "Browser credential cleared for this dashboard session.");
   } catch (_) {}
 }
 
@@ -17121,7 +17217,7 @@ async function loadAzureSubscriptions(defaultSubId) {
   // usable before the slow subscriptions API call completes.
   let savedSubId = "", savedRg = "";
   try {
-    const cfgFast = await fetch("/api/azure/status");
+    const cfgFast = await fetch("/api/azure/status", { signal: AbortSignal.timeout(4000) });
     const cfgFastData = await cfgFast.json();
     savedSubId = cfgFastData.azure_subscription_id_set ? cfgFastData.azure_subscription_id_value : "";
     savedRg    = cfgFastData.azure_resource_group_set  ? cfgFastData.azure_resource_group_value  : "";
@@ -17139,7 +17235,7 @@ async function loadAzureSubscriptions(defaultSubId) {
   // fallback with _cache_warming=true meaning background fetch is running).
   async function _fetchAndPopulate(isRetry) {
     try {
-      const res = await fetch("/api/azure/subscriptions");
+      const res = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
       const d = await res.json();
 
       if (d.ok && d.subscriptions.length > 0 && !d._cache_warming) {
@@ -17165,7 +17261,7 @@ async function loadAzureSubscriptions(defaultSubId) {
           if (attemptsLeft <= 0) return; // give up after ~30s
           setTimeout(async () => {
             try {
-              const r2 = await fetch("/api/azure/subscriptions");
+              const r2 = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
               const d2 = await r2.json();
               if (d2.ok && d2.subscriptions.length > 0 && !d2._cache_warming) {
                 sel.innerHTML = '';
@@ -17191,7 +17287,7 @@ async function loadAzureSubscriptions(defaultSubId) {
         _pollSubs(15); // up to 15 × 2s = 30s
 
       } else if (!savedSubId) {
-        const msg = d.error ? `No subscriptions — ${d.error}` : "No subscriptions — check az login";
+        const msg = d.error ? `No subscriptions — ${d.error}` : "No subscriptions — check browser sign-in and Azure RBAC";
         sel.innerHTML = `<option value="">${_esc(msg)}</option>`;
       }
       // If savedSubId was already shown and list unavailable, keep it.
@@ -17211,7 +17307,7 @@ async function loadAzureResourceGroups(subscriptionId, preSelectRg) {
     return;
   }
   try {
-    const res = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subscriptionId)}`);
+    const res = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subscriptionId)}`, { signal: AbortSignal.timeout(8000) });
     const d = await res.json();
     sel.innerHTML = '<option value="">All (entire subscription)</option>';
     if (d.ok && d.resource_groups.length > 0) {
@@ -17262,7 +17358,7 @@ async function validateAzure() {
     return;
   }
 
-  if (statusEl) { statusEl.textContent = "Testing (using your az login identity)…"; statusEl.className = "text-xs text-Cmuted"; }
+  if (statusEl) { statusEl.textContent = "Testing your browser-authenticated Azure access…"; statusEl.className = "text-xs text-Cmuted"; }
   try {
     const res  = await fetch("/api/azure/validate", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -17275,7 +17371,7 @@ async function validateAzure() {
     } else {
       const hint = data.hint ? ` — ${data.hint}` : "";
       if (statusEl) { statusEl.textContent = `❌ ${(data.error || "auth failed").slice(0, 80)}${hint}`; statusEl.className = "text-xs text-Cred"; }
-      toast("error", "Azure auth failed", data.hint || data.error || "Run 'az login' and try again");
+      toast("error", "Azure auth failed", data.hint || data.error || "Sign in with Browser and try again");
     }
   } catch (err) {
     if (statusEl) { statusEl.textContent = `❌ Network error: ${err?.message || err}`; statusEl.className = "text-xs text-Cred"; }
@@ -17284,7 +17380,7 @@ async function validateAzure() {
 
 async function _loadAzureStatusBadge() {
   try {
-    const res  = await fetch("/api/azure/status");
+    const res  = await fetch("/api/azure/status", { signal: AbortSignal.timeout(4000) });
     const data = await res.json();
     const badge = document.getElementById("azure-config-status-badge");
     if (!badge) return;
@@ -17316,6 +17412,8 @@ function openAzureModal() {
   document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("az-active");
   document.querySelectorAll('.azure-region-filter:not([data-region="ALL"])').forEach(b => b.remove());
   const srch = document.getElementById("azure-vm-search"); if (srch) srch.value = "";
+  const allSubscriptions = document.getElementById("azure-search-all-subscriptions");
+  if (allSubscriptions) allSubscriptions.checked = false;
   _syncAzureFilterPressedState();
   // Refresh auth bar and load subscriptions
   _refreshModalAuthBar();
@@ -17334,7 +17432,7 @@ async function _refreshModalAuthBar() {
   const signIn   = document.getElementById("azure-modal-signin-btn");
   const signOut  = document.getElementById("azure-modal-signout-btn");
   try {
-    const res  = await fetch("/api/azure/auth-status");
+    const res  = await fetch("/api/azure/auth-status", { signal: AbortSignal.timeout(4000) });
     const data = await res.json();
     if (data.method && data.method !== "none" && data.name) {
       // Authenticated
@@ -17439,16 +17537,16 @@ async function azureModalSignIn() {
   if (label) { label.textContent = "Waiting for browser sign-in…"; label.className = "text-Cmuted text-xs"; }
   if (dot) { dot.className = "w-2 h-2 rounded-full bg-Cmuted animate-pulse inline-block"; }
 
-  // Progressive hints so a stalled loopback redirect doesn't look like a freeze.
+  // Progressive hints so a slow interactive login does not look like a freeze.
   const hint1 = setTimeout(() => { if (label) { label.textContent = "Still waiting — complete sign-in in the Microsoft tab that opened."; label.className = "text-amber-400 text-xs"; } }, 30000);
-  const hint2 = setTimeout(() => { if (label) { label.textContent = 'If the tab says "connection refused" after sign-in, click Sign in again (a new port is used).'; label.className = "text-amber-400 text-xs"; } }, 90000);
-
-  // Hard ceiling so the modal can NEVER hang forever (mirrors the Settings login).
-  const ctl = new AbortController();
-  const tm  = setTimeout(() => ctl.abort(), 300000);
+  const hint2 = setTimeout(() => { if (label) { label.textContent = "Keep this request open. The dashboard will update after the Microsoft sign-in window completes."; label.className = "text-amber-400 text-xs"; } }, 90000);
   try {
-    const res = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
-    const data = await res.json();
+    const joiningExistingLogin = Boolean(_azureBrowserLoginInFlight);
+    if (joiningExistingLogin && label) {
+      label.textContent = "A Microsoft sign-in window is already open. Waiting for it to complete…";
+      label.className = "text-amber-400 text-xs";
+    }
+    const { response: res, data } = await _requestAzureBrowserLogin();
     if (!res.ok) {
       if (label) { label.textContent = `❌ ${data.detail || "Login failed"}`; label.className = "text-red-400 text-xs"; }
       toast("error", "Browser login failed", data.detail || "Unknown error");
@@ -17479,7 +17577,7 @@ async function azureModalSignIn() {
     if (label) { label.textContent = `❌ ${msg}`; label.className = "text-red-400 text-xs"; }
     toast("error", "Browser login error", msg);
   } finally {
-    clearTimeout(tm); clearTimeout(hint1); clearTimeout(hint2);
+    clearTimeout(hint1); clearTimeout(hint2);
     if (btn) { btn.disabled = false; btn.innerHTML = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg> Sign in with Browser'; }
   }
 }
@@ -17502,7 +17600,7 @@ async function _loadModalSubscriptions() {
 
   // Resolve the configured subscription once so we can pre-select it.
   let cfgSub = "";
-  try { const c = await fetch("/api/azure/status"); const cs = await c.json(); cfgSub = cs.azure_subscription_id_value || ""; } catch {}
+  try { const c = await fetch("/api/azure/status", { signal: AbortSignal.timeout(4000) }); const cs = await c.json(); cfgSub = cs.azure_subscription_id_value || ""; } catch {}
 
   const renderSubs = (subs) => {
     sel.innerHTML = "";
@@ -17525,7 +17623,7 @@ async function _loadModalSubscriptions() {
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     let d;
     try {
-      const r = await fetch("/api/azure/subscriptions");
+      const r = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
       d = await r.json();
     } catch {
       sel.innerHTML = '<option value="">Failed to load — reopen to retry</option>';
@@ -17546,7 +17644,7 @@ async function _loadModalSubscriptions() {
 
   // Warmed too slowly — render whatever we have (e.g. the saved sub) or say so.
   try {
-    const r = await fetch("/api/azure/subscriptions");
+    const r = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
     const d = await r.json();
     const subs = d.subscriptions || [];
     if (subs.length) { renderSubs(subs); return; }
@@ -17563,7 +17661,7 @@ async function azureLoadRGs() {
   rgSel.innerHTML = '<option value="">All (entire subscription)</option>';
   if (!subId) return;
   try {
-    const r = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subId)}`);
+    const r = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subId)}`, { signal: AbortSignal.timeout(8000) });
     const d = await r.json();
     for (const g of (d.resource_groups || [])) {
       const opt = document.createElement("option");
@@ -17672,30 +17770,57 @@ function _updateFilterCounts() {
 }
 
 /* ── Search VMs across all subscriptions (Resource Graph) ── */
+let _azureSearchController = null;
 async function azureSearchVMs() {
   const btn    = document.getElementById("azure-search-btn");
   const status = document.getElementById("azure-discover-status");
   const query  = (document.getElementById("azure-search-input")?.value || "").trim();
+  const selectedSubscription = document.getElementById("azure-modal-sub")?.value || "";
+  const searchAllSubscriptions = Boolean(document.getElementById("azure-search-all-subscriptions")?.checked);
 
   if (!query) { if (status) { status.textContent = "Enter a search term (customer name, server name, tag…)."; status.className = "text-xs text-amber-400"; } return; }
+  if (!searchAllSubscriptions && !selectedSubscription) {
+    if (status) { status.textContent = "Select a subscription for the fast search, or choose Search every accessible subscription."; status.className = "text-xs text-amber-400"; }
+    return;
+  }
+  if (_azureSearchController) {
+    if (status) { status.textContent = "A VM search is already running. Please wait for its result."; status.className = "text-xs text-Camber"; }
+    return;
+  }
 
   if (btn) { btn.disabled = true; btn.textContent = "Searching…"; }
-  if (status) { status.textContent = `Searching across all subscriptions for "${query}"…`; status.className = "text-xs text-Cmuted"; }
+  const scopeLabel = searchAllSubscriptions ? "all accessible subscriptions" : "the selected subscription";
+  if (status) { status.textContent = `Searching ${scopeLabel} for "${query}"…`; status.className = "text-xs text-Cmuted"; }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  _azureSearchController = controller;
 
   try {
     const res = await fetch("/api/azure/search-vms", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ query })
+      body: JSON.stringify({
+        query,
+        subscription_ids: searchAllSubscriptions ? undefined : [selectedSubscription],
+      }),
+      signal: controller.signal,
     });
     const data = await res.json();
     if (!res.ok) {
-      if (status) { status.textContent = `❌ ${data.detail || "Search failed"}`; status.className = "text-xs text-red-400"; }
+      const detail = res.status === 504
+        ? "Azure search timed out. Keep Search every accessible subscription off, or choose a more specific customer/tag."
+        : (data.detail || "Search failed");
+      if (status) { status.textContent = `❌ ${detail}`; status.className = "text-xs text-red-400"; }
       return;
     }
     _showDiscoveredVMs(data, status, `✅ Found ${data.total} VMs matching "${query}"`);
   } catch (err) {
-    if (status) { status.textContent = `❌ ${err.message}`; status.className = "text-xs text-red-400"; }
+    const message = err?.name === "AbortError"
+      ? "Search timed out after 60 seconds. Try Browse for one subscription, or use a more specific name or tag."
+      : (err?.message || "Search failed");
+    if (status) { status.textContent = `❌ ${message}`; status.className = "text-xs text-red-400"; }
   } finally {
+    clearTimeout(timeout);
+    if (_azureSearchController === controller) _azureSearchController = null;
     if (btn) { btn.disabled = false; btn.textContent = "Search"; }
   }
 }
@@ -17716,12 +17841,14 @@ async function azureDiscoverVMs() {
     // Save subscription to config so fetch uses it
     await fetch("/api/config", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ azure_subscription_id: subId, azure_resource_group: rg || "" })
+      body: JSON.stringify({ azure_subscription_id: subId, azure_resource_group: rg || "" }),
+      signal: AbortSignal.timeout(8000),
     });
 
     const res = await fetch("/api/azure/discover-vms", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ subscription_id: subId, resource_group: rg || null })
+      body: JSON.stringify({ subscription_id: subId, resource_group: rg || null }),
+      signal: AbortSignal.timeout(60000),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -17737,7 +17864,10 @@ async function azureDiscoverVMs() {
     _showDiscoveredVMs(data, status, `✅ Found ${data.total} VMs`);
 
   } catch (err) {
-    if (status) { status.textContent = `❌ ${err.message}`; status.className = "text-xs text-red-400"; }
+    const message = err?.name === "TimeoutError"
+      ? "Discovery timed out after 60 seconds. Check Azure access or select a smaller resource group."
+      : (err?.message || "Discovery failed");
+    if (status) { status.textContent = `❌ ${message}`; status.className = "text-xs text-red-400"; }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "Browse"; }
   }

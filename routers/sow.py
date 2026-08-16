@@ -378,12 +378,16 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
             f"at the tested volume only, not at full contracted scale."
         )
     elif in_range >= len(metrics) * 0.7:
-        overall = "OPTIMAL"
+        # `in_range` includes both OPTIMAL and ACCEPTABLE metrics. Do not
+        # badge the engagement OPTIMAL when every in-range metric is only in
+        # the lower acceptable band.
+        overall = "OPTIMAL" if optimals >= len(metrics) * 0.7 else "ACCEPTABLE"
+        confidence = "HIGH" if overall == "OPTIMAL" else "MODERATE-HIGH"
         summary = (
             f"\u2705 {in_range}/{len(metrics)} metrics within the "
             f"{_pc.SOW_UNDER_PCT:g}%\u2013{_pc.SOW_OVER_PCT:g}% SOW standard process "
             f"window ({optimals} in preferred 90\u2013{_pc.SOW_OVER_PCT:g}% zone, "
-            f"{acceptables} in the lower acceptable range). Go-live confidence HIGH."
+            f"{acceptables} in the lower acceptable range). Go-live confidence {confidence}."
         )
     else:
         overall = "MODERATE"

@@ -1,5 +1,5 @@
 """
-Azure Monitor resource fetcher — personal identity via az login.
+Azure Monitor resource fetcher — session-scoped interactive browser identity.
 
 Uses the azure-monitor-query + azure-identity SDK to pull CPU / Memory /
 Disk metrics for all VMs in a given subscription + resource group, then
@@ -7,9 +7,8 @@ returns records in the same dict shape as resource_parser_generic.py so
 they feed directly into resource_calculator.build_resource_payload().
 
 Authentication:
-    DefaultAzureCredential — picks up the logged-in user from `az login`,
-    managed identity, VS Code credential, or environment variables.
-    Every data pull is tied to the user's own Azure AD identity.
+    InteractiveBrowserCredential — the analyst explicitly signs in in their
+    browser. Every data pull is tied to that browser session's Azure AD identity.
 
 Public API
 ----------
@@ -110,13 +109,11 @@ except Exception:
     pass
 # ─────────────────────────────────────────────────────────────────────────────
 
-import hashlib as _hashlib
 import logging
 import os
 import sys as _sys
 import threading as _threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from services.spike_schema import make_spike_record
@@ -128,8 +125,16 @@ class AzureConfigError(Exception):
     """Raised when Azure credentials are missing or authentication fails."""
 
 
+class AzureNetworkError(AzureConfigError):
+    """Raised when the corporate network cannot reach the Microsoft login host."""
+
+
 class AzureFetchError(Exception):
     """Raised when the Azure Monitor API call fails."""
+
+
+class AzureTimeoutError(AzureFetchError):
+    """Raised when a bounded Azure SDK operation exceeds its transport timeout."""
 
 
 # ── Metric definitions ────────────────────────────────────────────────────────
@@ -232,10 +237,11 @@ def _require_sdk() -> None:
 # Credentials are scoped by session id (supplied by the HTTP layer from a
 # first-party cookie) so concurrent analysts sharing one server process never
 # overwrite or read each other's Azure identity/token. The "_default" bucket
-# preserves the original single-user / az-login workflow when no session id is
-# supplied (e.g. internal callers). All access is guarded by a re-entrant lock.
+# supports internal single-user callers that do not have an HTTP session. All
+# access is guarded by a re-entrant lock.
 _cred_lock = _threading.RLock()
 _cred_sessions: dict = {}   # sid -> {"cred": <credential|None>, "info": {...}}
+_login_locks: dict = {}     # sid -> Lock, serializes interactive browser launches
 _DEFAULT_SID = "_default"
 
 # Seconds to wait for the user to finish the interactive browser sign-in before
@@ -244,32 +250,9 @@ _DEFAULT_SID = "_default"
 # retryable error instead of leaving the request — and the UI — hanging.
 _BROWSER_AUTH_TIMEOUT_S = 180
 
-# Persistent credential cache — survives server restarts. Files are namespaced
-# per session so a restart restores only the identity that owns each session,
-# never a blanket "last person to log in" for everyone. The default bucket keeps
-# the original unsuffixed filenames for backward compatibility.
-_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
-
-
 def _sid_norm(session_id=None) -> str:
     sid = (session_id or "").strip()
     return sid or _DEFAULT_SID
-
-
-def _sid_tag(session_id=None) -> str:
-    """Filesystem-safe per-session suffix. Default bucket → '' (legacy names)."""
-    sid = _sid_norm(session_id)
-    if sid == _DEFAULT_SID:
-        return ""
-    return "_" + _hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
-
-
-def _auth_record_file(session_id=None) -> Path:
-    return _CACHE_DIR / f"auth_record{_sid_tag(session_id)}.json"
-
-
-def _credential_info_file(session_id=None) -> Path:
-    return _CACHE_DIR / f"credential_info{_sid_tag(session_id)}.json"
 
 
 # ── Thread-safe registry accessors (no network — pure in-memory state) ────────
@@ -295,176 +278,11 @@ def _clear_session(session_id=None) -> None:
         _cred_sessions.pop(_sid_norm(session_id), None)
 
 
-def _save_credential_info(info: dict, session_id=None):
-    """Persist credential identity info to this session's disk file."""
-    try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        import json as _json
-        _credential_info_file(session_id).write_text(_json.dumps(info), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _load_credential_info(session_id=None) -> dict:
-    """Load persisted credential identity info for this session from disk."""
-    try:
-        f = _credential_info_file(session_id)
-        if f.exists():
-            import json as _json
-            return _json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-
-def _save_auth_record(record, session_id=None):
-    """Persist AuthenticationRecord to this session's disk file."""
-    try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _auth_record_file(session_id).write_text(record.serialize(), encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Failed to persist auth record: %s", exc)
-
-
-def _load_auth_record(session_id=None):
-    """Load this session's AuthenticationRecord from disk, or None."""
-    try:
-        f = _auth_record_file(session_id)
-        if f.exists():
-            from azure.identity import AuthenticationRecord
-            return AuthenticationRecord.deserialize(f.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return None
-
-
-def _token_cache_options():
-    """Return safe TokenCachePersistenceOptions (DPAPI bypassed via Fix 3 above)."""
-    try:
-        from azure.identity import TokenCachePersistenceOptions
-        return TokenCachePersistenceOptions(
-            name="pe_dashboard_browser_msal_cache",
-            allow_unencrypted_storage=True,
-        )
-    except Exception:
-        return None
-
-
-_MSAL_CACHE_NAME = "pe_dashboard_browser_msal_cache"
-
-
-def _msal_token_cache_files() -> list:
-    """Best-effort list of the on-disk MSAL token-cache files this app creates.
-
-    azure-identity stores the browser refresh-token cache under
-    ``<user-data>/.IdentityService/<name><suffix>`` where suffix is ``.nocae``
-    or ``.cae``. We list every variant so a corrupt/locked cache can be purged
-    without depending on the SDK internals. Returns an empty list on any error."""
-    out = []
-    try:
-        if _sys.platform.startswith("win"):
-            base = os.environ.get("LOCALAPPDATA")
-            root = Path(base) / ".IdentityService" if base else None
-        else:
-            root = Path(os.path.expanduser("~")) / ".IdentityService"
-        if root is None:
-            return out
-        for suffix in (".nocae", ".cae", ""):
-            out.append(root / f"{_MSAL_CACHE_NAME}{suffix}")
-    except Exception:
-        return []
-    return out
-
-
-def _purge_msal_token_cache() -> int:
-    """Delete the MSAL persistent token-cache file(s). Best-effort, never raises.
-
-    Used to self-heal a corrupt cache (e.g. the Windows cp1252/'charmap' decode
-    crash, a stale DPAPI blob, or a version mismatch) so the next interactive
-    login starts from a clean state. Returns the count of files removed."""
-    removed = 0
-    for f in _msal_token_cache_files():
-        try:
-            if f.exists():
-                f.unlink()
-                removed += 1
-        except Exception:
-            pass
-    if removed:
-        logger.info("Purged %d corrupt MSAL token-cache file(s).", removed)
-    return removed
-
-
-def _is_cache_persistence_error(exc: BaseException) -> bool:
-    """True when an auth exception is a token-cache read/write failure rather
-    than a genuine user cancellation/timeout. Walks the exception chain and
-    matches the Windows 'charmap' codec crash, any Unicode/codec decode error,
-    and msal-extensions persistence errors. Conservative: only these classes of
-    failure trigger the purge-and-retry-without-persistence path."""
-    seen = set()
-    cur = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, UnicodeDecodeError):
-            return True
-        msg = str(cur).lower()
-        if any(tok in msg for tok in (
-            "charmap", "codec can't decode", "codec can not decode",
-            "'utf-8' codec", "persistence", "persisted", "token cache",
-            "tokencache", ".identityservice",
-        )):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
-
-
-def _restore_browser_credential(session_id=None) -> bool:
-    """Try to restore this session's browser credential from its persistent
-    AuthenticationRecord. Uses silent auth (no browser popup). Returns True if
-    restored. Each session restores only its OWN identity file — never another
-    session's."""
-    if _get_cred(session_id) is not None:
-        return True
-
-    info = _load_credential_info(session_id)
-    if not info.get("logged_in"):
-        return False
-
-    record = _load_auth_record(session_id)
-    if record is None:
-        return False
-
-    try:
-        from azure.identity import InteractiveBrowserCredential
-        cache_opts = _token_cache_options()
-        kwargs = {"authentication_record": record}
-        if cache_opts is not None:
-            kwargs["cache_persistence_options"] = cache_opts
-        cred = InteractiveBrowserCredential(**kwargs)
-        # Silently acquire a token (should use cached refresh token)
-        token = cred.get_token("https://management.azure.com/.default")
-        if token and token.token:
-            _set_session(session_id, cred, info)
-            logger.info("Restored browser credential from cache: %s", info.get("name", "?"))
-            return True
-    except Exception as exc:
-        logger.debug("Could not restore cached credential: %s", exc)
-        # If the persistent token cache itself is corrupt (e.g. the Windows
-        # 'charmap' crash), purge it so the next interactive login starts clean.
-        # Identity files are left intact — only on explicit sign-out are those removed.
-        if _is_cache_persistence_error(exc):
-            _purge_msal_token_cache()
-    return False
-
-
-def _clear_persistent_cache(session_id=None):
-    """Remove this session's persistent cache files."""
-    try:
-        for f in (_auth_record_file(session_id), _credential_info_file(session_id)):
-            if f.exists():
-                f.unlink()
-    except Exception:
-        pass
+def _login_lock(session_id=None):
+    """Return the per-session lock that makes browser sign-in single-flight."""
+    sid = _sid_norm(session_id)
+    with _cred_lock:
+        return _login_locks.setdefault(sid, _threading.Lock())
 
 
 def _preflight_auth_network(timeout: float = 6.0) -> None:
@@ -475,26 +293,24 @@ def _preflight_auth_network(timeout: float = 6.0) -> None:
         addrs = _s.getaddrinfo("login.microsoftonline.com", 443,
                                _s.AF_INET, _s.SOCK_STREAM)
         if not addrs:
-            raise AzureConfigError("DNS lookup for login.microsoftonline.com returned no IPv4 addresses.")
+            raise AzureNetworkError("DNS lookup for login.microsoftonline.com returned no IPv4 addresses.")
         ip = addrs[0][4][0]
         sock = _s.create_connection((ip, 443), timeout=timeout)
         sock.close()
-    except AzureConfigError:
+    except AzureNetworkError:
         raise
     except OSError as exc:
-        raise AzureConfigError(
+        raise AzureNetworkError(
             f"Cannot reach login.microsoftonline.com — check network/VPN. ({exc})"
         ) from exc
 
 
 def browser_login(session_id=None) -> dict:
-    """Launch interactive browser login and cache the credential for THIS session.
+    """Launch interactive browser login and cache the credential for THIS process/session.
 
     Opens the Microsoft "Pick an account" page in the user's default
-    browser.  After successful sign-in the credential is cached both
-    in-process (under this session id) AND on disk (per-session
-    AuthenticationRecord) so it survives server restarts without re-prompting —
-    and without overwriting any other session's identity.
+    browser. After successful sign-in the credential is held only in process
+    under this session id; persistent token caches are intentionally disabled.
 
     Returns a dict with identity info (name, tenant, etc.).
     """
@@ -505,121 +321,76 @@ def browser_login(session_id=None) -> dict:
     # Fix 5: network preflight — fail fast (6s) instead of 180s timeout
     _preflight_auth_network()
 
-    logger.info("Azure auth: launching interactive browser login…")
-    try:
-        cache_opts = _token_cache_options()
-        # Bound the interactive wait so a stalled loopback redirect fails fast
-        # (clear, retryable error) instead of hanging on the SDK's 300s default.
-        kwargs: dict = {"timeout": _BROWSER_AUTH_TIMEOUT_S}
-        if cache_opts is not None:
-            kwargs["cache_persistence_options"] = cache_opts
-        cred = InteractiveBrowserCredential(**kwargs)
-        # authenticate() opens browser AND returns an AuthenticationRecord
-        record = cred.authenticate(scopes=["https://management.azure.com/.default"])
-        _save_auth_record(record, session_id)   # save AFTER authenticate() returns the record
-        # Now get a token (will be silent — cached from authenticate())
-        token = cred.get_token("https://management.azure.com/.default")
-    except Exception as exc:
-        # A corrupt/legacy token cache (e.g. the Windows cp1252/'charmap' crash) must
-        # never block sign-in. Purge the bad cache and retry ONCE without persistence —
-        # login still succeeds; the only cost is re-auth after the next server restart.
-        if _is_cache_persistence_error(exc):
-            logger.warning(
-                "Token cache unreadable (%s) — purging and retrying without persistence.", exc
-            )
-            _purge_msal_token_cache()
-            try:
-                cred = InteractiveBrowserCredential(timeout=_BROWSER_AUTH_TIMEOUT_S)
-                record = cred.authenticate(scopes=["https://management.azure.com/.default"])
-                _save_auth_record(record, session_id)
-                token = cred.get_token("https://management.azure.com/.default")
-            except Exception as exc2:
-                raise AzureConfigError(
-                    f"Browser login failed or was cancelled. Error: {exc2}"
-                )
-        else:
+    # Two browser clicks can arrive on separate FastAPI worker threads. Without
+    # this single-flight lock both calls open an account-picker window. The
+    # follower waits for the bounded first attempt, then reuses its credential.
+    with _login_lock(session_id):
+        existing = _get_cred(session_id)
+        existing_info = _get_info(session_id)
+        if existing is not None and existing_info.get("logged_in"):
+            return existing_info
+
+        logger.info("Azure auth: launching interactive browser login…")
+        try:
+            # Bound the interactive wait so a stalled loopback redirect fails
+            # fast instead of hanging on the SDK's 300s default. Do not attach a
+            # persistent token cache: DPAPI can hang on this supported build.
+            cred = InteractiveBrowserCredential(timeout=_BROWSER_AUTH_TIMEOUT_S)
+            cred.authenticate(scopes=["https://management.azure.com/.default"])
+            token = cred.get_token("https://management.azure.com/.default")
+        except Exception as exc:
             raise AzureConfigError(
                 f"Browser login failed or was cancelled. Error: {exc}"
-            )
+            ) from exc
 
-    # Decode JWT to extract identity
-    try:
-        payload_b64 = token.token.split(".")[1]
-        payload_b64 += "=" * (4 - len(payload_b64) % 4)
-        claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
-        info = {
-            "logged_in": True,
-            "name":  claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or "",
-            "display_name": claims.get("name", ""),
-            "tenant_id": claims.get("tid", ""),
-            "method": "browser",
-        }
-    except Exception:
-        info = {"logged_in": True, "name": "unknown", "method": "browser"}
-
-    _set_session(session_id, cred, info)
-    _save_credential_info(info, session_id)
-
-    logger.info("Browser login succeeded: %s", info.get("name", "?"))
-    return info
+        # Decode JWT to extract identity.
+        try:
+            payload_b64 = token.token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            info = {
+                "logged_in": True,
+                "name":  claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or "",
+                "display_name": claims.get("name", ""),
+                "tenant_id": claims.get("tid", ""),
+                "method": "browser",
+            }
+        except Exception:
+            info = {"logged_in": True, "name": "unknown", "method": "browser"}
+        _set_session(session_id, cred, info)
+        logger.info("Browser login succeeded: %s", info.get("name", "?"))
+        return info
 
 
 def get_browser_credential_info(session_id=None) -> dict:
-    """Return this session's cached browser credential identity, or empty dict.
-    Also tries restoring from this session's disk cache on first call."""
-    if not _get_info(session_id):
-        _restore_browser_credential(session_id)
+    """Return this session's cached browser credential identity, or empty dict."""
     return _get_info(session_id)
 
 
 def get_browser_credential(session_id=None):
-    """Return this session's browser credential object (restoring from this
-    session's disk cache if needed), or None. Used by background workers that
-    need the credential without rebuilding it."""
-    cred = _get_cred(session_id)
-    if cred is not None:
-        return cred
-    if _restore_browser_credential(session_id):
-        return _get_cred(session_id)
-    return None
+    """Return this session's browser credential object, or None."""
+    return _get_cred(session_id)
 
 
 def clear_browser_credential(session_id=None) -> None:
-    """Clear this session's cached browser credential (sign-out) — both
-    in-process and on disk. Other sessions are unaffected."""
+    """Clear this session's in-memory browser credential on sign-out.
+
+    Other sessions are unaffected. Browser credentials deliberately do not
+    persist to disk, so a server restart requires an explicit new sign-in.
+    """
     _clear_session(session_id)
-    _clear_persistent_cache(session_id)
 
 
 def _build_credential(cfg: dict, session_id=None):
-    """Build Azure credential for this session — prefers the session's cached
-    browser credential (including restored from disk), then falls back to
-    DefaultAzureCredential (the server's ambient az-login / managed identity).
-    """
+    """Return the explicitly authenticated browser credential for this session."""
     # Try this session's in-memory credential first
     cred = _get_cred(session_id)
     if cred is not None:
         logger.info("Azure auth: reusing cached browser credential")
         return cred
-    # Try restoring this session's credential from its persistent cache
-    if _restore_browser_credential(session_id):
-        logger.info("Azure auth: restored browser credential from disk cache")
-        return _get_cred(session_id)
-
-    from azure.identity import DefaultAzureCredential
-    import logging as _logging
-    # Suppress noisy credential chain errors in the console
-    _logging.getLogger("azure.identity").setLevel(_logging.ERROR)
-    logger.info("Azure auth: DefaultAzureCredential (az login / personal identity)")
-    try:
-        cred = DefaultAzureCredential()
-        # Eagerly verify the credential can obtain a token
-        cred.get_token("https://management.azure.com/.default")
-        return cred
-    except Exception:
-        raise AzureConfigError(
-            "Not authenticated. Go to Settings → Sign in with Browser first."
-        )
+    raise AzureConfigError(
+        "Not authenticated. Go to Settings → Sign in with Browser first."
+    )
 
 
 def _list_vms(credential, subscription_id: str, resource_group: Optional[str]) -> List[dict]:
@@ -2506,7 +2277,8 @@ def discover_vms(cfg: dict, resource_group: Optional[str] = None,
 
 
 def search_vms(credential, query: str,
-               subscription_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+               subscription_ids: Optional[List[str]] = None,
+               session_id=None) -> List[Dict[str, Any]]:
     """
     Search for VMs across all (or specified) subscriptions using Azure
     Resource Graph.  Matches VM name, resource group, tags (CustomerName,
@@ -2515,6 +2287,34 @@ def search_vms(credential, query: str,
     Returns the same shape as discover_vms() so the frontend can render
     the same VM table.
     """
+    # A post-login inventory pre-warm already has the same metadata needed by
+    # this search. Use it first: no network call and no Resource Graph delay.
+    q = (query or "").strip()
+    if not q:
+        raise AzureConfigError("Search query is empty.")
+    q_lower = q.lower()
+    with _vm_prewarm_lock:
+        cached = list(_vm_inventory_cache.get(_sid_norm(session_id), {}).items())
+    cached_matches = []
+    for cached_subscription_id, inventory in cached:
+        if subscription_ids and cached_subscription_id not in subscription_ids:
+            continue
+        for vm in inventory:
+            tags = vm.get("tags") or {}
+            searchable = " ".join((
+                str(vm.get("name", "")), str(vm.get("resource_group", "")),
+                " ".join(f"{k} {v}" for k, v in tags.items()),
+            )).lower()
+            if q_lower in searchable:
+                cached_vm = dict(vm)
+                cached_vm["subscription_id"] = cached_subscription_id
+                cached_matches.append(cached_vm)
+    if cached_matches:
+        order = {"DB": 0, "SRE": 1, "APP": 2}
+        cached_matches.sort(key=lambda v: (order.get(v.get("type"), 9), v.get("name", "")))
+        logger.info("VM search '%s' served %d match(es) from session inventory cache", q, len(cached_matches))
+        return cached_matches
+
     try:
         from azure.mgmt.resourcegraph import ResourceGraphClient
         from azure.mgmt.resourcegraph.models import (
@@ -2527,17 +2327,15 @@ def search_vms(credential, query: str,
         )
 
     # Sanitize query for KQL (escape single quotes)
-    q = (query or "").strip().replace("'", "\\'")
-    if not q:
-        raise AzureConfigError("Search query is empty.")
+    q_kql = q.replace("'", "\\'")
 
     # KQL: search VMs where name, RG, or any tag value contains the query
     kql = f"""
     Resources
     | where type =~ 'microsoft.compute/virtualMachines'
-    | where name contains '{q}'
-       or resourceGroup contains '{q}'
-       or tostring(tags) contains '{q}'
+    | where name contains '{q_kql}'
+       or resourceGroup contains '{q_kql}'
+       or tostring(tags) contains '{q_kql}'
     | project id, name, location, resourceGroup, subscriptionId,
               vmSize = tostring(properties.hardwareProfile.vmSize),
               tags,
@@ -2546,7 +2344,12 @@ def search_vms(credential, query: str,
     | limit 200
     """
 
-    client = ResourceGraphClient(credential)
+    from services import pe_config as _pc
+    client = ResourceGraphClient(
+        credential,
+        connection_timeout=_pc.AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S,
+        read_timeout=_pc.AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S,
+    )
 
     opts = QueryRequestOptions(result_format="objectArray")
     req_kwargs = {"query": kql, "options": opts}
@@ -2558,6 +2361,10 @@ def search_vms(credential, query: str,
     try:
         response = client.resources(request)
     except Exception as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise AzureTimeoutError(
+                "Azure Resource Graph search timed out. Narrow the subscription scope and try again."
+            ) from exc
         raise AzureFetchError(f"Resource Graph query failed: {exc}") from exc
 
     results: List[Dict[str, Any]] = []
@@ -2860,23 +2667,25 @@ def _build_server_records(credential, vms: List[dict],
 # clear_vm_inventory_cache wipes it on logout / credential change.
 # get_vm_prewarm_state returns the current state for the polling endpoint.
 
-_vm_inventory_cache: Dict[str, Any] = {}
-_vm_prewarm_state: Dict[str, Any] = {"status": "idle", "vm_count": 0, "ts": 0.0, "error": None}
+_vm_inventory_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+_vm_prewarm_state: Dict[str, Dict[str, Any]] = {}
 _vm_prewarm_lock = __import__("threading").Lock()
 
 
-def clear_vm_inventory_cache() -> None:
-    """Wipe the VM inventory cache so a different user/credential never sees stale data."""
-    global _vm_inventory_cache, _vm_prewarm_state
+def clear_vm_inventory_cache(session_id=None) -> None:
+    """Wipe this session's VM inventory so identities never share cached metadata."""
+    sid = _sid_norm(session_id)
     with _vm_prewarm_lock:
-        _vm_inventory_cache.clear()
-        _vm_prewarm_state = {"status": "idle", "vm_count": 0, "ts": 0.0, "error": None}
+        _vm_inventory_cache.pop(sid, None)
+        _vm_prewarm_state.pop(sid, None)
 
 
-def get_vm_prewarm_state() -> Dict[str, Any]:
+def get_vm_prewarm_state(session_id=None) -> Dict[str, Any]:
     """Return the current VM pre-warm status (no network call)."""
     with _vm_prewarm_lock:
-        return dict(_vm_prewarm_state)
+        return dict(_vm_prewarm_state.get(_sid_norm(session_id), {
+            "status": "idle", "vm_count": 0, "ts": 0.0, "error": None,
+        }))
 
 
 def prewarm_vm_inventory(credential, subscription_id: str,
@@ -2890,18 +2699,17 @@ def prewarm_vm_inventory(credential, subscription_id: str,
     import threading as _threading
 
     def _worker():
-        global _vm_prewarm_state
+        sid = _sid_norm(session_id)
         with _vm_prewarm_lock:
-            if _vm_prewarm_state.get("status") == "warming":
+            if _vm_prewarm_state.get(sid, {}).get("status") == "warming":
                 return  # already running
-            _vm_prewarm_state = {"status": "warming", "vm_count": 0, "ts": __import__("time").time(), "error": None}
+            _vm_prewarm_state[sid] = {"status": "warming", "vm_count": 0, "ts": __import__("time").time(), "error": None}
         try:
-            cfg = {"credential": credential, "subscription_id": subscription_id}
+            cfg = {"azure_subscription_id": subscription_id}
             vms = discover_vms(cfg, resource_group=resource_group, session_id=session_id)
             with _vm_prewarm_lock:
-                _vm_inventory_cache.clear()
-                _vm_inventory_cache[subscription_id] = vms
-                _vm_prewarm_state = {
+                _vm_inventory_cache[sid] = {subscription_id: vms}
+                _vm_prewarm_state[sid] = {
                     "status": "ready",
                     "vm_count": len(vms),
                     "ts": __import__("time").time(),
@@ -2910,7 +2718,7 @@ def prewarm_vm_inventory(credential, subscription_id: str,
             logger.info("VM inventory pre-warm complete — %d VMs cached for sub %s", len(vms), subscription_id)
         except Exception as _e:
             with _vm_prewarm_lock:
-                _vm_prewarm_state = {
+                _vm_prewarm_state[sid] = {
                     "status": "error",
                     "vm_count": 0,
                     "ts": __import__("time").time(),

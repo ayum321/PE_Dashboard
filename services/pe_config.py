@@ -65,6 +65,13 @@ DB_MEM_CRIT:      float = 95.0   # genuine DB memory pressure regardless of band
 # and any future capture logic read one number. Override: resource_capture_days.
 RESOURCE_CAPTURE_DAYS: int = 15
 
+# ── Azure Resource Graph transport limits (seconds) ──────────────────────────
+# Tenant-wide VM search must fail clearly rather than leaving an analyst on a
+# permanent loading indicator when Azure Resource Graph or corporate transport
+# is unavailable.  Values can be overridden in .pe_config.json.
+AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S: float = 6.0
+AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S:    float = 35.0
+
 # ── Batch quality thresholds ──────────────────────────────────────────────────
 BATCH_FAIL_RATE:  float = 5.0    # % failure rate above which rule R4 fires
 ZERO_DUR_FLAG:    bool  = True   # Flag zero-duration jobs in findings
@@ -500,6 +507,7 @@ def reload() -> None:
     global CPU_WARN, CPU_CRIT, MEM_WARN, MEM_CRIT, DISK_WARN, DISK_CRIT
     global DB_MEM_BAND_LOW, DB_MEM_BAND_HIGH, DB_MEM_WARN, DB_MEM_CRIT
     global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
+    global AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S, AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S
     global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
     global SLA_ATRISK_PCT, SLA_LONGJOB_PCT, SLA_STRUCTURAL_RATIO
     global SLA_START_ATRISK_MINS, SLA_START_LATE_MINS
@@ -546,6 +554,8 @@ def reload() -> None:
         RESOURCE_CAPTURE_DAYS = int(_cfg("resource_capture_days", 15))
     except (TypeError, ValueError):
         RESOURCE_CAPTURE_DAYS = 15
+    AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S = _f("azure_resource_graph_connect_timeout_s", 6.0)
+    AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S = _f("azure_resource_graph_read_timeout_s", 35.0)
     SLA_DAILY_HRS     = _f("daily_sla_hrs",     SLA_DEFAULTS["daily"])
     SLA_WEEKLY_HRS    = _f("weekly_sla_hrs",    SLA_DEFAULTS["weekly"])
     SLA_BIWEEKLY_HRS  = _f("biweekly_sla_hrs",  SLA_DEFAULTS["biweekly"])

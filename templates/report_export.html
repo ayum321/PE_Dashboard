@@ -248,6 +248,9 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
   border:1px solid color-mix(in srgb,var(--green) 45%, transparent); box-shadow:0 0 10px -2px var(--green);}
 .check--off .check__mark{color:var(--ink-3); background:var(--track); border:1px solid var(--border);}
 .check--on{color:var(--ink);}
+.check--mismatch{border-color:color-mix(in srgb,var(--amber) 45%, var(--border-soft));}
+.check--mismatch .check__mark{color:var(--amber); background:color-mix(in srgb,var(--amber) 18%, transparent);
+  border:1px solid color-mix(in srgb,var(--amber) 55%, transparent); box-shadow:0 0 10px -2px var(--amber);}
 
 /* ── Approval ────────────────────────────────────────────── */
 .appr-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
@@ -430,14 +433,14 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">⚙️</div>
       <div>
         <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
-        <div class="panel__s">Daily ceiling {{ daily_limit }}h · monthly ceiling {{ monthly_limit }}h · buffer = (SLA − runtime) ÷ SLA</div>
+        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the {{ daily_limit }}h configured default · buffer = (SLA − runtime) ÷ SLA</div>
       </div>
       <div class="panel__count">{{ n_jobs }} jobs</div>
     </div>
     <div class="panel__body" style="padding:0;">
       <table>
         <thead><tr>
-          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>Buffer</th><th>Status</th>
+          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th>
         </tr></thead>
         <tbody>{{ top_rows|safe }}</tbody>
       </table>

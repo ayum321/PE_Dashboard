@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import io
 import re
+from numbers import Number
 from typing import Any, Dict, List, Optional
 
 # A genuine SLA contract states a repeatable clock time ("9:00 PM") — it does
@@ -693,6 +694,47 @@ def _normalize_col_header(col: str) -> str:
     return s.lower().strip()
 
 
+def _header_declares_sla_duration(col: str) -> bool:
+    """Return True when an SLA header explicitly declares duration units.
+
+    A bare ``SLA`` column is intentionally treated as a possible clock-time
+    deadline. Headers such as ``SLA(in Hrs)`` are different: the unit makes
+    the customer's intent unambiguous and the cells must be parsed as elapsed
+    hours/minutes. This runs before normalization can erase that evidence.
+    """
+    raw = re.sub(r"[_\-]+", " ", str(col or "").strip().lower())
+    if not re.search(r"\bsla\b", raw):
+        return False
+    return bool(re.search(r"\b(?:h(?:ou)?rs?|hours?|mins?|minutes?)\b", raw))
+
+
+def _value_declares_sla_duration(value: Any) -> bool:
+    """True only when a cell explicitly carries an hour/minute unit.
+
+    This safely disambiguates a bare ``SLA`` column row by row: ``8Hrs`` is a
+    duration, while ``7:00 PM`` remains a deadline. Unitless values stay on the
+    existing header-driven path because their meaning cannot be proven.
+    """
+    try:
+        import pandas as _pd
+        if _pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, Number) and not isinstance(value, bool):
+        # Excel clock-time serials are fractions of a day (0 < value < 1).
+        # A whole/decimal number >= 1 in a bare SLA column is therefore an
+        # elapsed-hour duration, not an Excel time-of-day value.
+        return float(value) >= 1
+    raw = str(value or "").strip().lower()
+    if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+        return float(raw) >= 1
+    return bool(re.search(
+        r"(?<![a-z])(?:h(?:ou)?rs?|hours?|mins?|minutes?)\b",
+        raw,
+    ))
+
+
 def _map_columns(df_columns: list[str]) -> dict[str, str]:
     """Return {canonical → actual_col} for columns found in df.
 
@@ -705,10 +747,29 @@ def _map_columns(df_columns: list[str]) -> dict[str, str]:
     Batch_Name's "job name" alias after it was already matched by First_Job.
     Process order respects _COL_ALIASES insertion order (Python 3.7+).
     """
-    lower = {_normalize_col_header(c): c for c in df_columns}
     mapping: dict[str, str] = {}
     claimed: set[str] = set()  # raw column names already assigned to a canonical key
+
+    # Preserve explicit unit evidence before _normalize_col_header() removes
+    # parenthetical suffixes. Without this, "SLA(in Hrs)" normalizes to bare
+    # "sla" and is incorrectly claimed by Expected_End_Time; values such as
+    # "8Hrs" then fail clock-time parsing and silently fall through to defaults.
+    duration_sla_cols = [c for c in df_columns if _header_declares_sla_duration(c)]
+    if duration_sla_cols:
+        mapping["Expected_SLA"] = duration_sla_cols[0]
+        # Do not let a second duration-SLA column masquerade as an end-time
+        # column after normalization. The first column is deterministic; any
+        # additional synonymous duration columns are ignored.
+        claimed.update(duration_sla_cols)
+
+    lower = {
+        _normalize_col_header(c): c
+        for c in df_columns
+        if c not in claimed
+    }
     for canon, aliases in _COL_ALIASES.items():
+        if canon in mapping:
+            continue
         for alias in aliases:
             if alias in lower and lower[alias] not in claimed:
                 mapping[canon] = lower[alias]
@@ -937,6 +998,18 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         sla_raw = sla_series.iloc[idx] if sla_series is not None else None
         sla_h   = parse_sla_hours(sla_raw)
         sla_end_time_raw: Optional[str] = None   # clock-time deadline (e.g. "07:00") when applicable
+
+        # A bare "SLA" header can legitimately contain either a duration or a
+        # clock deadline across customer templates. Explicit units in the cell
+        # settle that ambiguity without guessing: "8Hrs"/"90 min" are durations;
+        # "7:00 PM" continues through the clock-time path below.
+        if sla_h is None and expected_end_series is not None:
+            try:
+                _candidate = expected_end_series.iloc[idx]
+                if _value_declares_sla_duration(_candidate):
+                    sla_h = parse_sla_hours(_candidate)
+            except Exception:
+                pass
 
         # If Expected_SLA parse returned None AND the raw value looks like a time-of-day
         # string (HH:MM[:SS]), treat it as a deadline and compute sla_h as overnight delta

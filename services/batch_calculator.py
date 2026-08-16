@@ -1050,6 +1050,16 @@ def build_top_jobs_df(df: pd.DataFrame,
         ) or {}).get("source", "default"),
         axis=1,
     )
+    # Surface the resolved schedule type with the same composite-key lookup as
+    # sla_source.  Export consumers need it to explain a per-job SLA ceiling
+    # without re-deriving schedule semantics from the job name.
+    top_jobs["schedule_type"] = top_jobs.apply(
+        lambda r: (job_sla_map.get(
+            f"{r.get('Sub_Application','') if 'Sub_Application' in r.index else ''}|{r.get('Job_Name','')}",
+            job_sla_map.get(str(r.get("Job_Name", "")), {})
+        ) or {}).get("schedule_type", "UNKNOWN"),
+        axis=1,
+    )
 
     # ── PATH C: Adaptive baseline when no XLSX contracts present ────────────
     # When every job resolved from global_ceil (no XLSX), compute per-job history
@@ -3888,6 +3898,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     _job_cols = [c for c in ["Sub_Application", "Job_Name", "peak_hrs", "avg_hrs",
                               "total_hrs", "sla_hrs", "sla_source", "sla_path",
                               "sla_match_confidence", "sla_match_detail",
+                              "schedule_type",
                               "buffer_pct", "sla_used_pct", "buffer_status",
                               "baseline_quality", "is_high_variance",
                               "fail_count", "is_utility", "utility_reason",

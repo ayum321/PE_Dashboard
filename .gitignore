@@ -17,6 +17,7 @@ server_stdout.txt
 
 # Dev/diag scripts
 _test_*.py
+!_test_report_archive.py
 _check_*.py
 _diag_*.py
 _audit_*.py
@@ -65,11 +66,16 @@ start_debug.bat
 
 # Test output / scratch
 .cache/
-tests/
+tests/*
+!tests/test_sla_header_variants.py
 
 .pe_baseline.db
 .pe_baseline.db-wal
 .pe_baseline.db-shm
+.pe_report_archive.db
+.pe_report_archive.db-wal
+.pe_report_archive.db-shm
+data/report_archive/
 
 # Impeccable local runtime artifacts (critique reports remain trackable)
 .impeccable/config.local.json
