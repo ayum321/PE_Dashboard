@@ -351,7 +351,7 @@ echo.
 echo   [4/7] Verifying app files...
 
 set "FILES_OK=1"
-for %%F in (main.py _find_port.py _open_browser.py _seed_config.py _cleanup_stale.py) do (
+for %%F in (app\main.py app\_find_port.py app\_open_browser.py app\_seed_config.py app\_cleanup_stale.py) do (
     if not exist "%%F" (
         echo   [ERROR] Missing: %%F
         set "FILES_OK=0"
@@ -460,7 +460,7 @@ echo        All files and imports verified.
 
 echo.
 echo        Validating JavaScript...
-!PY! _validate_js.py
+!PY! app\_validate_js.py
 if errorlevel 1 (
     echo   [ERROR] Fix JavaScript errors above before shipping/starting.
     pause
@@ -468,7 +468,7 @@ if errorlevel 1 (
 )
 
 echo        Validating pe_config references...
-!PY! _check_pe_config_refs.py
+!PY! app\_check_pe_config_refs.py
 if errorlevel 1 (
     echo   [ERROR] Fix undefined pe_config references above before shipping/starting.
     pause
@@ -481,7 +481,7 @@ REM  STEP 5 -- Seed config
 REM ================================================================
 echo.
 echo   [5/7] Seeding configuration...
-!PY! _seed_config.py >nul 2>&1
+!PY! app\_seed_config.py >nul 2>&1
 if errorlevel 1 echo        [WARN] Config seed error -- defaults will apply.
 echo        Config ready.
 
@@ -505,7 +505,7 @@ REM are what pile up over days and choke the machine. The reaper attributes
 REM processes to THIS folder (cmdline signature + working directory) and kills
 REM them + their child trees. It never blocks startup (always exits 0).
 echo        Reaping stale dashboard processes...
-!PY! _cleanup_stale.py --quiet 2>nul
+!PY! app\_cleanup_stale.py --quiet 2>nul
 
 REM Kill any process listening on candidate ports
 for %%Q in (8000 8765 8080 8888 9000 9090 9999 7878 5000) do (
@@ -519,7 +519,7 @@ REM Wait for OS TCP stack to release sockets (TIME_WAIT → CLOSED)
 echo        Waiting for port release...
 !PY! -c "import time; time.sleep(2)" >nul 2>&1
 
-for /f "usebackq delims=" %%P in (`!PY! _find_port.py 2^>nul`) do set "PORT=%%P"
+for /f "usebackq delims=" %%P in (`!PY! app\_find_port.py 2^>nul`) do set "PORT=%%P"
 
 if not "!PORT!"=="" goto :port_found
 echo   [ERROR] No free port found - Python may have failed to run _find_port.py.
@@ -557,8 +557,8 @@ echo.
 echo   [7/7] Starting server  (Ctrl+C to stop)...
 echo.
 
-start "PE Browser" /B !PY! _open_browser.py %HOST% !PORT!
-!PY! -m uvicorn %APP% --host %HOST% --port !PORT! --reload --reload-dir routers --reload-dir services --reload-dir templates --reload-dir static
+start "PE Browser" /B !PY! app\_open_browser.py %HOST% !PORT!
+!PY! -m uvicorn %APP% --app-dir app --host %HOST% --port !PORT! --reload --reload-dir app\routers --reload-dir app\services --reload-dir app\templates --reload-dir app\static
 
 REM ── If uvicorn exits, check if it was a port-bind failure ──
 set "EXIT_CODE=!ERRORLEVEL!"
@@ -570,7 +570,7 @@ if "!EXIT_CODE!"=="1" (
         echo.
         echo        [WARN] Port !PORT! bind failed — finding next free port (attempt !RETRY_COUNT!/3)...
         !PY! -c "import time; time.sleep(1)" >nul 2>&1
-        for /f "usebackq delims=" %%P in (`!PY! _find_port.py 2^>nul`) do set "PORT=%%P"
+        for /f "usebackq delims=" %%P in (`!PY! app\_find_port.py 2^>nul`) do set "PORT=%%P"
         if not "!PORT!"=="" goto :server_start
     )
 )
