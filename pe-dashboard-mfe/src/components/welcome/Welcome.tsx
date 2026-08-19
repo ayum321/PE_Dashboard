@@ -90,6 +90,17 @@ const useStyles = makeStyles((theme: Theme) => {
       marginTop: theme.spacing(3),
       overflowX: 'auto',
     },
+    metricRow: {
+      display: 'flex',
+      gap: theme.spacing(1),
+      flexWrap: 'wrap',
+      marginTop: theme.spacing(2),
+    },
+    metric: {
+      minWidth: 110,
+      padding: theme.spacing(1.5),
+      border: `1px solid ${theme.palette.divider}`,
+    },
     paperWestZone: {
       height: `calc(100vh - ${theme.spacing(30.75)}px)`,
     },
@@ -141,6 +152,8 @@ export function Welcome() {
   };
 
   const resourceServers = upload?.classification.type === 'resource' ? upload.data.servers || [] : [];
+  const isSlaUpload = upload?.classification.type === 'sla_matrix';
+  const slaBreaches = isSlaUpload ? upload.data.breaches || [] : [];
 
   return (
     <div className={classes.welcomeContainer}>
@@ -222,6 +235,56 @@ export function Welcome() {
                 <Typography variant="body2" color="textSecondary">
                   The resource upload completed without server metric rows.
                 </Typography>
+              )}
+              {isSlaUpload && (
+                <Box className={classes.tableContainer} component="section">
+                  <Typography variant="subtitle2">SLA matrix</Typography>
+                  <Box className={classes.metricRow}>
+                    <Paper className={classes.metric} elevation={0}>
+                      <Typography variant="caption">Compliance</Typography>
+                      <Typography variant="h6">{(upload.data.compliance_pct || 0).toFixed(1)}%</Typography>
+                    </Paper>
+                    <Paper className={classes.metric} elevation={0}>
+                      <Typography variant="caption">Runs</Typography>
+                      <Typography variant="h6">{upload.data.total_runs || 0}</Typography>
+                    </Paper>
+                    <Paper className={classes.metric} elevation={0}>
+                      <Typography variant="caption">Breaches</Typography>
+                      <Typography variant="h6">{upload.data.breaching_runs || 0}</Typography>
+                    </Paper>
+                    <Paper className={classes.metric} elevation={0}>
+                      <Typography variant="caption">At risk</Typography>
+                      <Typography variant="h6">{upload.data.at_risk_runs || 0}</Typography>
+                    </Paper>
+                  </Box>
+                  {upload.data.worst_job && (
+                    <Typography variant="body2" className={classes.status}>
+                      Worst job: {upload.data.worst_job} ({(upload.data.worst_hrs || 0).toFixed(2)} hours)
+                    </Typography>
+                  )}
+                  {slaBreaches.length > 0 && (
+                    <Table size="small" aria-label="SLA breach results">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Job</TableCell>
+                          <TableCell>Status</TableCell>
+                          <TableCell align="right">Runtime hours</TableCell>
+                          <TableCell align="right">Over SLA hours</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {slaBreaches.slice(0, 10).map((breach, index) => (
+                          <TableRow key={`${breach.job_name || breach.job || 'job'}-${index}`}>
+                            <TableCell>{breach.job_name || breach.job || 'Unnamed job'}</TableCell>
+                            <TableCell>{breach.status || 'BREACH'}</TableCell>
+                            <TableCell align="right">{(breach.run_hrs || 0).toFixed(2)}</TableCell>
+                            <TableCell align="right">{(breach.breach_margin_hrs || 0).toFixed(2)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </Box>
               )}
               {context && (
                 <Typography variant="body2" color="textSecondary">

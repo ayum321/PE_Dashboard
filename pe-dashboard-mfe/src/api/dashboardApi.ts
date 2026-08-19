@@ -14,6 +14,18 @@ export interface SmartUploadResponse {
     server_count?: number;
     image_only?: boolean;
     servers?: ResourceServer[];
+    sla_mode?: string;
+    sla_label?: string;
+    total_runs?: number;
+    total_jobs?: number;
+    breaching_runs?: number;
+    at_risk_runs?: number;
+    ok_runs?: number;
+    compliance_pct?: number;
+    breach_rate_pct?: number;
+    worst_job?: string;
+    worst_hrs?: number;
+    breaches?: SlaBreach[];
     error?: string;
     ai_summary?: string;
     [key: string]: unknown;
@@ -27,6 +39,14 @@ export interface ResourceServer {
   mem_used?: number;
   disk_used_max?: number;
   health_score?: number;
+}
+
+export interface SlaBreach {
+  job_name?: string;
+  job?: string;
+  status?: string;
+  run_hrs?: number;
+  breach_margin_hrs?: number;
 }
 
 const getApiBaseUrl = (): string => (window.env.API_BASE_URL || '').replace(/\/$/, '');
