@@ -1,0 +1,177 @@
+name: Build and Deploy MFE to Stratosphere
+
+on:
+  push:
+    branches:
+      - main
+  # Configuring a manual trigger for demonstration and test purpose.
+  workflow_dispatch:
+
+env:
+  build-path: build
+  # Replace with your app frame URL
+  mfe-frame-url: https://<stratosphere-host>/<storage-account>/<container-id>/<path-to-mfe>
+
+  # Replace with your Azure Storage Account details
+  storage-account: ****
+  storage-container: ****
+  storage-deployment-directory: ****
+
+  # Replace with your Stratosphere details
+  # For more information about adding stratosphere values to github variable, refer to the documentation. 
+  # Add Github Variables: https://docs-gp-34-lplat-docs.eu.live.external.byp.ai/golden_paths/mfe_with_psc/step_2/#add-github-variables
+  stratosphere-azure-service-principal: ****
+  stratosphere-environment: ****
+  stratosphere-geography: ****
+  stratosphere-project: ****
+  stratosphere-psc: ****
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout ${{ github.repository }}
+        uses: actions/checkout@v4.1.1
+
+      - name: Set Node.js version
+        uses: actions/setup-node@v4.0.2
+        id: node-setup
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          # Replace with your Azure credentials
+          creds: ${{ secrets.YOUR_AZURE_CREDENTIALS }}
+
+      # Replace with your vault ids
+      - name: Get Key Vault Secrets
+        uses: BY-Product-Development/ds-shared-actions/azure/keyvault-secrets-get@keyvault-secrets-get/2.1.0
+        with:
+          key-vault: '${{env.VAULT_ID}}'
+          fail-on-not-found: true
+          secrets: '*'
+        id: keyVaultAction
+
+      - name: Login at Stratosphere with Service Account
+        id: stratosphere-login
+        uses: BY-Product-Development/ds-shared-actions/stratosphere/access-token-get@stratosphere-access-token-get-v1.0.1
+        with:
+          # Replace with your Stratosphere Client ID 
+          client-id: ${{ secrets.YOUR_STRATOSPHERE_CLIENT_ID }}
+          # Replace with your Stratosphere Client Secret
+          client-secret: ${{ secrets.YOUR_STRATOSPHERE_CLIENT_SECRET }}
+      
+      - name: Get Common Service Principal Details
+        id: common-sp
+        uses: BY-Product-Development/ds-shared-actions/stratosphere/service_principal_get@stratosphere-service_principal_get-v1.0.1
+        with:
+          geography-name: us
+          # Replace with your project name
+          project-name: your-project-name
+          # Replace with your resource name
+          resource-name: your-resource-name
+
+      - name: Common Azure with Service Principal Login
+        uses: Azure/login@v1.4.6
+        with:
+          creds: '{"clientId":"${{ steps.common-sp.outputs.spn-client-id }}","clientSecret":"${{ steps.common-sp.outputs.spn-client-secret }}","tenantId":"${{ steps.common-sp.outputs.spn-tenant-id }}"}'
+          allow-no-subscriptions: true
+    
+      # Replace with your Stratosphere login details
+      - name: Stratosphere ${{ env.DEPLOY_ENVIRONMENT }} Login
+        uses: BY-Product-Development/ds-shared-actions/stratosphere/access-token-get@stratosphere-access-token-get-v1.0.1
+        with:
+          # Replace with your Stratosphere Access Token URL
+          auth-endpoint: ${{ env.STRATOSPHERE_ACCESS_TOKEN_URL }}
+          # Replace with your Stratosphere Client ID
+          client-id: ${{ env.STRATOSPHERE_CLIENT_ID }}
+          # Replace with your Stratosphere Client Secret
+          client-secret: ${{ env.STRATOSPHERE_CLIENT_SECRET }}
+          # Replace with your Stratosphere token path
+          output-path: ${{ env.token-path }}
+      # Retrieve Service Principal to access the Azure Key Vault or Azure Storage Account of the Stratosphere Platform Static Content.
+      # The Azure Service Principal needs to be added to the access_policies of the Stratosphere Platform Static Content.
+      - name: Get Azure Service Principal
+        id: stratosphere-sp
+        uses: BY-Product-Development/ds-shared-actions/stratosphere/service_principal_get@stratosphere-service_principal_get-v1.0.1
+        with:
+          api-endpoint: https://api.${{ env.stratosphere-environment }}.external.byp.ai
+          geography-name: ${{ env.stratosphere-geography }}
+          project-name: ${{ env.stratosphere-project }}
+          resource-name: ${{ env.stratosphere-azure-service-principal }}
+
+      - name: Login at Azure with Service Principal
+        uses: Azure/login@v2
+        with:
+          creds: '{"clientId":"${{ steps.stratosphere-sp.outputs.spn-client-id }}","clientSecret":"${{ steps.stratosphere-sp.outputs.spn-client-secret }}","tenantId":"${{ steps.stratosphere-sp.outputs.spn-tenant-id }}"}'
+          allow-no-subscriptions: true
+
+      - name: Configure Artifactory
+        run: |
+          registryPrefix=$(echo "${{ env.artifactoryNpmUrl }}" | sed 's~http[s]*:~~g')
+          npm config set $registryPrefix:_auth="${{env.artifactoryAuth}}"
+          npm config set registry "${{env.artifactoryNpmUrl}}"
+          npm config set @jda:registry "${{env.artifactoryNpmUrl}}"
+          npm config set @by:registry "${{env.artifactoryNpmUrl}}"
+          npm config set $registryPrefix:email no-reply@jda.com
+  
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract frameUrl path
+        id: extract-path
+        run: |
+          FRAME_URL_PATH=$(echo "${{ env.mfe-frame-url }}" | sed -r 's~https?://[^/]+(/.*)~\1~')
+          if [[ -z $FRAME_URL_PATH ]]; then
+            FRAME_URL_PATH="/"
+          fi
+          echo "frameUrlPath=$FRAME_URL_PATH" >> $GITHUB_ENV
+
+      - name: Build MFE
+        id: mfe-build
+        run: |
+          echo "files-modified-ts=`date -d "15 min ago" '+%Y-%m-%dT%H:%MZ'`" >> $GITHUB_OUTPUT
+          npm run build
+
+      - name: Create env file
+        run: |
+          node ./.github/scripts/setRuntimeEnv.js ./${{ env.build-path }}/
+  
+      - name: Upload to Azure Storage Account
+        # https://github.com/Azure/cli
+        uses: azure/CLI@v1.0.9
+        with:
+          # See https://github.com/actions/runner-images for latest Azure CLI version.
+          azcliversion: 2.57.0
+          inlineScript: |
+            destination="${{ env.storage-container }}/${{ env.storage-deployment-directory }}"
+            az storage blob upload-batch \
+              --auth-mode login \
+              --destination $destination \
+              --source ${{ env.build-path }} \
+              --account-name ${{ env.storage-account }} \
+              --overwrite \
+              --pattern "*"
+  
+            az storage blob delete-batch \
+              --auth-mode login \
+              --source ${{ env.storage-container }} \
+              --pattern "${{ env.storage-deployment-directory }}/*" \
+              --account-name ${{ env.storage-account }} \
+              --if-unmodified-since "${{ steps.mfe-build.outputs.files-modified-ts }}"
+
+      - name: Purge cache
+        shell: bash
+        run: |
+          curl 'https://api.${{ env.stratosphere-environment }}.external.byp.ai/geographies/${{ env.stratosphere-geography }}/projects/${{ env.stratosphere-project }}/resources/platform-static-content/${{ env.stratosphere-psc }}/purge-cache' \
+            --request 'POST' \
+            --header "Authorization: Bearer ${{ steps.stratosphere-login.outputs.stratosphere-access-token }}" \
+            --header 'accept: application/json' \
+            --header 'Content-Type: application/json' \
+            --data '{ "spec": { "paths": ["/${{ env.storage-deployment-directory }}/*"] } }' \
+            --fail-with-body \
+            --silent

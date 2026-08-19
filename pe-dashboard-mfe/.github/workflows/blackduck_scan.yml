@@ -1,0 +1,17 @@
+name: Black Duck Scan - MFE
+
+on:
+  workflow_dispatch: # Allows manual triggering of a workflow_dispatch event
+  pull_request: # Runs on PRs
+  push:
+    branches: [master, main] # Runs on master and main branches
+  schedule:
+    - cron: '0 12 * * 6' # Runs Every Saturday at 12:00 PM UTC Time 
+
+jobs:
+  blackduck-scan:
+    uses: BY-Product-Development/plat-lui-github-reusable-workflows/.github/workflows/blackduck-scan.yml@master
+    secrets: inherit
+    with:
+      app-name: 'Your_MFE_App_Name' # Replace with your MFE app name
+      project-tags: 'tag1,tag2,tag3' # Replace by a comma separated list of tags

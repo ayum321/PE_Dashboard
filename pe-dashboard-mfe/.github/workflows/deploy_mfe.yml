@@ -1,0 +1,177 @@
+name: Deploy Your New Application 
+on:
+  deployment:
+  push:
+    branches: [master, main]
+
+env:
+  AZURE_APP_NAME: 'your-app-name' # Replace with your app name
+  AZURE_WEBAPP_PACKAGE_PATH: './build'
+  CDN_PROFILE: 'cdnprofile' # Replace with your CDN profile
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display debug info
+        run: |
+          cp "$GITHUB_EVENT_PATH" workload.json
+
+      - name: Store debug info
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-payload
+          path: workload.json
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.MY_CREDENTIALS }} # Replace with your credentials
+
+      - name: Get general CI key vault secrets and configs
+        uses: BY-Product-Development/ds-shared-actions/azure/keyvault-secrets-get@keyvault-secrets-get/2.1.0
+        with:
+          key-vault: 'your-vault-ci-all' # Replace with your vault name
+          fail-on-not-found: true
+          secrets: |
+            artifactoryNpmUrl
+            artifactoryAuth 
+          # Replace secret name if needed
+        id: metaKeyVaultAction
+
+      - name: Get Workflow Token
+        id: get_workflow_token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ env.yourGhAppId }} # Replace with your app id
+          private_key: ${{ env.yourGhAppPrivKey }} # Replace with your private key
+
+      - name: Checking out ${{env.CHECKED_OUT_BRANCH}}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{env.CHECKED_OUT_BRANCH}}
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        id: node-setup
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Set dynamic environment variables
+        uses: BY-Product-Development/plat-lui-github-actions/jda-dynamic-env@jda-dynamic-env/1.0.1
+        with:
+          env_file_path: .github/envs/.env
+          gen_js_path: '.github/envs/env.js'
+          gen_dot_path: '.github/envs/.env'
+
+      - name: BlueYonder Azure Login
+        id: by-env-login
+        uses: BY-Product-Development/ds-shared-actions/azure/enhanced-log-in@enhanced-log-in/1.0.0
+        with:
+          creds: ${{ env.AZURE_CRED }}
+
+      - name: Get vault name
+        run: |
+          [[ -n "${{steps.by-env-login.outputs.ci-vault-id}}" ]] && VAULT_ID="${{steps.by-env-login.outputs.ci-vault-id}}" || VAULT_ID="your-vault-ci-${{env.DEPLOY_ENV}}"
+          echo "VAULT_ID=${VAULT_ID}" >> $GITHUB_ENV
+        # Replace with your vault ids
+      
+      - name: Get Key Vault Secrets
+        uses: BY-Product-Development/ds-shared-actions/azure/keyvault-secrets-get@keyvault-secrets-get/2.1.0
+        with:
+          key-vault: '${{env.VAULT_ID}}'
+          fail-on-not-found: true
+          secrets: '*'
+        id: keyVaultAction
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        env:
+          cache-name: cache-node-modules
+        id: node-modules
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('package-lock.json') }}
+  
+      - name: Set dynamic environment variables
+        # Example of setting dynamic environment variables
+        run: |
+          set -x
+          AZURE_PROJECT_PREFIX=${{steps.by-env-login.outputs.resource-prefix}}
+          echo "AZURE_APP_ENV_NAME=${AZURE_PROJECT_PREFIX}${AZURE_APP_NAME}${DEPLOY_ENVIRONMENT}" >> $GITHUB_ENV
+          echo "ACCOUNT_NAME=${AZURE_PROJECT_PREFIX}${AZURE_APP_NAME}" >> $GITHUB_ENV
+          echo "SOURCE_DIR=${AZURE_WEBAPP_PACKAGE_PATH}" >> $GITHUB_ENV
+          echo "STORAGE_ACCOUNT_NAME=${AZURE_PROJECT_PREFIX}${AZURE_APP_NAME}${DEPLOY_ENVIRONMENT}" >> $GITHUB_ENV
+          echo "AZURE_CDN_PROFILE=${AZURE_PROJECT_PREFIX}${CDN_PROFILE}${DEPLOY_ENVIRONMENT}" >> $GITHUB_ENV
+          echo "AZURE_CDN_ENDPOINT=${AZURE_PROJECT_PREFIX}${AZURE_APP_NAME}${DEPLOY_ENVIRONMENT}" >> $GITHUB_ENV
+          AZURE_APP_INSIGHTS_NAME=${AZURE_PROJECT_PREFIX}${{env.AZURE_APP_INSIGHTS}}${DEPLOY_ENVIRONMENT}
+          az extension add --name application-insights
+          FOUND_APPINSIGHTS_INSTRUMENTATIONKEY=$(az monitor app-insights component show --app  ${AZURE_APP_INSIGHTS_NAME} --query 'instrumentationKey' -o tsv)
+          echo FOUND_APPINSIGHTS_INSTRUMENTATIONKEY=${FOUND_APPINSIGHTS_INSTRUMENTATIONKEY}
+          echo Default APPINSIGHTS_INSTRUMENTATIONKEY=${APPINSIGHTS_INSTRUMENTATIONKEY}
+          echo "APPINSIGHTS_INSTRUMENTATIONKEY=${FOUND_APPINSIGHTS_INSTRUMENTATIONKEY}" >> $GITHUB_ENV
+        # Replace with your environment variables and your specific implementation
+      - name: Configure Artifactory
+        run: |
+          registryPrefix=$(echo "${{ env.artifactoryNpmUrl }}" | sed 's~http[s]*:~~g')
+          npm config set $registryPrefix:_auth="${{env.artifactoryAuth}}"
+          npm config set registry "${{env.artifactoryNpmUrl}}"
+          npm config set @jda:registry "${{env.artifactoryNpmUrl}}"
+          npm config set @by:registry "${{env.artifactoryNpmUrl}}"
+          npm config set $registryPrefix:email no-reply@jda.com
+  
+      - name: Getting dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
+        run: |
+          npm ci --prefer-offline --no-audit
+  
+      - name: Build App
+        run: |
+          echo "FILES_MODIFIED_TS=`date -d "15 min ago" '+%Y-%m-%dT%H:%MZ'`" >> $GITHUB_ENV
+          REACT_APP_ARTIFACT_VESION=${ARTIFACT_VERSION} npm run build
+      
+      - name: Set Runtime ENV variables
+        run: |
+          node ./.github/scripts/setRuntimeEnv.js $SOURCE_DIR/
+        # Replace with your script
+
+      - name: Execute Test Coverage
+        run: |
+          npm test
+      
+      - name: Run codacy-coverage-reporter
+        uses: codacy/codacy-coverage-reporter-action@v1
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: coverage/lcov.info
+      
+      - name: Deploy to Azure storage
+        run: |
+          az storage blob service-properties update --account-name $STORAGE_ACCOUNT_NAME \
+            --static-website \
+            --index-document index.html \
+            --404-document index.html
+          az storage blob upload-batch --overwrite -s $SOURCE_DIR -d \$web --account-name $STORAGE_ACCOUNT_NAME
+          az storage blob upload-batch --overwrite -s $SOURCE_DIR -d \$web --account-name $STORAGE_ACCOUNT_NAME --pattern *.map --content-type application/javascript
+          az storage blob delete-batch -s \$web --account-name $STORAGE_ACCOUNT_NAME --if-unmodified-since "${{env.FILES_MODIFIED_TS}}"
+      
+      - name: Purge and reload CDN
+        run: |
+          az cdn endpoint purge  \
+            --name $AZURE_CDN_ENDPOINT \
+            --profile-name $AZURE_CDN_PROFILE \
+            --no-wait \
+            --content-paths '/*'
+      
+      - name: Update Deployment from Manifest
+        run: |
+          node ./.github/scripts/deployManifest.js 
+        # Replace with your script
+      
+  finalize:
+    name: Finalize run
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    steps:
+      - run: echo Done running workflow
