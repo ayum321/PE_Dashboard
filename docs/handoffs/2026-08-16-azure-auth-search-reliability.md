@@ -24,3 +24,9 @@
 ## Remaining live check
 
 - A real Azure MFA/RBAC sign-in and VM search was intentionally not run in this session because it opens the user's Microsoft account flow. Confirm it once on the target account: click **Sign in with Browser**, complete the one Microsoft window, wait for `VM inventory ready`, then search the selected subscription for a known customer or tag.
+
+## Follow-up: automatic customer-search scope
+
+- The Azure modal has no scope checkbox. Customer search tries the selected subscription first; only a zero-result search is automatically retried across the signed-in analyst's accessible subscriptions. When the picker is still warming, the initial search uses that same caller-accessible scope.
+- The request remains bounded and session-scoped. `scope_expanded` reports the automatic retry without exposing subscription or tenant identifiers.
+- `py -3.14 _test_azure_auth_search.py` -> 7 passed, including selected-result/no-retry and selected-empty/retry regressions. The running local dashboard served the checkbox-free flow successfully.

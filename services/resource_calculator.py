@@ -491,6 +491,7 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
             "n_dev":         n_dev,
             "n_agg_trap":    len(agg_trap_servers),
             "n_dual_pressure": len(dual_press_servers),
+            "threshold_flagged": exec_summary.get("threshold_flagged", 0),
             "thresholds": {
                 "cpu_ok":   CPU_OK,   "cpu_warn":  CPU_WARN,
                 "mem_ok":   MEM_OK,   "mem_warn":  MEM_WARN,
@@ -702,7 +703,11 @@ def _build_executive_summary(
             })
 
     # ── Part 4: Executive Summary (2 lines) ──────────────────
-    line1_parts = [f"Fleet Grade {grade} ({score:.0f}/100)"]
+    # Keep the diagnosis byte-for-byte consistent with the KPI tile.  The
+    # canonical fleet score is already rounded to one decimal by
+    # calculate_fleet_health(); rounding it again to an integer here made the
+    # same score appear as both 80.6 and 81 on one screen.
+    line1_parts = [f"Fleet Grade {grade} ({score:.1f}/100)"]
     if n_agg:
         line1_parts.append(f"{n_agg} false alarm(s) filtered")
     if len(dual_press_servers):
@@ -751,6 +756,12 @@ def _build_executive_summary(
     return {
         "verdict":       verdict,
         "verdict_detail": verdict_detail,
+        # The z-score Anomaly Spotlight is a subset of these absolute-threshold
+        # flags.  Export the exact count used by this diagnosis so the frontend
+        # never attempts a second, potentially drifting recount.
+        "threshold_flagged": real_crit + real_warn,
+        "threshold_critical": real_crit,
+        "threshold_warning": real_warn,
         "false_alarms":  false_alarms,
         "bottlenecks":   bottlenecks,
         "summary_line1": line1,

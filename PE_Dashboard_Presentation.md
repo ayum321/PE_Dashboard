@@ -60,37 +60,6 @@ design and the correlation formulas that follow.*
 
 ---
 
-## Why FastAPI, Not Streamlit
-
-| | FastAPI (this project) | Streamlit (legacy) |
-|---|---|---|
-| Model | Real HTTP API + separate frontend | Script re-executed top-to-bottom on every widget event |
-| Frontend | Full control — vanilla JS, Tailwind, Chart.js/Plotly | Fixed widget set, limited layout control |
-| Concurrency | Async, isolated per-request/session | Single-threaded per session, global state bleeds across users |
-| Multi-customer isolation | Explicit session boundary (`session_cache.py`) | `st.session_state` — easy to leak between users |
-| API surface | Real REST endpoints, callable by other tools | None — UI and logic are inseparable |
-| Fit for 250–300 customers | Scales — deployable via uvicorn/Docker | Prototype-grade, not built for concurrent multi-tenant use |
-
-```mermaid
-flowchart LR
-    U[Analyst uploads files] --> R[FastAPI routers/*.py]
-    R --> S[services/*.py business logic]
-    S --> C[session_cache.py\nin-memory audit context]
-    C --> W[resolved_workflow_df\nsingle source of truth]
-    W --> J["/api/* JSON response"]
-    J --> F[static/app.js\nrenders panels + charts]
-    F --> B[Browser — Tailwind, Chart.js, Plotly]
-```
-
-Every panel reads from the same `resolved_workflow_df` computed once per upload —
-no screen recomputes its own numbers, so no two panels can ever disagree.
-
-*Talk track: the Streamlit version had panels recomputing metrics independently.
-Two screens would show different compliance numbers for the same job. This
-architecture makes that impossible by design.*
-
----
-
 ## Tech Stack
 
 | Layer | Technology |
@@ -456,36 +425,6 @@ start-time data is clearly flagged to the reviewer, not silently absorbed.
   catches a brief spike that would otherwise average away to nothing over a
   7/15/30-day window, critical for spotting a short nightly-batch CPU spike a
   daily average would hide.
-
-### Step 1 — Authentication
-
-```mermaid
-flowchart TD
-    A["User clicks 'Connect Azure' in UI"] --> B["InteractiveBrowserCredential\n(azure-identity SDK)"]
-    B --> C["Opens browser → user logs in\nwith their own Azure AD account"]
-    C --> D["Token stored in .cache/\n(session-scoped, not shared between analysts)"]
-    D --> E["All subsequent API calls use that token"]
-```
-
-### Step 2 — Fetching VM Metrics
-
-```mermaid
-flowchart TD
-    F["fetch_vm_metrics(subscription_id, resource_group, hours_back)"] --> G["1. azure-mgmt-compute\nlists all VMs in subscription/resource group"]
-    G --> H["2. azure-mgmt-resource\nreads VM size metadata (RAM, CPU cores)"]
-    H --> I["3. azure-monitor-query (MetricsQueryClient)\nqueries each VM's resource URI, metrics in small groups"]
-    I --> I1["Percentage CPU — always available"]
-    I --> I2["Available Memory Bytes / Percentage — needs Azure Monitor Agent"]
-    I --> I3["OS/Data Disk Bandwidth Consumed % — needs AMA"]
-    I --> I4["Disk Read/Write Bytes & Ops/Sec — chart-only, raw bytes"]
-    I --> I5["Network In/Out Total — chart-only, raw bytes"]
-    I --> I6["VmAvailabilityMetric — availability preview"]
-    I1 & I2 & I3 & I4 & I5 & I6 --> J["4. Results → time-series dicts\nsame shape as resource_parser_generic.py"]
-    J --> K["5. resource_calculator.build_resource_payload()\nsame pipeline as DOCX upload"]
-```
-
-*Talk track: this is why Azure Live and a manual DOCX resource upload produce
-identical downstream panels — step 5 is the same function call either way.*
 
 ```mermaid
 sequenceDiagram

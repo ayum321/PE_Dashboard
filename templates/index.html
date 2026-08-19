@@ -2078,16 +2078,21 @@
               </div>
               <div class="rounded-xl bg-Ccard border border-Cborder shadow-kpi hover:shadow-kpiHov transition p-4 text-center">
                 <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted" style="letter-spacing:0.12em">Avg Disk</div>
-                <div class="relative flex justify-center mt-1" style="height:64px">
+                <div id="rk-disk-meter" class="relative flex justify-center mt-1" style="height:64px">
                   <canvas id="rk-disk-ring" width="64" height="64"></canvas>
                   <div id="rk-disk" class="absolute inset-0 flex items-center justify-center text-base font-extrabold text-Cmuted">—</div>
                 </div>
+                <button type="button" id="rk-disk-cta" onclick="openAzureModal()"
+                        class="hidden mx-auto mt-3 min-h-[44px] items-center justify-center rounded-lg border border-Camber/40 bg-Camber/10 px-3 py-2 text-[10px] font-bold leading-snug text-Camber transition hover:bg-Camber/20 focus:outline-none focus:ring-2 focus:ring-Camber/50">
+                  Enable Azure disk telemetry →
+                </button>
                 <div id="rk-disk-sub" class="text-[9px] text-Cmuted mt-1">Threshold 85%</div>
               </div>
               <div class="rounded-xl bg-Ccard border border-Cborder shadow-kpi hover:shadow-kpiHov transition p-4 text-center">
                 <div class="text-[9px] font-bold uppercase tracking-wider text-Cmuted" style="letter-spacing:0.12em">Health</div>
-                <div id="rk-health" class="text-base font-extrabold text-Cmuted mt-1 leading-tight">—</div>
-                <div class="text-[9px] text-Cmuted mt-1">Critical · Warn · OK</div>
+                <div id="rk-health-stack" class="mt-3 flex h-2 overflow-hidden rounded-full bg-Cbg" aria-label="Fleet health distribution"></div>
+                <div id="rk-health-badges" class="mt-3 flex items-start justify-center gap-2"></div>
+                <div id="rk-health-verdict" class="mt-2 hidden"></div>
               </div>
             </div>
 
@@ -2116,9 +2121,55 @@
                   <span class="text-sm">🎯</span>
                   <h3 class="text-xs font-bold uppercase tracking-wider text-Camber" style="letter-spacing:0.12em">Anomaly Spotlight</h3>
                 </div>
-                <span class="text-[9px] text-Cmuted">Servers behaving abnormally vs fleet baseline (|z| ≥ 2.0)</span>
+                <span id="resource-anomalies-subtext" class="text-[9px] text-Cmuted">Z-score subset of threshold-flagged servers (|z| ≥ 2.0)</span>
               </div>
               <div id="resource-anomalies-list" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+            </div>
+
+            <!-- Multi-day Resource Trend + Day × Server Heatmap -->
+            <div id="resource-trends-card" class="rounded-2xl border border-Cborder bg-Ccard shadow-panel p-4">
+              <div class="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-Ccyan">⌁</span>
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-Cwhite">Multi-day Resource Trend</h3>
+                    <span id="resource-trend-source" class="rounded-md border border-Cborder px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-Cmuted">Awaiting telemetry</span>
+                  </div>
+                  <p id="resource-trend-status" class="mt-1 text-[10px] text-Cmuted">Checking for real Azure Monitor history…</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <select id="resource-trend-server" onchange="setResourceTrendServer(this.value)"
+                          class="min-w-[190px] rounded-md border border-Cborder bg-Cbg px-2 py-1.5 text-[10px] text-Cwhite focus:border-Cblue focus:outline-none"
+                          aria-label="Trend server"></select>
+                  <select id="resource-trend-metric" onchange="setResourceTrendMetric(this.value)"
+                          class="rounded-md border border-Cborder bg-Cbg px-2 py-1.5 text-[10px] text-Cwhite focus:border-Cblue focus:outline-none"
+                          aria-label="Trend metric">
+                    <option value="cpu">CPU used %</option>
+                    <option value="memory">Memory available %</option>
+                    <option value="disk">Disk I/O consumed %</option>
+                  </select>
+                </div>
+              </div>
+              <div id="resource-trend-empty" class="mt-4 rounded-xl border border-dashed border-Cborder bg-Cbg/40 px-4 py-7 text-center text-[11px] text-Cmuted">
+                Historical resource telemetry is not available in this upload.
+                <button type="button" onclick="openAzureModal()" class="ml-1 font-semibold text-Cblue hover:underline">Connect Azure Monitor →</button>
+              </div>
+              <div id="resource-trend-content" class="mt-4 hidden">
+                <div id="resource-trend-chart" class="overflow-x-auto rounded-xl border border-Cborder/70 bg-Cbg/50 p-3"></div>
+                <div id="resource-trend-attribution" class="mt-2 text-[9px] text-Cmuted"></div>
+                <div class="mt-4 flex items-end justify-between gap-3 flex-wrap">
+                  <div>
+                    <h4 class="text-[10px] font-bold uppercase tracking-wider text-Cwhite">Day × Server Heatmap</h4>
+                    <p id="resource-heatmap-subtext" class="mt-0.5 text-[9px] text-Cmuted">Daily worst point by server; same metric and thresholds as the trend above.</p>
+                  </div>
+                  <div class="flex items-center gap-3 text-[8px] text-Cmuted">
+                    <span><i class="mr-1 inline-block h-2 w-2 rounded-sm bg-Cgreen"></i>OK</span>
+                    <span><i class="mr-1 inline-block h-2 w-2 rounded-sm bg-Camber"></i>Warning</span>
+                    <span><i class="mr-1 inline-block h-2 w-2 rounded-sm bg-Cred"></i>Critical</span>
+                  </div>
+                </div>
+                <div id="resource-day-server-heatmap" class="mt-2 overflow-x-auto"></div>
+              </div>
             </div>
 
             <!-- Per-server resource utilization (visual + numeric in one card) -->
@@ -4331,7 +4382,7 @@
         <div class="az-filter-panel" style="padding: 16px 20px;">
           <label style="font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:8px; font-weight:700; letter-spacing:0.14em; text-transform:uppercase; color:rgba(71,85,105,0.9); display:block; margin-bottom:10px;">
             Search by customer, server name, or tag
-            <span style="font-weight:400; margin-left:6px; color:rgba(71,85,105,0.6)">(selected subscription by default)</span>
+            <span style="font-weight:400; margin-left:6px; color:rgba(71,85,105,0.6)">(automatic search scope)</span>
           </label>
           <div class="flex gap-3 items-stretch">
             <input id="azure-search-input" type="text"
@@ -4349,10 +4400,6 @@
               Search
             </button>
           </div>
-          <label class="mt-2 flex items-center gap-2 cursor-pointer text-[10px] text-Cmuted">
-            <input id="azure-search-all-subscriptions" type="checkbox" class="rounded border-Cborder bg-Cbg text-Cblue focus:ring-Cblue">
-            <span>Search every accessible subscription <span class="text-Cmuted/70">(slower; use only when the customer may be outside the selected subscription)</span></span>
-          </label>
         </div>
 
         <div class="flex items-center gap-4">

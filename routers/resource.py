@@ -51,6 +51,7 @@ class ResourceKpis(BaseModel):
     n_sre:         int = 0
     n_agg_trap:    int = 0
     n_dual_pressure: int = 0
+    threshold_flagged: int = 0
     thresholds:    Optional[Dict[str, float]] = None
 
 
@@ -129,4 +130,5 @@ async def process_resource(body: ResourceRequest) -> ResourceResponse:
         kpis=ResourceKpis(**payload["kpis"]),
         anomalies=payload["anomalies"],
         servers=payload["servers"],
+        executive_summary=payload.get("executive_summary"),
     )

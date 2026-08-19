@@ -48,7 +48,7 @@ from services.azure_monitor import (
     get_browser_credential_info,
     get_vm_prewarm_state,
     prewarm_vm_inventory,
-    search_vms,
+    search_vms_with_fallback,
 )
 from services.resource_calculator import build_resource_payload
 from services import baseline_store
@@ -579,6 +579,10 @@ def azure_search_vms(body: AzureSearchRequest, request: Request, response: Respo
     if not q:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Search query is required.")
+    has_selected_scope = any(
+        str(subscription_id).strip()
+        for subscription_id in (body.subscription_ids or [])
+    )
 
     try:
         credential = _build_credential({}, sid)
@@ -587,9 +591,12 @@ def azure_search_vms(body: AzureSearchRequest, request: Request, response: Respo
                             detail=str(exc)) from exc
 
     try:
-        vms = search_vms(credential, q,
-                         subscription_ids=body.subscription_ids or None,
-                         session_id=sid)
+        vms, scope_expanded = search_vms_with_fallback(
+            credential,
+            q,
+            subscription_ids=body.subscription_ids,
+            session_id=sid,
+        )
     except AzureConfigError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=str(exc)) from exc
@@ -610,6 +617,13 @@ def azure_search_vms(body: AzureSearchRequest, request: Request, response: Respo
         "counts": counts,
         "vms": vms,
         "query": q,
+        # Scope labels intentionally disclose no subscription IDs or tenant data.
+        "search_scope": (
+            "caller_accessible_subscriptions"
+            if scope_expanded or not has_selected_scope
+            else "selected_subscriptions"
+        ),
+        "scope_expanded": scope_expanded,
     }
 
 

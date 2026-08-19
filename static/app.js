@@ -259,7 +259,7 @@ function _simpleHash(str) {
 }
 
 // Resource Review · table view state
-const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "", filterProductGroup: "" };
+const resourceTableState = { showAll: false, filter: "", sortKey: "cpu_pct", sortDir: -1, filterType: "", filterEnv: "", filterStatus: "" };
 const RESOURCE_TABLE_PREVIEW = 25; // initial lazy slice
 const AZURE_REQUIRE_FRESH_LOGIN = false; // persist sign-in across reloads/restarts (fast). Use the Sign out button to switch accounts.
 
@@ -313,7 +313,6 @@ function _pinKpiGridToTop() {
 // ─────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   _pinKpiGridToTop();
-  if (_archiveFailureWasRecorded()) _showArchiveSaveFailureBanner();
   initNav();
   initDropZone();
   initResetButton();
@@ -1143,64 +1142,6 @@ function _showServerDownBanner() {
   }, 5000);
 }
 
-// Keep an archive-write failure visible for this browser tab until the user
-// dismisses it or a later export confirms the archive was saved. The download
-// remains the primary deliverable and is never gated by this indicator.
-const ARCHIVE_FAILURE_SESSION_KEY = "pe-dashboard:archive-save-failed";
-
-function _archiveFailureWasRecorded() {
-  try { return window.sessionStorage.getItem(ARCHIVE_FAILURE_SESSION_KEY) === "1"; }
-  catch { return false; }
-}
-
-function _showArchiveSaveFailureBanner() {
-  if (document.getElementById("archive-save-failure-banner")) return;
-
-  const banner = document.createElement("div");
-  banner.id = "archive-save-failure-banner";
-  banner.setAttribute("role", "alert");
-  banner.className = "shrink-0 border-b border-Camber/50 bg-Camber/10 px-4 py-3 text-Camber flex items-start justify-between gap-4";
-
-  const message = document.createElement("div");
-  message.className = "flex items-start gap-3 min-w-0";
-  const icon = document.createElement("span");
-  icon.className = "text-base leading-none";
-  icon.textContent = "⚠";
-  const copy = document.createElement("div");
-  const title = document.createElement("div");
-  title.className = "text-[12px] font-bold";
-  title.textContent = "Report Archive was not updated";
-  const detail = document.createElement("div");
-  detail.className = "mt-0.5 text-[11px] text-Camber/85";
-  detail.textContent = "The signed HTML report downloaded successfully. Restore local archive write access, then export again to save its archive copy.";
-  copy.append(title, detail);
-  message.append(icon, copy);
-
-  const dismiss = document.createElement("button");
-  dismiss.type = "button";
-  dismiss.className = "shrink-0 rounded px-2 py-1 text-[11px] font-semibold text-Camber hover:bg-Camber/15 transition-colors";
-  dismiss.setAttribute("aria-label", "Dismiss archive save warning");
-  dismiss.textContent = "Dismiss";
-  dismiss.addEventListener("click", _clearArchiveSaveFailureBanner);
-  banner.append(message, dismiss);
-
-  const header = document.querySelector("header");
-  if (header) header.after(banner);
-  else document.body.prepend(banner);
-}
-
-function _recordArchiveSaveFailure() {
-  try { window.sessionStorage.setItem(ARCHIVE_FAILURE_SESSION_KEY, "1"); }
-  catch { /* session storage can be unavailable in locked-down browser profiles */ }
-  _showArchiveSaveFailureBanner();
-}
-
-function _clearArchiveSaveFailureBanner() {
-  try { window.sessionStorage.removeItem(ARCHIVE_FAILURE_SESSION_KEY); }
-  catch { /* banner removal still works without session storage */ }
-  document.getElementById("archive-save-failure-banner")?.remove();
-}
-
 /**
  * Central handler for all fetch/XHR catch blocks.
  * Distinguishes "server not running" from other errors and shows
@@ -1248,10 +1189,6 @@ const TOAST_STYLES = {
   success: {
     bar:  "bg-Cgreen",
     icon: '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-5 h-5 text-Cgreen"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>',
-  },
-  warning: {
-    bar:  "bg-Camber",
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-5 h-5 text-Camber"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 3.75h.008M10.29 3.86 1.82 18a2.25 2.25 0 0 0 1.93 3.38h16.5A2.25 2.25 0 0 0 22.18 18L13.71 3.86a2.25 2.25 0 0 0-3.42 0Z"/></svg>',
   },
   error: {
     bar:  "bg-Cred",
@@ -1987,8 +1924,8 @@ function _filterBatchUtility(data) {
   };
 }
 
-/** Debounced push of reviewer decisions to the active audit session + full
- *  server recompute. These choices are never written to persistent config.
+/** Debounced push of the current manual-exclusion set to the backend config
+ *  (persists per-engagement) + full server recompute via /api/batch/refresh.
  *
  *  WHY: client-side filtering (_filterBatchUtility) only patches job-keyed
  *  arrays/grids (top_jobs, window tooltip, sla_heatmap, longpole_matrix). It
@@ -2025,15 +1962,15 @@ async function _syncBatchExclusionsToServer() {
     const _origChipText = chip?.textContent || "";
     if (chip) chip.textContent = "⟳ Applying exclusions…";
     try {
-      const manualExclusions = Array.from(_batchManualExclude).map(name => ({
-        name,
-        reason: _batchManualExcludeReasons.get(name) || "",
-      }));
-      const refRes = await fetch("/api/batch/refresh", {
+      const excludeList = Array.from(_batchManualExclude);
+      const cfgRes = await fetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ manual_exclusions: manualExclusions }),
+        body: JSON.stringify({ exclude_jobs: excludeList }),
       });
+      if (!cfgRes.ok) throw new Error(`config HTTP ${cfgRes.status}`);
+
+      const refRes = await fetch("/api/batch/refresh", { method: "POST" });
       if (!refRes.ok) {
         // 404 = session cache doesn't have job_runs_df (e.g. server restarted) —
         // the client-side filtered view is all the user gets until re-upload.
@@ -2286,9 +2223,6 @@ function renderBatchReview(data) {
 
   for (const name of (Array.isArray(data.user_excluded_job_names) ? data.user_excluded_job_names : [])) {
     if (name) _batchManualExclude.add(String(name));
-  }
-  for (const record of (Array.isArray(data.manual_exclusion_audit) ? data.manual_exclusion_audit : [])) {
-    if (record?.name && record?.reason) _batchManualExcludeReasons.set(String(record.name), String(record.reason));
   }
 
   // Apply utility job exclusion filter
@@ -3358,20 +3292,16 @@ window._excludedReexclude = function(name) {
 window._excludedAddManual = function(rawVal, rawReason) {
   const val = String(rawVal || "").trim();
   if (!val) return;
-  const known = new Map((window.appData?.batch?.top_jobs || [])
-    .map(j => [String(j.Job_Name || "").toUpperCase(), String(j.Job_Name || "")])
-    .filter(([key]) => key));
-  const name = known.get(val.toUpperCase());
-  if (known.size && !name) {
+  const known = new Set((window.appData?.batch?.top_jobs || []).map(j => String(j.Job_Name || "").toUpperCase()));
+  if (known.size && !known.has(val.toUpperCase())) {
     toast("info", "Job not found", `No job named "${val}" in this batch. Pick from the suggestions.`);
     return;
   }
-  const canonicalName = name || val;
-  _batchManualInclude.delete(canonicalName);
-  _batchManualExclude.add(canonicalName);
+  _batchManualInclude.delete(val);
+  _batchManualExclude.add(val);
   const reason = String(rawReason || "").trim();
-  if (reason) _batchManualExcludeReasons.set(canonicalName, reason);
-  else _batchManualExcludeReasons.delete(canonicalName);
+  if (reason) _batchManualExcludeReasons.set(val, reason);
+  else _batchManualExcludeReasons.delete(val);
   _reRenderBatch();
 };
 
@@ -3413,7 +3343,7 @@ function _buildUnifiedExclusionRows(dataCoverage) {
       name,
       category: isManual ? "MANUAL" : _exclusionCategory(reason),
       why: isManual
-        ? (customReason || "Reviewer-selected for this review session — excluded after recalculation from batch KPIs, charts, SLA matrix, concurrency evidence and findings. Re-include at any time.")
+        ? (customReason || "Manually excluded by the reviewer for this session — removed from every metric.")
         : _exclusionWhy(reason),
       scope: "ALL_METRICS",
       isUtil: true, // always round-trips client-side, always re-includable
@@ -5506,8 +5436,8 @@ function initResourceView() {
     }
   });
 
-  // Dropdown filters: Type, Env, Status, Product Group
-  for (const [id, key] of [["resource-filter-type", "filterType"], ["resource-filter-env", "filterEnv"], ["resource-filter-status", "filterStatus"], ["resource-filter-product-group", "filterProductGroup"]]) {
+  // Dropdown filters: Type, Env, Status
+  for (const [id, key] of [["resource-filter-type", "filterType"], ["resource-filter-env", "filterEnv"], ["resource-filter-status", "filterStatus"]]) {
     const sel = document.getElementById(id);
     sel?.addEventListener("change", () => {
       resourceTableState[key] = sel.value;
@@ -5523,12 +5453,10 @@ function initResourceView() {
     resourceTableState.filterType = "";
     resourceTableState.filterEnv = "";
     resourceTableState.filterStatus = "";
-    resourceTableState.filterProductGroup = "";
     if (search) search.value = "";
     document.getElementById("resource-filter-type").value = "";
     document.getElementById("resource-filter-env").value = "";
     document.getElementById("resource-filter-status").value = "";
-    document.getElementById("resource-filter-product-group").value = "";
     _updateClearButton();
     if (window.appData.resource) renderResourceTable(window.appData.resource.servers);
   });
@@ -5553,7 +5481,7 @@ function initResourceView() {
 function _updateClearButton() {
   const btn = document.getElementById("resource-clear-filters");
   if (!btn) return;
-  const hasFilters = resourceTableState.filter || resourceTableState.filterType || resourceTableState.filterEnv || resourceTableState.filterStatus || resourceTableState.filterProductGroup;
+  const hasFilters = resourceTableState.filter || resourceTableState.filterType || resourceTableState.filterEnv || resourceTableState.filterStatus;
   btn.classList.toggle("hidden", !hasFilters);
 }
 
@@ -5667,7 +5595,6 @@ function renderResourceReview(data) {
   // ── Phase 1: instant — lightweight KPI DOM writes (fast first paint)
   renderResourceKpis(data.kpis || {});
   _renderPriorityAction(data);
-  _populateProductGroupFilter(data.servers || []);
 
   // ── Phase 2: deferred — heavy renders staggered across frames
   //    Prevents Firefox "this page is slowing down" warning by yielding
@@ -6784,21 +6711,6 @@ function drawDonutRing(canvasId, value, threshold = 80) {
 }
 
 // ── Lazy server detail table ──────────────────────────────────
-// Builds the "Product Group" filter dropdown from whatever tag values are
-// actually present on this engagement's servers — generic across any
-// customer's own tag convention, never a hardcoded option list.
-function _populateProductGroupFilter(servers) {
-  const sel = document.getElementById("resource-filter-product-group");
-  if (!sel) return;
-  const groups = [...new Set((servers || []).map(s => s.product_group).filter(Boolean))].sort();
-  const current = sel.value;
-  sel.innerHTML = `<option value="">All Product Groups</option>` +
-    groups.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
-  if (groups.includes(current)) sel.value = current;
-  else { resourceTableState.filterProductGroup = ""; }
-  sel.classList.toggle("hidden", groups.length === 0);
-}
-
 function renderResourceTable(servers) {
   const tbody = document.getElementById("resource-tbody");
   const empty = document.getElementById("resource-table-empty");
@@ -6853,9 +6765,6 @@ function renderResourceTable(servers) {
   }
   if (resourceTableState.filterStatus) {
     rows = rows.filter(s => s.status === resourceTableState.filterStatus);
-  }
-  if (resourceTableState.filterProductGroup) {
-    rows = rows.filter(s => (s.product_group || "") === resourceTableState.filterProductGroup);
   }
 
   // ── Show count ───────────────────────────────────────────
@@ -6978,7 +6887,6 @@ function renderResourceTable(servers) {
         ${_dispStatus === "DB Normal" ? `<div class="text-[8px] mt-0.5 leading-tight" style="color:${DB_EXPECTED_COLOR}">SGA/PGA steady — high memory by design</div>` : ""}
         ${_memConflictLine}
       </td>
-      <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[220px]" title="${escapeHtml(r.vm_size_desc || r.vm_size || "")}">${escapeHtml(r.vm_size_desc || r.vm_size || "—")}</td>
       <td class="py-2.5 pr-3 text-Cmuted truncate max-w-[180px]" title="${escapeHtml(r.source_env || "")}">${escapeHtml(truncate(r.source_env || "", 28))}</td>
     `;
     tbody.appendChild(tr);
@@ -8782,17 +8690,12 @@ function _baselineBadge(bc, opts = {}) {
   if (!bc || !Number.isFinite(bc.pulls)) return "";
   const minP = bc.min_pulls || 3;
   const degraded = bc.pulls < minP;
-  // The backend deliberately uses Percentage CPU as the representative
-  // confidence baseline for each VM card. Keep that scope visible: an
-  // unqualified "Baseline" beside memory/disk evidence implies all metrics
-  // share this mean and sigma, which is not true.
-  const metricLabel = opts.metricLabel || "CPU";
   const muSig = (bc.baseline_mean != null && bc.baseline_std != null)
     ? ` · μ=${bc.baseline_mean}% σ=${bc.baseline_std}%` : "";
-  const sz = opts.compact ? "text-[8px] px-1.5" : "text-[9px] px-2";
+  const sz = opts.compact ? "text-[7px] px-1" : "text-[9px] px-2";
   return degraded
-    ? `<span class="${sz} py-0.5 rounded-full font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} ${metricLabel} pulls stored — anomaly detection uses a session-only ${metricLabel} baseline (degraded).">${metricLabel} baseline: ${bc.pulls}/${minP} pulls — session only</span>`
-    : `<span class="${sz} py-0.5 rounded-full font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical ${metricLabel} baseline from ${bc.pulls} pulls / ${bc.retention_days}d. The mean and sigma shown are ${metricLabel}, not memory or disk.">${metricLabel} baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
+    ? `<span class="${sz} py-0.5 rounded-full font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25 saturated-pulse" title="Only ${bc.pulls} of ${minP} pulls stored — anomaly detection uses session-only baseline (degraded).">Baseline: ${bc.pulls}/${minP} pulls — session only</span>`
+    : `<span class="${sz} py-0.5 rounded-full font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Historical baseline from ${bc.pulls} pulls / ${bc.retention_days}d.">Baseline: ${bc.pulls} pulls / ${bc.retention_days}d${muSig}</span>`;
 }
 
 function _renderVmServerCard(vmName, vmData, metricConfig, container) {
@@ -8831,29 +8734,17 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     : 100;
   const diskStats = stats["OS Disk Bandwidth Consumed Percentage"];
   const diskP95 = diskStats?.p95 ?? diskStats?.max ?? 0;
-  let domLabel, domVal, domColor, domStatType, domStatTitle;
+  let domLabel, domVal, domColor, domStatType;
   // Pick the metric under most pressure:
   // CPU/Disk: highest % = worst; Memory: lowest available % = worst
   // Convert to a common "pressure" score for comparison
   const memPressure = 100 - memLowest;  // high pressure = low available
   if (memPressure >= cpuP95 && memPressure >= diskP95) {
-    const memUsesP5 = Boolean(memAvailStats?.min_anomalous && memAvailStats?.p5 != null);
-    domLabel = "MEM";
-    domVal = memLowest;
-    domColor = THEME.cyan;
-    // The fleet headline deliberately uses P5 when Azure's raw minimum is a
-    // one-bucket outlier. Make that statistic and its full-query scope visible
-    // next to the value; the sparkline below is a separate, recent trend.
-    domStatType = memUsesP5 ? "P5 avail · full window" : "raw min avail · full window";
-    domStatTitle = memUsesP5
-      ? "P5 available memory across the full selected query window. The raw minimum is shown in detail when it is a one-bucket outlier."
-      : "Raw minimum available memory across the full selected query window.";
+    domLabel = "MEM"; domVal = memLowest; domColor = THEME.cyan; domStatType = "min avail";
   } else if (cpuP95 >= diskP95) {
-    domLabel = "CPU"; domVal = cpuP95; domColor = THEME.blue; domStatType = "P95 · full window";
-    domStatTitle = "P95 CPU across the full selected query window.";
+    domLabel = "CPU"; domVal = cpuP95; domColor = THEME.blue; domStatType = "P95";
   } else {
-    domLabel = "DISK"; domVal = diskP95; domColor = THEME.amber; domStatType = "P95 · full window";
-    domStatTitle = "P95 disk bandwidth consumed across the full selected query window.";
+    domLabel = "DISK"; domVal = diskP95; domColor = THEME.amber; domStatType = "P95";
   }
   // If P95 < max by a large margin, note the outlier
   const domMaxVal = domLabel === "CPU" ? cpuMax : domLabel === "DISK" ? (diskStats?.max ?? 0) : 0;
@@ -8989,9 +8880,8 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     domWave = _rewriteWaveformForDb(domWave, role, 100 - domVal, _thr);
   }
   const waveRiskColors = { none: THEME.green, low: THEME.cyan, medium: THEME.amber, high: THEME.red, critical: THEME.purple };
-  const domWaveIcon = domWave?.shape === "plateau" ? "≋" : (domWave?.icon || "•");
   const waveBadge = domWave
-    ? `<span class="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded cursor-help" style="color:${waveRiskColors[domWave.risk] || THEME.muted};background:${hexA(waveRiskColors[domWave.risk] || THEME.muted, 0.12)}" title="${domWave.meaning}">${escapeHtml(domWaveIcon)} ${domWave.label}</span>`
+    ? `<span class="text-[7px] font-bold uppercase tracking-wider px-1 py-0.5 rounded cursor-help" style="color:${waveRiskColors[domWave.risk] || THEME.muted};background:${hexA(waveRiskColors[domWave.risk] || THEME.muted, 0.12)}" title="${domWave.meaning}">${domWave.icon} ${domWave.label}</span>`
     : "";
 
   card.innerHTML = `
@@ -9004,9 +8894,9 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           ${waveBadge}
         </div>
         <div class="flex items-center gap-2 mt-1 flex-wrap">
-          <span class="px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase cursor-help" title="${_severityHelpText(sevLabel)}" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
+          <span class="px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase cursor-help" title="${_severityHelpText(sevLabel)}" style="color:${sevColor};background:${hexA(sevColor,0.15)}">${sevLabel}</span>
           <span class="text-[9px] text-Cmuted">${spikeEventCount} spike event${spikeEventCount > 1 ? "s" : ""} · ${thresholdCrossCount} threshold crossing${thresholdCrossCount !== 1 ? "s" : ""}</span>
-          ${breachLabel ? `<span class="text-[9px] font-bold px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
+          ${breachLabel ? `<span class="text-[8px] font-bold px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}">⏱ ${breachLabel}</span>` : ""}
           ${_baselineBadge(vmData.baseline_confidence, { compact: true })}
         </div>
       </div>
@@ -9016,7 +8906,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
           <span class="text-xs font-bold" style="color:${trendColor}">${trendArrow}</span>
         </div>
         <div class="flex items-center gap-1 justify-end">
-          <span class="text-[8px] font-bold uppercase tracking-wider" style="color:${domColor}" title="${domStatTitle}">${domLabel} ${domStatType}</span>
+          <span class="text-[8px] font-bold uppercase tracking-wider" style="color:${domColor}">${domLabel} ${domStatType}</span>
           ${trendDelta ? `<span class="text-[8px] font-mono" style="color:${trendColor}">${trendDelta}</span>` : ""}
         </div>
         ${domHasOutlier ? `<div class="text-[7px] text-Cmuted mt-0.5" title="Single-point spike to ${domMaxVal.toFixed(0)}% — P95 shown instead">peak ${domMaxVal.toFixed(0)}% ⚠</div>` : ""}
@@ -9025,7 +8915,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     <div class="flex items-center justify-between">
       ${sparkSvg}
       <div class="flex items-center gap-2">
-        <span class="text-[8px] text-Cmuted">${recentSeries.length > 4 ? "trend: last 6h" : "trend: full window"}</span>
+        <span class="text-[8px] text-Cmuted">${recentSeries.length > 4 ? "last 6h" : "full window"}</span>
         <button type="button" class="dd-open-detail-btn text-[8px] font-semibold px-1.5 py-0.5 rounded border border-Cblue/35 text-Cblue hover:bg-Cblue/10 transition">Show detail ▸</button>
       </div>
     </div>
@@ -9109,7 +8999,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   let headerStats = "";
   if (cpuStatsH) {
     const maxTag = cpuStatsH.max_anomalous
-      ? `<span class="text-[9px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Max ${cpuStatsH.max}% may be a single-point spike — P95 is ${cpuStatsH.p95}%">single-point</span>`
+      ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Max ${cpuStatsH.max}% may be a single-point spike — P95 is ${cpuStatsH.p95}%">single-point</span>`
       : "";
     const maxSrc = cpuStatsH.max_source === "azure_max_agg" ? "" : "";
     const maxSrcTitle = cpuStatsH.max_source === "azure_max_agg" ? " title=\"Max from Azure Maximum aggregation (true peak, not average)\"" : "";
@@ -9117,9 +9007,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
   }
   if (memStats) {
     const memMinTag = memStats.min_anomalous
-      ? `<span class="text-[9px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Raw minimum ${memStats.min}% came from one Azure minimum bucket and may be a momentary dip — P5 of the Average series is ${memStats.p5 ?? 'N/A'}%">single bucket</span>`
+      ? `<span class="text-[8px] px-1 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}" title="Min ${memStats.min}% may be a single-point dip — P5 is ${memStats.p5 ?? 'N/A'}%">single-point</span>`
       : "";
-    headerStats += `${cpuStatsH ? " · " : ""}<span class="text-Ccyan">Mem avail avg ${memStats.mean}% · raw min ${memStats.min}% ${memMinTag}</span> <span class="text-[7px] px-0.5 rounded cursor-help" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)}" title="Average is from Azure Monitor Average. Raw min is the Azure Minimum extreme and is not a sustained-window value. Higher available % means more free memory.">ℹ</span>`;
+    headerStats += `${cpuStatsH ? " · " : ""}<span class="text-Ccyan">Mem avail ${memStats.mean}% · min ${memStats.min}% ${memMinTag}</span> <span class="text-[7px] px-0.5 rounded cursor-help" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.08)}" title="Source: Available Memory Percentage (Azure Monitor Average). Higher = more free memory.">ℹ</span>`;
   }
 
   // Count by real severity so the badge matches the spike table exactly.
@@ -9299,13 +9189,13 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const _activeByWindow = Number.isFinite(_winEndMs) && Number.isFinite(_endMs) && (_winEndMs - _endMs) >= 0 && (_winEndMs - _endMs) <= (90 * 60 * 1000);
         const _stillActive = sev.includes("SUSTAINED") && _activeByWindow;
         const activeBadge = _stillActive
-          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-extrabold" style="color:${THEME.red};background:${hexA(THEME.red,0.15)};border:1px solid ${hexA(THEME.red,0.45)}">STILL ACTIVE</span>`
+          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[8px] font-extrabold" style="color:${THEME.red};background:${hexA(THEME.red,0.15)};border:1px solid ${hexA(THEME.red,0.45)}">STILL ACTIVE</span>`
           : "";
         const durLabel = _humanizeDurationMin(s.duration_min, {
           ongoing: _stillActive,
         });
         const detectionTag = s.detection === "absolute_threshold"
-          ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
+          ? `<span class="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.cyan};background:${hexA(THEME.cyan,0.15)}">ABS</span>`
           : "";
 
         // Source lineage tooltip
@@ -9526,11 +9416,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       if (det.peak_used_pct != null) {
         const pv = det.peak_used_pct;
         const pc = pv >= 85 ? THEME.red : pv >= 65 ? THEME.amber : THEME.green;
-        const hd = det.headroom_pct != null ? ` <span class="text-Cmuted">(${det.headroom_pct.toFixed(0)}% avail)</span>` : "";
-        // Waveform peaks come from the Average time-series. Say so explicitly
-        // so this value is never mistaken for the raw Azure Minimum/Maximum in
-        // the VM header or for an entire sustained incident window.
-        peakClause = `<span style="color:${pc}">worst avg bucket ${pv.toFixed(0)}% used</span>${hd}`;
+        const hd = det.headroom_pct != null ? ` <span class="text-Cmuted">(${det.headroom_pct.toFixed(0)}% free)</span>` : "";
+        peakClause = `<span style="color:${pc}">peak ${pv.toFixed(0)}%</span>${hd}`;
       }
 
       // Confidence is a DATA-QUALITY signal, not a severity signal — giving it
@@ -9538,7 +9425,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       // sitting next to the real one. Rendered as plain muted text instead.
       const confLabel = dWf.confidence_label || (dWf.confidence >= 0.75 ? "observed" : dWf.confidence >= 0.55 ? "inferred" : "weak-signal");
       const confPct = dWf.confidence != null ? `${(dWf.confidence * 100).toFixed(0)}%` : "";
-      const confClause = confPct ? `confidence ${confPct} (${confLabel})`
+      const confClause = confPct ? `${confLabel} ${confPct}`
         : "";
 
       const recurDays = wf.recurrence_days || 0;
@@ -9570,19 +9457,19 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
 
       const evidenceParts = [confClause, peakClause, durClause, recurClause, secClause].filter(Boolean);
       const evidenceLine = evidenceParts.length
-        ? `<div class="text-[10px] text-Cmuted mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap" title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${recurDays} breach days, ${(det.cv || 0).toFixed(2)} CV.">
+        ? `<div class="text-[9px] text-Cmuted mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap" title="Confidence: ${confPct} — ${confLabel}. Based on ${det.peak_count || 0} peaks, ${recurDays} breach days, ${(det.cv || 0).toFixed(2)} CV.">
             ${evidenceParts.map((p, i) => i === 0 ? p : `<span class="text-Cborder">·</span> ${p}`).join(" ")}
           </div>`
         : "";
 
       wfRows += `
         <div class="flex items-start gap-3 py-2 border-b border-Cborder/20 last:border-0 hover:bg-white/[0.015] rounded transition">
-          <span class="text-lg shrink-0 mt-0.5" aria-hidden="true">${dWf.shape === "plateau" ? "≋" : escapeHtml(dWf.icon || "•")}</span>
+          <span class="text-lg shrink-0 mt-0.5">${dWf.icon}</span>
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-1.5 flex-wrap">
               <span class="text-[11px] font-bold text-Cwhite">${metricShort(metric)}</span>
-              <span class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
-              <span class="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
+              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.14)};border:1px solid ${hexA(rc,0.3)}">${dWf.label}</span>
+              <span class="text-[8px] font-bold uppercase px-1 py-0.5 rounded shrink-0" style="color:${rc};background:${hexA(rc,0.08)}">${dWf.risk}</span>
               ${cpTag}${concTag}${dbBandTag}
             </div>
             ${evidenceLine}
@@ -9842,10 +9729,10 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
             content: labelContent,
             position: { x: "start", y: "start" },
             yAdjust: yOffset,
-            font: { size: 10, weight: "bold" },
+            font: { size: 9, weight: "bold" },
             color: THEME.white,
             backgroundColor: bgColor,
-            padding: { top: 3, bottom: 3, left: 7, right: 5 },
+            padding: { top: 2, bottom: 2, left: 6, right: 4 },
             borderRadius: 3,
           },
         };
@@ -9926,11 +9813,11 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       ${_maxOverlayFacts.length ? `
       <div class="text-[8px] text-Cmuted mb-2 leading-relaxed">
         <span class="font-bold uppercase tracking-wider" style="color:${THEME.muted}">Why the shaded band exists</span> —
-        Azure Maximum for one bucket exceeded that bucket's Average:
+        the average bucket briefly ran hotter than its own average shows:
         ${_maxOverlayFacts
           .sort((a, b) => b.gap - a.gap)
           .slice(0, 3)
-          .map(f => `<span style="color:${f.color}">${escapeHtml(f.label)}</span> bucket max ${f.maxVal.toFixed(0)}% at ${f.time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} vs avg ${f.avgVal.toFixed(0)}% (+${f.gap.toFixed(0)}pp) <span class="text-[8px] px-1.5 py-0.5 rounded" style="color:${THEME.amber};background:${hexA(THEME.amber,0.12)}" title="One Azure Maximum aggregation bucket; not a sustained-window peak.">single bucket</span>`)
+          .map(f => `<span style="color:${f.color}">${escapeHtml(f.label)}</span> hit ${f.maxVal.toFixed(0)}% at ${f.time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} while that bucket averaged ${f.avgVal.toFixed(0)}% (+${f.gap.toFixed(0)}pp)`)
           .join(" · ")}
       </div>` : ""}
       <div class="deepdive-chart-container">
@@ -10531,7 +10418,6 @@ async function exportHtmlReport() {
       return;
     }
     const blob     = await res.blob();
-    const archiveStatus = res.headers.get("X-Archive-Status");
     const url      = URL.createObjectURL(blob);
     const anchor   = document.createElement("a");
     // The server already names this file "PE_Audit_{Customer}_{yyyymmdd_hhmm}.html"
@@ -10546,17 +10432,6 @@ async function exportHtmlReport() {
     anchor.click();
     URL.revokeObjectURL(url);
     toast("success", "Report downloaded", `Saved as ${anchor.download}`, 5000);
-    if (archiveStatus === "saved") {
-      _clearArchiveSaveFailureBanner();
-      toast("success", "Report archived", "A copy is available in Review Registry.");
-    } else if (archiveStatus === "skipped") {
-      toast("warning", "Review Registry skipped",
-        "The report downloaded, but no customer name was available to create an accurate registry record. Add the customer name and export again.", 7000);
-    } else if (archiveStatus === "failed") {
-      _recordArchiveSaveFailure();
-      toast("warning", "Archive unavailable",
-        "The report downloaded, but its archive copy could not be saved.", 7000);
-    }
   } catch (err) {
     _handleFetchError(err);
   } finally {
@@ -16888,7 +16763,7 @@ async function saveConfig() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  AZURE MONITOR — live-fetch integration (session-scoped browser identity)
+//  AZURE MONITOR — live-fetch integration (personal identity via az login)
 // ═══════════════════════════════════════════════════════════════
 
 async function checkAzureIdentity(opts = {}) {
@@ -16946,28 +16821,6 @@ async function checkAzureIdentity(opts = {}) {
 }
 function _esc(s) { const d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
 
-// Both Settings and the live-metrics modal can start Azure sign-in.  Keep one
-// browser-auth request per dashboard tab so rapid clicks, or clicking both
-// surfaces, cannot open competing Microsoft login windows.
-let _azureBrowserLoginInFlight = null;
-function _requestAzureBrowserLogin() {
-  if (_azureBrowserLoginInFlight) return _azureBrowserLoginInFlight;
-  _azureBrowserLoginInFlight = (async () => {
-    const ctl = new AbortController();
-    const timeout = setTimeout(() => ctl.abort(), 300000);
-    try {
-      const response = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
-      let data = {};
-      try { data = await response.json(); } catch (_) {}
-      return { response, data };
-    } finally {
-      clearTimeout(timeout);
-      _azureBrowserLoginInFlight = null;
-    }
-  })();
-  return _azureBrowserLoginInFlight;
-}
-
 // ── Browser-based Azure login ────────────────────────────────────────────────
 async function azureBrowserLogin() {
   const btn      = document.getElementById("az-browser-login-btn");
@@ -17012,19 +16865,20 @@ async function azureBrowserLogin() {
     if (statusEl) {
       statusEl.innerHTML =
         `<span>Complete MFA in your browser, then return here.</span>` +
-        `<br><span class="text-Cmuted">Keep this request open. The dashboard will update after the Microsoft sign-in window completes.</span>`;
+        `<br><span class="text-Cmuted">If the page says "connection refused" after sign-in, ` +
+        `click <strong>Try Again</strong> below — a different port will be used.</span>`;
       statusEl.className = "text-xs text-Camber";
     }
   }, 60000);
 
   try {
-    const joiningExistingLogin = Boolean(_azureBrowserLoginInFlight);
-    if (joiningExistingLogin && statusEl) {
-      statusEl.textContent = "A Microsoft sign-in window is already open. Waiting for it to complete…";
-      statusEl.className = "text-xs text-Camber";
-    }
-    const { response: res, data } = await _requestAzureBrowserLogin();
+    const ctl = new AbortController();
+    const timeoutMs = 300000; // 5 minutes — allows for slow AV-scanned SDK import + MFA
+    const tm = setTimeout(() => ctl.abort(), timeoutMs);
+    const res  = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
+    clearTimeout(tm);
     clearTimeout(sdkHintTimer);
+    const data = await res.json();
     if (!res.ok) {
       const msg = data?.detail || `HTTP ${res.status}`;
       if (statusEl) { statusEl.textContent = `❌ ${msg}`; statusEl.className = "text-xs text-Cred"; }
@@ -17170,7 +17024,7 @@ async function azureBrowserLogout() {
     _stopAzureAutoSync();
     // Refresh identity
     checkAzureIdentity({ loadSubscriptions: false });
-    toast("info", "Signed out", "Browser credential cleared for this dashboard session.");
+    toast("info", "Signed out", "Browser credential cleared. Will fall back to az login.");
   } catch (_) {}
 }
 
@@ -17217,7 +17071,7 @@ async function loadAzureSubscriptions(defaultSubId) {
   // usable before the slow subscriptions API call completes.
   let savedSubId = "", savedRg = "";
   try {
-    const cfgFast = await fetch("/api/azure/status", { signal: AbortSignal.timeout(4000) });
+    const cfgFast = await fetch("/api/azure/status");
     const cfgFastData = await cfgFast.json();
     savedSubId = cfgFastData.azure_subscription_id_set ? cfgFastData.azure_subscription_id_value : "";
     savedRg    = cfgFastData.azure_resource_group_set  ? cfgFastData.azure_resource_group_value  : "";
@@ -17235,7 +17089,7 @@ async function loadAzureSubscriptions(defaultSubId) {
   // fallback with _cache_warming=true meaning background fetch is running).
   async function _fetchAndPopulate(isRetry) {
     try {
-      const res = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
+      const res = await fetch("/api/azure/subscriptions");
       const d = await res.json();
 
       if (d.ok && d.subscriptions.length > 0 && !d._cache_warming) {
@@ -17261,7 +17115,7 @@ async function loadAzureSubscriptions(defaultSubId) {
           if (attemptsLeft <= 0) return; // give up after ~30s
           setTimeout(async () => {
             try {
-              const r2 = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
+              const r2 = await fetch("/api/azure/subscriptions");
               const d2 = await r2.json();
               if (d2.ok && d2.subscriptions.length > 0 && !d2._cache_warming) {
                 sel.innerHTML = '';
@@ -17287,7 +17141,7 @@ async function loadAzureSubscriptions(defaultSubId) {
         _pollSubs(15); // up to 15 × 2s = 30s
 
       } else if (!savedSubId) {
-        const msg = d.error ? `No subscriptions — ${d.error}` : "No subscriptions — check browser sign-in and Azure RBAC";
+        const msg = d.error ? `No subscriptions — ${d.error}` : "No subscriptions — check az login";
         sel.innerHTML = `<option value="">${_esc(msg)}</option>`;
       }
       // If savedSubId was already shown and list unavailable, keep it.
@@ -17307,7 +17161,7 @@ async function loadAzureResourceGroups(subscriptionId, preSelectRg) {
     return;
   }
   try {
-    const res = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subscriptionId)}`, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subscriptionId)}`);
     const d = await res.json();
     sel.innerHTML = '<option value="">All (entire subscription)</option>';
     if (d.ok && d.resource_groups.length > 0) {
@@ -17358,7 +17212,7 @@ async function validateAzure() {
     return;
   }
 
-  if (statusEl) { statusEl.textContent = "Testing your browser-authenticated Azure access…"; statusEl.className = "text-xs text-Cmuted"; }
+  if (statusEl) { statusEl.textContent = "Testing (using your az login identity)…"; statusEl.className = "text-xs text-Cmuted"; }
   try {
     const res  = await fetch("/api/azure/validate", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -17371,7 +17225,7 @@ async function validateAzure() {
     } else {
       const hint = data.hint ? ` — ${data.hint}` : "";
       if (statusEl) { statusEl.textContent = `❌ ${(data.error || "auth failed").slice(0, 80)}${hint}`; statusEl.className = "text-xs text-Cred"; }
-      toast("error", "Azure auth failed", data.hint || data.error || "Sign in with Browser and try again");
+      toast("error", "Azure auth failed", data.hint || data.error || "Run 'az login' and try again");
     }
   } catch (err) {
     if (statusEl) { statusEl.textContent = `❌ Network error: ${err?.message || err}`; statusEl.className = "text-xs text-Cred"; }
@@ -17380,7 +17234,7 @@ async function validateAzure() {
 
 async function _loadAzureStatusBadge() {
   try {
-    const res  = await fetch("/api/azure/status", { signal: AbortSignal.timeout(4000) });
+    const res  = await fetch("/api/azure/status");
     const data = await res.json();
     const badge = document.getElementById("azure-config-status-badge");
     if (!badge) return;
@@ -17405,16 +17259,13 @@ function openAzureModal() {
   if (step2) step2.classList.add("hidden");
   if (statusDiv) { statusDiv.textContent = ""; statusDiv.classList.add("hidden"); }
   // Reset all filters (type, env, region) to ALL and clear search
-  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL", productGroup: "ALL" };
+  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL" };
   document.querySelectorAll('.azure-type-filter').forEach(b => b.classList.remove("az-active"));
   document.querySelector('.azure-type-filter[data-type="ALL"]')?.classList.add("az-active");
   document.querySelectorAll('.azure-env-filter').forEach(b => b.classList.remove("az-active"));
   document.querySelector('.azure-env-filter[data-env="ALL"]')?.classList.add("az-active");
   document.querySelectorAll('.azure-region-filter:not([data-region="ALL"])').forEach(b => b.remove());
   const srch = document.getElementById("azure-vm-search"); if (srch) srch.value = "";
-  const allSubscriptions = document.getElementById("azure-search-all-subscriptions");
-  if (allSubscriptions) allSubscriptions.checked = false;
-  _syncAzureFilterPressedState();
   // Refresh auth bar and load subscriptions
   _refreshModalAuthBar();
 }
@@ -17432,7 +17283,7 @@ async function _refreshModalAuthBar() {
   const signIn   = document.getElementById("azure-modal-signin-btn");
   const signOut  = document.getElementById("azure-modal-signout-btn");
   try {
-    const res  = await fetch("/api/azure/auth-status", { signal: AbortSignal.timeout(4000) });
+    const res  = await fetch("/api/azure/auth-status");
     const data = await res.json();
     if (data.method && data.method !== "none" && data.name) {
       // Authenticated
@@ -17537,16 +17388,16 @@ async function azureModalSignIn() {
   if (label) { label.textContent = "Waiting for browser sign-in…"; label.className = "text-Cmuted text-xs"; }
   if (dot) { dot.className = "w-2 h-2 rounded-full bg-Cmuted animate-pulse inline-block"; }
 
-  // Progressive hints so a slow interactive login does not look like a freeze.
+  // Progressive hints so a stalled loopback redirect doesn't look like a freeze.
   const hint1 = setTimeout(() => { if (label) { label.textContent = "Still waiting — complete sign-in in the Microsoft tab that opened."; label.className = "text-amber-400 text-xs"; } }, 30000);
-  const hint2 = setTimeout(() => { if (label) { label.textContent = "Keep this request open. The dashboard will update after the Microsoft sign-in window completes."; label.className = "text-amber-400 text-xs"; } }, 90000);
+  const hint2 = setTimeout(() => { if (label) { label.textContent = 'If the tab says "connection refused" after sign-in, click Sign in again (a new port is used).'; label.className = "text-amber-400 text-xs"; } }, 90000);
+
+  // Hard ceiling so the modal can NEVER hang forever (mirrors the Settings login).
+  const ctl = new AbortController();
+  const tm  = setTimeout(() => ctl.abort(), 300000);
   try {
-    const joiningExistingLogin = Boolean(_azureBrowserLoginInFlight);
-    if (joiningExistingLogin && label) {
-      label.textContent = "A Microsoft sign-in window is already open. Waiting for it to complete…";
-      label.className = "text-amber-400 text-xs";
-    }
-    const { response: res, data } = await _requestAzureBrowserLogin();
+    const res = await fetch("/api/azure/browser-login", { method: "POST", signal: ctl.signal });
+    const data = await res.json();
     if (!res.ok) {
       if (label) { label.textContent = `❌ ${data.detail || "Login failed"}`; label.className = "text-red-400 text-xs"; }
       toast("error", "Browser login failed", data.detail || "Unknown error");
@@ -17577,7 +17428,7 @@ async function azureModalSignIn() {
     if (label) { label.textContent = `❌ ${msg}`; label.className = "text-red-400 text-xs"; }
     toast("error", "Browser login error", msg);
   } finally {
-    clearTimeout(hint1); clearTimeout(hint2);
+    clearTimeout(tm); clearTimeout(hint1); clearTimeout(hint2);
     if (btn) { btn.disabled = false; btn.innerHTML = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg> Sign in with Browser'; }
   }
 }
@@ -17600,7 +17451,7 @@ async function _loadModalSubscriptions() {
 
   // Resolve the configured subscription once so we can pre-select it.
   let cfgSub = "";
-  try { const c = await fetch("/api/azure/status", { signal: AbortSignal.timeout(4000) }); const cs = await c.json(); cfgSub = cs.azure_subscription_id_value || ""; } catch {}
+  try { const c = await fetch("/api/azure/status"); const cs = await c.json(); cfgSub = cs.azure_subscription_id_value || ""; } catch {}
 
   const renderSubs = (subs) => {
     sel.innerHTML = "";
@@ -17623,7 +17474,7 @@ async function _loadModalSubscriptions() {
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     let d;
     try {
-      const r = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
+      const r = await fetch("/api/azure/subscriptions");
       d = await r.json();
     } catch {
       sel.innerHTML = '<option value="">Failed to load — reopen to retry</option>';
@@ -17644,7 +17495,7 @@ async function _loadModalSubscriptions() {
 
   // Warmed too slowly — render whatever we have (e.g. the saved sub) or say so.
   try {
-    const r = await fetch("/api/azure/subscriptions", { signal: AbortSignal.timeout(8000) });
+    const r = await fetch("/api/azure/subscriptions");
     const d = await r.json();
     const subs = d.subscriptions || [];
     if (subs.length) { renderSubs(subs); return; }
@@ -17661,7 +17512,7 @@ async function azureLoadRGs() {
   rgSel.innerHTML = '<option value="">All (entire subscription)</option>';
   if (!subId) return;
   try {
-    const r = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subId)}`, { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subId)}`);
     const d = await r.json();
     for (const g of (d.resource_groups || [])) {
       const opt = document.createElement("option");
@@ -17675,7 +17526,7 @@ async function azureLoadRGs() {
 /* ── Cached discovered VMs ── */
 let _discoveredVMs = [];
 let _selectedVmIds = new Set();   // Persistent selection — survives filter switches
-let _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL", productGroup: "ALL" };
+let _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL" };
 let _collapsedCustomers = new Set(); // Customer group names currently collapsed in the VM table
 
 /* ── Detect VM environment from Azure tags or name prefix ── */
@@ -17737,7 +17588,6 @@ function _showDiscoveredVMs(data, statusEl, statusMsg) {
 
   _updateFilterCounts();
   _updateRegionFilterButtons();
-  _updatePgFilterButtons();
   _renderVMTable(_discoveredVMs);
   _updateSelectedCount();
   const dupNote = dupCount > 0 ? ` (${dupCount} duplicate${dupCount>1?'s':''} removed)` : "";
@@ -17770,57 +17620,30 @@ function _updateFilterCounts() {
 }
 
 /* ── Search VMs across all subscriptions (Resource Graph) ── */
-let _azureSearchController = null;
 async function azureSearchVMs() {
   const btn    = document.getElementById("azure-search-btn");
   const status = document.getElementById("azure-discover-status");
   const query  = (document.getElementById("azure-search-input")?.value || "").trim();
-  const selectedSubscription = document.getElementById("azure-modal-sub")?.value || "";
-  const searchAllSubscriptions = Boolean(document.getElementById("azure-search-all-subscriptions")?.checked);
 
   if (!query) { if (status) { status.textContent = "Enter a search term (customer name, server name, tag…)."; status.className = "text-xs text-amber-400"; } return; }
-  if (!searchAllSubscriptions && !selectedSubscription) {
-    if (status) { status.textContent = "Select a subscription for the fast search, or choose Search every accessible subscription."; status.className = "text-xs text-amber-400"; }
-    return;
-  }
-  if (_azureSearchController) {
-    if (status) { status.textContent = "A VM search is already running. Please wait for its result."; status.className = "text-xs text-Camber"; }
-    return;
-  }
 
   if (btn) { btn.disabled = true; btn.textContent = "Searching…"; }
-  const scopeLabel = searchAllSubscriptions ? "all accessible subscriptions" : "the selected subscription";
-  if (status) { status.textContent = `Searching ${scopeLabel} for "${query}"…`; status.className = "text-xs text-Cmuted"; }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
-  _azureSearchController = controller;
+  if (status) { status.textContent = `Searching across all subscriptions for "${query}"…`; status.className = "text-xs text-Cmuted"; }
 
   try {
     const res = await fetch("/api/azure/search-vms", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({
-        query,
-        subscription_ids: searchAllSubscriptions ? undefined : [selectedSubscription],
-      }),
-      signal: controller.signal,
+      body: JSON.stringify({ query })
     });
     const data = await res.json();
     if (!res.ok) {
-      const detail = res.status === 504
-        ? "Azure search timed out. Keep Search every accessible subscription off, or choose a more specific customer/tag."
-        : (data.detail || "Search failed");
-      if (status) { status.textContent = `❌ ${detail}`; status.className = "text-xs text-red-400"; }
+      if (status) { status.textContent = `❌ ${data.detail || "Search failed"}`; status.className = "text-xs text-red-400"; }
       return;
     }
     _showDiscoveredVMs(data, status, `✅ Found ${data.total} VMs matching "${query}"`);
   } catch (err) {
-    const message = err?.name === "AbortError"
-      ? "Search timed out after 60 seconds. Try Browse for one subscription, or use a more specific name or tag."
-      : (err?.message || "Search failed");
-    if (status) { status.textContent = `❌ ${message}`; status.className = "text-xs text-red-400"; }
+    if (status) { status.textContent = `❌ ${err.message}`; status.className = "text-xs text-red-400"; }
   } finally {
-    clearTimeout(timeout);
-    if (_azureSearchController === controller) _azureSearchController = null;
     if (btn) { btn.disabled = false; btn.textContent = "Search"; }
   }
 }
@@ -17841,14 +17664,12 @@ async function azureDiscoverVMs() {
     // Save subscription to config so fetch uses it
     await fetch("/api/config", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ azure_subscription_id: subId, azure_resource_group: rg || "" }),
-      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ azure_subscription_id: subId, azure_resource_group: rg || "" })
     });
 
     const res = await fetch("/api/azure/discover-vms", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ subscription_id: subId, resource_group: rg || null }),
-      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify({ subscription_id: subId, resource_group: rg || null })
     });
     const data = await res.json();
     if (!res.ok) {
@@ -17864,10 +17685,7 @@ async function azureDiscoverVMs() {
     _showDiscoveredVMs(data, status, `✅ Found ${data.total} VMs`);
 
   } catch (err) {
-    const message = err?.name === "TimeoutError"
-      ? "Discovery timed out after 60 seconds. Check Azure access or select a smaller resource group."
-      : (err?.message || "Discovery failed");
-    if (status) { status.textContent = `❌ ${message}`; status.className = "text-xs text-red-400"; }
+    if (status) { status.textContent = `❌ ${err.message}`; status.className = "text-xs text-red-400"; }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "Browse"; }
   }
@@ -18100,65 +17918,6 @@ function _updateRegionFilterButtons() {
   });
 }
 
-/* Stable color assignment for dynamic Product Group values (unlike Type/Env,
-   the set of groups isn't a fixed known enum). Each distinct name seen gets
-   the next unused palette color (not a hash — a raw hash can collide two
-   real groups onto the same color even with few groups), so any two groups
-   visible at once always look different until the palette is exhausted. */
-const _PG_PALETTE = ["#2dd4bf","#a78bfa","#fbbf24","#f472b6","#38bdf8","#a3e635","#fb923c","#818cf8","#fb7185","#34d399"];
-const _pgColorAssignments = new Map();
-function _pgColorFor(name) {
-  if (_pgColorAssignments.has(name)) return _pgColorAssignments.get(name);
-  const clr = _PG_PALETTE[_pgColorAssignments.size % _PG_PALETTE.length];
-  _pgColorAssignments.set(name, clr);
-  return clr;
-}
-/* Applies/clears the colored + ambient-glow active style for one PG button. */
-function _stylePgButton(btn, active) {
-  const clr = btn.dataset.pgColor;
-  if (!clr) return;
-  if (active) {
-    btn.style.color = clr;
-    btn.style.background = hexA(clr, 0.12);
-    btn.style.borderBottomColor = clr;
-    btn.style.boxShadow = `0 0 10px ${hexA(clr, 0.45)}, inset 0 0 10px ${hexA(clr, 0.08)}`;
-  } else {
-    btn.style.color = ""; btn.style.background = ""; btn.style.borderBottomColor = ""; btn.style.boxShadow = "";
-  }
-}
-
-/* ── Product Group filter buttons — built dynamically per subscription/search
-   result, same reasoning as region: not a fixed enum, and hidden entirely
-   when no VM in this set carries a 'Product Group' tag at all. ── */
-function _updatePgFilterButtons() {
-  const group = document.getElementById("az-pg-seg-group");
-  if (!group) return;
-  const counts = {};
-  _discoveredVMs.forEach(v => {
-    const pg = (v.product_group || "").trim();
-    if (pg) counts[pg] = (counts[pg] || 0) + 1;
-  });
-  const groups = Object.keys(counts).sort();
-  const allBtn = group.querySelector('.azure-pg-filter[data-pg="ALL"]');
-  group.querySelectorAll('.azure-pg-filter:not([data-pg="ALL"])').forEach(b => b.remove());
-  const row = document.getElementById("az-pg-filter-row");
-  if (row) row.classList.toggle("hidden", groups.length === 0);
-  document.querySelectorAll('.azure-pg-filter').forEach(b => _stylePgButton(b, false));
-  if (allBtn) allBtn.classList.add("az-active");
-  _activeVmFilters.productGroup = "ALL";
-  groups.forEach(pg => {
-    const clr = _pgColorFor(pg);
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.dataset.pg = pg;
-    btn.dataset.pgColor = clr;
-    btn.className = "azure-pg-filter az-seg-btn";
-    btn.onclick = () => azureFilterProductGroup(pg);
-    btn.innerHTML = `<span class="az-dot" style="background:${clr};opacity:0.8"></span>${_escHtml(pg)}<span class="az-chip">${counts[pg]}</span>`;
-    group.appendChild(btn);
-  });
-}
-
 /* ── Region filter — single-select radio style (same pattern as env) ── */
 function azureFilterRegion(region) {
   const allBtn  = document.querySelector('.azure-region-filter[data-region="ALL"]');
@@ -18175,23 +17934,6 @@ function azureFilterRegion(region) {
   _applyVmFilters();
 }
 
-/* ── Product Group filter — single-select radio style (same pattern as region) ── */
-function azureFilterProductGroup(pg) {
-  const allBtn  = document.querySelector('.azure-pg-filter[data-pg="ALL"]');
-  const clicked = document.querySelector(`.azure-pg-filter[data-pg="${CSS.escape(pg)}"]`);
-  const wasActive = clicked?.classList.contains("az-active") && pg !== "ALL";
-  document.querySelectorAll('.azure-pg-filter').forEach(b => { b.classList.remove("az-active"); _stylePgButton(b, false); });
-  if (pg === "ALL" || wasActive) {
-    allBtn?.classList.add("az-active");
-    _activeVmFilters.productGroup = "ALL";
-  } else {
-    clicked?.classList.add("az-active");
-    _stylePgButton(clicked, true);
-    _activeVmFilters.productGroup = pg;
-  }
-  _applyVmFilters();
-}
-
 /* ── Combined filter: respects type + env + region + name search ── */
 function _applyVmFilters() {
   const activeTypes = [...document.querySelectorAll('.azure-type-filter.az-active')].map(b => b.dataset.type);
@@ -18204,9 +17946,6 @@ function _applyVmFilters() {
   if (_activeVmFilters.region !== "ALL") {
     filtered = filtered.filter(v => ((v.location || "unknown").trim() || "unknown") === _activeVmFilters.region);
   }
-  if (_activeVmFilters.productGroup !== "ALL") {
-    filtered = filtered.filter(v => (v.product_group || "").trim() === _activeVmFilters.productGroup);
-  }
   if (searchQ) {
     filtered = filtered.filter(v =>
       (v.name || "").toLowerCase().includes(searchQ) ||
@@ -18216,11 +17955,6 @@ function _applyVmFilters() {
   }
   _renderVMTable(filtered);
   _updateSelectedCount();
-  const filterResult = document.getElementById("azure-filter-result-count");
-  if (filterResult) {
-    filterResult.textContent = `${filtered.length} of ${_discoveredVMs.length} VM${_discoveredVMs.length === 1 ? "" : "s"} shown`;
-  }
-  _syncAzureFilterPressedState();
   // Sync header checkbox state to visible rows
   const allCb = document.getElementById("azure-vm-checkall");
   if (allCb && filtered.length > 0) {
@@ -18229,34 +17963,6 @@ function _applyVmFilters() {
     allCb.checked       = allVisible;
     allCb.indeterminate = !allVisible && anyVisible;
   }
-}
-
-// Keep every filter group operable as a true pressed-button set. The Type
-// group is multi-select; Environment, Region and Product Group are exclusive.
-// The visual active state and assistive state must therefore share this source.
-function _syncAzureFilterPressedState() {
-  document.querySelectorAll(".azure-type-filter, .azure-env-filter, .azure-region-filter, .azure-pg-filter")
-    .forEach(button => button.setAttribute("aria-pressed", button.classList.contains("az-active") ? "true" : "false"));
-}
-
-function azureResetVmFilters() {
-  _activeVmFilters = { type: "ALL", env: "ALL", region: "ALL", productGroup: "ALL" };
-  const activateAll = (selector) => {
-    const buttons = document.querySelectorAll(selector);
-    buttons.forEach(button => button.classList.remove("az-active"));
-    buttons[0]?.classList.add("az-active");
-  };
-  activateAll(".azure-type-filter[data-type='ALL'], .azure-type-filter:not([data-type='ALL'])");
-  activateAll(".azure-env-filter[data-env='ALL'], .azure-env-filter:not([data-env='ALL'])");
-  activateAll(".azure-region-filter[data-region='ALL'], .azure-region-filter:not([data-region='ALL'])");
-  document.querySelectorAll(".azure-pg-filter").forEach(button => {
-    button.classList.remove("az-active");
-    _stylePgButton(button, false);
-  });
-  document.querySelector(".azure-pg-filter[data-pg='ALL']")?.classList.add("az-active");
-  const search = document.getElementById("azure-vm-search");
-  if (search) search.value = "";
-  _applyVmFilters();
 }
 
 /* ── Env filter — single-select radio style ── */
@@ -18696,9 +18402,9 @@ function _renderSlaCommitmentsPanel() {
       batchEl.innerHTML = `
         <div class="text-[10px] text-Cmuted mb-1.5">
           ${workflows.length} workflow(s) loaded ·
-          ${batchSlaInfo.with_explicit_sla || 0} with explicit SLA
+          ${batchSlaInfo.with_explicit_sla || batchSlaInfo.with_sla_count || 0} with explicit SLA
           ${(batchSlaInfo.with_fallback_sla || 0) > 0
-            ? ` · <span class="text-Camber font-semibold" title="These workflows have no column the customer explicitly labelled as the SLA target ('Expected SLA'/'Expected End Time') — using SOW ceiling or the generic PE default instead. A Start/End window or Duration column alone is NOT treated as the SLA.">${batchSlaInfo.with_fallback_sla} using fallback SLA</span>`
+            ? ` · <span class="text-Camber font-semibold" title="These workflows have no SLA column in the XLSX — using SOW ceiling or global defaults">${batchSlaInfo.with_fallback_sla} using fallback SLA</span>`
             : ""} ·
           types: <span class="text-Cteal font-semibold">${(batchSlaInfo.batch_types || []).join(", ") || "—"}</span>
           ${Object.keys(canonicalMap).length > 0
@@ -18707,45 +18413,7 @@ function _renderSlaCommitmentsPanel() {
                 : `· <span class="text-Camber font-semibold" title="Ctrl-M runtime is loaded, but its sub-application names don't match these XLSX contract names — so the rows below show XLSX last-run samples. The SLA Debug panel shows the live Ctrl-M elapsed-time verdict for the actual sub-applications.">⚠ Ctrl-M loaded but unmatched — rows show XLSX last-run</span>`)
             : `· <span class="text-Camber" title="Showing XLSX last-run data. Run SLA Matrix with Ctrl-M upload for live runtime.">⚠ using XLSX last-run — upload Ctrl-M for live data</span>`}
         </div>
-        ${(() => {
-          // ── Backend diagnostic warnings (parse_batch_sla_xlsx) ──────────────
-          // sla_merger.py generates specific, evidence-based warnings (e.g. "no
-          // column was explicitly labelled as the SLA target", placeholder-data
-          // detection, collapsed historical rows) — these were computed but
-          // never rendered anywhere, so a reviewer had no way to see WHY every
-          // row shows DEFAULT/UNVERIFIED. Surfaced as one consolidated notice
-          // per severity (not a tile per message) — legible body copy, a real
-          // stroke icon (no emoji), generous padding.
-          const _warns = batchSlaInfo.warnings || [];
-          if (!_warns.length) return "";
-          const _critical = _warns.filter(w => /^CRITICAL:/.test(w)).map(w => w.replace(/^CRITICAL:\s*/, ""));
-          const _other = _warns.filter(w => !/^CRITICAL:/.test(w));
-          const _triangleIcon = `<svg viewBox="0 0 24 24" fill="none" stroke-width="1.75" stroke="currentColor" class="w-5 h-5 shrink-0 mt-0.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>`;
-          const _infoIcon = `<svg viewBox="0 0 24 24" fill="none" stroke-width="1.75" stroke="currentColor" class="w-5 h-5 shrink-0 mt-0.5"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>`;
-          return `
-            <div class="mt-2 space-y-2">
-              ${_critical.length ? `
-                <div class="rounded-xl border border-Cred/30 bg-Cred/[0.07] px-4 py-3.5">
-                  <div class="flex items-start gap-3 text-Cred">
-                    ${_triangleIcon}
-                    <div class="min-w-0">
-                      <div class="text-[13px] font-bold tracking-tight mb-1.5">Data quality issue — SLA not populated</div>
-                      ${_critical.map(w => `<p class="text-[13px] leading-relaxed text-Cwhite/90 mb-1.5 last:mb-0">${_esc(w)}</p>`).join("")}
-                    </div>
-                  </div>
-                </div>` : ""}
-              ${_other.length ? `
-                <div class="rounded-xl border border-Camber/25 bg-Camber/[0.05] px-4 py-3">
-                  <div class="flex items-start gap-3 text-Camber">
-                    ${_infoIcon}
-                    <div class="min-w-0 space-y-1">
-                      ${_other.map(w => `<p class="text-[12.5px] leading-relaxed text-Cwhite/80">${_esc(w)}</p>`).join("")}
-                    </div>
-                  </div>
-                </div>` : ""}
-            </div>`;
-        })()}
-        <div class="overflow-x-auto rounded-lg border border-Cborder/40 mt-2">
+        <div class="overflow-x-auto rounded-lg border border-Cborder/40">
           ${(() => {
             // ── SLA Standard vs Matrix comparison notice ──────────────────
             // Shows inline when both batch and SLA matrix are loaded.
@@ -18790,10 +18458,10 @@ function _renderSlaCommitmentsPanel() {
               <th class="text-left py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]">Workflow</th>
               <th class="text-left py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]">Type</th>
               <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="SLA (Expected Completion) — the agreed time window by which this workflow must finish. Source tiers: 1 = XLSX contract · 2 = SOW ceiling · 3 = PE system default. Badge shows which tier was used.">SLA <span class="text-[9px] font-normal opacity-60 normal-case">(Expected Completion)</span></th>
-              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="${Object.keys(canonicalMap).length > 0 ? "Peak observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used." : "Runtime taken from the uploaded SLA file's own Duration/End−Start column (last-known snapshot, not live Ctrl-M data). Upload Ctrl-M for live runtime."}">${Object.keys(canonicalMap).length > 0 ? "Peak Window" : `Runtime <span class="text-[9px] font-normal opacity-60 normal-case">(SLA file)</span>`}</th>
+              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Peak observed Ctrl-M workflow window used for this row's buffer and status. Exact first/last contract anchors are used only when both resolve; otherwise the full daily window is used. XLSX tag = last-known snapshot, not live Ctrl-M data.">Peak Window</th>
               <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Buffer % = (SLA − Runtime) ÷ SLA × 100. Negative = breach. Formula shown on hover per row.">Buffer %</th>
-              <th class="text-right py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="How far the runtime finished inside (or outside) the SLA window, in plain time — e.g. '2h before deadline', '15m over', or 'on the edge' when it exactly fills the window.">Margin</th>
-              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · NO_BUFFER (exactly 0% — runs to the edge, zero slack) · BREACH (runtime over the window) · SLA_MISSING · RUNTIME_MISSING">Status</th>
+              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="OK (>40% buffer) · LONG_JOB (15–40%) · AT_RISK (0–15%) · BREACH (<0%) · SLA_MISSING · RUNTIME_MISSING">Status</th>
+              <th class="text-center py-2.5 px-3 text-Cmuted font-semibold uppercase tracking-wide text-[10.5px]" title="Did the batch START on time? Duration compliance alone doesn't catch a late start that still finishes inside its window — downstream data is stale even though the run 'passed'. Compares the XLSX contracted Start_Time against the actual worst-case (latest) observed start clock time. Requires a Start_Time column in the SLA matrix file.">Start Time</th>
             </tr></thead>
             <tbody>
               ${topWfs.map(w => {
@@ -18811,13 +18479,6 @@ function _renderSlaCommitmentsPanel() {
                 // global*/assumed = no contract found, system default → DEFAULT (amber warning)
                 const _slaBadge = (() => {
                   const s = (_slaSrc || "").toLowerCase();
-                  // INFERRED = no explicit "Expected SLA"/"Expected End Time" column
-                  // exists in this file — sla_h was derived from a bare Start/End
-                  // window (an interpretation, not a customer-labelled target).
-                  // Shown distinctly from CONTRACT so a reviewer never mistakes
-                  // this for the same certainty as an explicit SLA column.
-                  if (w.sla_confidence === "INFERRED")
-                    return `<span class="ml-1 text-[9px] font-bold text-Cteal bg-Cteal/10 px-1 py-0.5 rounded" title="No 'Expected SLA'/'Expected End Time' column found in this file — this value was INFERRED as the plain Start Time \u2192 End Time window. Confirm the exact SLA with the customer if uncertain.">SCHEDULE (inferred)</span>`;
                   // batch_sla_xlsx* and sla_intelligence_anchor = SLA came from the customer file
                   if (s.startsWith("batch_sla_xlsx") || s === "xlsx" || s === "sla_intelligence_anchor")
                     return `<span class="ml-1 text-[9px] font-bold text-Cgreen bg-Cgreen/10 px-1 py-0.5 rounded" title="Source: Customer SLA Matrix file — per-contract window">CONTRACT</span>`;
@@ -18839,21 +18500,9 @@ function _renderSlaCommitmentsPanel() {
                                 : status === "AT_RISK" ? "text-Camber"
                                 : status === "LONG_JOB" ? "text-Corange"
                                 : status === "OK" ? "text-Cteal"
-                                : status === "NO_BUFFER" ? "text-Camber"
                                 : status === "RUNTIME_MISSING" ? "text-Cmuted"
                                 : status === "SLA_MISSING" ? "text-Cpurple"
                                 : "text-Cmuted";
-                // UNVERIFIED = sla_merger.py found no contract SLA anywhere in the
-                // file (no Expected End Time/SLA/Deadline column) and fell back to
-                // the generic pe_config default — this status is comparing an
-                // observed XLSX sample against an assumption, not a confirmed
-                // customer target. Softened so a reviewer doesn't mistake it for a
-                // verified contract breach. Applies to any customer's file, not one.
-                const _unverified = w.sla_confidence === "UNVERIFIED"
-                  && ["BREACH", "AT_RISK", "LONG_JOB"].includes(status);
-                const unverifiedTag = _unverified
-                  ? `<span class="ml-1 text-[8px] font-bold text-Cmuted/80 bg-Cmuted/10 px-1 py-0.5 rounded align-middle" title="No contracted SLA/Expected End Time/Deadline column was found in this file — ${_esc(status)} compares an observed sample against a generic PE default, not a confirmed customer target. Upload a file with an explicit SLA column, or confirm the SLA with the customer.">UNVERIFIED</span>`
-                  : "";
                 const bufResult = bufOf(w);       // { val, src }
                 const rtResult  = runtimeOf(w);   // { val, src }
                 const buf       = bufResult.val;
@@ -18896,35 +18545,36 @@ function _renderSlaCommitmentsPanel() {
                   ? `<span class="ml-1 text-[9.5px] font-bold text-Cred bg-Cred/10 px-1.5 py-0.5 rounded">${_severeBuf ? "MAJOR BREACH" : (buf < 0 ? "BREACH" : "LOW")}</span>` : "";
                 const name  = w.workflow || w.sub_application || "—";
                 const btype = w.batch_type || "—";
-                // ── Margin cell: plain-English early/late vs the SLA window ──
-                // Prefer the backend's sla_margin_desc (XLSX rows); else derive
-                // from the live SLA − runtime for the Ctrl-M path so both modes
-                // read the same. Colour: red = ran over, amber = zero slack,
-                // teal = finished inside the window.
-                const _marginH = (rt != null && _slaVal != null) ? (_slaVal - rt) : null;
-                const _fmtMargin = (h) => {
-                  const tot = Math.round(Math.abs(h) * 60);
-                  if (tot < 1) return "on the edge (0 slack)";
-                  const hh = Math.floor(tot / 60), mm = tot % 60;
-                  const span = ((hh ? hh + "h " : "") + ((mm || !hh) ? mm + "m" : "")).trim();
-                  return h > 0 ? span + " before deadline" : span + " over";
-                };
-                const _marginDesc = w.sla_margin_desc || (_marginH != null ? _fmtMargin(_marginH) : null);
-                const _marginCol = _marginH == null ? "text-Cmuted italic"
-                                 : _marginH < -0.008 ? "text-Cred"
-                                 : Math.abs(_marginH) < 0.008 ? "text-Camber"
-                                 : "text-Cteal";
-                const marginCell = _marginDesc
-                  ? `<span class="${_marginCol}" title="Runtime vs the SLA window (positive = finished before the window closed, negative = ran over).">${_esc(_marginDesc)}</span>`
-                  : `<span class="text-Cmuted italic">—</span>`;
+                // ── Start-time compliance cell ──────────────────────────────
+                // entry.start_time_status is only populated when the XLSX has a
+                // fixed Start_Time AND at least one observed Ctrl-M run for this
+                // workflow — otherwise show a neutral "no data" state instead of
+                // silently implying compliance.
+                const _stStatus = entry?.start_time_status || null;
+                const _stDelay  = entry?.start_delay_mins;
+                const _stContract = entry?.contract_start_time;
+                const startTimeCell = (() => {
+                  if (!_stStatus) {
+                    return `<span class="text-Cmuted italic" title="No contracted Start_Time in the SLA matrix, or no matching Ctrl-M run observed for this workflow.">—</span>`;
+                  }
+                  const _delayStr = typeof _stDelay === "number"
+                    ? (_stDelay <= 0 ? `${Math.abs(_stDelay)}m early` : `+${_stDelay}m late`)
+                    : "";
+                  const _title = `Contracted start: ${_esc(_stContract || "—")}. Worst observed start was ${_delayStr || "on time"} vs contract.`;
+                  if (_stStatus === "ON_TIME")
+                    return `<span class="text-Cteal font-semibold" title="${_title}">ON TIME</span>`;
+                  if (_stStatus === "LATE_START")
+                    return `<span class="text-Camber font-semibold" title="${_title}">${_delayStr}</span>`;
+                  return `<span class="text-Cred font-bold" title="${_title}">${_delayStr}</span>`;
+                })();
                 return `<tr class="border-b border-Cborder/20 hover:bg-Ccard/40 transition-colors ${status === 'BREACH' ? 'bg-Cred/5' : ''}">
                   <td class="py-2.5 px-3 text-Cwhite font-mono font-medium truncate max-w-[200px]" title="${_esc(name)}">${_esc(name)}</td>
                   <td class="py-2.5 px-3 text-Cmuted">${_esc(btype)}</td>
                   <td class="py-2.5 px-3 text-right font-mono font-bold text-Cteal">${sla}</td>
                   <td class="py-2.5 px-3 text-right font-mono text-Cwhite/80">${rtStr}</td>
                   <td class="py-2.5 px-3 text-right ${bCol}" title="${_esc(bufTitle)}">${bufStr}${lowFlag}</td>
-                  <td class="py-2.5 px-3 text-right text-[11px]">${marginCell}</td>
-                  <td class="py-2.5 px-3 text-center font-bold text-[11px] ${cCol}">${status}${unverifiedTag}</td>
+                  <td class="py-2.5 px-3 text-center font-bold text-[11px] ${cCol}">${status}</td>
+                  <td class="py-2.5 px-3 text-center text-[11px]">${startTimeCell}</td>
                 </tr>`;
               }).join("")}
               ${more > 0 ? `<tr><td colspan="7" class="py-2 px-3 text-[11px] text-Cmuted italic text-center">+ ${more} more workflows not shown</td></tr>` : ""}
@@ -18952,8 +18602,6 @@ function _renderSlaCommitmentsPanel() {
           <span class="text-Corange font-bold">LONG_JOB</span><span class="text-Cmuted">${_at}\u2013${_lj}%</span>
           <span class="text-Cmuted/40">\u00b7</span>
           <span class="text-Camber font-bold">AT_RISK</span><span class="text-Cmuted">0\u2013${_at}%</span>
-          <span class="text-Cmuted/40">\u00b7</span>
-          <span class="text-Camber font-bold">NO_BUFFER</span><span class="text-Cmuted">runs to edge (0%)</span>
           <span class="text-Cmuted/40">\u00b7</span>
           <span class="text-Cred font-bold">BREACH</span><span class="text-Cmuted">&lt;0%</span>
           <span class="text-Cmuted/30 mx-1">|</span>

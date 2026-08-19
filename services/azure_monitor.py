@@ -2397,6 +2397,33 @@ def search_vms(credential, query: str,
     return results
 
 
+def search_vms_with_fallback(credential, query: str,
+                             subscription_ids: Optional[List[str]] = None,
+                             session_id=None) -> tuple[List[Dict[str, Any]], bool]:
+    """Search selected subscriptions, then the caller's accessible scope if empty.
+
+    The retry deliberately uses the same session-scoped browser credential and no
+    subscription list so Azure Resource Graph applies the signed-in caller's RBAC
+    scope.  It never widens a search that already found a VM.
+    """
+    selected_ids = [str(sub_id).strip() for sub_id in (subscription_ids or [])
+                    if str(sub_id).strip()]
+    results = search_vms(
+        credential,
+        query,
+        subscription_ids=selected_ids or None,
+        session_id=session_id,
+    )
+    if results or not selected_ids:
+        return results, False
+
+    logger.info(
+        "Resource Graph search '%s' returned no VMs in selected scope; retrying caller-accessible scope",
+        query,
+    )
+    return search_vms(credential, query, session_id=session_id), True
+
+
 def fetch_vm_metrics(cfg: dict, hours_back: int = 24,
                      vm_ids: Optional[List[str]] = None,
                      session_id=None) -> List[Dict[str, Any]]:

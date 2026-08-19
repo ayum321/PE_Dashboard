@@ -72,7 +72,18 @@ tbody tr.row--attention:hover { background:rgba(245,158,11,.065); }
 .customer-name { color:var(--ink); font-size:14px; font-weight:720; }
 .customer-meta,.cell-note { margin-top:3px; color:var(--dim); font-size:11px; }
 .status-stack,.evidence-stack,.team-stack { display:flex; flex-direction:column; gap:5px; align-items:flex-start; }
+.completion-tags { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
 .evidence-stack { min-width:280px; gap:8px; }
+.compact-snapshots { display:flex; min-width:560px; flex-wrap:nowrap; gap:5px; align-items:center; overflow-x:auto; scrollbar-width:thin; }
+.snapshot-detail-row:hover { background:transparent; }
+.snapshot-detail-row[hidden] { display:none; }
+.snapshot-detail { padding:0 16px 16px; background:rgba(7,11,24,.36); }
+.snapshot-detail[hidden] { display:none; }
+.snapshot-detail__inner { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding-top:12px; }
+.snapshot-detail .snapshot-group { min-width:0; min-height:100%; padding:10px; border:1px solid var(--border-soft); background:var(--panel); }
+.snapshot-detail .snapshot-group:last-child { border-bottom:1px solid var(--border-soft); }
+.expand-snapshots { cursor:pointer; min-height:30px; color:var(--muted); background:#0a1222; border:1px solid var(--border); padding:5px 8px; font-size:11px; font-weight:700; white-space:nowrap; }
+.expand-snapshots:hover { color:var(--ink); border-color:var(--blue); }
 .snapshot-group { display:flex; width:100%; flex-direction:column; gap:3px; padding-bottom:7px; border-bottom:1px solid var(--border-soft); }
 .snapshot-group:last-child { padding-bottom:0; border-bottom:0; }
 .snapshot-line { display:flex; align-items:baseline; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; line-height:1.35; }
@@ -102,6 +113,7 @@ tbody tr.row--attention:hover { background:rgba(245,158,11,.065); }
   .summary-item:nth-child(-n+2) { border-bottom:1px solid var(--border); }
   .page-head { align-items:flex-start; flex-direction:column; }
   .table-wrap { max-height:none; }
+  .snapshot-detail__inner { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
 @media (max-width:620px) {
   .topbar__inner,.page { padding-left:16px; padding-right:16px; }
@@ -111,6 +123,7 @@ tbody tr.row--attention:hover { background:rgba(245,158,11,.065); }
   .summary-value { font-size:19px; }
   .registry__bar { align-items:stretch; }
   .sort { width:100%; }
+  .snapshot-detail__inner { grid-template-columns:1fr; }
 }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms !important; } }
 </style>
@@ -256,9 +269,11 @@ function reviewState(record) {
 }
 
 function matchesFilter(record) {
-  if (ACTIVE_FILTER === "signed") return isSignedOff(record);
-  if (ACTIVE_FILTER === "pending") return !isSignedOff(record);
-  if (ACTIVE_FILTER === "attention") return needsAttention(record);
+  const signed = isSignedOff(record);
+  const attention = needsAttention(record);
+  if (ACTIVE_FILTER === "signed") return signed;
+  if (ACTIVE_FILTER === "pending") return !signed;
+  if (ACTIVE_FILTER === "attention") return attention;
   return true;
 }
 
@@ -288,7 +303,13 @@ function customerCell(record) {
 function completionCell(record) {
   const state = reviewState(record);
   const stack = element("div", "status-stack");
-  stack.append(tag(state.tone, state.label), element("div", "cell-note", state.detail));
+  const mismatches = countValue(record.checklist_mismatches);
+  const tags = element("div", "completion-tags");
+  tags.append(
+    tag(state.tone, state.label),
+    tag(mismatches ? "amber" : "gray", `${formatCount(mismatches)} evidence gap${mismatches === 1 ? "" : "s"}`),
+  );
+  stack.append(tags, element("div", "cell-note", state.detail));
   return stack;
 }
 
@@ -329,60 +350,87 @@ function sowPresentation(status) {
   return { label:labels[normalized] || "NOT ASSESSED", tone:tones[normalized] || "gray" };
 }
 
-function evidenceCell(record) {
-  const stack = element("div", "evidence-stack");
+function snapshotGroups(record) {
+  const groups = [];
   const mismatches = countValue(record.checklist_mismatches);
 
   if (isCaptured(record, "batch_metrics_captured")) {
     const breaches = countValue(record.batch_breach_count);
     const atRisk = countValue(record.batch_at_risk_count);
     const tone = breaches ? "red" : (atRisk ? "amber" : "green");
-    stack.appendChild(snapshotGroup(tone, "Batch SLA snapshot", [
+    groups.push({ tone, label:"Batch SLA snapshot", compactLabel:`SLA ${formatDecimal(record.batch_compliance_pct)}%`, lines:[
       ["Compliance", `${formatDecimal(record.batch_compliance_pct)}%`],
       ["Jobs", `${formatCount(record.batch_total_jobs)} total · ${formatCount(record.batch_ok_count)} within SLA`],
       ["Exceptions", `${formatCount(atRisk)} at risk · ${formatCount(breaches)} breach`],
       ["Runs / runtime", `${formatCount(record.batch_total_runs)} / ${formatDecimal(record.batch_total_hrs, 2)} h`],
-    ]));
+    ] });
   } else {
-    stack.appendChild(snapshotGroup("gray", "Batch SLA not captured", [["Snapshot", "Not available on this export"]]));
+    groups.push({ tone:"gray", label:"Batch SLA not captured", compactLabel:"SLA N/A", lines:[["Snapshot", "Not available on this export"]] });
   }
 
   if (isCaptured(record, "resource_metrics_captured")) {
     const grade = textValue(record.resource_fleet_grade, "—").toUpperCase();
-    stack.appendChild(snapshotGroup(fleetTone(grade), `Resource fleet · ${grade}`, [
+    groups.push({ tone:fleetTone(grade), label:`Resource fleet · ${grade}`, compactLabel:`Fleet ${grade} · ${formatDecimal(record.resource_fleet_score)}`, lines:[
       ["Fleet score", formatDecimal(record.resource_fleet_score)],
       ["Servers", formatCount(record.resource_total_servers)],
       ["Exceptions", `${formatCount(record.resource_critical_count)} critical · ${formatCount(record.resource_warning_count)} warning`],
-    ]));
+    ] });
   } else {
-    stack.appendChild(snapshotGroup("gray", "Resource not captured", [["Snapshot", "Not available on this export"]]));
+    groups.push({ tone:"gray", label:"Resource not captured", compactLabel:"Fleet N/A", lines:[["Snapshot", "Not available on this export"]] });
   }
 
   if (isCaptured(record, "sow_metrics_captured")) {
     const sow = sowPresentation(record.sow_status);
-    stack.appendChild(snapshotGroup(sow.tone, `SOW · ${sow.label}`, [["Contract metrics", formatCount(record.sow_metrics_count)]]));
+    groups.push({ tone:sow.tone, label:`SOW · ${sow.label}`, compactLabel:`SOW ${sow.label}`, lines:[["Contract metrics", formatCount(record.sow_metrics_count)]] });
   } else {
-    stack.appendChild(snapshotGroup("gray", "SOW not captured", [["Snapshot", "Not available on this export"]]));
+    groups.push({ tone:"gray", label:"SOW not captured", compactLabel:"SOW N/A", lines:[["Snapshot", "Not available on this export"]] });
   }
 
   if (isCaptured(record, "benchmark_metrics_captured")) {
     const benchmarkBreaches = countValue(record.benchmark_sla_breach_count);
     const regressions = countValue(record.batch_perf_regression_count);
     const tone = benchmarkBreaches || regressions ? "red" : (countValue(record.benchmark_degraded_count) ? "amber" : "green");
-    stack.appendChild(snapshotGroup(tone, "Benchmark snapshot", [
+    groups.push({ tone, label:"Benchmark snapshot", compactLabel:benchmarkBreaches ? `Benchmark ${formatCount(benchmarkBreaches)} breach` : (regressions ? `Benchmark ${formatCount(regressions)} regression` : (countValue(record.benchmark_degraded_count) ? "Benchmark degraded" : "Benchmark clear")), lines:[
       ["Transactions", formatCount(record.benchmark_total_transactions)],
       ["SLA / degraded", `${formatCount(benchmarkBreaches)} breach · ${formatCount(record.benchmark_degraded_count)} degraded`],
       ["Batch performance", `${formatCount(record.batch_perf_total_jobs)} jobs · ${formatCount(regressions)} regression`],
-    ]));
+    ] });
   } else {
-    stack.appendChild(snapshotGroup("gray", "Benchmark not captured", [["Snapshot", "Not available on this export"]]));
+    groups.push({ tone:"gray", label:"Benchmark not captured", compactLabel:"Benchmark N/A", lines:[["Snapshot", "Not available on this export"]] });
   }
 
   const issueTone = countValue(record.issues_count) ? "amber" : "gray";
   const checklistTone = mismatches ? "amber" : "gray";
-  stack.appendChild(snapshotGroup(issueTone, `Issues · ${formatCount(record.issues_count)} logged`, [["Recorded issue entries", formatCount(record.issues_count)]]));
-  stack.appendChild(snapshotGroup(checklistTone, `Checklist · ${formatCount(mismatches)} evidence gap${mismatches === 1 ? "" : "s"}`, [["Supporting evidence", mismatches ? "Review required" : "No recorded gap"]]));
-  if (mismatches) stack.appendChild(element("div", "cell-note", "Checklist claim(s) without supporting data in this export."));
+  groups.push({ tone:issueTone, label:`Issues · ${formatCount(record.issues_count)} logged`, compactLabel:`Issues ${formatCount(record.issues_count)}`, lines:[["Recorded issue entries", formatCount(record.issues_count)]] });
+  groups.push({ tone:checklistTone, label:`Checklist · ${formatCount(mismatches)} evidence gap${mismatches === 1 ? "" : "s"}`, compactLabel:mismatches ? `⚠ ${formatCount(mismatches)} gap${mismatches === 1 ? "" : "s"}` : "Checklist clear", lines:[["Supporting evidence", mismatches ? "Review required" : "No recorded gap"]] });
+  return groups;
+}
+
+function evidenceCell(record, detailId) {
+  const stack = element("div", "evidence-stack");
+  const compact = element("div", "compact-snapshots");
+  snapshotGroups(record).forEach(group => compact.appendChild(tag(group.tone, group.compactLabel)));
+  const expand = element("button", "expand-snapshots", "Show breakdown");
+  expand.type = "button";
+  expand.setAttribute("aria-expanded", "false");
+  expand.setAttribute("aria-controls", detailId);
+  expand.addEventListener("click", () => {
+    const detail = document.getElementById(detailId);
+    const expanded = expand.getAttribute("aria-expanded") === "true";
+    if (!expanded && !detail.dataset.ready) {
+      const inner = element("div", "snapshot-detail__inner");
+      snapshotGroups(record).forEach(group => inner.appendChild(snapshotGroup(group.tone, group.label, group.lines)));
+      if (countValue(record.checklist_mismatches)) {
+        inner.appendChild(element("div", "cell-note", "Checklist claim(s) without supporting data in this export."));
+      }
+      detail.querySelector("td").appendChild(inner);
+      detail.dataset.ready = "true";
+    }
+    detail.hidden = expanded;
+    expand.setAttribute("aria-expanded", String(!expanded));
+    expand.textContent = expanded ? "Show breakdown" : "Hide breakdown";
+  });
+  stack.append(compact, expand);
   return stack;
 }
 
@@ -411,18 +459,29 @@ function actionCell(record) {
   return actions;
 }
 
-function registryRow(record) {
+function detailRow(record, detailId) {
+  const row = element("tr", "snapshot-detail-row");
+  row.id = detailId;
+  row.hidden = true;
+  const cell = element("td", "snapshot-detail");
+  cell.colSpan = 6;
+  row.appendChild(cell);
+  return row;
+}
+
+function registryRows(record, rowIndex) {
   const row = document.createElement("tr");
+  const detailId = `snapshot-detail-${rowIndex}`;
   if (needsAttention(record)) row.classList.add("row--attention");
   row.append(
     createCell(customerCell(record)),
     createCell(completionCell(record)),
-    createCell(evidenceCell(record)),
+    createCell(evidenceCell(record, detailId)),
     createCell(teamCell(record)),
     createCell(element("div", "tabnum", fmtDate(record.generated_at))),
     createCell(actionCell(record)),
   );
-  return row;
+  return [row, detailRow(record, detailId)];
 }
 
 function updateSummary() {
@@ -458,7 +517,7 @@ function render() {
   const empty = document.getElementById("emptyState");
   const count = document.getElementById("registryCount");
   count.textContent = `${formatCount(rows.length)} of ${formatCount(ALL_REPORTS.length)} customer${ALL_REPORTS.length === 1 ? "" : "s"}`;
-  body.replaceChildren(...rows.map(registryRow));
+  body.replaceChildren(...rows.flatMap((record, rowIndex) => registryRows(record, rowIndex)));
   const hasRows = rows.length > 0;
   tableWrap.hidden = !hasRows;
   empty.hidden = hasRows;

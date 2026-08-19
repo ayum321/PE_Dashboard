@@ -7,6 +7,9 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import tempfile
+import re
+import json
+import subprocess
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -368,6 +371,148 @@ def test_export_storage_failure_never_blocks_download() -> None:
         _restore_archive(root, original)
 
 
+def _registry_needs_attention(record: dict) -> bool:
+    """Mirror the frozen exception facts used by the registry filter.
+
+    Sign-off and attention deliberately remain independent: an approved audit
+    can retain evidence gaps or operational exceptions.
+    """
+    return any((
+        int(record.get("sla_breach_count") or 0) > 0,
+        int(record.get("sla_at_risk_count") or 0) > 0,
+        int(record.get("checklist_mismatches") or 0) > 0,
+        int(record.get("resource_critical_count") or 0) > 0,
+        int(record.get("benchmark_sla_breach_count") or 0) > 0,
+        int(record.get("batch_perf_regression_count") or 0) > 0,
+        str(record.get("sow_status") or "").upper() in {"OVER", "CRITICAL_OVER"},
+    ))
+
+
+def test_registry_fixture_keeps_signoff_and_attention_filters_independent() -> None:
+    """250 records must remain compactly filterable; states do not partition rows."""
+    root, original = _isolate_archive()
+    try:
+        fixtures = (
+            ("Signed clean", {"pe_approved": True, "cust_approved": True, "checklist_mismatches": 0}),
+            ("Signed gaps", {"pe_approved": True, "cust_approved": True, "checklist_mismatches": 2}),
+            ("Pending clean", {"pe_approved": False, "cust_approved": False, "checklist_mismatches": 0}),
+        )
+        for index, (customer, meta) in enumerate(fixtures):
+            result = report_archive.save(customer, f"<h1>{customer}</h1>", {
+                "generated_at": f"2026-08-16T00:00:0{index}+00:00", **meta,
+            })
+            _assert(result["ok"], f"fixture save failed: {customer} {result}")
+
+        # Simulate the intended 250+ customer registry without creating any
+        # production records. The UI is responsible for compact rendering;
+        # this fixture ensures the API can supply the full scan volume.
+        for index in range(247):
+            result = report_archive.save(f"Scan customer {index:03}", "<h1>fixture</h1>", {
+                "generated_at": f"2026-08-16T01:{index // 60:02}:{index % 60:02}+00:00",
+            })
+            _assert(result["ok"], f"scan fixture save failed at {index}: {result}")
+
+        rows = report_archive.list_reports()
+        by_customer = {row["customer"]: row for row in rows}
+        _assert(len(rows) == 250, f"expected 250 scan records, got {len(rows)}")
+        signed = {name for name, row in by_customer.items() if bool(row["pe_approved"] and row["cust_approved"])}
+        attention = {name for name, row in by_customer.items() if _registry_needs_attention(row)}
+        _assert({"Signed clean", "Signed gaps"}.issubset(signed), f"signed filter lost records: {signed}")
+        _assert("Signed gaps" in attention, f"signed-with-gaps must be visible under attention: {attention}")
+        _assert("Signed clean" not in attention and "Pending clean" not in attention,
+                f"clean fixtures incorrectly marked attention: {attention}")
+        _assert("Pending clean" not in signed, f"pending fixture incorrectly signed: {signed}")
+        print("  [OK] 250-row registry fixture keeps sign-off and attention facts independent")
+    finally:
+        _restore_archive(root, original)
+
+
+def test_exported_fleet_score_matches_the_frozen_archive_value() -> None:
+    """The archived snapshot must reuse the value rendered in this exact HTML."""
+    root, original = _isolate_archive()
+    try:
+        app = FastAPI()
+        app.include_router(export_router.router, prefix="/api")
+        response = TestClient(app).post("/api/export-report", json={
+            "approvals": {"customer_name": "Fleet parity"},
+            "resource": {"kpis": {
+                "fleet_grade": "B", "fleet_score": 82.5, "total_servers": 4,
+                "n_critical": 0, "n_warning": 1,
+            }},
+        })
+        _assert(response.status_code == 200 and response.headers.get("x-archive-status") == "saved",
+                f"fleet parity export failed: {response.status_code} {response.headers}")
+        rendered = re.search(r'class="gauge__cap tabnum">([^<]+)/100</div>', response.text)
+        _assert(rendered is not None, "exported HTML did not render the Fleet score")
+        record = report_archive.get_report("fleet-parity")
+        _assert(record is not None, "fleet parity archive record is missing")
+        rendered_score = rendered.group(1)
+        archived_score = f"{float(record['resource_fleet_score']):g}"
+        _assert(rendered_score == archived_score,
+                f"full HTML Fleet score {rendered_score!r} != frozen archive value {archived_score!r}")
+        print("  [OK] exported Fleet score exactly matches the frozen archive value")
+    finally:
+        _restore_archive(root, original)
+
+
+def test_registry_template_compacts_rows_and_filters_independent_facts() -> None:
+    """Exercise the actual inline filter/chip functions without a browser."""
+    template = (Path(__file__).resolve().parent / "templates" / "report_archive.html").read_text(encoding="utf-8")
+    script = template.split("<script>", 1)[1].split("</script>", 1)[0]
+    # The first DOM listener starts browser wiring. Everything before it is the
+    # pure presentation/filter surface we want to execute against test records.
+    pure_script = script.split('\n\ndocument.querySelectorAll(".filter").forEach', 1)[0]
+    records = [
+        {"customer": "Signed clean", "pe_approved": 1, "cust_approved": 1, "checklist_mismatches": 0},
+        {"customer": "Signed gaps", "pe_approved": 1, "cust_approved": 1, "checklist_mismatches": 2},
+        {"customer": "Pending clean", "pe_approved": 0, "cust_approved": 0, "checklist_mismatches": 0},
+    ]
+    chip_sample = {
+        "batch_metrics_captured": 1, "batch_compliance_pct": 100,
+        "batch_breach_count": 0, "batch_at_risk_count": 0,
+        "batch_total_jobs": 10, "batch_ok_count": 10, "batch_total_runs": 20, "batch_total_hrs": 5,
+        "resource_metrics_captured": 1, "resource_fleet_grade": "B", "resource_fleet_score": 82.5,
+        "resource_total_servers": 4, "resource_critical_count": 0, "resource_warning_count": 0,
+        "sow_metrics_captured": 1, "sow_status": "ACCEPTABLE", "sow_metrics_count": 2,
+        "benchmark_metrics_captured": 0,
+        "issues_count": 0, "checklist_mismatches": 2,
+    }
+    harness = pure_script + """
+const records = JSON.parse(process.argv[1]);
+const chipSample = JSON.parse(process.argv[2]);
+const result = {};
+for (const filter of ["signed", "attention", "pending"]) {
+  ACTIVE_FILTER = filter;
+  result[filter] = records.filter(matchesFilter).map(record => record.customer).sort();
+}
+result.chips = snapshotGroups(chipSample).map(group => group.compactLabel);
+console.log(JSON.stringify(result));
+"""
+    completed = subprocess.run(
+        ["node", "-e", harness, json.dumps(records), json.dumps(chip_sample)],
+        capture_output=True, text=True, check=False,
+    )
+    _assert(completed.returncode == 0, f"registry template harness failed: {completed.stderr}")
+    result = json.loads(completed.stdout)
+    _assert(result["signed"] == ["Signed clean", "Signed gaps"], f"signed filter: {result}")
+    _assert(result["attention"] == ["Signed gaps"], f"attention filter: {result}")
+    _assert(result["pending"] == ["Pending clean"], f"pending filter: {result}")
+    _assert(len(result["chips"]) == 6, f"expected six compact snapshot chips: {result}")
+    _assert(result["chips"][0] == "SLA 100%", f"SLA chip drifted: {result}")
+    _assert(result["chips"][1].startswith("Fleet B") and result["chips"][1].endswith("82.5"),
+            f"Fleet chip drifted: {result}")
+    _assert(result["chips"][2] == "SOW ACCEPTABLE" and result["chips"][3] == "Benchmark N/A",
+            f"SOW/benchmark chips drifted: {result}")
+    _assert(result["chips"][4] == "Issues 0" and result["chips"][5].endswith("2 gaps"),
+            f"issue/gap chips drifted: {result}")
+    _assert("⚠ ${formatCount(mismatches)} gap" in template,
+            "gap chip must retain its warning marker next to sign-off")
+    _assert('if (!expanded && !detail.dataset.ready)' in template,
+            "breakdown panels must be created only when the row is expanded")
+    _assert('cell.colSpan = 6' in template, "expanded detail row must span the six registry columns")
+    print("  [OK] registry compact chips and independent signed/attention filters")
+
+
 def main() -> None:
     print("Report archive regression suite")
     print("-" * 60)
@@ -382,6 +527,9 @@ def main() -> None:
     test_export_route_archives_the_rendered_metric_snapshot()
     test_unnamed_export_downloads_without_creating_a_fake_customer_record()
     test_export_storage_failure_never_blocks_download()
+    test_registry_fixture_keeps_signoff_and_attention_filters_independent()
+    test_exported_fleet_score_matches_the_frozen_archive_value()
+    test_registry_template_compacts_rows_and_filters_independent_facts()
     print("-" * 60)
     print("REPORT ARCHIVE CHECKS PASSED")
 
