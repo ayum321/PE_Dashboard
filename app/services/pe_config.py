@@ -1,0 +1,767 @@
+"""
+pe_config.py — Single source of truth for all PE Dashboard thresholds and settings.
+
+Adapts the user's pe_config.py blueprint for the FastAPI (non-Streamlit) stack.
+Reads from:
+  1. .pe_config.json  (persistent config via config_store)
+  2. Environment variables (GEMINI_API_KEY / GOOGLE_API_KEY)
+  3. Hardcoded defaults (last resort)
+
+Usage:
+    from services import pe_config
+    if cpu_value > pe_config.CPU_CRIT: ...
+    pe_config.reload()  # re-read from disk after settings change
+"""
+from __future__ import annotations
+
+import os
+from typing import Any
+
+# ── Internal import (lazy to avoid circular) ─────────────────────────────────
+def _cfg(key: str, default: Any = None) -> Any:
+    """Read a value from config_store with fallback."""
+    try:
+        from services import config_store
+        return config_store.get(key, default)
+    except Exception:
+        return default
+
+
+# ── AI master switch ──────────────────────────────────────────────────────────
+# Single kill-switch for ALL AI/LLM integration (NVIDIA NIM + Google Gemini
+# text). When False the app runs fully on its deterministic engine: no
+# external API calls are made and no API keys are required. The 4 AI routers
+# (ai, agent, pe_narrative, pe_consultant) are not mounted, and ai_engine.chat
+# short-circuits. Flip back on with PE_AI_ENABLED=1 (env) or by setting this
+# to True — nothing else needs to change.
+AI_ENABLED: bool = os.environ.get("PE_AI_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── CPU thresholds (%) ────────────────────────────────────────────────────────
+# Use module-level constants (re-read live via reload() below)
+CPU_WARN:  float = 75.0   # Warning band
+CPU_CRIT:  float = 90.0   # Critical — rule engine fires
+
+# ── Memory thresholds (%) ─────────────────────────────────────────────────────
+MEM_WARN:  float = 70.0
+MEM_CRIT:  float = 80.0
+
+# ── Disk thresholds (%) ───────────────────────────────────────────────────────
+DISK_WARN: float = 70.0
+DISK_CRIT: float = 85.0
+
+# ── DB memory thresholds (%) ──────────────────────────────────────────────────
+# Oracle/DB servers pre-allocate SGA/PGA — steady usage in the 80-92% band is
+# NORMAL, not pressure. Distinguishes expected DB allocation from genuine memory
+# pressure in routers/redflags.py. Override: db_mem_band_low/high, db_mem_warn/crit.
+DB_MEM_BAND_LOW:  float = 80.0   # below this, DB memory usage isn't even in the expected band
+DB_MEM_BAND_HIGH: float = 92.0   # up to this, high DB memory usage is expected allocation
+DB_MEM_WARN:      float = 88.0   # above this within the band, watch for upward trend
+DB_MEM_CRIT:      float = 95.0   # genuine DB memory pressure regardless of band
+
+# ── Resource capture window (days) ────────────────────────────────────────────
+# How many days of resource-utilisation history a PE review is expected to cover.
+# Surfaced in the export checklist label and kept here so the frontend, export,
+# and any future capture logic read one number. Override: resource_capture_days.
+RESOURCE_CAPTURE_DAYS: int = 15
+
+# ── Azure Resource Graph transport limits (seconds) ──────────────────────────
+# Tenant-wide VM search must fail clearly rather than leaving an analyst on a
+# permanent loading indicator when Azure Resource Graph or corporate transport
+# is unavailable.  Values can be overridden in .pe_config.json.
+AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S: float = 6.0
+AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S:    float = 35.0
+
+# ── Batch quality thresholds ──────────────────────────────────────────────────
+BATCH_FAIL_RATE:  float = 5.0    # % failure rate above which rule R4 fires
+ZERO_DUR_FLAG:    bool  = True   # Flag zero-duration jobs in findings
+
+# ── SLA windows (hours) ──────────────────────────────────────────────
+# Generic configurable defaults — NEVER hardcode 5 / 3.5 / 8 anywhere else.
+# Override via Settings → config_store keys: daily_sla_hrs, weekly_sla_hrs,
+# biweekly_sla_hrs, monthly_sla_hrs, custom_sla_hrs.
+SLA_DEFAULTS: dict[str, float] = {
+    "daily":    6.0,
+    "weekly":   8.0,
+    "biweekly": 17.0,
+    "monthly":  17.0,
+    "custom":   6.0,
+}
+SLA_DAILY_HRS:    float = SLA_DEFAULTS["daily"]
+SLA_WEEKLY_HRS:   float = SLA_DEFAULTS["weekly"]
+SLA_BIWEEKLY_HRS: float = SLA_DEFAULTS["biweekly"]
+SLA_MONTHLY_HRS:  float = SLA_DEFAULTS["monthly"]
+SLA_CUSTOM_HRS:   float = SLA_DEFAULTS["custom"]
+SLA_BUFFER_WARN:  float = 15.0   # % buffer below which job is AT_RISK (kept for backward compat)
+
+# ── SLA status classification thresholds ─────────────────────────────────────
+# Single canonical source — sla_matrix.py, sla_merger.py, and the UI legend
+# all read from here. Override via config_store keys: sla_atrisk_pct, sla_longjob_pct.
+# Formula: buffer_pct = (SLA_h − runtime_h) / SLA_h × 100
+#   buffer ≤  0%              → BREACH
+#   0% < buffer ≤ AT_RISK_PCT  → AT_RISK   (e.g. 15% → runtime uses ≥85% of SLA)
+#   AT_RISK < buffer ≤ LONGJOB → LONG_JOB  (e.g. 40% → runtime uses ≥60% of SLA)
+#   buffer > LONGJOB_PCT        → OK
+SLA_ATRISK_PCT:   float = 15.0   # % buffer threshold → AT_RISK below this
+SLA_LONGJOB_PCT:  float = 40.0   # % buffer threshold → LONG_JOB below this
+# Breach-day ratio (breach_days ÷ days_run) at/above which a sub-app's breach
+# pattern is classified STRUCTURAL (standing capacity/contract problem) rather
+# than INTERMITTENT (occasional regression). Pure methodology ratio — NOT a
+# customer value; applies identically to every uploaded dataset.
+SLA_STRUCTURAL_RATIO: float = 0.60
+
+# ── Start-time compliance thresholds (minutes late vs contracted Start_Time) ──
+# Duration compliance alone doesn't catch a batch that starts hours late but
+# still finishes inside its window — downstream data is stale even though the
+# duration check reports healthy. These are generic tolerance bands, not
+# customer-specific values. Override via config_store keys below.
+SLA_START_ATRISK_MINS: float = 30.0    # minutes late → ON_TIME below this
+SLA_START_LATE_MINS:   float = 120.0   # minutes late → LATE_START below this, else SEVERELY_LATE
+
+# ── Window/SLA compliance bands (day-level %) ─────────────────────────────────
+# The share of measured days a batch must finish inside its SLA window. These
+# drive the deterministic PE question ladder (services/batch_questions.py) so the
+# customer question scales with the actual compliance equation:
+#   compliance == 100%                 → healthy → headroom/validation question
+#   TARGET ≤ compliance < 100%         → near-miss → one-off vs early-warning
+#   CRIT   ≤ compliance < TARGET       → sub-target → remediation plan
+#   compliance < CRIT                  → systemic → SLA-validity / recovery plan
+# Pure PE methodology bars (95% production target, 80% systemic floor) — identical
+# for every customer; override per-account via config_store if a contract differs.
+SLA_COMPLIANCE_TARGET_PCT: float = 95.0   # production go-live compliance target
+SLA_COMPLIANCE_CRIT_PCT:   float = 80.0   # below this, breaches are systemic
+
+# ── Batch window decomposition (busy-time, idle gaps, blocks) ─────────────────
+# The "Daily Batch Window" elapsed span (first-start → last-end) overstates the
+# real workload when a day's jobs run in separated clusters (e.g. a morning
+# extract block and an evening outbound block with a long idle gap between).
+# These thresholds drive busy-time (interval union) + batch-block detection so
+# buffer is measured against ACTIVE compute time, not the inflated wall-clock span.
+# Override: batch_block_gap_hrs, longpole_top_n, longpole_window_share_pct.
+BATCH_BLOCK_GAP_HRS:        float = 1.0    # idle gap (hrs) that splits one block from the next
+LONGPOLE_TOP_N:            int   = 8      # how many longest jobs the consistency heatmap shows
+LONGPOLE_WINDOW_SHARE_PCT: float = 25.0   # a job using ≥ this % of the day's busy window is a long pole
+
+# ── Final-Judgment severity scoring (judgment_engine.py) ──────────────────────
+# The cross-pillar Final Judgment scores each pillar on its pass-rate, then
+# applies BOUNDED severity penalties so a catastrophic-but-rare event (a 10×
+# overrun on 5% of runs) cannot hide behind a healthy-looking average.
+#
+# Two modes, per-customer switchable via config_store["fj_scoring_mode"]:
+#   "additive"  (default, safe): base = pass-rate, then SUBTRACT capped severity
+#               penalties. A verdict can only get STRICTER, never falsely looser.
+#   "recompute" (aggressive): binding constraint (window vs job-level) becomes the
+#               base and per-signal penalties apply with no per-pillar total cap.
+FJ_SCORING_MODE: str = "additive"   # "additive" | "recompute"
+
+# Per-pillar TOTAL penalty cap (additive mode only) — keeps Option A bounded so a
+# single pillar can't be driven to absurd lows by stacked penalties. The decision
+# matrix's hard-block floors (in final_judgment.py) handle catastrophic cases.
+FJ_PEN_TOTAL_CAP: float = 45.0
+
+# Per-signal penalty caps (points removed from a pillar's 0–100 score).
+FJ_PEN_WINDOW_CAP:     float = 35.0   # batch/SLA window non-compliance (binding)
+FJ_PEN_FAILRATE_CAP:   float = 20.0   # ENDED-NOT-OK execution failure rate
+FJ_PEN_OVERRUN_CAP:    float = 20.0   # worst single-job overrun magnitude vs ceiling
+FJ_PEN_REGRESSION_CAP: float = 15.0   # runtime regression depth (count of jobs)
+FJ_PEN_SLA_MAG_CAP:    float = 25.0   # SLA-matrix breach breadth
+FJ_PEN_BENCH_MAG_CAP:  float = 20.0   # benchmark worst-delta magnitude
+FJ_PEN_RES_CRIT_CAP:   float = 30.0   # critical servers (hard infra signal)
+FJ_PEN_RES_DUAL_CAP:   float = 20.0   # servers under simultaneous CPU+mem pressure
+FJ_PEN_SOW_MAG_CAP:    float = 15.0   # SOW metrics breaching contractual baseline
+
+# Per-unit penalty rates (multiplied by the excess, then clamped to the cap above).
+FJ_PEN_FAILRATE_PER_PCT:   float = 1.0    # pts per % failure-rate over BATCH_FAIL_RATE
+FJ_PEN_OVERRUN_PER_PCT:    float = 0.25   # pts per % a job ran past its SLA ceiling
+FJ_PEN_REGRESSION_PER_JOB: float = 3.0    # pts per regressed job
+FJ_PEN_SLA_PER_PCT:        float = 0.40   # pts per % of runs breaching SLA
+FJ_PEN_BENCH_PER_PCT:      float = 0.30   # pts per % the worst tx exceeded threshold
+FJ_PEN_RES_CRIT_PER:       float = 12.0   # pts per critical server
+FJ_PEN_RES_DUAL_PER:       float = 8.0    # pts per dual-pressure server
+FJ_PEN_SOW_PER:            float = 6.0    # pts per metric over contractual baseline
+
+# ── Benchmark ─────────────────────────────────────────────────────────────────
+BENCH_THRESHOLD_PCT: float = 10.0   # % degradation → RED
+
+# Action-type SLA defaults for UI benchmark (seconds).
+# WATCH triggers when current is within 10% of SLA, BREACH when current > SLA.
+# Override via pe_config.json: {"benchmark_action_sla": {"Load": 5, "Export": 15, ...}}
+BENCHMARK_ACTION_SLA: dict[str, float] = {
+    "Load":            3.0,
+    "Export":         10.0,
+    "Save":            5.0,
+    "Import":         15.0,
+    "SRE Process Run": 10.0,
+    "Other":           0.0,   # 0 = no SLA for "Other"
+}
+
+# ── Anomaly detection ─────────────────────────────────────────────────────────
+ANOMALY_Z_THRESHOLD: float = 2.0    # z-score cutoff for statistical outliers
+# Pattern recurrence evidence floor: a "recurring_time" spike pattern must hit on
+# at least PATTERN_MIN_OCCURRENCES distinct days AND on ≥ PATTERN_MIN_RATIO of the
+# days observed. Both gates together so a sparse weekly batch on a 30-day window
+# (4/30=13%) still fires while a 2-day coincidence on a 15-day window does not.
+PATTERN_MIN_OCCURRENCES: int = 3
+PATTERN_MIN_RATIO: float = 0.20
+# Time-to-breach projection (predict_linear): only emit when the linear fit is
+# trustworthy — R² at/above this. Below it the slope is noise, not a trend.
+PREDICT_MIN_R2: float = 0.60
+
+# ── Baseline persistence (ADR-001: SQLite-WAL store, see services/spike_schema.py) ──
+# Rolling history kept per customer:vm:metric. Pruned on write — unbounded growth
+# across 250+ customers × ~16 VMs × 4 metrics would fill disk fast otherwise.
+BASELINE_RETENTION_DAYS: int = 90
+# Cold-start gate: until a VM has this many stored pulls, anomaly detection falls
+# back to session-only μ/σ (degraded mode). Surface "Baseline: N pulls / 90 days"
+# on the VM card so a PE lead knows whether to trust the anomaly count.
+MIN_BASELINE_PULLS: int = 3
+# Regime-drift detection — step-change in the snapshot sequence (recent vs prior
+# pooled mean ≥ ANOMALY_Z_THRESHOLD × pooled σ). Fires only with ≥ MIN_PRIOR_PULLS
+# prior + MIN_BASELINE_PULLS recent (≥8 total), else suppressed as insufficient
+# history. Emits a 'regime_change' pattern, never escalates existing anomalies.
+MIN_PRIOR_PULLS: int = 5
+# Regime-drift sensitivity, separated from ANOMALY_Z_THRESHOLD so gradual drift
+# (e.g. 15→18→22→26% over 8 pulls) can be tuned independently of live-spike
+# sensitivity once real multi-customer history exists. Defaults to the live z so
+# behaviour is identical today — separation is for empirical calibration later.
+REGIME_DRIFT_Z_THRESHOLD: float = 2.0
+
+# ── Batch runtime comparison — suspect "near-instant collapse" guard ──────────
+# In a PROD-vs-TEST batch runtime file, a job whose runtime collapses from a
+# multi-minute baseline to a couple of seconds almost never reflects a genuine
+# tuning win — far more often the job processed no data, exited early, or was a
+# no-op in the test environment. Counting these as "improvements" (and crediting
+# their full runtime as time "saved") inflates the upgrade's apparent benefit.
+# These two values bound that guard:
+#   • a NEW runtime below BATCH_NOWORK_SEC seconds is treated as "did no work"
+#   • only flagged as suspect when the OLD baseline was >= BATCH_COLLAPSE_MIN_OLD_SEC
+# Both are tunable via pe_config.json ("batch_nowork_sec", "batch_collapse_min_old_sec").
+BATCH_NOWORK_SEC: float          = 5.0    # new runtime < this ⇒ effectively no work
+BATCH_COLLAPSE_MIN_OLD_SEC: float = 30.0  # only suspect when baseline did real work (>= this)
+BATCH_COLLAPSE_RATIO: float       = 0.05  # new <= old×this (>=95% drop) ⇒ implausible win
+
+# Runtime-comparison classification band (batch benchmark PROD→TEST/UAT).
+# A two-sided pair (both runtimes > 0, not a suspect collapse) is bucketed by its
+# percent delta so tiny measurement jitter is not mislabelled as a real movement:
+#   • delta > +benchmark_threshold_pct        ⇒ REGRESSION (slower)
+#   • delta < −BATCH_IMPROVE_MIN_PCT           ⇒ IMPROVEMENT (faster)
+#   • in between                               ⇒ NO CHANGE (within tolerance band)
+# The regression side reuses the per-file benchmark threshold; the improvement floor
+# is separate (a small win is easier to reach by noise than a large slowdown) and is
+# disclosed in the UI so the counts reconcile against a raw any-delta tally.
+BATCH_IMPROVE_MIN_PCT: float      = 5.0   # |delta| below this on the faster side ⇒ no-change
+
+
+# ── Suspect-collapse cause classification (Gap 1) ─────────────────────────────
+# A flagged collapse is not equally suspicious across job classes. Data-heavy
+# load/extract jobs (history transfers, SKU extracts) collapsing to seconds is
+# almost always a TEST-environment data-volume artifact (empty/stub data), not a
+# tuning win — the single most important class to call out for a PE reviewer.
+# Any job name containing one of these substrings (env-prefix-insensitive,
+# matched UPPERCASE) is classified DATA_VOLUME_SUSPECT. Tunable via
+# pe_config.json ("batch_data_heavy_patterns").
+DEFAULT_BATCH_DATA_HEAVY_PATTERNS: list[str] = [
+    "HIST_TRANSFER", "HISTTRANSFER", "EXTRACT_SKUPROJ", "EXTRACT_SKUEXCEPTION",
+    "EXTRACT_EXCEPTION", "SKUEXCEPTION", "SKUPROJ", "IO_SRE", "EXTRACT_IO",
+    "LOAD_", "_LOAD", "STAGING", "INGEST",
+]
+BATCH_DATA_HEAVY_PATTERNS: list[str] = list(DEFAULT_BATCH_DATA_HEAVY_PATTERNS)
+
+# ── Release→production SLA projection guard ───────────────────────────────────
+# When projecting a benchmark (PROD-vs-TEST) runtime regression onto a matched
+# Ctrl-M production job's SLA, a percentage drawn from a tiny baseline is not a
+# reliable predictor. A 3s→375s job is +12400%, but multiplying that onto a
+# 30-minute production job yields an absurd, misleading "will breach SLA" verdict.
+# Only regressions whose baseline did real work (>= this many seconds) are
+# statistically credible enough to project. Tunable via "batch_project_min_baseline_sec".
+BATCH_PROJECT_MIN_BASELINE_SEC: float = 60.0
+# A benchmark job and a Ctrl-M job are only the SAME job if their production-side
+# runtimes are in the same ballpark. If the benchmark baseline and the Ctrl-M
+# peak differ by more than this factor, the token match is a false positive
+# (different jobs that merely share a name prefix) and must not drive a projection.
+BATCH_PROJECT_MAX_BASELINE_RATIO: float = 10.0
+
+# ── Ctrl-M job classification (customer-configurable) ─────────────────────────
+# job_type_patterns: batch_type → list of substrings to match in job/workflow name
+JOB_TYPE_PATTERNS: dict = {
+    "DAILY":     ["_DLY", "DAILY_", "_DAY", "DAY_RUN", "NIGHTLY", "OVERNIGHT", "EVERYDAY"],
+    "WEEKLY":    ["_WLY", "WEEKLY_", "WK_", "_WEEK", "_WF", "-WF"],
+    "BIWEEKLY":  ["_BIWKLY", "BIWEEKLY_", "_BWLY", "BI_WEEKLY", "BI-WEEKLY"],
+    "QUARTERLY": ["QUARTERLY", "QUATERLY", "QTR"],
+    "MONTHLY":   ["_MLY", "MONTHLY_", "_MNTH"],
+    "CYCLIC":    ["CYCLIC", "_CYC", "CRON_"],
+    "OUTBOUND":  ["OUTBOUND", "_OUTBND", "EXPORT_"],
+}
+
+# exclude_from_sla: batch types that are silently excluded from SLA matrix analysis
+EXCLUDE_FROM_SLA: list = ["CYCLIC", "OUTBOUND"]
+
+# env_prefixes_to_strip: stripped from job/workflow names before matching
+ENV_PREFIXES_TO_STRIP: list = ["PROD_", "TEST_", "UAT_", "DEV_", "STG_"]
+
+# ctrlm_column_map: canonical → list of raw Ctrl-M column name variants (lowercase)
+CTRLM_COLUMN_MAP: dict = {
+    "job_name":    ["jobname", "job_name", "name", "job"],
+    "sub_app":     ["subapplication", "sub_application", "subapp", "sub_app"],
+    "start_time":  ["starttime", "start_time", "startdate", "start_date"],
+    "end_time":    ["endtime", "end_time", "enddate", "end_date"],
+    "status":      ["completionstatus", "completion_status", "status"],
+    "runtime_sec": ["runtimesec", "runtime_sec", "run_time_sec", "run_sec"],
+}
+
+# ── Utility job exclusion rules (generic, signal-based) ──────────────────────
+# The rules are split into:
+#   - STRONG tokens: name match alone is sufficient
+#   - RUNTIME-gated patterns: name match plus runtime threshold is required
+DEFAULT_STRONG_UTILITY_TOKENS: frozenset[str] = frozenset({
+    "file_watcher", "filewatcher", "ctrl_m_file_watcher",
+    "ping_job", "heartbeat", "health_check",
+    "export_outbound", "outbound_export",
+    "move_file_to_outbox", "outbound_file",
+})
+
+# AKA "UTILITY_PATTERN_THRESHOLDS": name-match pattern → max runtime (hours)
+# below which the job is a housekeeping utility, not real batch work. Exceeding
+# the threshold flags UTILITY_PATTERN_NOT_EXCLUDED (kept in scope + surfaced as
+# an info warning) rather than silently dropping the job — see
+# services/batch_calculator.py _utility_warnings. Override via config_store key
+# "runtime_gated_utility" (per-customer dict, same shape) — see reload() below.
+DEFAULT_RUNTIME_GATED_UTILITY: dict[str, float] = {
+    "_fw": 0.05,              # file-watcher poll loop — a few seconds per check
+    "fw_": 0.05,
+    "gather_db_stats": 0.25,  # stats refresh — real gathers on large tables run longer
+    "update_stats": 0.25,
+    "rebuild_index": 0.25,
+    "db_stats": 0.25,
+    "delete_type": 0.05,      # single-table housekeeping delete
+    "purge_": 0.10,           # purge scans more rows than a plain delete — wider ceiling
+    "truncate_": 0.05,
+    "archive_log": 0.05,      # log rotation/archival — near-instant metadata op
+    "batch_start": 0.02,      # sentinel/marker job — no real work, just a timestamp
+    "batch_end": 0.02,
+    "batchstart": 0.02,
+    "batchend": 0.02,
+    "pre_batch_node": 0.02,
+    "post_batch_node": 0.02,
+    "qwbatchstart": 0.02,
+    "qwbatchend": 0.02,
+    "seq_disable_login": 0.05,  # account lock/unlock toggle — single DDL/DML statement
+    "seq_enable_users": 0.05,
+    "disable_users": 0.05,
+    "enable_users": 0.05,
+    "disable_login": 0.05,
+    "enable_login": 0.05,
+    "zabbix_monitors": 0.05,    # monitoring check-in ping
+    "export_": 0.05,            # generic export/outbound utility — real data exports
+    "_export": 0.05,            # that legitimately take longer are NOT excluded (see above)
+    "db_backup": 0.25,          # DB-level backup/restore/cleanup — larger I/O than a single table op
+    "db_restore": 0.25,
+    "db_cleanup": 0.25,
+    "backup": 0.10,             # broad keyword match — looser ceiling avoids false-excluding real backup jobs
+}
+
+# Mutable runtime copies used by the app. Legacy UTILITY_JOB_PATTERNS remains
+# as a compatibility alias for any code that still expects a flat list.
+STRONG_UTILITY_TOKENS: set[str] = set(DEFAULT_STRONG_UTILITY_TOKENS)
+RUNTIME_GATED_UTILITY: dict[str, float] = dict(DEFAULT_RUNTIME_GATED_UTILITY)
+UTILITY_JOB_PATTERNS: list[str] = sorted(set(STRONG_UTILITY_TOKENS) | set(RUNTIME_GATED_UTILITY))
+
+# ── Sentinel detection patterns (Stage 4 Level 2 fallback) ───────────────────
+# Normalized job name substrings indicating batch WINDOW START (first job) or
+# WINDOW END (last job). Used when XLSX sentinel pair is not configured.
+# Add customer-specific patterns to config_store["sentinel_start_patterns"].
+SENTINEL_START_PATTERNS: list = [
+    # Batch open / user disable sequences — broad-to-specific order
+    "scpo_batch_start", "batch_start_dummy", "batch_start",
+    "jbi000_disableusers", "jbi000_disable",
+    "zabbix_monitors_disable", "zabbix_disable",
+    "seq_disable_login", "seq_batch_start",
+    "on_dp_disable_users", "on_sp_disable_triggers",
+    "disable_ref_constraints", "disable_scpomgr_triggers",
+    "itp_disable_login", "io_disable_login",
+    "disable_users", "disable_login", "disable_monitors",
+    "batch_open", "start_batch", "batch_init",
+    # FileWatcher in normalized form — Ctrl-M File Watcher_W → ctrl_m_file_watcher_w
+    "ctrl_m_file_watcher",
+]
+SENTINEL_END_PATTERNS: list = [
+    # Batch close / user enable sequences — broad-to-specific order
+    "scpo_enable_users", "scpo_batch_end", "batch_end",
+    "jbi000_enableusers", "jbi000_enable",
+    "zabbix_monitors_enable", "zabbix_enable",
+    "seq_enable_users", "seq_batch_end",
+    "on_dp_enable_users", "on_sp_enable_users",
+    "enable_ref_constraints", "enable_scpomgr_triggers",
+    "enable_users", "enable_login", "enable_monitors",
+    "batch_close", "end_batch", "batch_complete",
+]
+
+# ── Sentinel window validity bounds (hours)
+SENTINEL_MIN_WINDOW_HRS: float = 0.25   # < 15 min → SUSPECT_TOO_SHORT
+SENTINEL_MAX_WINDOW_HRS: float = 20.0   # > 20h   → SUSPECT_TOO_LONG (warn, keep)
+
+# ── Schedule types EXCLUDED from window compliance denominator ────────────────
+# Used by compliance_engine.compute_window_compliance(). These schedule classes
+# either have no daily SLA window (CYCLIC/ADHOC) or run on a non-daily cadence
+# that the daily-window compliance metric must not penalize.
+# NOTE: UNKNOWN is NOT excluded — an unclassified sub_app defaults to a daily
+# batch window and must be counted, else compliance collapses to 0 windows.
+COMPLIANCE_EXCLUDED_TYPES: set = {
+    "CYCLIC", "CYCLIC_INTERVAL", "ADHOC", "CALENDAR_BASED", "OUTBOUND",
+    "PIPELINE_STAGE", "MONTHLY", "BIMONTHLY", "QUARTERLY", "ANNUAL",
+}
+
+# When True, compute_window_compliance() logs every (sub_app, date) decision —
+# INCLUDED (with its resolved ceiling + verdict) or EXCLUDED (with its schedule
+# type) — to the "compliance_engine" logger. Off by default (would log one line
+# per sub-app-day on every upload); flip on via pe_config.json
+# ("compliance_debug_log": true) when a headline % needs to be traced against
+# the raw data row-by-row. The same trace is always available without logging,
+# in window_compliance["audit_windows"].
+COMPLIANCE_DEBUG_LOG: bool = False
+
+# ── Cyclic detection threshold ────────────────────────────────────────────────
+# Jobs with avg_runtime_hrs below this threshold are considered cyclic candidates.
+# (Combined with frequency guard: max runs/day > 5 AND median > 3)
+CYCLIC_MAX_RUNTIME_HRS: float = 0.25   # < 15 minutes = polling/heartbeat, not batch
+
+# ── SOW baseline targets ──────────────────────────────────────────────────────
+SOW_DFU:           float = 499_999.0
+SOW_SKU:           float = 80_000.0
+SOW_ORDERS:        float = 200_000.0
+SOW_BATCH_JOBS:    float = 450.0
+
+# ── SOW consumption bands (% of contracted volume) ───────────────────────────
+# The PE standard process window is SOW_UNDER_PCT … SOW_OVER_PCT. Outside that
+# range the deviation requires formal review and customer acknowledgment.
+#
+#   < SOW_UNDER_PCT       LOW           — tested below contracted scale; findings
+#                                         are not validated at full volume
+#   … SOW_ACCEPTABLE_PCT  ACCEPTABLE    — inside the standard process window, low end
+#   … SOW_OVER_PCT        OPTIMAL       — preferred zone
+#   > SOW_OVER_PCT        OVER          — over-consumption vs contracted scope
+#   > SOW_OVER_CRIT_PCT   CRITICAL_OVER — severe over-consumption; blocks PE
+#                                         sign-off until commercially resolved
+#
+# Every consumer (routers/sow.py, routers/findings.py, routers/pe_narrative.py
+# and the SOW panels in static/app.js) reads these — never hardcode 70/110/120
+# a second time.
+SOW_UNDER_PCT:     float = 70.0
+SOW_OVER_PCT:      float = 110.0
+SOW_OVER_CRIT_PCT: float = 120.0
+# ACCEPTABLE/OPTIMAL split within the standard window (SOW_UNDER_PCT..SOW_OVER_PCT).
+# Was a hardcoded `90` literal duplicated in routers/sow.py, routers/export.py,
+# routers/findings.py, routers/pe_narrative.py and static/app.js — pulled into
+# one named constant here so none of those five call sites can drift.
+SOW_ACCEPTABLE_PCT: float = 90.0
+
+# ── Correlation engine weights (services/correlation_engine.py) ──────────────
+# The 5 executive-dashboard formulas (RFCS/SRI/CRS/OSHS/JRTOS) previously
+# hardcoded every weight/threshold inline — the one file in the repo that most
+# contradicted this module's own "never hardcode thresholds" rule. Centralized
+# here so per-customer tuning is a config edit, not a code change, and so the
+# same weight can't drift between two call sites that both need it.
+RFCS_CPU_WEIGHT:          float = 0.6    # RFCS weighted-pressure: CPU share
+RFCS_MEM_WEIGHT:          float = 0.4    # RFCS weighted-pressure: memory share
+RFCS_CRITSERVER_AMPLIFIER: float = 0.15  # +15% RFCS per critical server, capped below
+RFCS_CRITSERVER_CAP:      int   = 10     # amplifier stops growing past this many critical servers
+# Same 60/30 bands used both for RFCS's red/amber/green display band AND
+# generate_narrative's "resource saturation is a primary driver" cause gate —
+# one constant each so the narrative can never disagree with the badge color.
+RFCS_BAND_RED:            float = 60.0
+RFCS_BAND_AMBER:          float = 30.0
+SRI_CPU_AMP_THRESHOLD:    float = 70.0   # SRI's CPU amplifier only kicks in above this
+CRS_CHAIN_DENOM_OFFSET:   float = 50.0    # CRS chain factor = downstream / (downstream + this)
+# OSHS executive-grade component weights — must sum to 1.0.
+OSHS_W_BATCH: float = 0.40
+OSHS_W_SLA:   float = 0.35
+OSHS_W_RES:   float = 0.25
+# derive_batch_score: compliance vs inverse-fail-rate split.
+DERIVE_BATCH_COMPLIANCE_WEIGHT: float = 0.7
+DERIVE_BATCH_FAILRATE_WEIGHT:   float = 0.3
+# derive_resource_score: CPU/mem/disk pressure weights. Numerically matched
+# OSHS_W_BATCH/SLA/RES by coincidence in the original code — named distinctly
+# here so centralizing never implies the two are the same tunable.
+RESSCORE_CPU_WEIGHT:  float = 0.40
+RESSCORE_MEM_WEIGHT:  float = 0.35
+RESSCORE_DISK_WEIGHT: float = 0.25
+# generate_narrative's own decision thresholds (separate from the formulas'
+# own math — these gate which prose branch fires).
+NARRATIVE_SRI_AT_RISK:         float = 0.85
+NARRATIVE_CRS_CAUSE_THRESHOLD: float = 0.3
+
+
+def reload() -> None:
+    """
+    Re-read all threshold values from config_store (disk).
+    Call this after a Settings save to make the new values live immediately.
+    """
+    def _f(key: str, default: float) -> float:
+        """Safe float read — returns default when stored value is not numeric."""
+        v = _cfg(key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    global CPU_WARN, CPU_CRIT, MEM_WARN, MEM_CRIT, DISK_WARN, DISK_CRIT
+    global DB_MEM_BAND_LOW, DB_MEM_BAND_HIGH, DB_MEM_WARN, DB_MEM_CRIT
+    global BATCH_FAIL_RATE, ZERO_DUR_FLAG, RESOURCE_CAPTURE_DAYS
+    global AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S, AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S
+    global SLA_DAILY_HRS, SLA_WEEKLY_HRS, SLA_BIWEEKLY_HRS, SLA_MONTHLY_HRS, SLA_CUSTOM_HRS, SLA_BUFFER_WARN
+    global SLA_ATRISK_PCT, SLA_LONGJOB_PCT, SLA_STRUCTURAL_RATIO
+    global SLA_START_ATRISK_MINS, SLA_START_LATE_MINS
+    global SLA_COMPLIANCE_TARGET_PCT, SLA_COMPLIANCE_CRIT_PCT
+    global COMPLIANCE_DEBUG_LOG
+    global BATCH_BLOCK_GAP_HRS, LONGPOLE_TOP_N, LONGPOLE_WINDOW_SHARE_PCT
+    global FJ_SCORING_MODE, FJ_PEN_TOTAL_CAP
+    global FJ_PEN_WINDOW_CAP, FJ_PEN_FAILRATE_CAP, FJ_PEN_OVERRUN_CAP, FJ_PEN_REGRESSION_CAP
+    global FJ_PEN_SLA_MAG_CAP, FJ_PEN_BENCH_MAG_CAP, FJ_PEN_RES_CRIT_CAP, FJ_PEN_RES_DUAL_CAP, FJ_PEN_SOW_MAG_CAP
+    global FJ_PEN_FAILRATE_PER_PCT, FJ_PEN_OVERRUN_PER_PCT, FJ_PEN_REGRESSION_PER_JOB
+    global FJ_PEN_SLA_PER_PCT, FJ_PEN_BENCH_PER_PCT, FJ_PEN_RES_CRIT_PER, FJ_PEN_RES_DUAL_PER, FJ_PEN_SOW_PER
+    global BENCH_THRESHOLD_PCT, BENCHMARK_ACTION_SLA, ANOMALY_Z_THRESHOLD
+    global PATTERN_MIN_OCCURRENCES, PATTERN_MIN_RATIO, PREDICT_MIN_R2
+    global BASELINE_RETENTION_DAYS, MIN_BASELINE_PULLS, MIN_PRIOR_PULLS, REGIME_DRIFT_Z_THRESHOLD
+    global BATCH_NOWORK_SEC, BATCH_COLLAPSE_MIN_OLD_SEC, BATCH_COLLAPSE_RATIO, BATCH_IMPROVE_MIN_PCT
+    global BATCH_PROJECT_MIN_BASELINE_SEC, BATCH_PROJECT_MAX_BASELINE_RATIO
+    global BATCH_DATA_HEAVY_PATTERNS
+    global SOW_DFU, SOW_SKU, SOW_ORDERS, SOW_BATCH_JOBS
+    global SOW_UNDER_PCT, SOW_OVER_PCT, SOW_OVER_CRIT_PCT, SOW_ACCEPTABLE_PCT
+    global JOB_TYPE_PATTERNS, EXCLUDE_FROM_SLA, ENV_PREFIXES_TO_STRIP, CTRLM_COLUMN_MAP
+    global STRONG_UTILITY_TOKENS, RUNTIME_GATED_UTILITY, UTILITY_JOB_PATTERNS
+    global SENTINEL_START_PATTERNS, SENTINEL_END_PATTERNS
+    global SENTINEL_MIN_WINDOW_HRS, SENTINEL_MAX_WINDOW_HRS, CYCLIC_MAX_RUNTIME_HRS
+    global RFCS_CPU_WEIGHT, RFCS_MEM_WEIGHT, RFCS_CRITSERVER_AMPLIFIER, RFCS_CRITSERVER_CAP
+    global RFCS_BAND_RED, RFCS_BAND_AMBER, SRI_CPU_AMP_THRESHOLD, CRS_CHAIN_DENOM_OFFSET
+    global OSHS_W_BATCH, OSHS_W_SLA, OSHS_W_RES
+    global DERIVE_BATCH_COMPLIANCE_WEIGHT, DERIVE_BATCH_FAILRATE_WEIGHT
+    global RESSCORE_CPU_WEIGHT, RESSCORE_MEM_WEIGHT, RESSCORE_DISK_WEIGHT
+    global NARRATIVE_SRI_AT_RISK, NARRATIVE_CRS_CAUSE_THRESHOLD
+
+    CPU_WARN          = _f("cpu_warning",       75.0)
+    CPU_CRIT          = _f("cpu_critical",      90.0)
+    MEM_WARN          = _f("mem_warning",       70.0)
+    MEM_CRIT          = _f("mem_critical",      80.0)
+    DISK_WARN         = _f("disk_warning",      70.0)
+    DISK_CRIT         = _f("disk_critical",     85.0)
+    DB_MEM_BAND_LOW   = _f("db_mem_band_low",   80.0)
+    DB_MEM_BAND_HIGH  = _f("db_mem_band_high",  92.0)
+    DB_MEM_WARN       = _f("db_mem_warn",       88.0)
+    DB_MEM_CRIT       = _f("db_mem_crit",       95.0)
+    BATCH_FAIL_RATE   = _f("batch_fail_rate",   5.0)
+    ZERO_DUR_FLAG     = bool (_cfg("zero_dur_flag",     True))
+    try:
+        RESOURCE_CAPTURE_DAYS = int(_cfg("resource_capture_days", 15))
+    except (TypeError, ValueError):
+        RESOURCE_CAPTURE_DAYS = 15
+    AZURE_RESOURCE_GRAPH_CONNECT_TIMEOUT_S = _f("azure_resource_graph_connect_timeout_s", 6.0)
+    AZURE_RESOURCE_GRAPH_READ_TIMEOUT_S = _f("azure_resource_graph_read_timeout_s", 35.0)
+    SLA_DAILY_HRS     = _f("daily_sla_hrs",     SLA_DEFAULTS["daily"])
+    SLA_WEEKLY_HRS    = _f("weekly_sla_hrs",    SLA_DEFAULTS["weekly"])
+    SLA_BIWEEKLY_HRS  = _f("biweekly_sla_hrs",  SLA_DEFAULTS["biweekly"])
+    SLA_MONTHLY_HRS   = _f("monthly_sla_hrs",   SLA_DEFAULTS["monthly"])
+    SLA_CUSTOM_HRS    = _f("custom_sla_hrs",    SLA_DEFAULTS["custom"])
+    SLA_BUFFER_WARN   = _f("sla_buffer_warn",   15.0)
+    SLA_ATRISK_PCT    = _f("sla_atrisk_pct",    15.0)
+    SLA_LONGJOB_PCT   = _f("sla_longjob_pct",   40.0)
+    SLA_STRUCTURAL_RATIO = _f("sla_structural_ratio", 0.60)
+    SLA_START_ATRISK_MINS = _f("sla_start_atrisk_mins", 30.0)
+    SLA_START_LATE_MINS   = _f("sla_start_late_mins",   120.0)
+    SLA_COMPLIANCE_TARGET_PCT = _f("sla_compliance_target_pct", 95.0)
+    SLA_COMPLIANCE_CRIT_PCT   = _f("sla_compliance_crit_pct",   80.0)
+    COMPLIANCE_DEBUG_LOG = bool(_cfg("compliance_debug_log", False))
+    BATCH_BLOCK_GAP_HRS = _f("batch_block_gap_hrs", 1.0)
+    try:
+        LONGPOLE_TOP_N = int(_cfg("longpole_top_n", 8))
+    except (TypeError, ValueError):
+        LONGPOLE_TOP_N = 8
+    LONGPOLE_WINDOW_SHARE_PCT = _f("longpole_window_share_pct", 25.0)
+    # Final-Judgment severity scoring (per-customer switchable)
+    _fj_mode = str(_cfg("fj_scoring_mode", "additive") or "additive").strip().lower()
+    FJ_SCORING_MODE   = _fj_mode if _fj_mode in ("additive", "recompute") else "additive"
+    FJ_PEN_TOTAL_CAP      = _f("fj_pen_total_cap",      45.0)
+    FJ_PEN_WINDOW_CAP     = _f("fj_pen_window_cap",     35.0)
+    FJ_PEN_FAILRATE_CAP   = _f("fj_pen_failrate_cap",   20.0)
+    FJ_PEN_OVERRUN_CAP    = _f("fj_pen_overrun_cap",    20.0)
+    FJ_PEN_REGRESSION_CAP = _f("fj_pen_regression_cap", 15.0)
+    FJ_PEN_SLA_MAG_CAP    = _f("fj_pen_sla_mag_cap",    25.0)
+    FJ_PEN_BENCH_MAG_CAP  = _f("fj_pen_bench_mag_cap",  20.0)
+    FJ_PEN_RES_CRIT_CAP   = _f("fj_pen_res_crit_cap",   30.0)
+    FJ_PEN_RES_DUAL_CAP   = _f("fj_pen_res_dual_cap",   20.0)
+    FJ_PEN_SOW_MAG_CAP    = _f("fj_pen_sow_mag_cap",    15.0)
+    FJ_PEN_FAILRATE_PER_PCT   = _f("fj_pen_failrate_per_pct",   1.0)
+    FJ_PEN_OVERRUN_PER_PCT    = _f("fj_pen_overrun_per_pct",    0.25)
+    FJ_PEN_REGRESSION_PER_JOB = _f("fj_pen_regression_per_job", 3.0)
+    FJ_PEN_SLA_PER_PCT        = _f("fj_pen_sla_per_pct",        0.40)
+    FJ_PEN_BENCH_PER_PCT      = _f("fj_pen_bench_per_pct",      0.30)
+    FJ_PEN_RES_CRIT_PER       = _f("fj_pen_res_crit_per",       12.0)
+    FJ_PEN_RES_DUAL_PER       = _f("fj_pen_res_dual_per",       8.0)
+    FJ_PEN_SOW_PER            = _f("fj_pen_sow_per",            6.0)
+    BENCH_THRESHOLD_PCT = _f("benchmark_threshold", 10.0)
+    _bench_actions = _cfg("benchmark_action_sla")
+    if isinstance(_bench_actions, dict) and _bench_actions:
+        _bam: dict[str, float] = {}
+        for k, v in _bench_actions.items():
+            try:
+                _bam[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if _bam:
+            BENCHMARK_ACTION_SLA = _bam
+    ANOMALY_Z_THRESHOLD = _f("anomaly_z_threshold", 2.0)
+    RFCS_CPU_WEIGHT           = _f("rfcs_cpu_weight",           0.6)
+    RFCS_MEM_WEIGHT           = _f("rfcs_mem_weight",           0.4)
+    RFCS_CRITSERVER_AMPLIFIER = _f("rfcs_critserver_amplifier", 0.15)
+    try:
+        RFCS_CRITSERVER_CAP = int(_cfg("rfcs_critserver_cap", 10))
+    except (TypeError, ValueError):
+        RFCS_CRITSERVER_CAP = 10
+    RFCS_BAND_RED          = _f("rfcs_band_red",           60.0)
+    RFCS_BAND_AMBER        = _f("rfcs_band_amber",         30.0)
+    SRI_CPU_AMP_THRESHOLD  = _f("sri_cpu_amp_threshold",   70.0)
+    CRS_CHAIN_DENOM_OFFSET = _f("crs_chain_denom_offset",  5.0)
+    OSHS_W_BATCH = _f("oshs_w_batch", 0.40)
+    OSHS_W_SLA   = _f("oshs_w_sla",   0.35)
+    OSHS_W_RES   = _f("oshs_w_res",   0.25)
+    DERIVE_BATCH_COMPLIANCE_WEIGHT = _f("derive_batch_compliance_weight", 0.7)
+    DERIVE_BATCH_FAILRATE_WEIGHT   = _f("derive_batch_failrate_weight",   0.3)
+    RESSCORE_CPU_WEIGHT  = _f("resscore_cpu_weight",  0.40)
+    RESSCORE_MEM_WEIGHT  = _f("resscore_mem_weight",  0.35)
+    RESSCORE_DISK_WEIGHT = _f("resscore_disk_weight", 0.25)
+    NARRATIVE_SRI_AT_RISK         = _f("narrative_sri_at_risk",         0.85)
+    NARRATIVE_CRS_CAUSE_THRESHOLD = _f("narrative_crs_cause_threshold", 0.3)
+    PATTERN_MIN_OCCURRENCES = int(_f("pattern_min_occurrences", 3))
+    PATTERN_MIN_RATIO       = _f("pattern_min_ratio",       0.20)
+    PREDICT_MIN_R2          = _f("predict_min_r2",          0.60)
+    BASELINE_RETENTION_DAYS = int(_f("baseline_retention_days", 90))
+    MIN_BASELINE_PULLS      = int(_f("min_baseline_pulls",       3))
+    MIN_PRIOR_PULLS         = int(_f("min_prior_pulls",          5))
+    REGIME_DRIFT_Z_THRESHOLD = _f("regime_drift_z_threshold", ANOMALY_Z_THRESHOLD)
+    BATCH_NOWORK_SEC           = _f("batch_nowork_sec",            5.0)
+    BATCH_COLLAPSE_MIN_OLD_SEC = _f("batch_collapse_min_old_sec", 30.0)
+    BATCH_COLLAPSE_RATIO       = _f("batch_collapse_ratio",        0.05)
+    BATCH_IMPROVE_MIN_PCT      = _f("batch_improve_min_pct",       5.0)
+    BATCH_PROJECT_MIN_BASELINE_SEC   = _f("batch_project_min_baseline_sec",   60.0)
+    BATCH_PROJECT_MAX_BASELINE_RATIO = _f("batch_project_max_baseline_ratio", 10.0)
+    _dhp = _cfg("batch_data_heavy_patterns")
+    if isinstance(_dhp, list) and _dhp:
+        BATCH_DATA_HEAVY_PATTERNS = [str(p).upper().strip() for p in _dhp if str(p).strip()]
+    else:
+        BATCH_DATA_HEAVY_PATTERNS = list(DEFAULT_BATCH_DATA_HEAVY_PATTERNS)
+    SOW_DFU           = _f("sow_dfu",           499_999.0)
+    SOW_SKU           = _f("sow_sku",           80_000.0)
+    SOW_ORDERS        = _f("sow_orders",        200_000.0)
+    SOW_BATCH_JOBS    = _f("sow_batch_jobs",    450.0)
+    SOW_UNDER_PCT     = _f("sow_under_pct",      70.0)
+    SOW_OVER_PCT      = _f("sow_over_pct",      110.0)
+    SOW_OVER_CRIT_PCT = _f("sow_over_crit_pct", 120.0)
+    SOW_ACCEPTABLE_PCT = _f("sow_acceptable_pct", 90.0)
+
+    _pats  = _cfg("job_type_patterns")
+    if isinstance(_pats, dict) and _pats:
+        JOB_TYPE_PATTERNS = _pats
+    _excl = _cfg("exclude_from_sla")
+    if isinstance(_excl, list):
+        EXCLUDE_FROM_SLA = _excl
+    _env  = _cfg("env_prefixes_to_strip")
+    if isinstance(_env, list):
+        ENV_PREFIXES_TO_STRIP = _env
+    _cmap = _cfg("ctrlm_column_map")
+    if isinstance(_cmap, dict) and _cmap:
+        CTRLM_COLUMN_MAP = _cmap
+    STRONG_UTILITY_TOKENS = set(DEFAULT_STRONG_UTILITY_TOKENS)
+    RUNTIME_GATED_UTILITY = dict(DEFAULT_RUNTIME_GATED_UTILITY)
+
+    def _norm_token(v: Any) -> str:
+        return str(v).strip().lower()
+
+    _strong = _cfg("strong_utility_tokens")
+    _runtime = _cfg("runtime_gated_utility")
+    _legacy = _cfg("utility_job_patterns")
+
+    if isinstance(_strong, (list, set, tuple)) and _strong:
+        STRONG_UTILITY_TOKENS = {_norm_token(v) for v in _strong if str(v).strip()}
+
+    if isinstance(_runtime, dict) and _runtime:
+        _rt: dict[str, float] = {}
+        for k, v in _runtime.items():
+            try:
+                _rt[_norm_token(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if _rt:
+            RUNTIME_GATED_UTILITY = _rt
+    elif isinstance(_legacy, list) and _legacy:
+        # Legacy compatibility: treat the flat list as an allowlist over the
+        # built-in defaults. Unknown tokens are kept as strong tokens so older
+        # persisted overrides still have an effect.
+        _legacy_norm = {_norm_token(v) for v in _legacy if str(v).strip()}
+        if _legacy_norm:
+            STRONG_UTILITY_TOKENS = {
+                t for t in STRONG_UTILITY_TOKENS
+                if t in _legacy_norm
+            } | {
+                t for t in _legacy_norm
+                if t not in DEFAULT_RUNTIME_GATED_UTILITY and t not in DEFAULT_STRONG_UTILITY_TOKENS
+            }
+            RUNTIME_GATED_UTILITY = {
+                pat: thr for pat, thr in RUNTIME_GATED_UTILITY.items()
+                if pat in _legacy_norm
+            }
+
+    UTILITY_JOB_PATTERNS = sorted(set(STRONG_UTILITY_TOKENS) | set(RUNTIME_GATED_UTILITY))
+    _ss = _cfg("sentinel_start_patterns")
+    if isinstance(_ss, list) and _ss:
+        SENTINEL_START_PATTERNS = _ss
+    _se = _cfg("sentinel_end_patterns")
+    if isinstance(_se, list) and _se:
+        SENTINEL_END_PATTERNS = _se
+    SENTINEL_MIN_WINDOW_HRS = _f("sentinel_min_window_hrs", 0.25)
+    SENTINEL_MAX_WINDOW_HRS = _f("sentinel_max_window_hrs", 20.0)
+    CYCLIC_MAX_RUNTIME_HRS  = _f("cyclic_max_runtime_hrs", 0.25)
+
+
+def status_label(val: float | None, warn: float, crit: float) -> str:
+    """Return 'CRITICAL' | 'WARNING' | 'OK' | 'UNKNOWN'."""
+    if val is None:
+        return "UNKNOWN"
+    if val >= crit:
+        return "CRITICAL"
+    if val >= warn:
+        return "WARNING"
+    return "OK"
+
+
+def format_pct(val: float | None, warn: float, crit: float) -> str:
+    """Format a percentage with emoji status prefix."""
+    icons = {"CRITICAL": "🔴", "WARNING": "🟡", "OK": "🟢", "UNKNOWN": "–"}
+    st = status_label(val, warn, crit)
+    if val is None:
+        return "–"
+    return f"{icons[st]} {val:.1f}%"
+
+
+# ── Initialise from disk on module import ─────────────────────────────────────
+try:
+    reload()
+except Exception:
+    pass  # safe — defaults already set above
+
+
+# ── Canonical grade table — single source of truth ──────────────────────────
+# Every module that maps a numeric score to a letter grade MUST use this.
+GRADE_TABLE: list[tuple[float, str, str]] = [
+    (90, "A", "APPROVED"),
+    (80, "B", "APPROVED WITH NOTES"),
+    (70, "C", "CONDITIONAL HOLD"),
+    (60, "D", "BLOCKED — MINOR"),
+    (0,  "F", "BLOCKED — MAJOR"),
+]
+
+
+def score_to_grade(score: float) -> tuple[str, str]:
+    """Map a 0–100 score to (letter, label) using the canonical grade table."""
+    for threshold, letter, label in GRADE_TABLE:
+        if score >= threshold:
+            return letter, label
+    return "F", "BLOCKED — MAJOR"

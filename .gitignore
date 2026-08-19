@@ -1,0 +1,92 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Runtime / cache
+.pe_cache.json
+.pe_config.json
+.pkg_stamp
+.server_pid
+debug.log
+server_err.txt
+server_stderr.txt
+server_stdout.txt
+*.txt.bak
+
+# Dev/diag scripts
+_test_*.py
+!_test_report_archive.py
+_check_*.py
+_diag_*.py
+_audit_*.py
+_bench_*.py
+_time_*.py
+_analyze_*.py
+_inspect_*.py
+_patch_*.py
+_wmi_*.py
+_restore_*.py
+_ingest_*.py
+_pe_audit_*.py
+__diag_*
+
+# Releases / customer data
+PE_Dashboard_Release*.zip
+*.xlsx
+*.csv
+*.docx
+*.pdf
+
+# IDE / editor
+.vscode/
+.claude/
+.codex/
+.mcp.json
+node_modules/
+
+# Old versions / release bundles
+0.0.9/
+0.0.9
+
+# Diag / audit text outputs
+_audit_*.txt
+_audit_result*.txt
+
+# OS junk
+desktop.ini
+Thumbs.db
+
+# Machine-specific helpers
+CLAUDE.md
+_dev_server.py
+launch_server.bat
+start_debug.bat
+
+# Test output / scratch
+.cache/
+tests/*
+!tests/test_sla_header_variants.py
+
+.pe_baseline.db
+.pe_baseline.db-wal
+.pe_baseline.db-shm
+.pe_report_archive.db
+.pe_report_archive.db-wal
+.pe_report_archive.db-shm
+data/report_archive/
+
+# Impeccable local runtime artifacts (critique reports remain trackable)
+.impeccable/config.local.json
+.impeccable/screenshots/
+.impeccable/live/
+.impeccable/cache/
+
+# Graphify generated knowledge-graph output (regenerable, not source)
+graphify-out/
+
+# Stray validation-run artifacts
+.server_pid_actual_validation
+server_stdout_actual_validation.txt
+server_stderr_actual_validation.txt

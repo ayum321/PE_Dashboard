@@ -1,0 +1,757 @@
+"""
+Red Flags & RCA auto-generator.
+
+POST /api/red-flags
+Scans all available data sources (batch KPIs, resource metrics, issues register)
+and generates:
+  - PE-style investigation questions with risk levels
+  - A risk priority matrix
+  - Counts by risk tier
+
+All logic is deterministic — no LLM call; use /api/ai-insight for AI narrative.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter
+from pydantic import BaseModel, ConfigDict
+
+from services.pe_utils import coerce_float as _f, coerce_int as _i
+import services.pe_config as _pc
+
+router = APIRouter()
+
+
+# ── Models ───────────────────────────────────────────────────────
+
+class RedFlagsRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    batch_kpis:    Optional[Dict[str, Any]]       = None
+    resource_kpis: Optional[Dict[str, Any]]       = None
+    servers:       Optional[List[Dict[str, Any]]] = None
+    anomalies:     Optional[List[Dict[str, Any]]] = None
+    issues:        Optional[List[Dict[str, Any]]] = None
+    top_breaches:  Optional[List[Dict[str, Any]]] = None
+    sub_stats:     Optional[List[Dict[str, Any]]] = None
+    # Hardwired interconnection — full SLA Matrix response from /api/sla-matrix
+    sla_matrix:    Optional[Dict[str, Any]]       = None
+    # Merged benchmark contract: UI transaction rows and batch-runtime summary
+    # are kept distinct and drive UAT questions only when actually uploaded.
+    benchmark:     Optional[Dict[str, Any]]       = None
+
+
+class RedFlag(BaseModel):
+    id:         str   # Q1, Q2, …
+    category:   str   # Volume | CPU | Memory | Batch | DR | Scheduling | Governance | Correlation | Testing
+    context:    str   # One-sentence observation (with numbers)
+    question:   str   # The PE investigation question
+    risk:       str   # CRITICAL | HIGH | MEDIUM | LOW
+    data_point: str   # The specific metric driving this flag
+
+
+class RiskItem(BaseModel):
+    area:           str
+    risk:           str
+    impact:         str
+    recommendation: str
+
+
+class RedFlagsResponse(BaseModel):
+    flags:       List[RedFlag]
+    risk_matrix: List[RiskItem]
+    total:       int
+    by_risk:     Dict[str, int]
+    ai_narrative: Optional[str] = None
+    ai_model:     Optional[str] = None
+
+
+# ── Optional AI narrative helper ─────────────────────────────────
+def _ai_narrative(flags: List[RedFlag],
+                  risk_matrix: List[RiskItem],
+                  by_risk: Dict[str, int]) -> tuple[Optional[str], Optional[str]]:
+    """Best-effort short narrative summarising the deterministic flags."""
+    if not flags and not risk_matrix:
+        return None, None
+    try:
+        from services.ai_engine import chat as _ai_chat, is_ready
+        if not is_ready().get("nvidia_key") and not is_ready().get("gemini_key"):
+            return None, None
+        digest = {
+            "by_risk":      by_risk,
+            "top_flags":    [f.model_dump() for f in flags[:8]],
+            "risk_matrix":  [r.model_dump() for r in risk_matrix[:8]],
+        }
+        prompt = (
+            "Summarize the top performance-engineering risks in 4 lines: "
+            "(1) overall posture, (2) the single most damaging flag and why, "
+            "(3) the cluster of related risks, (4) one immediate action.\n\n"
+            f"DIGEST: {digest}"
+        )
+        text, model = _ai_chat(
+            prompt,
+            system=("You are a Senior Performance Engineer writing for a CTO. "
+                    "Be specific, quote exact counts, no filler."),
+            max_tokens=380, temperature=0.3,
+        )
+        return text.strip() or None, model
+    except Exception:
+        return None, None
+
+
+
+# ── Endpoint ────────────────────────────────────────────────────
+
+@router.post("/red-flags", response_model=RedFlagsResponse)
+def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
+    bk          = body.batch_kpis    or {}
+    rk          = body.resource_kpis or {}
+    # Harden all caller-supplied lists to dict items — a single non-dict row
+    # (None/str/int from a partial parse) elsewhere crashes .get() and 500s the
+    # whole red-flags + downstream PE-consultant cascade. Generic across 250+ customers.
+    servers     = [s for s in (body.servers or [])      if isinstance(s, dict)]
+    anomalies   = [a for a in (body.anomalies or [])    if isinstance(a, dict)]
+    issues      = [i for i in (body.issues or [])       if isinstance(i, dict)]
+    top_breaches= [j for j in (body.top_breaches or []) if isinstance(j, dict)]
+    sla_mx      = body.sla_matrix    or {}
+    benchmark   = body.benchmark     or {}
+
+    flags:       List[RedFlag]   = []
+    risk_matrix: List[RiskItem]  = []
+    q_num = 0
+
+    def add_flag(cat: str, ctx: str, question: str, risk: str, dp: str) -> None:
+        nonlocal q_num
+        q_num += 1
+        flags.append(RedFlag(
+            id=f"Q{q_num}", category=cat, context=ctx,
+            question=question, risk=risk, data_point=dp,
+        ))
+
+    # ── Batch / CTRL-M flags ─────────────────────────────────────
+    compliance    = _f(bk.get("compliance_pct"), 100.0)
+    breach_count  = _i(bk.get("jobs_breach"))
+    total_jobs    = _i(bk.get("total_jobs"))
+    at_risk_count = _i(bk.get("jobs_at_risk"))
+
+    if total_jobs > 0:
+        if compliance < 80:
+            add_flag(
+                "Batch",
+                f"Batch SLA compliance is {compliance:.1f}% — critically below the 95% production target.",
+                f"What is the root cause of the {breach_count} SLA breach(es) and "
+                f"what is the remediation plan before production go-live?",
+                "CRITICAL", f"{compliance:.1f}% compliance",
+            )
+            risk_matrix.append(RiskItem(
+                area="Batch SLA Compliance",
+                risk="CRITICAL",
+                impact=f"{breach_count} jobs breached SLA — {100 - compliance:.1f}% non-compliance rate",
+                recommendation="Identify and resolve all breach root causes; obtain customer sign-off on each fix",
+            ))
+        elif compliance < 95:
+            add_flag(
+                "Batch",
+                f"Batch SLA compliance is {compliance:.1f}% — below the 95% production target.",
+                f"Are the {breach_count} breaching jobs one-off or recurring failures? "
+                "Is there a fix or waiver in place for each?",
+                "HIGH", f"{breach_count} breaches",
+            )
+
+        if at_risk_count > 0:
+            add_flag(
+                "Scheduling",
+                f"{at_risk_count} jobs have <40% SLA buffer, placing them at risk under full production load.",
+                "What monitoring alerts are configured to catch at-risk jobs before they breach? "
+                "What is the escalation path when a breach is detected?",
+                "HIGH", f"{at_risk_count} at-risk jobs",
+            )
+
+        if top_breaches:
+            # top_breaches falls back to "top-10 jobs by peak runtime" when nothing
+            # actually breached (services/batch_calculator.py breaches_df fallback).
+            # In that fallback state, item [0] is just the single longest-running
+            # job in an otherwise healthy batch — it is NOT an "SLA offender" and
+            # must not be told to root-cause/code-fix/waiver just for being tallest.
+            # Gate on the SAME buffer thresholds the rest of the dashboard uses
+            # (pe_config.SLA_ATRISK_PCT / SLA_LONGJOB_PCT) so this flag only fires
+            # when the job is genuinely at risk, scaling severity to how bad it is.
+            worst    = top_breaches[0]
+            _buf     = worst.get("buffer_pct")
+            _buf_pct = _f(_buf) if _buf is not None else None
+            if _buf_pct is not None and _buf_pct <= _pc.SLA_LONGJOB_PCT:
+                if _buf_pct <= 0:
+                    _sev, _ask = "CRITICAL", (
+                        "Has this job's root cause been formally analysed? "
+                        "Is a code fix, resource allocation change, or SLA waiver required?"
+                    )
+                elif _buf_pct <= _pc.SLA_ATRISK_PCT:
+                    _sev, _ask = "HIGH", (
+                        "This job is close to breaching its SLA — what is the remediation "
+                        "plan, and is it being actively monitored before it tips into breach?"
+                    )
+                else:
+                    _sev, _ask = "MEDIUM", (
+                        "Buffer is thinning but still positive — is this job trending upward, "
+                        "and does it need a fix now or just continued monitoring?"
+                    )
+                add_flag(
+                    "Batch",
+                    f"Job '{worst.get('Job_Name','?')}' is the longest-running batch job at "
+                    f"{_f(worst.get('peak_hrs')):.2f} hrs peak runtime, with only "
+                    f"{_buf_pct:.0f}% SLA buffer left.",
+                    _ask, _sev,
+                    f"{_f(worst.get('peak_hrs')):.2f}h peak / {_buf_pct:.0f}% buffer left",
+                )
+            # else: buffer_pct is None (no buffer data to judge) or comfortably
+            # healthy (> SLA_LONGJOB_PCT) — being the tallest job in a compliant
+            # batch is not itself a red flag, so no question is raised.
+
+    # Zero-duration / pre-execution terminations
+    zero_dur = [
+        a for a in anomalies
+        if "zero" in str(a.get("type", "")).lower() or
+        "zero_duration" in str(a.get("type", "")).lower()
+    ]
+    if zero_dur:
+        add_flag(
+            "Batch",
+            f"{len(zero_dur)} job(s) completed with zero runtime — "
+            "indicating pre-execution termination or dependency abort.",
+            "What triggered these zero-duration failures? "
+            "Are downstream jobs configured to abort on upstream zero-duration outcomes?",
+            "CRITICAL", f"{len(zero_dur)} zero-duration jobs",
+        )
+        risk_matrix.append(RiskItem(
+            area="Zero-Duration Failures",
+            risk="CRITICAL",
+            impact="Pre-execution job terminations can cascade and silently skip critical data processing",
+            recommendation="Review Ctrl-M dependency logic; add explicit failure-handling for zero-duration jobs",
+        ))
+
+    # ── SLA Matrix interconnection ───────────────────────────────
+    # Hardwired flags from the SLA Matrix pillar so Red Flags & RCA
+    # cite the same evidence the SLA tab displays.
+    if sla_mx:
+        sla_breach   = _i(sla_mx.get("breaching_runs"))
+        sla_atrisk   = _i(sla_mx.get("at_risk_runs"))
+        sla_total    = _i(sla_mx.get("total_runs"))
+        sla_comp     = _f(sla_mx.get("compliance_pct"), 100.0)
+        sla_limit    = _f(sla_mx.get("sla_limit_hrs"))
+        sla_label    = sla_mx.get("sla_label") or "SLA"
+        worst_job    = sla_mx.get("worst_job") or ""
+        worst_hrs    = _f(sla_mx.get("worst_hrs"))
+        worst_margin = _f(sla_mx.get("worst_margin_hrs"))
+        breach_rows  = [r for r in (sla_mx.get("breaches") or []) if isinstance(r, dict)]
+
+        if sla_breach > 0 and worst_job:
+            top_breaches_listed = ", ".join(
+                f"{r.get('job_name','?')} ({_f(r.get('run_hrs')):.2f}h)"
+                for r in breach_rows[:3] if r.get("status") == "BREACH"
+            )
+            add_flag(
+                "SLA-Matrix",
+                f"SLA Matrix flags {sla_breach} BREACH run(s) against {sla_label} "
+                f"({sla_comp:.1f}% compliance over {sla_total} runs). "
+                f"Worst: {worst_job} at {worst_hrs:.2f}h (+{worst_margin:.2f}h over).",
+                f"For each breaching job ({top_breaches_listed or worst_job}), what is the "
+                f"committed remediation — code fix, schedule shift, or formal SLA waiver?",
+                "CRITICAL", f"{sla_breach} breach run(s) / {sla_label}",
+            )
+            risk_matrix.append(RiskItem(
+                area=f"SLA Matrix · {sla_label}",
+                risk="CRITICAL",
+                impact=f"{sla_breach} run(s) over {sla_limit:.1f}h limit; worst margin +{worst_margin:.2f}h",
+                recommendation="Trace each breach to its root cause in the SLA tab; "
+                               "either fix the job or obtain a customer-signed waiver before sign-off",
+            ))
+
+        if sla_atrisk > 0 and sla_breach == 0:
+            add_flag(
+                "SLA-Matrix",
+                f"{sla_atrisk} run(s) within 15% of the {sla_label} ceiling — "
+                f"the buffer is too tight for production load growth.",
+                "What load-growth headroom has been agreed with the customer, and which "
+                "jobs will be optimised first if any AT_RISK run flips to BREACH?",
+                "HIGH", f"{sla_atrisk} at-risk run(s) / {sla_label}",
+            )
+
+        # Repeated breaches by the same job → not a one-off
+        from collections import Counter as _Counter
+        repeats = _Counter(
+            r.get("job_name") for r in breach_rows
+            if r.get("status") == "BREACH" and r.get("job_name")
+        )
+        repeat_offenders = [(jn, n) for jn, n in repeats.items() if n >= 2]
+        if repeat_offenders:
+            names = ", ".join(f"{jn}×{n}" for jn, n in repeat_offenders[:3])
+            add_flag(
+                "SLA-Matrix",
+                f"{len(repeat_offenders)} job(s) breach SLA on multiple runs — pattern, not anomaly: {names}.",
+                "Why are these specific jobs breaching repeatedly? Has a code or data-volume "
+                "trend been investigated, or is the SLA itself unrealistic?",
+                "CRITICAL", f"{len(repeat_offenders)} repeat offender(s)",
+            )
+
+    # ── Resource / CPU flags ─────────────────────────────────────
+    critical_srvs = [s for s in servers if _f(s.get("cpu_used")) >= 90]
+    high_srvs     = [s for s in servers if 80 <= _f(s.get("cpu_used")) < 90]
+    mem_critical  = [s for s in servers if _f(s.get("mem_used")) >= 90]
+    disk_critical = [s for s in servers if _f(s.get("disk_used_max")) >= 90]
+    dual_pressure = [
+        s for s in servers
+        if _f(s.get("cpu_used")) >= 80 and _f(s.get("mem_used")) >= 70
+    ]
+
+    if critical_srvs:
+        top_cpu = critical_srvs[0]
+        add_flag(
+            "CPU",
+            f"{len(critical_srvs)} server(s) running at ≥90% CPU — critically saturated.",
+            "What is the primary workload driver on these servers? "
+            "What is the plan to reduce CPU below 80% before production go-live?",
+            "CRITICAL",
+            f"{top_cpu.get('host','?')} @ {_f(top_cpu.get('cpu_used')):.0f}% CPU",
+        )
+        risk_matrix.append(RiskItem(
+            area="CPU Saturation",
+            risk="CRITICAL",
+            impact=f"{len(critical_srvs)} server(s) at ≥90% CPU — batch jobs will fail under concurrent load",
+            recommendation="Increase vCPU allocation or redistribute workload; target <80% max CPU",
+        ))
+
+    if high_srvs:
+        add_flag(
+            "CPU",
+            f"{len(high_srvs)} server(s) at 80–90% CPU — limited headroom under peak load.",
+            "Under production peak load concurrent with batch execution, will these servers exceed 90%? "
+            "What capacity buffer has been agreed with the customer?",
+            "HIGH", f"{len(high_srvs)} server(s) at 80–90% CPU",
+        )
+
+    if mem_critical:
+        # Separate DB servers in expected band from genuine memory pressure
+        # (module-level `_pc` import above covers this — no local re-import,
+        # which previously shadowed _pc as function-local for the whole function
+        # and broke the earlier buffer-materiality check with an UnboundLocalError).
+        db_mem_expected = [s for s in mem_critical
+                          if (s.get("type") or s.get("server_type") or "").upper() == "DB"
+                          and _f(s.get("mem_used")) <= _pc.DB_MEM_BAND_HIGH]
+        mem_genuine = [s for s in mem_critical if s not in db_mem_expected]
+
+        if db_mem_expected:
+            add_flag(
+                "Memory",
+                f"{len(db_mem_expected)} DB server(s) at ≥90% memory — within expected DB allocation band.",
+                f"DB servers pre-allocate SGA/PGA memory; steady usage up to {_pc.DB_MEM_BAND_HIGH:.0f}% is expected. "
+                f"Confirm no page/swap activity and no upward trend above {_pc.DB_MEM_WARN:.0f}%.",
+                "MEDIUM",
+                f"{db_mem_expected[0].get('host','?')} @ {_f(db_mem_expected[0].get('mem_used')):.0f}% memory (DB expected)",
+            )
+
+        if mem_genuine:
+            top_mem = mem_genuine[0]
+            add_flag(
+                "Memory",
+                f"{len(mem_genuine)} server(s) at ≥90% memory utilisation.",
+                "Is memory pressure causing OS swapping or paging? "
+                "What is the JVM heap and GC configuration on these hosts?",
+                "CRITICAL",
+                f"{top_mem.get('host','?')} @ {_f(top_mem.get('mem_used')):.0f}% memory",
+            )
+            risk_matrix.append(RiskItem(
+                area="Memory Pressure",
+                risk="CRITICAL",
+                impact="High memory utilisation may cause OOM kills and silent batch job failures",
+                recommendation="Add RAM or tune JVM heap settings; add OOM alerting to monitoring",
+            ))
+
+    if dual_pressure:
+        add_flag(
+            "Infrastructure",
+            f"{len(dual_pressure)} server(s) face DUAL pressure — CPU ≥80% AND Memory ≥70%.",
+            "Are these dual-pressure servers hosting the most critical batch workloads? "
+            "What is the immediate mitigation plan?",
+            "CRITICAL", f"{len(dual_pressure)} dual-pressure server(s)",
+        )
+
+    if disk_critical:
+        top_disk = disk_critical[0]
+        add_flag(
+            "Infrastructure",
+            f"{len(disk_critical)} server(s) at ≥90% disk utilisation.",
+            "What is the disk growth rate and projected full date? "
+            "Is a disk cleanup or archive job scheduled before production cutover?",
+            "HIGH",
+            f"{top_disk.get('host','?')} @ {_f(top_disk.get('disk_used_max')):.0f}% disk",
+        )
+
+    fleet_grade = rk.get("fleet_grade", "")
+    if fleet_grade in ("C", "D", "F"):
+        add_flag(
+            "Infrastructure",
+            f"Overall fleet health grade is {fleet_grade} — below acceptable production standard.",
+            "What remediation actions have been agreed to bring fleet health to grade B or above "
+            "before the PE audit sign-off?",
+            "HIGH", f"Fleet grade {fleet_grade}",
+        )
+        risk_matrix.append(RiskItem(
+            area="Fleet Health",
+            risk="HIGH",
+            impact=f"Grade {fleet_grade} fleet health indicates systemic infrastructure risk",
+            recommendation=f"Address critical/high servers first; re-assess fleet grade post-remediation",
+        ))
+
+    # ── Governance / Issues flags ────────────────────────────────
+    open_critical = [
+        i for i in issues
+        if str(i.get("Severity", "")).upper() in ("CRITICAL", "HIGH")
+        and str(i.get("Status", "")).upper() not in ("CLOSED", "WAIVED")
+    ]
+
+    if open_critical:
+        add_flag(
+            "Governance",
+            f"{len(open_critical)} open CRITICAL/HIGH issue(s) without resolution in the register.",
+            "Does each issue have an assigned owner, concrete ETA, and tested fix? "
+            "What is blocking resolution?",
+            "CRITICAL", f"{len(open_critical)} open critical/high issues",
+        )
+        risk_matrix.append(RiskItem(
+            area="Open Critical Issues",
+            risk="CRITICAL",
+            impact=f"{len(open_critical)} unresolved critical/high issues blocking go-live sign-off",
+            recommendation="Assign owners with concrete ETAs; escalate blockers to PE lead immediately",
+        ))
+
+    if not issues and (breach_count > 0 or critical_srvs):
+        add_flag(
+            "Governance",
+            "No issues have been logged despite observable performance anomalies in the data.",
+            "Has a formal issues review been conducted? "
+            "Are all anomalies tracked, classified, and assigned in the register?",
+            "MEDIUM", "0 issues logged",
+        )
+
+    # ── Correlation flag ─────────────────────────────────────────
+    if critical_srvs and breach_count > 0:
+        add_flag(
+            "Correlation",
+            f"{breach_count} SLA breach(es) co-exist with {len(critical_srvs)} critically loaded server(s).",
+            "Has a formal temporal correlation analysis been run to separate resource-caused "
+            "failures from scheduling conflicts?",
+            "CRITICAL",
+            f"{breach_count} breaches + {len(critical_srvs)} critical servers",
+        )
+
+    # ── Volume / SOW commitment flags ────────────────────────────
+    # Compare each delivered DFU / SKU / item-location actual against its SOW target
+    # and raise a banded, situation-specific question. The bands and the remediation
+    # doctrine come from PE practice:
+    #
+    #   ±10% of SOW (90–110%) is the accepted operating band — no question (green).
+    #
+    #   OVER-consumption (>110%): obsolete data is deleted/purged wherever possible
+    #     (retention + exclusion rules); if it cannot be purged, a new SOW is required,
+    #     especially once it crosses into the next T-shirt size. Confirm customer
+    #     approval of the current data dynamics.
+    #
+    #   UNDER-consumption is the harder case: light load will not exercise the system,
+    #     so the team must acknowledge performance may degrade as volumes grow. We need
+    #     the customer's data-growth plan / commitment; and if growth is expected it
+    #     must first be loaded in TEST with a batch impact analysis (via consulting)
+    #     before PROD, to avoid a sudden runtime problem under data growth.
+    #       70–90%  mildly under (just outside the ±10% band) — confirm growth plan
+    #       40–70%  materially under — growth commitment + TEST-first validation
+    #       < 40%   severely under — formal justification + customer awareness
+    #
+    # Phrasing is varied deterministically per metric (stable hash) so a multi-metric
+    # audit reads like a prepared consultant, not the same sentence repeated. Driven
+    # purely by the uploaded/entered numbers — generic across every customer.
+    def _vol_pick(options: List[str], seed: str) -> str:
+        if not options:
+            return ""
+        return options[sum(ord(c) for c in seed) % len(options)]
+
+    _sow_cmp     = (body.model_extra or {}).get("sow_compare") or {}
+    _sow_metrics = _sow_cmp.get("metrics") if isinstance(_sow_cmp, dict) else None
+    if isinstance(_sow_metrics, list):
+        for _idx, _m in enumerate(_sow_metrics):
+            if not isinstance(_m, dict):
+                continue
+            _label   = str(_m.get("label") or _m.get("key") or "Volume metric").strip()
+            _sow_v   = _f(_m.get("sow"), 0.0)
+            _act_raw = _m.get("actual")
+            if _act_raw is None or _sow_v <= 0:
+                continue  # no target or no actual → nothing to challenge
+            _act_v = _f(_act_raw, 0.0)
+            _pct   = _f(_m.get("pct")) if _m.get("pct") is not None else round(_act_v / _sow_v * 100, 1)
+            _act_s = f"{_act_v:,.0f}"
+            _sow_s = f"{_sow_v:,.0f}"
+            # Humanise the label for mid-sentence use: lowercase ordinary words but
+            # keep all-caps acronyms (DFU, SKU) intact — "Item-Locations" → "item-locations",
+            # "Daily DFU" → "daily DFU".
+            _low   = " ".join(
+                w if w.isupper() else w.lower() for w in _label.split()
+            ) or "volume"
+            _ev    = f"{_label}: {_pct:.0f}% of SOW"
+            _gap   = _sow_v - _act_v
+            _over  = _act_v - _sow_v
+            # Target value that brings an overage back inside the accepted +10% band.
+            _purge_target = _sow_v * 1.10
+            # Seed the phrasing picker with the metric's position as well as its name,
+            # so two metrics that fall in the SAME band (e.g. DFU and SKU both severely
+            # under) never draw the identical sentence — each reads as its own question.
+            _seed  = f"{_label}#{_idx}"
+
+            if _pct < 40:
+                # Severely under contract. Three plain-English angles: (1) is it
+                # intentional & approved, (2) the hidden risk + TEST-first remedy,
+                # (3) the growth plan + performance acknowledgement.
+                _q = _vol_pick([
+                    (f"Running at {_pct:.0f}% of contract is a big gap. Is this a deliberate partial "
+                     f"load for this phase, or is {_low} data still being brought in? Please confirm the "
+                     f"customer has agreed to validate at {_act_s} rather than the contracted {_sow_s}."),
+                    (f"At this volume the batch isn't being tested at real scale, so any slowdown that "
+                     f"only appears once data grows is still hidden today. If {_low} is expected to climb "
+                     f"toward {_sow_s}, that growth should be loaded into TEST and impact-tested first, "
+                     f"before it reaches PROD."),
+                    (f"This is well under the contracted {_sow_s}. What is the plan and timeline to reach "
+                     f"full volume, and has the customer accepted that batch runtimes may rise as {_low} "
+                     f"grows from {_act_s}?"),
+                ], _seed)
+                add_flag(
+                    "Volume",
+                    f"{_label} is running at just {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — well below the SOW.",
+                    _q,
+                    "CRITICAL" if _pct < 25 else "HIGH",
+                    _ev,
+                )
+            elif _pct < 70:
+                # Materially under — growth commitment + TEST-first validation.
+                _q = _vol_pick([
+                    (f"At {_pct:.0f}% of contract, is the remaining {_gap:,.0f} of {_low} coming in a "
+                     f"later phase? If more data is on the way, the batch should be re-checked at the "
+                     f"higher volume in TEST before go-live."),
+                    (f"This is short of the contracted volume. Does {_act_s} cover everything in scope, "
+                     f"or is more {_low} still to be loaded? If more is expected, please plan a TEST run "
+                     f"at that volume so any runtime impact is caught early."),
+                    (f"Delivery sits below the accepted range. What is the plan to reach the contracted "
+                     f"{_sow_s}, and has the customer accepted that runtimes may rise as {_low} grows?"),
+                ], _seed)
+                add_flag(
+                    "Volume",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — below the accepted ±10% range.",
+                    _q,
+                    "MEDIUM",
+                    _ev,
+                )
+            elif _pct < 90:
+                # Mildly under — just outside the ±10% accepted band. Lightest touch.
+                _q = _vol_pick([
+                    (f"{_label} is a little under the accepted range, at {_pct:.0f}% of contract. Is it "
+                     f"expected to grow toward {_sow_s}, and is that captured in a plan?"),
+                    (f"This sits just below the ±10% band. Please confirm whether the remaining "
+                     f"{_gap:,.0f} of {_low} will be loaded, and flag any growth for a quick TEST check first."),
+                ], _seed)
+                add_flag(
+                    "Volume",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — just below the accepted ±10% range.",
+                    _q,
+                    "LOW",
+                    _ev,
+                )
+            elif _pct > 110:
+                # Over the contracted ceiling — purge obsolete / exclusion rules, else new SOW.
+                _q = _vol_pick([
+                    (f"{_label} is about {_over:,.0f} over the contracted ceiling. Can the older {_low} "
+                     f"be purged or excluded, and on what schedule? Bringing it back to roughly "
+                     f"{_purge_target:,.0f} keeps it inside the agreed range."),
+                    (f"This is {_pct:.0f}% of contract. Is there a retention or purge plan for the extra "
+                     f"{_over:,.0f}? If the data cannot be reduced, the SOW likely needs re-sizing — "
+                     f"especially if this crosses into the next T-shirt size."),
+                    (f"Running above contract adds cost and capacity risk. Is the customer aware they are "
+                     f"over the SOW, and does the contract need to move up a size to cover the extra "
+                     f"{_over:,.0f} of {_low}?"),
+                ], _seed)
+                add_flag(
+                    "Volume",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — over the SOW ceiling.",
+                    _q,
+                    "HIGH" if _pct > 130 else "MEDIUM",
+                    _ev,
+                )
+            # 90–110% → within the accepted ±10% band → no question (green).
+
+    # ── Dynamic PE batch-review question bank ────────────────────
+    # Turn whatever the Ctrl-M upload actually shows into specific, plain-English
+    # consultative questions (named jobs, real old→new times, named breach days).
+    # Hydrate the richer batch detail from session_cache because the frontend
+    # red-flags payload only carries headline KPIs.
+    try:
+        from services import session_cache as _sc
+        from services.batch_questions import generate_batch_questions, SEV_RANK
+
+        _last_batch = _sc.get("last_batch") or {}
+
+        def _src(*keys):
+            for k in keys:
+                v = _sc.ac_get(k)
+                if v:
+                    return v
+            for k in keys:
+                v = _last_batch.get(k)
+                if v:
+                    return v
+            return None
+
+        # Lifecycle hint: a TEST/UAT dataset frames questions toward go-live.
+        _env_names = [
+            str(s.get("Sub_Application") or s.get("sub_application") or "")
+            for s in (body.sub_stats or [])
+        ]
+        _is_test = any(
+            str(n).upper().startswith(("TEST_", "UAT_", "SIT_", "QA_", "STG_", "DEV_"))
+            for n in _env_names
+        )
+        _lifecycle = "go-live" if _is_test else ""
+
+        _qctx = {
+            "kpis":        bk or _last_batch.get("kpis"),
+            "job_summary": _src("job_summary", "batch_top_jobs") or body.top_breaches,
+            "anomalies":   body.anomalies or _src("regression_df"),
+            "window":      _src("daily_window_series"),
+            "sla_matrix":  sla_mx or _sc.get("last_sla_matrix"),
+            "benchmark":   _sc.get("last_benchmark"),
+            "sub_stats":   body.sub_stats,
+        }
+
+        _bank = generate_batch_questions(_qctx, lifecycle=_lifecycle)
+        # Red-flags already emits a repeat-offender flag above; drop the bank's
+        # duplicate so the same finding is not shown twice.
+        for _bq in _bank:
+            if _bq.get("root_cause") == "REPEAT_BREACH" and sla_mx:
+                continue
+            add_flag(
+                _bq["category"], _bq["observation"], _bq["question"],
+                _bq["severity"], _bq["evidence"],
+            )
+            if SEV_RANK.get(_bq["severity"], 0) >= SEV_RANK["CRITICAL"]:
+                risk_matrix.append(RiskItem(
+                    area=_bq["category"],
+                    risk="CRITICAL",
+                    impact=_bq["observation"],
+                    recommendation=_bq["question"],
+                ))
+    except Exception as _qe:  # question bank is additive — never break red-flags
+        import logging
+        logging.getLogger("pe_dashboard.redflags").warning(
+            "batch question bank failed: %s", _qe)
+
+    # ── Evidence-driven UAT questions ──────────────────────────────────────
+    # Do not ask generic pre-go-live questions when no UAT evidence was
+    # uploaded.  Every question below is anchored to a UI benchmark row or a
+    # batch-runtime comparison supplied for this audit.
+    _ui_rows = [r for r in (benchmark.get("rows") or []) if isinstance(r, dict)]
+    _batch_perf = benchmark.get("batch_perf_summary") or {}
+
+    if _ui_rows:
+        _ui_total = _i(benchmark.get("total_transactions"), len(_ui_rows)) or len(_ui_rows)
+        _ui_breach = sum(1 for r in _ui_rows if str(r.get("status") or "").upper() in ("BREACH", "RED"))
+        _ui_watch = sum(1 for r in _ui_rows if str(r.get("status") or "").upper() in ("WATCH", "AMBER"))
+        _ui_ok = max(_ui_total - _ui_breach - _ui_watch, 0)
+        _ui_file = str(benchmark.get("ui_filename") or benchmark.get("filename") or "uploaded UI benchmark")
+        _ui_evidence = f"{_ui_ok} OK · {_ui_watch} WATCH · {_ui_breach} BREACH / {_ui_total} transactions"
+        if _ui_breach or _ui_watch:
+            _ui_focus = next((str(r.get("transaction") or "?") for r in _ui_rows
+                              if str(r.get("status") or "").upper() in ("BREACH", "RED", "WATCH", "AMBER")), "affected transaction")
+            add_flag(
+                "UAT UI Performance",
+                f"UI benchmark '{_ui_file}' recorded {_ui_breach} breach(es) and {_ui_watch} watch item(s) across {_ui_total} transaction(s).",
+                f"What remediation and customer acceptance decision is agreed for '{_ui_focus}' and the remaining UI performance exceptions?",
+                "HIGH" if _ui_breach else "MEDIUM", _ui_evidence,
+            )
+        else:
+            add_flag(
+                "UAT UI Performance",
+                f"UI benchmark '{_ui_file}' recorded {_ui_total} transaction(s) with no WATCH or BREACH result.",
+                "Has the customer reviewed and accepted the measured UI performance evidence for this test scope?",
+                "LOW", _ui_evidence,
+            )
+
+    if isinstance(_batch_perf, dict) and (_i(_batch_perf.get("total_jobs")) or _i(_batch_perf.get("comparable"))):
+        _batch_total = _i(_batch_perf.get("total_jobs"))
+        _batch_comp = _i(_batch_perf.get("comparable"))
+        _batch_reg = _i(_batch_perf.get("regressions"))
+        _batch_imp = _i(_batch_perf.get("improvements"))
+        _batch_rate = round((_batch_reg / _batch_comp) * 100, 1) if _batch_comp else None
+        _batch_file = str(benchmark.get("batch_filename") or benchmark.get("filename") or "uploaded batch runtime comparison")
+        _batch_evidence = (
+            f"{_batch_reg} regressions / {_batch_comp} comparable"
+            + (f" ({_batch_rate:.1f}%)" if _batch_rate is not None else "")
+            + f" · {_batch_imp} improvements"
+        )
+        if _batch_reg:
+            add_flag(
+                "UAT Batch Performance",
+                f"Batch runtime comparison '{_batch_file}' found {_batch_reg} regression(s) across {_batch_comp} comparable job(s).",
+                "Which regressed batch jobs are accepted, remediated, or excluded with a documented customer decision before UAT sign-off?",
+                "HIGH", _batch_evidence,
+            )
+        else:
+            add_flag(
+                "UAT Batch Performance",
+                f"Batch runtime comparison '{_batch_file}' found no regressions across {_batch_comp} comparable job(s).",
+                "Has the customer reviewed and accepted the batch-runtime comparison for this UAT scope?",
+                "LOW", _batch_evidence,
+            )
+    # ── Customer sign-off gate ───────────────────────────────────
+    # A PE audit is not complete without formal customer approval of the batch
+    # schedule and SLA window timings. Fires only when there IS batch/SLA data to
+    # sign off on, and phrases toward the environment actually under review (a
+    # TEST/UAT capture asks for sign-off on the TEST schedule + windows).
+    _has_batch = total_jobs > 0 or bool(sla_mx) or bool(bk.get("window_total_days"))
+    if _has_batch:
+        _env_is_test = any(
+            str(s.get("Sub_Application") or s.get("sub_application") or "").upper()
+            .startswith(("TEST_", "UAT_", "SIT_", "QA_", "STG_", "DEV_"))
+            for s in (body.sub_stats or [])
+        )
+        _env_word = "TEST/UAT" if _env_is_test else "production"
+        add_flag(
+            "Approval",
+            f"The audit reviews the {_env_word} batch schedule and SLA window timings, but no "
+            f"formal customer approval is attached to this dataset.",
+            f"Has the customer formally reviewed and signed off on the {_env_word} batch "
+            f"schedule and SLA window timings? If approval exists, please attach the signed "
+            f"document (or SharePoint link) so it is captured against this audit.",
+            "HIGH", "No customer sign-off attached",
+        )
+
+    # ── Tally by risk level ──────────────────────────────────────
+    by_risk: Dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    for f in flags:
+        by_risk[f.risk] = by_risk.get(f.risk, 0) + 1
+
+    # Default risk matrix entry if nothing generated
+    if not risk_matrix and total_jobs == 0 and not servers:
+        risk_matrix.append(RiskItem(
+            area="Data Completeness",
+            risk="MEDIUM",
+            impact="No batch or resource data available — analysis may be incomplete",
+            recommendation="Upload Ctrl-M CSV and resource utilisation report for a full risk assessment",
+        ))
+
+    resp = RedFlagsResponse(
+        flags=flags,
+        risk_matrix=risk_matrix,
+        total=len(flags),
+        by_risk=by_risk,
+    )
+    try:
+        from services import session_cache
+        session_cache.set("last_red_flags", resp.model_dump())
+    except Exception:
+        pass
+    return resp
