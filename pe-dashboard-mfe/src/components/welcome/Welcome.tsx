@@ -14,7 +14,20 @@
  */
 
 import React, { ChangeEvent, useEffect, useState } from 'react';
-import { Box, Button, CircularProgress, makeStyles, Paper, Theme, Typography } from '@material-ui/core';
+import {
+  Box,
+  Button,
+  CircularProgress,
+  makeStyles,
+  Paper,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Theme,
+  Typography,
+} from '@material-ui/core';
 import { CentralZone, EastZone, LayoutWrapper, NorthZone, WestZone } from '@jda/lui-dashboard-scaffolding-layouts';
 import { LuiLogoStacked } from '@jda/lui-common-component-library';
 import { AuditContext, getAuditContext, SmartUploadResponse, uploadDashboardFile } from '../../api/dashboardApi';
@@ -73,6 +86,10 @@ const useStyles = makeStyles((theme: Theme) => {
       padding: theme.spacing(2),
       borderLeft: `3px solid ${theme.palette.primary.main}`,
     },
+    tableContainer: {
+      marginTop: theme.spacing(3),
+      overflowX: 'auto',
+    },
     paperWestZone: {
       height: `calc(100vh - ${theme.spacing(30.75)}px)`,
     },
@@ -123,6 +140,8 @@ export function Welcome() {
     }
   };
 
+  const resourceServers = upload?.classification.type === 'resource' ? upload.data.servers || [] : [];
+
   return (
     <div className={classes.welcomeContainer}>
       <LayoutWrapper>
@@ -169,6 +188,40 @@ export function Welcome() {
                   <Typography variant="subtitle2">Backend summary</Typography>
                   <Typography variant="body2">{upload.data.ai_summary}</Typography>
                 </Paper>
+              )}
+              {upload?.classification.type === 'resource' && resourceServers.length > 0 && (
+                <Box className={classes.tableContainer} component="section">
+                  <Typography variant="subtitle2">Resource health</Typography>
+                  <Table size="small" aria-label="Resource health results">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Host</TableCell>
+                        <TableCell>Type</TableCell>
+                        <TableCell align="right">CPU %</TableCell>
+                        <TableCell align="right">Memory %</TableCell>
+                        <TableCell align="right">Disk %</TableCell>
+                        <TableCell align="right">Health</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {resourceServers.map((server) => (
+                        <TableRow key={`${server.host}-${server.type || 'APP'}`}>
+                          <TableCell>{server.host}</TableCell>
+                          <TableCell>{server.type || 'APP'}</TableCell>
+                          <TableCell align="right">{(server.cpu_used || 0).toFixed(1)}</TableCell>
+                          <TableCell align="right">{(server.mem_used || 0).toFixed(1)}</TableCell>
+                          <TableCell align="right">{(server.disk_used_max || 0).toFixed(1)}</TableCell>
+                          <TableCell align="right">{(server.health_score || 0).toFixed(1)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Box>
+              )}
+              {upload?.classification.type === 'resource' && resourceServers.length === 0 && (
+                <Typography variant="body2" color="textSecondary">
+                  The resource upload completed without server metric rows.
+                </Typography>
               )}
               {context && (
                 <Typography variant="body2" color="textSecondary">
