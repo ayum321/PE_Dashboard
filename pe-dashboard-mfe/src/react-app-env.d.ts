@@ -14,3 +14,13 @@
  */
 
 /// <reference types="react-scripts" />
+
+interface RuntimeEnvironment {
+	API_BASE_URL?: string;
+	FRAME_URL_PATH?: string;
+	LOCAL_APP_NAME?: string;
+}
+
+interface Window {
+	env: RuntimeEnvironment;
+}
