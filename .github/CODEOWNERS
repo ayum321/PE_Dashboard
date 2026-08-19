@@ -1,0 +1,5 @@
+
+# Example CODEOWNERS file
+# Assigns ownership of the whole repository to a GitHub team
+
+*       @BY-Product-Development/asre-planning-admins   # Team members are owners
