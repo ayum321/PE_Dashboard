@@ -56,9 +56,19 @@ def verify_identity(host: str, port: int) -> bool:
     return False
 
 
+def verify_mfe(host: str, port: int) -> bool:
+    """Check that the standalone React MFE is serving its HTML shell."""
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/", timeout=3) as resp:
+            return resp.status == 200 and b"<html" in resp.read(4096).lower()
+    except Exception:
+        return False
+
+
 def main() -> int:
     host = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_HOST
     port = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_PORT
+    mode = sys.argv[3] if len(sys.argv) > 3 else "api"
     # Cache-busting timestamp forces the browser to make a fresh HTTP request
     # instead of serving a previously cached page from the same port.
     url = f"http://{host}:{port}/?_={int(time.time())}"
@@ -68,7 +78,11 @@ def main() -> int:
         print(f"[browser] timeout — server did not start within {TIMEOUT_SEC}s")
         return 1
 
-    if not verify_identity(host, port):
+    if mode == "mfe":
+        verified = verify_mfe(host, port)
+    else:
+        verified = verify_identity(host, port)
+    if not verified:
         print(f"[browser] ABORT: port {port} is not serving PE Dashboard")
         return 3
 

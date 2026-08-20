@@ -548,6 +548,7 @@ echo.
 echo  ================================================================
 echo   Dashboard  :  http://%HOST%:!PORT!/
 echo   API Docs   :  http://%HOST%:!PORT!/docs
+echo   React MFE   :  http://127.0.0.1:3000/
 echo   Config     :  .pe_config.json  (edit in Settings tab)
 echo.
 echo   Tabs: Upload+Intake  Executive  Batch  Resource  Correlation
@@ -557,7 +558,20 @@ echo.
 echo   [7/7] Starting server  (Ctrl+C to stop)...
 echo.
 
-start "PE Browser" /B !PY! app\_open_browser.py %HOST% !PORT!
+if not exist "pe-dashboard-mfe\node_modules\react-scripts\bin\react-scripts.js" (
+    echo   [ERROR] React MFE dependencies are not installed.
+    echo          Run: cd pe-dashboard-mfe ^&^& npm ci
+    pause
+    exit /b 1
+)
+
+set "MFE_API_URL=http://%HOST%:!PORT!"
+set "API_BASE_URL=!MFE_API_URL!"
+set "appName=PE Audit Dashboard"
+set "frameUrlPath=/"
+call npm --prefix pe-dashboard-mfe run setLocalEnv >nul 2>&1
+start "PE MFE" cmd /c "set API_BASE_URL=!MFE_API_URL! ^& set appName=PE Audit Dashboard ^& set frameUrlPath=/ ^& cd /d %CD%\pe-dashboard-mfe ^& npm run start:standalone"
+start "PE Browser" /B !PY! app\_open_browser.py 127.0.0.1 3000 mfe
 !PY! -m uvicorn %APP% --app-dir app --host %HOST% --port !PORT! --reload --reload-dir app\routers --reload-dir app\services --reload-dir app\templates --reload-dir app\static
 
 REM ── If uvicorn exits, check if it was a port-bind failure ──
