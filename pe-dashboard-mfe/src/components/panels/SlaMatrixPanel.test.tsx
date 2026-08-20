@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { render } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { AppDataProvider, useAppData } from '../../context/AppDataContext';
 import { SlaMatrixPanel } from './SlaMatrixPanel';
 
@@ -48,9 +49,11 @@ describe('SlaMatrixPanel', () => {
   it('shows the upload control and empty state before any file is uploaded', () => {
     window['env'] = { LOCAL_APP_NAME: 'Local MFE' };
     const { getByText, getByRole } = render(
-      <AppDataProvider>
-        <SlaMatrixPanel />
-      </AppDataProvider>,
+      <MemoryRouter>
+        <AppDataProvider>
+          <SlaMatrixPanel />
+        </AppDataProvider>
+      </MemoryRouter>,
     );
 
     expect(getByRole('button', { name: /Upload SLA Matrix/i })).toBeDefined();
@@ -60,11 +63,13 @@ describe('SlaMatrixPanel', () => {
   it('renders breach crux, job summary, resource-link table and buffer chart without crashing on real-shaped data', () => {
     window['env'] = { LOCAL_APP_NAME: 'Local MFE' };
     const { getByText, getAllByText } = render(
-      <AppDataProvider>
-        <SlaDataInjector>
-          <SlaMatrixPanel />
-        </SlaDataInjector>
-      </AppDataProvider>,
+      <MemoryRouter>
+        <AppDataProvider>
+          <SlaDataInjector>
+            <SlaMatrixPanel />
+          </SlaDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
     );
 
     expect(getByText(/is the worst offender/i)).toBeDefined();

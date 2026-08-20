@@ -1,4 +1,5 @@
 import React, { ChangeEvent, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Box,
   Button,
@@ -368,49 +369,136 @@ export function SlaMatrixPanel() {
           )}
 
           {/* ── Active SLA Commitments — Tier 1/2/3 workflow table, ported from
-              _renderSlaCommitmentsPanel() (app.js). ── */}
-          {workflowSummary.length > 0 && (
-            <Box style={{ borderRadius: 12, border: '1px solid #213060', background: 'rgba(17,29,54,.5)', padding: 12, marginTop: 12 }}>
-              <Typography variant="subtitle2">Active SLA Commitments</Typography>
-              <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
-              {Array.from(workflowByTier.entries()).map(([tier, rows]) => (
-                <Box key={tier} style={{ marginTop: 12 }}>
-                  <Typography variant="caption" style={{ fontWeight: 700, color: '#a855f7' }}>{tier}</Typography>
-                  <Table size="small" className="pe-table" aria-label={`SLA commitments ${tier}`} style={{ marginTop: 4 }}>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Workflow</TableCell>
-                        <TableCell>Type</TableCell>
-                        <TableCell align="right">SLA</TableCell>
-                        <TableCell align="right">Peak Window</TableCell>
-                        <TableCell align="right">Buffer %</TableCell>
-                        <TableCell>Status</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {rows.slice(0, 20).map((wf, index) => (
-                        <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
-                          <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
-                          <TableCell>{wf.batch_type || '\u2014'}</TableCell>
-                          <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
-                          <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
-                          <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
-                            {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
-                          </TableCell>
-                          <TableCell>
-                            <span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </Box>
-              ))}
-              <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 8, fontSize: 9 }}>
-                OK {'>'}40% {'\u00b7'} LONG_JOB 15{'\u2013'}40% {'\u00b7'} AT_RISK 0{'\u2013'}15% {'\u00b7'} BREACH {'<'}0% {'\u00b7'} Buffer=(SLA-rt)÷SLA×100
-              </Typography>
+              _renderSlaCommitmentsPanel() (app.js). Tier 2 renders even when empty
+              (with an "Upload SOW" CTA) to match the real dashboard's always-visible
+              two-tier layout with numbered circle badges. ── */}
+          <Box style={{ borderRadius: 12, border: '1px solid rgba(34,211,238,.25)', background: 'rgba(34,211,238,.03)', padding: 16, marginTop: 12 }}>
+            <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+              <Box>
+                <Typography variant="subtitle2">Active SLA Commitments</Typography>
+                <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
+              </Box>
+              <Link to="/sow" style={{ fontSize: 10, fontWeight: 700, color: '#22d3ee', textDecoration: 'none' }}>View SOW Contract {'\u2192'}</Link>
             </Box>
-          )}
+
+            {/* Tier 2 — SOW contract ceilings (always shown, empty-state CTA when absent) */}
+            <Box style={{ marginBottom: 16 }}>
+              <Box display="flex" alignItems="center" style={{ gap: 8, marginBottom: 8 }}>
+                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'rgba(34,211,238,.2)', border: '1px solid rgba(34,211,238,.4)', color: '#22d3ee', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>2</span>
+                <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10 }}>Tier 2 {'\u2014'} SOW Contract Batch Window Ceilings</Typography>
+              </Box>
+              {!workflowByTier.has('Tier 2 \u2014 SOW Contract Batch Window Ceilings') ? (
+                <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>
+                  No SOW contract uploaded yet: <Link to="/sow" style={{ color: '#22d3ee' }}>Upload SOW {'\u2192'}</Link>
+                </Typography>
+              ) : (
+                <Table size="small" className="pe-table" aria-label="SLA commitments Tier 2">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Workflow</TableCell>
+                      <TableCell>Type</TableCell>
+                      <TableCell align="right">SLA</TableCell>
+                      <TableCell align="right">Peak Window</TableCell>
+                      <TableCell align="right">Buffer %</TableCell>
+                      <TableCell>Status</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {(workflowByTier.get('Tier 2 \u2014 SOW Contract Batch Window Ceilings') || []).slice(0, 20).map((wf, index) => (
+                      <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
+                        <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
+                        <TableCell>{wf.batch_type || '\u2014'}</TableCell>
+                        <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
+                          {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
+                        </TableCell>
+                        <TableCell><span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </Box>
+
+            {/* Tier 1 — BatchSLA workflow overrides (always shown, empty-state CTA when absent) */}
+            <Box>
+              <Box display="flex" alignItems="center" style={{ gap: 8, marginBottom: 8 }}>
+                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'rgba(45,212,191,.2)', border: '1px solid rgba(45,212,191,.4)', color: '#2dd4bf', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>1</span>
+                <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10 }}>Tier 1 {'\u2014'} BatchSLA_info.xlsx Workflow Overrides</Typography>
+              </Box>
+              {!workflowByTier.has('Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') ? (
+                <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>No BatchSLA file loaded {'\u2014'} upload on Upload page</Typography>
+              ) : (
+                <Table size="small" className="pe-table" aria-label="SLA commitments Tier 1">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Workflow</TableCell>
+                      <TableCell>Type</TableCell>
+                      <TableCell align="right">SLA</TableCell>
+                      <TableCell align="right">Peak Window</TableCell>
+                      <TableCell align="right">Buffer %</TableCell>
+                      <TableCell>Status</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {(workflowByTier.get('Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') || []).slice(0, 20).map((wf, index) => (
+                      <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
+                        <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
+                        <TableCell>{wf.batch_type || '\u2014'}</TableCell>
+                        <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
+                          {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
+                        </TableCell>
+                        <TableCell><span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </Box>
+
+            {/* Tier 3 — global defaults, only shown when workflows resolved via fallback */}
+            {workflowByTier.has('Tier 3 \u2014 Global Defaults') && (
+              <Box style={{ marginTop: 16 }}>
+                <Box display="flex" alignItems="center" style={{ gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'rgba(107,125,179,.2)', border: '1px solid rgba(107,125,179,.4)', color: '#6b7db3', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>3</span>
+                  <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10 }}>Tier 3 {'\u2014'} Global Defaults</Typography>
+                </Box>
+                <Table size="small" className="pe-table" aria-label="SLA commitments Tier 3">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Workflow</TableCell>
+                      <TableCell>Type</TableCell>
+                      <TableCell align="right">SLA</TableCell>
+                      <TableCell align="right">Peak Window</TableCell>
+                      <TableCell align="right">Buffer %</TableCell>
+                      <TableCell>Status</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {(workflowByTier.get('Tier 3 \u2014 Global Defaults') || []).slice(0, 20).map((wf, index) => (
+                      <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
+                        <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
+                        <TableCell>{wf.batch_type || '\u2014'}</TableCell>
+                        <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
+                          {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
+                        </TableCell>
+                        <TableCell><span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+            )}
+
+            <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 12, fontSize: 9 }}>
+              OK {'>'}40% {'\u00b7'} LONG_JOB 15{'\u2013'}40% {'\u00b7'} AT_RISK 0{'\u2013'}15% {'\u00b7'} BREACH {'<'}0% {'\u00b7'} {'Buffer=(SLA-rt)\u00f7SLA\u00d7100'}
+            </Typography>
+          </Box>
 
           <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16 }}>
             <KpiStatCard

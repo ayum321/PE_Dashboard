@@ -256,6 +256,22 @@ function _excludedJobsCsv(rows: UnifiedExclusionRow[]): string {
   return out.join('\n');
 }
 
+/** teal (short) -> amber (longer) -> red (longest run) by share of matrix max, ported from
+ * renderLongpoleHeatmap()'s _cellStyle() (app.js). */
+function _longpoleCellStyle(mins: number, maxMin: number): React.CSSProperties {
+  if (!mins) return { background: '#0f172a', border: '1px solid rgba(255,255,255,.05)' };
+  const t = Math.min(1, mins / maxMin);
+  const base = t < 0.5 ? '45,212,191' : t < 0.8 ? '245,158,11' : '244,63,94';
+  const intensity = (0.30 + 0.6 * t).toFixed(2);
+  return { background: `rgba(${base},${intensity})`, border: `1px solid rgba(${base},.8)` };
+}
+
+/** "2026-06-01" -> "06/01", ported from renderLongpoleHeatmap()'s _short() (app.js). */
+function _shortDate(d: string): string {
+  const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[2]}/${m[3]}` : String(d).slice(-5);
+}
+
 interface LongpoleRow {
   job: string;
   avg_min: number;
@@ -281,6 +297,9 @@ interface LongpoleMatrix {
   cells: LongpoleCell[];
   rows: LongpoleRow[];
   has_data: boolean;
+  max_minutes?: number;
+  busy_ref_hrs?: number;
+  share_pct_flag?: number;
 }
 
 const useStyles = makeStyles((theme) => ({
@@ -493,6 +512,30 @@ export function BatchPanel() {
     }
     return null;
   }, [window, elapsedWindow]);
+
+  // ── Pattern Detection — statistical z-score spike detection on window values,
+  // ported from the spikeIdxs computation in renderWindowTrendChart() (app.js). A day
+  // is anomalous if z > 2.0, or z > 1.5 while also a breach day. ──
+  const patternDetection = useMemo(() => {
+    const rawEff = window.map((w) => Number(w.effective_hrs) || 0);
+    const rawElapsed = window.map((w) => Number(w.elapsed_hrs) || 0);
+    const rawSums = window.map((w) => Number(w.total_hrs) || 0);
+    const hasEff = rawEff.some((v) => v > 0);
+    const hasElapsed = rawElapsed.some((v) => v > 0);
+    const values = window.map((_, i) => (hasEff && rawEff[i] > 0 ? rawEff[i] : hasElapsed && rawElapsed[i] > 0 ? rawElapsed[i] : rawSums[i]));
+    if (!values.length) return [];
+    const mean = values.reduce((s, v) => s + v, 0) / values.length;
+    const std = Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length);
+    const items: { date: string; val: number; count: number; type: 'breach' | 'spike'; top: string }[] = [];
+    window.forEach((w, i) => {
+      const z = std > 0 ? (values[i] - mean) / std : 0;
+      const isSpike = z > 2.0 || (z > 1.5 && w.breach);
+      if (isSpike || w.breach) {
+        items.push({ date: w.run_date, val: values[i], count: w.job_count, type: w.breach ? 'breach' : 'spike', top: w.top_job || '' });
+      }
+    });
+    return items;
+  }, [window]);
 
   // Real narrative formulas ported from renderBatchStory()/_buildBatchNarrative() (app.js) —
   // derived from the same window[] data, not fabricated wording.
@@ -1068,6 +1111,18 @@ export function BatchPanel() {
                   {gaugeSource.sla_source === 'adaptive' && ' · adaptive baseline'}
                 </Typography>
               )}
+              <Box display="flex" style={{ gap: 10, flexWrap: 'wrap', justifyContent: 'center', marginTop: 8 }}>
+                <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#10d96e' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10d96e', display: 'inline-block' }} /> Healthy · &gt;40% buffer
+                </Typography>
+                <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#f59e0b' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f59e0b', display: 'inline-block' }} /> {'Tight \u00b7 15\u201340% buffer'}
+                </Typography>
+                <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#f43f5e' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f43f5e', display: 'inline-block' }} /> {'At risk / breach \u00b7 \u226415%'}
+                </Typography>
+                <Typography variant="caption" style={{ color: '#f59e0b' }}>{'\u26a1 unusually long day (statistical spike)'}</Typography>
+              </Box>
             </Box>
           )}
           {window.length > 0 && (
@@ -1075,6 +1130,30 @@ export function BatchPanel() {
               <Typography variant="subtitle2">Daily Batch Window</Typography>
               <Typography variant="caption" color="textSecondary">Bar color = SLA buffer that day</Typography>
               <HighchartsReact highcharts={Highcharts} options={chartOptions} />
+              {patternDetection.length > 0 && (
+                <Box style={{ marginTop: 8, borderRadius: 12, border: '1px solid rgba(245,158,11,.3)', background: 'rgba(245,158,11,.04)', padding: '8px 12px' }}>
+                  <Box display="flex" alignItems="center" style={{ gap: 8, marginBottom: 6 }}>
+                    <Typography variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#f59e0b' }}>Pattern Detection</Typography>
+                    <span style={{ fontSize: 8, padding: '2px 6px', borderRadius: 4, color: '#f59e0b', background: 'rgba(245,158,11,.12)' }}>
+                      {patternDetection.length} anomalous day{patternDetection.length !== 1 ? 's' : ''}
+                    </span>
+                  </Box>
+                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    {patternDetection.map((it) => {
+                      const color = it.type === 'breach' ? '#f43f5e' : '#f59e0b';
+                      return (
+                        <span
+                          key={it.date}
+                          title={`${it.date}: ${it.val.toFixed(2)}h · ${it.count} jobs${it.top ? ' · ' + it.top : ''}`}
+                          style={{ fontSize: 8, fontFamily: 'monospace', padding: '2px 6px', borderRadius: 4, color, background: `${color}1a`, border: `1px solid ${color}4d` }}
+                        >
+                          {it.type === 'breach' ? '⚠' : '⚡'} {it.date} {it.val.toFixed(1)}h
+                        </span>
+                      );
+                    })}
+                  </Box>
+                </Box>
+              )}
             </Box>
           )}
         </Box>
@@ -1096,46 +1175,103 @@ export function BatchPanel() {
         </Box>
       )}
 
-      {longpole && longpole.has_data && longpole.rows.length > 0 && (
-        <Box className={classes.chart}>
-          <Typography variant="subtitle2">Long-Pole Job Consistency</Typography>
-          <Typography variant="caption" color="textSecondary">
-            Longest jobs by average runtime — read across a row to see if the same job is slow every day or only spikes.
-          </Typography>
-          <Table size="small" className="pe-table" aria-label="Long-pole job consistency table" style={{ marginTop: 8 }}>
-            <TableHead>
-              <TableRow>
-                <TableCell>Job</TableCell>
-                <TableCell align="right">Avg (min)</TableCell>
-                <TableCell align="right">Max (min)</TableCell>
-                <TableCell align="right">Runs</TableCell>
-                <TableCell align="right">Days present</TableCell>
-                <TableCell align="right">Spike ratio</TableCell>
-                <TableCell>Stability</TableCell>
-                <TableCell>Long-pole</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {longpole.rows.map((row) => (
-                <TableRow key={row.job}>
-                  <TableCell>{row.job}</TableCell>
-                  <TableCell align="right">{row.avg_min.toFixed(1)}</TableCell>
-                  <TableCell align="right">{row.max_min.toFixed(1)}</TableCell>
-                  <TableCell align="right">{row.runs}</TableCell>
-                  <TableCell align="right">{row.days_present}/{row.days_total}</TableCell>
-                  <TableCell align="right" style={{ color: row.spike_ratio > 2.5 ? '#f43f5e' : row.spike_ratio > 1.5 ? '#f59e0b' : '#10d96e' }}>
-                    {row.spike_ratio.toFixed(2)}x
-                  </TableCell>
-                  <TableCell style={{ textTransform: 'capitalize' }}>{row.stability}</TableCell>
-                  <TableCell>
-                    {row.is_longpole && <span className="metric-badge metric-badge-amber">LONG-POLE</span>}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Box>
-      )}
+      {longpole && longpole.has_data && longpole.rows.length > 0 && (() => {
+        const dates = longpole.dates || [];
+        const rows = longpole.rows || [];
+        const cellMap = new Map<string, number>();
+        (longpole.cells || []).forEach((c) => cellMap.set(`${c.job}|${c.date}`, c.minutes));
+        const maxMin = Math.max(1, Number(longpole.max_minutes) || 1);
+        const busyRef = Number(longpole.busy_ref_hrs) || 0;
+        const flagPct = Number(longpole.share_pct_flag) || 25;
+        const longpoles = rows.filter((r) => r.is_longpole).length;
+        const topRow = rows.reduce((a, b) => (Number(b.window_share_pct) || 0) > (Number(a.window_share_pct) || 0) ? b : a, rows[0]);
+        const topShare = Number(topRow?.window_share_pct) || 0;
+        let critSentence = 'These jobs define your effective batch critical path — any growth here eats directly into the window buffer.';
+        if (topShare > 0 && topRow?.job) {
+          critSentence += ` Biggest single contributor: ${topRow.job} at ${topShare.toFixed(0)}% of the ${busyRef.toFixed(1)}h busy window`;
+          critSentence += longpoles > 0
+            ? ` — ${longpoles} job(s) cross the ${flagPct}% long-pole line (▲), so trimming them frees the most headroom.`
+            : '; no single job dominates, so the risk is aggregate concurrency rather than one runaway job.';
+        }
+        return (
+          <Box className={classes.chart}>
+            <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <Typography variant="subtitle2">Long-Pole Job Consistency</Typography>
+              <span className={`metric-badge ${longpoles > 0 ? 'metric-badge-amber' : 'metric-badge-green'}`}>
+                {longpoles > 0 ? `${longpoles} long-pole (\u2265${flagPct}% of window)` : 'No single dominating job'}
+              </span>
+            </Box>
+            <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>
+              {rows.length} longest jobs · {dates.length} day(s) · typical busy window {busyRef.toFixed(1)}h · cell = longest run that day (min)
+            </Typography>
+            <Typography variant="caption" style={{ display: 'block', marginTop: 4, color: '#f59e0b' }}>{critSentence}</Typography>
+            <Box style={{ overflowX: 'auto', marginTop: 8 }}>
+              <table style={{ borderCollapse: 'separate', borderSpacing: 3 }}>
+                <thead>
+                  <tr>
+                    <th style={{ position: 'sticky', left: 0, textAlign: 'left', fontSize: 10, color: '#6b7db3', paddingRight: 12, paddingBottom: 4, background: '#111d36' }}>Job</th>
+                    {dates.map((d) => (
+                      <th key={d} title={d} style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7db3', minWidth: 30, textAlign: 'center', paddingBottom: 4 }}>{_shortDate(d)}</th>
+                    ))}
+                    <th style={{ fontSize: 9, color: '#6b7db3', paddingLeft: 8, textAlign: 'center' }} title="Average single-run minutes">avg</th>
+                    <th style={{ fontSize: 9, color: '#6b7db3', paddingLeft: 4, textAlign: 'center' }} title="Longest single run">max</th>
+                    <th style={{ fontSize: 9, color: '#6b7db3', paddingLeft: 4, textAlign: 'center' }} title="Average runtime as % of the typical daily busy window">share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => {
+                    const jobShort = row.job.length > 30 ? `${row.job.slice(0, 29)}\u2026` : row.job;
+                    const shareColor = row.is_longpole ? '#f59e0b' : '#8899bb';
+                    return (
+                      <tr key={row.job}>
+                        <td
+                          title={`${row.job} — ${row.stability}, ${row.runs} run(s) over ${row.days_present}/${row.days_total} days`}
+                          style={{ position: 'sticky', left: 0, fontSize: 11, color: 'rgba(255,255,255,.9)', paddingRight: 12, whiteSpace: 'nowrap', background: '#111d36' }}
+                        >
+                          {row.is_longpole && <span style={{ color: '#f59e0b' }}>▲ </span>}
+                          {jobShort}
+                        </td>
+                        {dates.map((d) => {
+                          const mins = cellMap.get(`${row.job}|${d}`) || 0;
+                          return (
+                            <td
+                              key={d}
+                              title={mins ? `${row.job} — ${d}: longest run ${mins.toFixed(0)} min` : `${row.job} — ${d}: did not run`}
+                              style={{ textAlign: 'center', width: 30, height: 24, borderRadius: 2, ..._longpoleCellStyle(mins, maxMin) }}
+                            >
+                              <span style={{ fontSize: 9, fontWeight: 700, color: '#fff' }}>{mins ? Math.round(mins) : ''}</span>
+                            </td>
+                          );
+                        })}
+                        <td style={{ textAlign: 'center', fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 8 }}>{row.avg_min.toFixed(0)}</td>
+                        <td style={{ textAlign: 'center', fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 4 }}>{row.max_min.toFixed(0)}</td>
+                        <td style={{ textAlign: 'center', fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: shareColor, paddingLeft: 4 }}>
+                          {row.window_share_pct ? `${row.window_share_pct.toFixed(0)}%` : '\u2014'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </Box>
+            <Box display="flex" style={{ gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
+              <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 12, height: 12, borderRadius: 2, background: 'rgba(45,212,191,.7)', display: 'inline-block' }} /> shorter run
+              </Typography>
+              <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 12, height: 12, borderRadius: 2, background: 'rgba(245,158,11,.8)', display: 'inline-block' }} /> longer
+              </Typography>
+              <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 12, height: 12, borderRadius: 2, background: 'rgba(244,63,94,.85)', display: 'inline-block' }} /> longest run
+              </Typography>
+              <Typography variant="caption" style={{ color: '#f59e0b' }}>
+                ▲ long-pole (avg ≥ {flagPct}% of the {busyRef.toFixed(1)}h busy window)
+              </Typography>
+              <Typography variant="caption" color="textSecondary">cell = longest single run that day (min); blank = job didn't run</Typography>
+            </Box>
+          </Box>
+        );
+      })()}
 
       {sortedJobs.length > 0 && (
         <Box className={classes.chart}>

@@ -25,6 +25,7 @@ import { dashboardTheme } from './theme/dashboardTheme';
 import './theme/dashboard.css';
 import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
+import { CustomerAuditBanner } from './components/shared/CustomerAuditBanner';
 import { UploadPanel } from './components/panels/UploadPanel';
 import { ExecutivePanel } from './components/panels/ExecutivePanel';
 import { BatchPanel } from './components/panels/BatchPanel';
@@ -53,6 +54,9 @@ function App() {
             <Box display="flex">
               <Sidebar />
               <Box flexGrow={1} minWidth={0} style={{ background: '#060914', minHeight: '100vh' }}>
+                <Box p={2} pb={0}>
+                  <CustomerAuditBanner />
+                </Box>
                 <Switch>
                   <Route exact path="/upload" component={UploadPanel} />
                   <Route exact path="/executive" component={ExecutivePanel} />
