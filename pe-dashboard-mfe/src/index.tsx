@@ -19,7 +19,8 @@ import App from './App';
 import { EventsHandler } from './components/events-handler/EventsHandler';
 import { BrowserRouter } from 'react-router-dom';
 
-const { FRAME_URL_PATH } = window['env'];
+const configuredFramePath = window.env.FRAME_URL_PATH || '';
+const FRAME_URL_PATH = configuredFramePath.includes('&lt;') ? '/' : configuredFramePath || '/';
 
 ReactDOM.render(
   <EventsHandler>

@@ -57,7 +57,15 @@ export interface AzureStatus {
   [key: string]: unknown;
 }
 
-const getApiBaseUrl = (): string => (window.env.API_BASE_URL || '').replace(/\/$/, '');
+export const getApiBaseUrl = (): string => {
+  const configured = (window.env.API_BASE_URL || '').trim();
+  if (configured) {
+    return configured.replace(/\/$/, '');
+  }
+  return window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost'
+    ? 'http://127.0.0.1:8765'
+    : '';
+};
 
 const readError = async (response: Response): Promise<string> => {
   try {
@@ -113,6 +121,42 @@ export const processBatch = (file: File): Promise<DashboardPayload> => {
   formData.append('file', file);
   return request<DashboardPayload>('/api/process-batch', { method: 'POST', body: formData });
 };
+
+export const processBatchMulti = (files: File[]): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  files.forEach((file) => formData.append('files', file));
+  return request<DashboardPayload>('/api/process-batch/multi', { method: 'POST', body: formData });
+};
+
+export const uploadSlaMatrix = (file: File, slaMode = 'daily'): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('sla_mode', slaMode);
+  return request<DashboardPayload>('/api/sla-matrix', { method: 'POST', body: formData });
+};
+
+export const getConfig = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/config');
+
+export const updateConfig = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/config', payload);
+
+export const clearSession = (): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/clear-session', {});
+
+export const getReportArchive = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/report-archive');
+
+export const getSowBaseline = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/sow/baseline');
+
+export const saveSowBaseline = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/sow/baseline', payload);
+
+export const deleteSowBaseline = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/sow/baseline', { method: 'DELETE' });
+
+export const getSowSlaWindows = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/sow/sla-windows');
+
+export const getSowProductTaxonomy = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/sow/product-taxonomy');
 
 export const generateFindings = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/generate-findings', payload);

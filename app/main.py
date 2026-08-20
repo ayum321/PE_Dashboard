@@ -95,7 +95,10 @@ app = FastAPI(
 # CORS — origins controlled via ALLOWED_ORIGINS env var (comma-separated).
 # Defaults to localhost only for safety; set ALLOWED_ORIGINS='*' only for
 # isolated local dev that never faces a network.
-_raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://127.0.0.1:*,http://localhost:*")
+_raw_origins = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://127.0.0.1:3000,http://localhost:3000",
+)
 _CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 app.add_middleware(

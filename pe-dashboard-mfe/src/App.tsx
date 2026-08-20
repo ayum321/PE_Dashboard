@@ -14,13 +14,26 @@
  */
 
 import React, { useContext } from 'react';
-import { Route, Switch } from 'react-router-dom';
-import { ThemeProvider } from '@material-ui/core';
+import { Redirect, Route, Switch } from 'react-router-dom';
+import { Box, ThemeProvider } from '@material-ui/core';
 import { LuiBackground } from '@jda/lui-common-component-library';
 import { useDomHistoryMonitor } from '@jda/lui-portal-utilities';
-import { Welcome } from './components/welcome/Welcome';
 import { EventContext } from './context';
 import { Breadcrumbs } from './components/breadcrumbs/Breadcrumbs';
+import { AppDataProvider } from './context/AppDataContext';
+import { Header } from './components/layout/Header';
+import { Sidebar } from './components/layout/Sidebar';
+import { UploadPanel } from './components/panels/UploadPanel';
+import { ExecutivePanel } from './components/panels/ExecutivePanel';
+import { BatchPanel } from './components/panels/BatchPanel';
+import { ResourcePanel } from './components/panels/ResourcePanel';
+import { SlaMatrixPanel } from './components/panels/SlaMatrixPanel';
+import { BenchmarkPanel } from './components/panels/BenchmarkPanel';
+import { SowPanel } from './components/panels/SowPanel';
+import { FindingsPanel } from './components/panels/FindingsPanel';
+import { RedFlagsPanel } from './components/panels/RedFlagsPanel';
+import { ArchivePanel } from './components/panels/ArchivePanel';
+import { SettingsPanel } from './components/panels/SettingsPanel';
 
 function App() {
   useDomHistoryMonitor();
@@ -31,9 +44,28 @@ function App() {
       <ThemeProvider theme={theme}>
         <LuiBackground>
           <Breadcrumbs />
-          <Switch>
-            <Route exact path="/" component={Welcome} />
-          </Switch>
+          <AppDataProvider>
+            <Header />
+            <Box display="flex">
+              <Sidebar />
+              <Box flexGrow={1} minWidth={0}>
+                <Switch>
+                  <Route exact path="/upload" component={UploadPanel} />
+                  <Route exact path="/executive" component={ExecutivePanel} />
+                  <Route exact path="/batch" component={BatchPanel} />
+                  <Route exact path="/resource" component={ResourcePanel} />
+                  <Route exact path="/sla-matrix" component={SlaMatrixPanel} />
+                  <Route exact path="/benchmark" component={BenchmarkPanel} />
+                  <Route exact path="/sow" component={SowPanel} />
+                  <Route exact path="/findings" component={FindingsPanel} />
+                  <Route exact path="/red-flags" component={RedFlagsPanel} />
+                  <Route exact path="/archive" component={ArchivePanel} />
+                  <Route exact path="/settings" component={SettingsPanel} />
+                  <Redirect exact from="/" to="/upload" />
+                </Switch>
+              </Box>
+            </Box>
+          </AppDataProvider>
         </LuiBackground>
       </ThemeProvider>
     </div>

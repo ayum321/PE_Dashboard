@@ -54,8 +54,12 @@ export const EventsHandler = ({ children }: EventsHandlerProps) => {
 
   // Emmit values to portal
   useEffect(() => {
-    PortalMessageService.getInstance().registerListener(portalEventsHandler);
-    handleThemeRequest();
+    try {
+      PortalMessageService.getInstance().registerListener(portalEventsHandler);
+      handleThemeRequest();
+    } catch {
+      // Standalone local mode has no portal; retain the default light theme.
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
