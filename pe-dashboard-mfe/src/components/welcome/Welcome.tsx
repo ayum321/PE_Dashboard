@@ -30,7 +30,17 @@ import {
 } from '@material-ui/core';
 import { CentralZone, EastZone, LayoutWrapper, NorthZone, WestZone } from '@jda/lui-dashboard-scaffolding-layouts';
 import { LuiLogoStacked } from '@jda/lui-common-component-library';
-import { AuditContext, getAuditContext, SmartUploadResponse, uploadDashboardFile } from '../../api/dashboardApi';
+import {
+  AuditContext,
+  exportReport,
+  fetchAzureResources,
+  generateFindings,
+  getAzureStatus,
+  getExecutiveDashboard,
+  getRedFlags,
+  SmartUploadResponse,
+  uploadDashboardFile,
+} from '../../api/dashboardApi';
 
 const useStyles = makeStyles((theme: Theme) => {
   return {
@@ -101,6 +111,11 @@ const useStyles = makeStyles((theme: Theme) => {
       padding: theme.spacing(1.5),
       border: `1px solid ${theme.palette.divider}`,
     },
+    panel: {
+      marginTop: theme.spacing(3),
+      padding: theme.spacing(2),
+      border: `1px solid ${theme.palette.divider}`,
+    },
     paperWestZone: {
       height: `calc(100vh - ${theme.spacing(30.75)}px)`,
     },
@@ -120,11 +135,16 @@ export function Welcome() {
   const [upload, setUpload] = useState<SmartUploadResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [downstream, setDownstream] = useState<Record<string, unknown>>({});
+  const [azure, setAzure] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     getAuditContext()
       .then(setContext)
       .catch(() => setContext(null));
+    getAzureStatus()
+      .then(setAzure)
+      .catch(() => setAzure(null));
   }, []);
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -144,6 +164,21 @@ export function Welcome() {
       }
       setUpload(result);
       setContext(await getAuditContext());
+      if (result.classification.type === 'batch') {
+        const payload = result.data as Record<string, unknown>;
+        const responses = await Promise.allSettled([
+          generateFindings(payload),
+          getRedFlags(payload),
+          getExecutiveDashboard(payload),
+        ]);
+        const next: Record<string, unknown> = {};
+        responses.forEach((response, index) => {
+          if (response.status === 'fulfilled') {
+            next[['findings', 'redFlags', 'executive'][index]] = response.value;
+          }
+        });
+        setDownstream(next);
+      }
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.');
     } finally {
@@ -154,6 +189,10 @@ export function Welcome() {
   const resourceServers = upload?.classification.type === 'resource' ? upload.data.servers || [] : [];
   const isSlaUpload = upload?.classification.type === 'sla_matrix';
   const slaBreaches = isSlaUpload ? upload.data.breaches || [] : [];
+  const batchKpis = upload?.classification.type === 'batch' ? (upload.data.kpis as Record<string, unknown> | undefined) : undefined;
+  const findings = (downstream.findings as Record<string, unknown> | undefined)?.findings as unknown[] | undefined;
+  const redFlags = (downstream.redFlags as Record<string, unknown> | undefined)?.flags as unknown[] | undefined;
+  const executive = downstream.executive as Record<string, unknown> | undefined;
 
   return (
     <div className={classes.welcomeContainer}>
@@ -286,6 +325,59 @@ export function Welcome() {
                   )}
                 </Box>
               )}
+              {upload?.classification.type === 'batch' && (
+                <Box className={classes.panel} component="section">
+                  <Typography variant="subtitle2">Batch analysis</Typography>
+                  <Box className={classes.metricRow}>
+                    {['total_runs', 'total_jobs', 'breaching_runs', 'compliance_pct'].map((key) => (
+                      <Paper className={classes.metric} elevation={0} key={key}>
+                        <Typography variant="caption">{key.replace(/_/g, ' ')}</Typography>
+                        <Typography variant="h6">{String(batchKpis?.[key] ?? 'Not available')}</Typography>
+                      </Paper>
+                    ))}
+                  </Box>
+                  <Typography variant="body2" className={classes.status}>
+                    Executive, findings, and red-flag calculations use the same backend batch payload.
+                  </Typography>
+                </Box>
+              )}
+              {(executive || findings || redFlags) && (
+                <Box className={classes.panel} component="section">
+                  <Typography variant="subtitle2">Analysis results</Typography>
+                  {executive && <Typography variant="body2">Executive dashboard response received from the backend.</Typography>}
+                  {findings && <Typography variant="body2">Findings: {findings.length} returned.</Typography>}
+                  {redFlags && <Typography variant="body2">Red flags: {redFlags.length} returned.</Typography>}
+                </Box>
+              )}
+              <Box className={classes.panel} component="section">
+                <Typography variant="subtitle2">SOW, benchmark, Azure, and export</Typography>
+                <Typography variant="body2">
+                  Upload SOW or benchmark files through the same control to populate their backend results.
+                </Typography>
+                <Typography variant="body2" color="textSecondary">
+                  Azure connection: {azure ? (azure.configured ? 'configured' : 'not configured') : 'status unavailable'}
+                </Typography>
+                <Button
+                  variant="outlined"
+                  disabled={!upload}
+                  onClick={async () => {
+                    if (!upload) return;
+                    try {
+                      const blob = await exportReport({ upload, resource: upload.data, batch: upload.data });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement('a');
+                      link.href = url;
+                      link.download = 'pe-audit-report.html';
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    } catch (exportError) {
+                      setError(exportError instanceof Error ? exportError.message : 'Report export failed.');
+                    }
+                  }}
+                >
+                  Export report
+                </Button>
+              </Box>
               {context && (
                 <Typography variant="body2" color="textSecondary">
                   Audit context completeness: {context.completeness_pct}%
