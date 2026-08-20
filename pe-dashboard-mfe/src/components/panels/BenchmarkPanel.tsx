@@ -23,7 +23,25 @@ interface BenchmarkRow {
   current_sec: number;
   delta_pct: number;
   status: string;
+  sla_sec?: number | null;
+  sla_breach?: boolean;
 }
+
+interface BenchmarkCategory {
+  name: string;
+  total: number;
+  passed: number;
+  failed: number;
+  degraded: number;
+  avg_delta: number;
+}
+
+const STATUS_BADGE: Record<string, string> = {
+  OK: 'metric-badge-green',
+  WATCH: 'metric-badge-amber',
+  BREACH: 'metric-badge-red',
+  REFERENCE: 'metric-badge-blue',
+};
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -123,6 +141,18 @@ export function BenchmarkPanel() {
               <Typography variant="h6" style={{ color: '#f43f5e' }}>{Number(data.benchmark.sla_breaches) || 0}</Typography>
             </Paper>
           </Box>
+          {typeof data.benchmark.summary === 'string' && data.benchmark.summary && (
+            <Typography variant="body2" style={{ marginTop: 12, color: '#f0f4ff' }}>{data.benchmark.summary}</Typography>
+          )}
+          {((data.benchmark.categories as BenchmarkCategory[]) || []).length > 0 && (
+            <Box style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+              {(data.benchmark.categories as BenchmarkCategory[]).map((category) => (
+                <span key={category.name} className="metric-badge metric-badge-purple">
+                  {category.name}: {category.passed}/{category.total} passed · {category.avg_delta.toFixed(1)}% avg
+                </span>
+              ))}
+            </Box>
+          )}
           <Box className={classes.row}>
             <TextField size="small" label="Filter transaction" value={filter} onChange={(event) => setFilter(event.target.value)} />
           </Box>
@@ -141,6 +171,7 @@ export function BenchmarkPanel() {
                     Delta %
                   </TableSortLabel>
                 </TableCell>
+                <TableCell align="right">SLA (s)</TableCell>
                 <TableCell>Status</TableCell>
               </TableRow>
             </TableHead>
@@ -150,8 +181,11 @@ export function BenchmarkPanel() {
                   <TableCell>{row.transaction}</TableCell>
                   <TableCell align="right">{row.baseline_sec.toFixed(2)}</TableCell>
                   <TableCell align="right">{row.current_sec.toFixed(2)}</TableCell>
-                  <TableCell align="right">{row.delta_pct.toFixed(1)}</TableCell>
-                  <TableCell>{row.status}</TableCell>
+                  <TableCell align="right" style={{ color: row.delta_pct > 0 ? '#f43f5e' : '#10d96e' }}>{row.delta_pct.toFixed(1)}</TableCell>
+                  <TableCell align="right">{row.sla_sec != null ? row.sla_sec.toFixed(2) : '—'}</TableCell>
+                  <TableCell>
+                    <span className={`metric-badge ${STATUS_BADGE[row.status] || 'metric-badge-blue'}`}>{row.status}</span>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

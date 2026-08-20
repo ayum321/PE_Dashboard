@@ -23,7 +23,25 @@ interface SowMetric {
   actual: number;
   pct: number;
   status: string;
+  over_by?: number;
 }
+
+interface Overconsumption {
+  count: number;
+  critical_count: number;
+  severity: string;
+  worst_label: string;
+  worst_pct: number;
+  worst_over_by: number;
+}
+
+const STATUS_BADGE: Record<string, string> = {
+  LOW: 'metric-badge-blue',
+  ACCEPTABLE: 'metric-badge-teal',
+  OPTIMAL: 'metric-badge-green',
+  OVER: 'metric-badge-amber',
+  CRITICAL_OVER: 'metric-badge-red',
+};
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -109,6 +127,7 @@ export function SowPanel() {
   };
 
   const metrics = ((data.sowCompare?.metrics as SowMetric[]) || []);
+  const overconsumption = data.sowCompare?.overconsumption as Overconsumption | undefined;
 
   return (
     <Box style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -166,8 +185,24 @@ export function SowPanel() {
       {data.sowCompare && (
         <>
           <Typography variant="subtitle2" style={{ marginTop: 16 }}>
-            Overall status: {String(data.sowCompare.overall_status)}
+            Overall status: <span className={`metric-badge ${STATUS_BADGE[String(data.sowCompare.overall_status)] || 'metric-badge-blue'}`}>{String(data.sowCompare.overall_status)}</span>
           </Typography>
+          {typeof data.sowCompare.summary === 'string' && (
+            <Typography variant="body2" style={{ marginTop: 8, color: '#f0f4ff' }}>{data.sowCompare.summary}</Typography>
+          )}
+          {overconsumption && (
+            <Box
+              style={{
+                marginTop: 12, borderRadius: 12, padding: 12,
+                border: `1px solid ${overconsumption.severity === 'CRITICAL_OVER' ? 'rgba(244,63,94,.4)' : 'rgba(245,158,11,.4)'}`,
+                background: overconsumption.severity === 'CRITICAL_OVER' ? 'rgba(244,63,94,.08)' : 'rgba(245,158,11,.08)',
+              }}
+            >
+              <Typography variant="body2" style={{ fontWeight: 700, color: overconsumption.severity === 'CRITICAL_OVER' ? '#f43f5e' : '#f59e0b' }}>
+                {overconsumption.count} metric(s) over contracted scope — worst: {overconsumption.worst_label} at {overconsumption.worst_pct.toFixed(1)}% of SOW (+{overconsumption.worst_over_by.toFixed(0)} over)
+              </Typography>
+            </Box>
+          )}
           {metrics.length > 0 && (
             <Table size="small" className="pe-table" aria-label="SOW comparison table" style={{ marginTop: 8 }}>
               <TableHead>
@@ -186,7 +221,9 @@ export function SowPanel() {
                     <TableCell align="right">{metric.sow}</TableCell>
                     <TableCell align="right">{metric.actual}</TableCell>
                     <TableCell align="right">{metric.pct.toFixed(1)}%</TableCell>
-                    <TableCell>{metric.status}</TableCell>
+                    <TableCell>
+                      <span className={`metric-badge ${STATUS_BADGE[metric.status] || 'metric-badge-blue'}`}>{metric.status}</span>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

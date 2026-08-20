@@ -207,6 +207,9 @@ export const fetchAzureResources = (payload: DashboardPayload = {}): Promise<Das
 export const fetchAzureTimeseries = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/azure/timeseries', payload);
 
+export const processResource = (servers: ResourceServer[]): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/process-resource', { servers });
+
 export const exportReport = (payload: DashboardPayload): Promise<Blob> =>
   fetch(`${getApiBaseUrl()}/api/export-report`, {
     method: 'POST',

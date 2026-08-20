@@ -20,6 +20,7 @@ interface ArchiveRow {
   env?: string;
   pe_approved?: boolean;
   cust_approved?: boolean;
+  checklist_mismatches?: number;
   sla_breach_count?: number;
   sla_at_risk_count?: number;
   sla_total_jobs?: number;
@@ -62,6 +63,7 @@ export function ArchivePanel() {
               <TableCell>Environment</TableCell>
               <TableCell align="right">Breaches</TableCell>
               <TableCell align="right">At risk</TableCell>
+              <TableCell>Sign-off</TableCell>
               <TableCell>Actions</TableCell>
             </TableRow>
           </TableHead>
@@ -73,6 +75,19 @@ export function ArchivePanel() {
                 <TableCell>{report.env || '-'}</TableCell>
                 <TableCell align="right">{report.sla_breach_count ?? '-'}</TableCell>
                 <TableCell align="right">{report.sla_at_risk_count ?? '-'}</TableCell>
+                <TableCell>
+                  <span className={`metric-badge ${report.pe_approved ? 'metric-badge-green' : 'metric-badge-blue'}`}>
+                    PE {report.pe_approved ? '✓' : '—'}
+                  </span>{' '}
+                  <span className={`metric-badge ${report.cust_approved ? 'metric-badge-green' : 'metric-badge-blue'}`}>
+                    Cust {report.cust_approved ? '✓' : '—'}
+                  </span>
+                  {!!report.checklist_mismatches && (
+                    <span className="metric-badge metric-badge-amber" style={{ marginLeft: 4 }}>
+                      {report.checklist_mismatches} mismatch(es)
+                    </span>
+                  )}
+                </TableCell>
                 <TableCell>
                   <Button
                     size="small"

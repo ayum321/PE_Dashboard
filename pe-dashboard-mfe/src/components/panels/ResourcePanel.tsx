@@ -21,9 +21,28 @@ import {
   getAzureResourceGroups,
   getAzureStatus,
   getAzureSubscriptions,
+  processResource,
 } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
 import { KpiStatCard } from '../shared/KpiStatCard';
+
+interface FleetKpis {
+  fleet_grade?: string;
+  fleet_score?: number;
+  avg_cpu?: number;
+  avg_mem?: number;
+  avg_disk?: number;
+  n_critical?: number;
+  n_warning?: number;
+  n_healthy?: number;
+}
+
+interface ResourceAnomaly {
+  host: string;
+  metric: string;
+  value: number;
+  z: number;
+}
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -46,6 +65,8 @@ export function ResourcePanel() {
   const [vms, setVms] = useState<Record<string, unknown>[]>([]);
   const [azureBusy, setAzureBusy] = useState(false);
   const [azureError, setAzureError] = useState<string | null>(null);
+  const [fleetKpis, setFleetKpis] = useState<FleetKpis | null>(null);
+  const [anomalies, setAnomalies] = useState<ResourceAnomaly[]>([]);
 
   React.useEffect(() => {
     getAzureAuthStatus()
@@ -53,6 +74,24 @@ export function ResourcePanel() {
       .catch(() => setAzureAuth(null));
     getAzureStatus().catch(() => undefined);
   }, []);
+
+  React.useEffect(() => {
+    const rows = data.resource?.servers || [];
+    if (rows.length === 0) {
+      setFleetKpis(null);
+      setAnomalies([]);
+      return;
+    }
+    processResource(rows)
+      .then((result) => {
+        setFleetKpis((result.kpis as FleetKpis) || null);
+        setAnomalies((result.anomalies as ResourceAnomaly[]) || []);
+      })
+      .catch(() => {
+        setFleetKpis(null);
+        setAnomalies([]);
+      });
+  }, [data.resource]);
 
   const servers = data.resource?.servers || [];
   const fleetAvg = useMemo(() => {
@@ -167,11 +206,51 @@ export function ResourcePanel() {
         <>
           <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 16 }}>
             <KpiStatCard label="Servers" value={servers.length} sub={`${servers.filter((s) => (s.type || 'APP') === 'APP').length} APP · ${servers.filter((s) => s.type === 'DB').length} DB`} accent="#3b82f6" />
-            <KpiStatCard label="Avg CPU" value={`${fleetAvg.cpu.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.cpu >= 80 ? '#f43f5e' : '#10d96e'} />
-            <KpiStatCard label="Avg Memory" value={`${fleetAvg.mem.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.mem >= 80 ? '#f43f5e' : '#10d96e'} />
-            <KpiStatCard label="Avg Disk" value={`${fleetAvg.disk.toFixed(0)}%`} sub="Threshold 85%" accent={fleetAvg.disk >= 85 ? '#f43f5e' : '#10d96e'} />
-            <KpiStatCard label="Fleet Health" value={fleetAvg.health.toFixed(0)} sub="Score /100" accent="#a855f7" />
+            {fleetKpis ? (
+              <>
+                <KpiStatCard label="Fleet Grade" value={fleetKpis.fleet_grade || '?'} sub={`Score ${(fleetKpis.fleet_score || 0).toFixed(0)}/100`} accent="#a855f7" />
+                <KpiStatCard label="Avg CPU" value={`${(fleetKpis.avg_cpu || 0).toFixed(0)}%`} sub="Threshold 80%" accent={(fleetKpis.avg_cpu || 0) >= 80 ? '#f43f5e' : '#10d96e'} />
+                <KpiStatCard label="Avg Memory" value={`${(fleetKpis.avg_mem || 0).toFixed(0)}%`} sub="Threshold 80%" accent={(fleetKpis.avg_mem || 0) >= 80 ? '#f43f5e' : '#10d96e'} />
+                <KpiStatCard label="Avg Disk" value={`${(fleetKpis.avg_disk || 0).toFixed(0)}%`} sub="Threshold 85%" accent={(fleetKpis.avg_disk || 0) >= 85 ? '#f43f5e' : '#10d96e'} />
+                <KpiStatCard label="Health" accent="#f43f5e" value={
+                  <span>
+                    <span style={{ color: '#f43f5e' }}>{fleetKpis.n_critical || 0}</span>
+                    <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
+                    <span style={{ color: '#f59e0b' }}>{fleetKpis.n_warning || 0}</span>
+                    <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
+                    <span style={{ color: '#10d96e' }}>{fleetKpis.n_healthy || 0}</span>
+                  </span>
+                } sub="Critical · Warning · Healthy" />
+              </>
+            ) : (
+              <>
+                <KpiStatCard label="Avg CPU" value={`${fleetAvg.cpu.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.cpu >= 80 ? '#f43f5e' : '#10d96e'} />
+                <KpiStatCard label="Avg Memory" value={`${fleetAvg.mem.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.mem >= 80 ? '#f43f5e' : '#10d96e'} />
+                <KpiStatCard label="Avg Disk" value={`${fleetAvg.disk.toFixed(0)}%`} sub="Threshold 85%" accent={fleetAvg.disk >= 85 ? '#f43f5e' : '#10d96e'} />
+                <KpiStatCard label="Fleet Health" value={fleetAvg.health.toFixed(0)} sub="Score /100" accent="#a855f7" />
+              </>
+            )}
           </Box>
+
+          {anomalies.length > 0 && (
+            <Box
+              style={{ borderRadius: 12, border: '1px solid rgba(245,158,11,.3)', background: 'rgba(245,158,11,.05)', padding: 16, marginBottom: 16 }}
+            >
+              <Typography variant="subtitle2" style={{ color: '#f59e0b' }}>🎯 Anomaly Spotlight</Typography>
+              <Typography variant="caption" color="textSecondary">Servers whose metrics deviate significantly (|z| ≥ 2.0) from the fleet.</Typography>
+              <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8, marginTop: 8 }}>
+                {anomalies.slice(0, 9).map((anomaly, index) => (
+                  <Box key={`${anomaly.host}-${anomaly.metric}-${index}`} className="insight-card warning" style={{ padding: 10 }}>
+                    <Typography variant="body2" style={{ fontWeight: 700 }}>{anomaly.host}</Typography>
+                    <Typography variant="caption" color="textSecondary">
+                      {anomaly.metric}: {anomaly.value.toFixed(1)} (z={anomaly.z.toFixed(2)})
+                    </Typography>
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          )}
+
           <Box className={classes.controls}>
             <TextField
               size="small"
