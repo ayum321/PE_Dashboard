@@ -111,8 +111,38 @@ export function SowPanel() {
   const metrics = ((data.sowCompare?.metrics as SowMetric[]) || []);
 
   return (
-    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
-      <Typography variant="h6">SOW Contract &amp; Volume Compliance</Typography>
+    <Box style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Box
+        style={{
+          borderRadius: 16,
+          border: '1px solid rgba(168,85,247,.3)',
+          background: 'linear-gradient(135deg, #0d1526 0%, #111d36 100%)',
+          padding: 16,
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 12,
+        }}
+      >
+        <Box
+          style={{
+            width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+            background: 'rgba(168,85,247,.2)', border: '1px solid rgba(168,85,247,.45)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#a855f7',
+          }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" width={20} height={20}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 6A2.25 2.25 0 0 1 15.75 3.75H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
+          </svg>
+        </Box>
+        <Box>
+          <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.15em', color: '#6b7db3', fontWeight: 700 }}>Audit Scope</Typography>
+          <Typography variant="h6" style={{ lineHeight: 1.2 }}>SOW Contract &amp; Volume Compliance</Typography>
+          <Typography variant="caption" color="textSecondary">
+            Contracted commitments, SLA ceilings and volume ramp — cross-checked against actuals from Batch Review.
+          </Typography>
+        </Box>
+      </Box>
+      <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Box className={classes.row}>
         <input className={classes.input} id="sow-parse-input" type="file" accept=".pdf,.docx" onChange={handleParse} />
         <label htmlFor="sow-parse-input">
@@ -164,6 +194,7 @@ export function SowPanel() {
           )}
         </>
       )}
-    </Paper>
+      </Paper>
+    </Box>
   );
 }

@@ -14,6 +14,8 @@ import {
 } from '@material-ui/core';
 import { uploadSlaMatrix } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
+import { SectionBanner } from '../shared/SectionBanner';
+import { KpiStatCard } from '../shared/KpiStatCard';
 
 interface SlaBreach {
   job_name?: string;
@@ -55,9 +57,19 @@ export function SlaMatrixPanel() {
 
   const slaMatrix = data.slaMatrix || {};
   const breaches = ((slaMatrix.breaches as SlaBreach[]) || []).slice(0, 25);
+  const compliancePct = Number(slaMatrix.compliance_pct) || 0;
 
   return (
-    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
+    <Box style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <SectionBanner
+        eyebrow="Contract Conformance & Drift"
+        title="Is every job measured against the right contract — and which jobs are drifting toward a breach?"
+        description="Batch Review answers whether the window was met. This tab answers where each SLA ceiling comes from and which jobs are quietly creeping toward their own limits."
+        headline={data.slaMatrix ? `${compliancePct.toFixed(1)}%` : '—'}
+        headlineLabel="Window SLA · day-level"
+        accent="#a855f7"
+      />
+      <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">SLA Matrix</Typography>
       <Box className={classes.row}>
         <input className={classes.input} id="sla-matrix-input" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} />
@@ -76,23 +88,11 @@ export function SlaMatrixPanel() {
         </Typography>
       ) : (
         <>
-          <Box className={classes.kpiRow}>
-            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-              <Typography variant="caption">Compliance</Typography>
-              <Typography variant="h6">{(Number(slaMatrix.compliance_pct) || 0).toFixed(1)}%</Typography>
-            </Paper>
-            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-              <Typography variant="caption">Total runs</Typography>
-              <Typography variant="h6">{Number(slaMatrix.total_runs) || 0}</Typography>
-            </Paper>
-            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-              <Typography variant="caption">Breaching</Typography>
-              <Typography variant="h6" style={{ color: '#f43f5e' }}>{Number(slaMatrix.breaching_runs) || 0}</Typography>
-            </Paper>
-            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-              <Typography variant="caption">At risk</Typography>
-              <Typography variant="h6" style={{ color: '#f59e0b' }}>{Number(slaMatrix.at_risk_runs) || 0}</Typography>
-            </Paper>
+          <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16 }}>
+            <KpiStatCard label="Compliance" value={`${compliancePct.toFixed(1)}%`} sub="Runs within SLA ceiling" accent="#10d96e" />
+            <KpiStatCard label="Total Runs" value={Number(slaMatrix.total_runs) || 0} sub="Evaluated against SLA" accent="#3b82f6" />
+            <KpiStatCard label="Breaching" value={Number(slaMatrix.breaching_runs) || 0} sub="Over SLA ceiling" accent="#f43f5e" />
+            <KpiStatCard label="At Risk" value={Number(slaMatrix.at_risk_runs) || 0} sub="Near SLA ceiling" accent="#f59e0b" />
           </Box>
           {breaches.length > 0 && (
             <Table size="small" className="pe-table" aria-label="SLA breach table" style={{ marginTop: 16 }}>
@@ -119,5 +119,6 @@ export function SlaMatrixPanel() {
         </>
       )}
     </Paper>
+    </Box>
   );
 }

@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Box,
   Paper,
@@ -14,6 +15,7 @@ import {
 import Highcharts from 'highcharts';
 import HighchartsReact from 'highcharts-react-official';
 import { useAppData } from '../../context/AppDataContext';
+import { KpiStatCard } from '../shared/KpiStatCard';
 
 interface BatchKpis {
   compliance_pct?: number;
@@ -101,44 +103,52 @@ export function BatchPanel() {
 
   if (!data.batch) {
     return (
-      <Paper className={`${classes.panel} kpi-card`} elevation={0}>
-        <Typography variant="h6">Batch Review</Typography>
-        <Typography className={classes.empty} variant="body2" color="textSecondary">
-          Upload a Ctrl-M batch export in Upload &amp; Intake to populate this view.
-        </Typography>
+      <Paper
+        className={classes.panel}
+        elevation={0}
+        style={{ border: '1px solid #213060', borderRadius: 12, background: 'rgba(17,29,54,.6)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}
+      >
+        <Box>
+          <Typography variant="subtitle2">No Ctrl-M data loaded yet</Typography>
+          <Typography className={classes.empty} variant="body2" color="textSecondary">
+            Upload your Ctrl-M CSV/XLSX from Upload &amp; Intake.
+          </Typography>
+        </Box>
+        <Link to="/upload" className="metric-badge metric-badge-green" style={{ textDecoration: 'none' }}>
+          Go to Upload →
+        </Link>
       </Paper>
     );
   }
 
   return (
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
-      <Typography variant="h6">Batch Review</Typography>
-      <Box className={classes.kpiRow}>
-        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-          <Typography variant="caption">Compliance</Typography>
-          <Typography variant="h6">{(kpis.compliance_pct || 0).toFixed(1)}%</Typography>
-        </Paper>
-        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-          <Typography variant="caption">Total runs</Typography>
-          <Typography variant="h6">{kpis.total_runs || 0}</Typography>
-        </Paper>
-        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-          <Typography variant="caption">Total jobs</Typography>
-          <Typography variant="h6">{kpis.total_jobs || 0}</Typography>
-        </Paper>
-        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-          <Typography variant="caption">Breaching</Typography>
-          <Typography variant="h6" style={{ color: '#f43f5e' }}>{kpis.jobs_breach || 0}</Typography>
-        </Paper>
-        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-          <Typography variant="caption">At risk</Typography>
-          <Typography variant="h6" style={{ color: '#f59e0b' }}>{kpis.jobs_at_risk || 0}</Typography>
-        </Paper>
-        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
-          <Typography variant="caption">Failed runs</Typography>
-          <Typography variant="h6" style={{ color: '#f43f5e' }}>{kpis.failed_runs || 0}</Typography>
-        </Paper>
+      <Box display="flex" alignItems="center" style={{ gap: 10, marginBottom: 4 }}>
+        <span className="status-dot status-dot-green" />
+        <Typography variant="h6">Batch Review</Typography>
       </Box>
+      <Box className={classes.kpiRow} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+        <KpiStatCard label="Job SLA" value={`${(kpis.compliance_pct || 0).toFixed(1)}%`} sub="Peak job runtime vs SLA ceiling" accent="#10d96e" />
+        <KpiStatCard label="Total Runs" value={kpis.total_runs || 0} sub={`${kpis.total_jobs || 0} unique jobs`} accent="#3b82f6" />
+        <KpiStatCard label="Peak · Risk · OK" accent="#f43f5e" value={
+          <span>
+            <span style={{ color: '#f43f5e' }}>{kpis.jobs_breach || 0}</span>
+            <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
+            <span style={{ color: '#f59e0b' }}>{kpis.jobs_at_risk || 0}</span>
+            <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
+            <span style={{ color: '#10d96e' }}>{kpis.jobs_ok || 0}</span>
+          </span>
+        } sub="Job-level SLA status by peak runtime" />
+        <KpiStatCard label="Failed Runs" value={kpis.failed_runs || 0} sub={`${(kpis.fail_rate_pct || 0).toFixed(1)}% of all runs`} accent="#fb923c" />
+        <KpiStatCard label="Total Hours" value={(kpis.total_hrs || 0).toFixed(1)} sub="Summed runtime across jobs" accent="#a855f7" />
+        <KpiStatCard label="SLA Source" value="Uploaded" valueColor="#2dd4bf" sub="From SLA Matrix / config" accent="#2dd4bf" />
+      </Box>
+      <Typography variant="caption" style={{ display: 'block', marginTop: 12, color: '#6b7db3' }}>
+        <span style={{ color: '#3b82f6' }}>ℹ</span>{' '}
+        <strong style={{ color: '#f0f4ff' }}>Job SLA</strong> = % of jobs whose own peak runtime beat its SLA ceiling.
+        Compare against the window trend below for aggregate daily behavior.
+      </Typography>
+
 
       {window.length > 0 && (
         <Box className={classes.chart}>

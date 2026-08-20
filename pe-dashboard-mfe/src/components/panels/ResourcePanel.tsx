@@ -23,6 +23,7 @@ import {
   getAzureSubscriptions,
 } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
+import { KpiStatCard } from '../shared/KpiStatCard';
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -54,6 +55,18 @@ export function ResourcePanel() {
   }, []);
 
   const servers = data.resource?.servers || [];
+  const fleetAvg = useMemo(() => {
+    const rows = data.resource?.servers || [];
+    const count = rows.length || 1;
+    const sum = (key: 'cpu_used' | 'mem_used' | 'disk_used_max' | 'health_score') =>
+      rows.reduce((total, server) => total + (server[key] || 0), 0);
+    return {
+      cpu: sum('cpu_used') / count,
+      mem: sum('mem_used') / count,
+      disk: sum('disk_used_max') / count,
+      health: sum('health_score') / count,
+    };
+  }, [data.resource]);
   const filtered = useMemo(() => {
     const rows = data.resource?.servers || [];
     return rows.filter((server) => server.host.toLowerCase().includes(filter.toLowerCase()));
@@ -152,6 +165,13 @@ export function ResourcePanel() {
         </Typography>
       ) : (
         <>
+          <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 16 }}>
+            <KpiStatCard label="Servers" value={servers.length} sub={`${servers.filter((s) => (s.type || 'APP') === 'APP').length} APP · ${servers.filter((s) => s.type === 'DB').length} DB`} accent="#3b82f6" />
+            <KpiStatCard label="Avg CPU" value={`${fleetAvg.cpu.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.cpu >= 80 ? '#f43f5e' : '#10d96e'} />
+            <KpiStatCard label="Avg Memory" value={`${fleetAvg.mem.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.mem >= 80 ? '#f43f5e' : '#10d96e'} />
+            <KpiStatCard label="Avg Disk" value={`${fleetAvg.disk.toFixed(0)}%`} sub="Threshold 85%" accent={fleetAvg.disk >= 85 ? '#f43f5e' : '#10d96e'} />
+            <KpiStatCard label="Fleet Health" value={fleetAvg.health.toFixed(0)} sub="Score /100" accent="#a855f7" />
+          </Box>
           <Box className={classes.controls}>
             <TextField
               size="small"
