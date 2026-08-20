@@ -17,6 +17,16 @@ jobs:
         run: |
           cp "$GITHUB_EVENT_PATH" workload.json
 
+      - name: Validate deployment configuration
+        env:
+          AZURE_APP_NAME: ${{ env.AZURE_APP_NAME }}
+          CDN_PROFILE: ${{ env.CDN_PROFILE }}
+          AZURE_CREDENTIALS: ${{ secrets.MY_CREDENTIALS }}
+        run: |
+          test "$AZURE_APP_NAME" != "your-app-name" || { echo "AZURE_APP_NAME must be configured by the BY platform team"; exit 1; }
+          test "$CDN_PROFILE" != "cdnprofile" || { echo "CDN_PROFILE must be configured by the BY platform team"; exit 1; }
+          test -n "$AZURE_CREDENTIALS" || { echo "MY_CREDENTIALS GitHub secret is required"; exit 1; }
+
       - name: Store debug info
         uses: actions/upload-artifact@v4
         with:
