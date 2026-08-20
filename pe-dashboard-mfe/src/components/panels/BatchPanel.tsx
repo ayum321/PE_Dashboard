@@ -30,6 +30,7 @@ interface BatchKpis {
   failed_runs?: number;
   fail_rate_pct?: number;
   daily_limit_hrs?: number;
+  fleet_sla_buffer?: FleetSlaBuffer;
 }
 
 interface TopJobRow {
@@ -38,8 +39,12 @@ interface TopJobRow {
   peak_hrs: number;
   avg_hrs: number;
   total_hrs: number;
+  sla_hrs?: number | null;
+  sla_used_pct?: number | null;
   buffer_pct?: number | null;
   buffer_status: string;
+  concurrent_overlap_hrs?: number | null;
+  concurrent_job_count?: number | null;
 }
 
 interface WindowPoint {
@@ -106,6 +111,40 @@ interface SlaHeatmap {
   limit: number;
 }
 
+interface FleetSlaBuffer {
+  buffer_hrs: number;
+  buffer_pct: number;
+  status: string;
+  sla_source?: string;
+}
+
+interface LongpoleRow {
+  job: string;
+  avg_min: number;
+  max_min: number;
+  runs: number;
+  days_present: number;
+  days_total: number;
+  spike_ratio: number;
+  window_share_pct: number;
+  is_longpole: boolean;
+  stability: string;
+}
+
+interface LongpoleCell {
+  job: string;
+  date: string;
+  minutes: number;
+}
+
+interface LongpoleMatrix {
+  jobs: string[];
+  dates: string[];
+  cells: LongpoleCell[];
+  rows: LongpoleRow[];
+  has_data: boolean;
+}
+
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
   kpiRow: { display: 'flex', gap: theme.spacing(2), flexWrap: 'wrap', marginTop: theme.spacing(2) },
@@ -123,6 +162,18 @@ const CONFIDENCE_COLOR: Record<string, string> = {
   INSUFFICIENT: '#f43f5e',
 };
 
+const STATUS_COLOR: Record<string, string> = {
+  BREACH: '#f43f5e',
+  AT_RISK: '#f59e0b',
+  LONG_JOB: '#2dd4bf',
+  OK: '#10d96e',
+  SLA_MISSING: '#6b7db3',
+};
+
+// Mirrors services/pe_config.py SLA_ATRISK_PCT / SLA_LONGJOB_PCT defaults.
+const SLA_ATRISK_PCT = 15;
+const SLA_LONGJOB_PCT = 40;
+
 export function BatchPanel() {
   const classes = useStyles();
   const { data } = useAppData();
@@ -139,8 +190,23 @@ export function BatchPanel() {
   const slaSource = data.batch?.sla_source as SlaSourceInfo | undefined;
   const dataCoverage = data.batch?.data_coverage as DataCoverage | undefined;
   const slaHeatmap = data.batch?.sla_heatmap as SlaHeatmap | undefined;
+  const fleetSlaBuffer = kpis.fleet_sla_buffer;
+  const longpole = data.batch?.longpole_matrix as LongpoleMatrix | undefined;
   const windowCompliance = kpis.window_compliance_pct ?? kpis.batch_window_compliance ?? 0;
   const slaCeilingHrs = kpis.daily_limit_hrs || 6;
+
+  // Real narrative formulas ported from renderBatchStory()/_buildBatchNarrative() (app.js) —
+  // derived from the same window[] data, not fabricated wording.
+  const narrative = useMemo(() => {
+    if (window.length === 0) return null;
+    const total = window.length;
+    const breachDays = window.filter((point) => point.breach).length;
+    const cleanDays = total - breachDays;
+    const compliancePct = windowCompliance || (total > 0 ? (cleanDays / total) * 100 : 0);
+    const worstBreach = window.filter((point) => point.breach).sort((a, b) => b.total_hrs - a.total_hrs)[0];
+    const tone = breachDays === 0 ? 'ok' : breachDays / total > 0.3 ? 'critical' : 'warning';
+    return { total, breachDays, cleanDays, compliancePct, worstBreach, tone };
+  }, [window, windowCompliance]);
 
   const sortedJobs = useMemo(() => {
     const rows = [...topJobs];
@@ -188,37 +254,39 @@ export function BatchPanel() {
     ],
   };
 
-  const gaugeValue = worstJob ? Math.max(-100, Math.min(100, worstJob.buffer_pct)) : 0;
+  const gaugeSource = fleetSlaBuffer || (worstJob ? { buffer_pct: worstJob.buffer_pct, status: undefined, sla_source: worstJob.sla_source } : null);
+  const gaugeNeedle = gaugeSource ? Math.max(0, Math.min(100, gaugeSource.buffer_pct)) : 0;
+  const gaugeStatus = gaugeSource?.status;
+  const gaugeColor = gaugeStatus ? (STATUS_COLOR[gaugeStatus] || '#6b7db3') : (gaugeSource && gaugeSource.buffer_pct <= 0 ? '#f43f5e' : '#10d96e');
   const gaugeOptions: Highcharts.Options = {
-    chart: { type: 'solidgauge', height: 220 },
+    chart: { type: 'gauge', height: 260 },
     title: { text: undefined },
     pane: {
-      center: ['50%', '85%'],
-      size: '140%',
       startAngle: -90,
       endAngle: 90,
-      background: [{ backgroundColor: 'rgba(255,255,255,.05)', innerRadius: '60%', outerRadius: '100%', shape: 'arc' }],
+      background: undefined,
+      center: ['50%', '85%'],
+      size: '140%',
     },
     yAxis: {
-      min: -100,
+      min: 0,
       max: 100,
-      stops: [
-        [0.0, '#f43f5e'],
-        [0.5, '#f59e0b'],
-        [1.0, '#10d96e'],
-      ],
       lineWidth: 0,
-      tickWidth: 0,
-      minorTickInterval: undefined,
-      labels: { enabled: false },
+      tickInterval: 20,
+      minorTickInterval: null,
+      labels: { distance: 12, style: { fontSize: '9px', color: '#6b7db3' } },
+      plotBands: [
+        { from: 0, to: SLA_ATRISK_PCT, color: '#f43f5e' },
+        { from: SLA_ATRISK_PCT, to: SLA_LONGJOB_PCT, color: '#f59e0b' },
+        { from: SLA_LONGJOB_PCT, to: 100, color: '#10d96e' },
+      ],
     },
     series: [{
-      type: 'solidgauge',
-      data: [gaugeValue],
-      dataLabels: {
-        format: `<div style="text-align:center"><span style="font-size:22px;font-weight:800;color:${worstJob && worstJob.buffer_pct < 0 ? '#f43f5e' : '#10d96e'}">{y:.1f}%</span></div>`,
-        useHTML: true,
-      },
+      type: 'gauge',
+      name: 'SLA buffer',
+      data: [gaugeNeedle],
+      dial: { backgroundColor: '#f0f4ff', baseWidth: 4, rearLength: '0%' },
+      pivot: { backgroundColor: '#f0f4ff', radius: 5 },
     }],
   };
 
@@ -372,18 +440,62 @@ export function BatchPanel() {
         <strong style={{ color: '#f0f4ff' }}> Window SLA</strong> = % of days the full batch window beat the same ceiling.
       </Typography>
 
+      {narrative && (
+        <Box
+          className={classes.chart}
+          style={{
+            borderRadius: 16,
+            border: `1px solid ${narrative.tone === 'ok' ? 'rgba(16,217,110,.35)' : narrative.tone === 'critical' ? 'rgba(244,63,94,.35)' : 'rgba(245,158,11,.35)'}`,
+            background: `linear-gradient(135deg, ${narrative.tone === 'ok' ? 'rgba(16,217,110,.07)' : narrative.tone === 'critical' ? 'rgba(244,63,94,.07)' : 'rgba(245,158,11,.07)'}, rgba(17,29,54,.45))`,
+            padding: 16,
+          }}
+        >
+          <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.1em', color: '#6b7db3', fontWeight: 700 }}>
+            Batch SLA — the headline question
+          </Typography>
+          <Typography variant="subtitle1" style={{ marginTop: 4 }}>Are we meeting batch SLAs?</Typography>
+          <Typography
+            variant="body2"
+            style={{ marginTop: 4, fontWeight: 700, color: narrative.tone === 'ok' ? '#10d96e' : narrative.tone === 'critical' ? '#f43f5e' : '#f59e0b' }}
+          >
+            {narrative.breachDays === 0
+              ? `Yes — every one of the ${narrative.total} day(s) finished inside the window (${narrative.compliancePct.toFixed(0)}% day compliance).`
+              : `${narrative.cleanDays}/${narrative.total} day(s) finished inside the window — ${narrative.compliancePct.toFixed(0)}% day compliance, ${narrative.breachDays} breach${narrative.breachDays > 1 ? 'es' : ''}.`}
+          </Typography>
+          {narrative.worstBreach && (
+            <Typography variant="body2" style={{ marginTop: 8, color: '#f0f4ff' }}>
+              Worst breach: {narrative.worstBreach.run_date} ran {narrative.worstBreach.total_hrs.toFixed(2)}h
+              {narrative.worstBreach.top_job && `; longest job ${narrative.worstBreach.top_job}.`}
+            </Typography>
+          )}
+        </Box>
+      )}
 
 
-      {(window.length > 0 || worstJob) && (
-        <Box className={classes.chart} style={{ display: 'grid', gridTemplateColumns: worstJob ? '1fr 2fr' : '1fr', gap: 16 }}>
-          {worstJob && (
-            <Box className="chart-panel" style={{ padding: 16 }}>
+      {(window.length > 0 || gaugeSource) && (
+        <Box className={classes.chart} style={{ display: 'grid', gridTemplateColumns: gaugeSource ? '1fr 2fr' : '1fr', gap: 16 }}>
+          {gaugeSource && (
+            <Box className="chart-panel" style={{ padding: 16, position: 'relative' }}>
               <Typography variant="subtitle2">SLA Buffer Gauge</Typography>
               <Typography variant="caption" color="textSecondary">Headroom between worst-job peak and the SLA ceiling</Typography>
-              <HighchartsReact highcharts={Highcharts} options={gaugeOptions} />
-              <Typography variant="caption" style={{ display: 'block', textAlign: 'center', color: '#6b7db3' }}>
-                {worstJob.job_name} · {worstJob.peak_hrs.toFixed(2)}h vs {worstJob.sla_hrs.toFixed(2)}h ceiling
-              </Typography>
+              <Box style={{ position: 'relative' }}>
+                <HighchartsReact highcharts={Highcharts} options={gaugeOptions} />
+                <Box
+                  style={{
+                    position: 'absolute', left: '50%', bottom: 26, transform: 'translateX(-50%)',
+                    textAlign: 'center', pointerEvents: 'none',
+                  }}
+                >
+                  <div style={{ fontSize: 22, fontWeight: 800, color: gaugeColor }}>{gaugeSource.buffer_pct.toFixed(0)}%</div>
+                  {gaugeStatus && <div style={{ fontSize: 10, color: '#6b7db3', textTransform: 'uppercase' }}>{gaugeStatus.replace('_', ' ')}</div>}
+                </Box>
+              </Box>
+              {worstJob && (
+                <Typography variant="caption" style={{ display: 'block', textAlign: 'center', color: '#6b7db3' }}>
+                  {worstJob.job_name} · {worstJob.peak_hrs.toFixed(2)}h vs {worstJob.sla_hrs.toFixed(2)}h ceiling
+                  {gaugeSource.sla_source === 'adaptive' && ' · adaptive baseline'}
+                </Typography>
+              )}
             </Box>
           )}
           {window.length > 0 && (
@@ -401,6 +513,47 @@ export function BatchPanel() {
           <Typography variant="subtitle2">SLA Compliance Heatmap</Typography>
           <Typography variant="caption" color="textSecondary">Job × Date — green = healthy buffer, amber = near SLA, red = breach</Typography>
           <HighchartsReact highcharts={Highcharts} options={heatmapOptions as Highcharts.Options} />
+        </Box>
+      )}
+
+      {longpole && longpole.has_data && longpole.rows.length > 0 && (
+        <Box className={classes.chart}>
+          <Typography variant="subtitle2">Long-Pole Job Consistency</Typography>
+          <Typography variant="caption" color="textSecondary">
+            Longest jobs by average runtime — read across a row to see if the same job is slow every day or only spikes.
+          </Typography>
+          <Table size="small" className="pe-table" aria-label="Long-pole job consistency table" style={{ marginTop: 8 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell>Job</TableCell>
+                <TableCell align="right">Avg (min)</TableCell>
+                <TableCell align="right">Max (min)</TableCell>
+                <TableCell align="right">Runs</TableCell>
+                <TableCell align="right">Days present</TableCell>
+                <TableCell align="right">Spike ratio</TableCell>
+                <TableCell>Stability</TableCell>
+                <TableCell>Long-pole</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {longpole.rows.map((row) => (
+                <TableRow key={row.job}>
+                  <TableCell>{row.job}</TableCell>
+                  <TableCell align="right">{row.avg_min.toFixed(1)}</TableCell>
+                  <TableCell align="right">{row.max_min.toFixed(1)}</TableCell>
+                  <TableCell align="right">{row.runs}</TableCell>
+                  <TableCell align="right">{row.days_present}/{row.days_total}</TableCell>
+                  <TableCell align="right" style={{ color: row.spike_ratio > 2.5 ? '#f43f5e' : row.spike_ratio > 1.5 ? '#f59e0b' : '#10d96e' }}>
+                    {row.spike_ratio.toFixed(2)}x
+                  </TableCell>
+                  <TableCell style={{ textTransform: 'capitalize' }}>{row.stability}</TableCell>
+                  <TableCell>
+                    {row.is_longpole && <span className="metric-badge metric-badge-amber">LONG-POLE</span>}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </Box>
       )}
 
@@ -434,7 +587,11 @@ export function BatchPanel() {
                   <TableCell>{job.Job_Name}</TableCell>
                   <TableCell align="right">{job.peak_hrs.toFixed(2)}</TableCell>
                   <TableCell align="right">{job.avg_hrs.toFixed(2)}</TableCell>
-                  <TableCell>{job.buffer_status}</TableCell>
+                  <TableCell>
+                    <span className="metric-badge" style={{ color: STATUS_COLOR[job.buffer_status] || '#6b7db3', borderColor: `${STATUS_COLOR[job.buffer_status] || '#6b7db3'}40`, background: `${STATUS_COLOR[job.buffer_status] || '#6b7db3'}1f` }}>
+                      {job.buffer_status}
+                    </span>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -453,23 +610,39 @@ export function BatchPanel() {
                 <TableCell>Sub-app</TableCell>
                 <TableCell align="right">Peak hrs</TableCell>
                 <TableCell align="right">Avg hrs</TableCell>
+                <TableCell align="right">SLA hrs</TableCell>
                 <TableCell align="right">Buffer %</TableCell>
+                <TableCell align="right">SLA used</TableCell>
                 <TableCell>Status</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {topBreaches.slice(0, 9).map((job, index) => {
                 const buffer = job.buffer_pct;
+                const color = STATUS_COLOR[job.buffer_status] || '#6b7db3';
                 return (
                   <TableRow key={`${job.Job_Name}-${index}`}>
-                    <TableCell>{job.Job_Name}</TableCell>
+                    <TableCell>
+                      {job.Job_Name}
+                      {job.concurrent_job_count != null && job.concurrent_job_count > 0 && (
+                        <Typography variant="caption" style={{ display: 'block', color: '#6b7db3' }}>
+                          {job.concurrent_job_count} concurrent · {(job.concurrent_overlap_hrs || 0).toFixed(1)}h overlap
+                        </Typography>
+                      )}
+                    </TableCell>
                     <TableCell>{job.Sub_Application || '—'}</TableCell>
                     <TableCell align="right">{job.peak_hrs.toFixed(2)}</TableCell>
                     <TableCell align="right">{job.avg_hrs.toFixed(2)}</TableCell>
+                    <TableCell align="right">{job.sla_hrs != null ? job.sla_hrs.toFixed(2) : '—'}</TableCell>
                     <TableCell align="right" style={{ color: buffer != null && buffer < 0 ? '#f43f5e' : '#f59e0b' }}>
                       {buffer != null ? `${buffer.toFixed(1)}%` : '—'}
                     </TableCell>
-                    <TableCell>{job.buffer_status}</TableCell>
+                    <TableCell align="right">{job.sla_used_pct != null ? `${job.sla_used_pct.toFixed(0)}%` : '—'}</TableCell>
+                    <TableCell>
+                      <span className="metric-badge" style={{ color, borderColor: `${color}40`, background: `${color}1f` }}>
+                        {job.buffer_status}
+                      </span>
+                    </TableCell>
                   </TableRow>
                 );
               })}
