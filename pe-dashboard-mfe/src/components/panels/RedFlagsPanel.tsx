@@ -60,7 +60,7 @@ export function RedFlagsPanel() {
   const riskMatrix = (data.redFlags?.risk_matrix as RiskItem[]) || [];
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Red Flags</Typography>
       <Box className={classes.row}>
         <Button variant="contained" color="primary" onClick={handleGenerate} disabled={busy}>
@@ -77,7 +77,7 @@ export function RedFlagsPanel() {
       ) : (
         <>
           {riskMatrix.length > 0 && (
-            <Table size="small" aria-label="Risk matrix" style={{ marginTop: 16 }}>
+            <Table size="small" className="pe-table" aria-label="Risk matrix" style={{ marginTop: 16 }}>
               <TableHead>
                 <TableRow>
                   <TableCell>Area</TableCell>
@@ -99,7 +99,7 @@ export function RedFlagsPanel() {
             </Table>
           )}
           {flags.length > 0 && (
-            <Table size="small" aria-label="Red flag questions" style={{ marginTop: 16 }}>
+            <Table size="small" className="pe-table" aria-label="Red flag questions" style={{ marginTop: 16 }}>
               <TableHead>
                 <TableRow>
                   <TableCell>ID</TableCell>

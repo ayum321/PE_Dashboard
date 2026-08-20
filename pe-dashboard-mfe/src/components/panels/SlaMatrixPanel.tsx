@@ -57,7 +57,7 @@ export function SlaMatrixPanel() {
   const breaches = ((slaMatrix.breaches as SlaBreach[]) || []).slice(0, 25);
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">SLA Matrix</Typography>
       <Box className={classes.row}>
         <input className={classes.input} id="sla-matrix-input" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} />
@@ -77,25 +77,25 @@ export function SlaMatrixPanel() {
       ) : (
         <>
           <Box className={classes.kpiRow}>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">Compliance</Typography>
               <Typography variant="h6">{(Number(slaMatrix.compliance_pct) || 0).toFixed(1)}%</Typography>
             </Paper>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">Total runs</Typography>
               <Typography variant="h6">{Number(slaMatrix.total_runs) || 0}</Typography>
             </Paper>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">Breaching</Typography>
-              <Typography variant="h6">{Number(slaMatrix.breaching_runs) || 0}</Typography>
+              <Typography variant="h6" style={{ color: '#f43f5e' }}>{Number(slaMatrix.breaching_runs) || 0}</Typography>
             </Paper>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">At risk</Typography>
-              <Typography variant="h6">{Number(slaMatrix.at_risk_runs) || 0}</Typography>
+              <Typography variant="h6" style={{ color: '#f59e0b' }}>{Number(slaMatrix.at_risk_runs) || 0}</Typography>
             </Paper>
           </Box>
           {breaches.length > 0 && (
-            <Table size="small" aria-label="SLA breach table" style={{ marginTop: 16 }}>
+            <Table size="small" className="pe-table" aria-label="SLA breach table" style={{ marginTop: 16 }}>
               <TableHead>
                 <TableRow>
                   <TableCell>Job</TableCell>

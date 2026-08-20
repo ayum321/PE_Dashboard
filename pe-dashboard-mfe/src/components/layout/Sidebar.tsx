@@ -1,51 +1,108 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { List, ListItem, ListItemText, Paper, Theme, makeStyles } from '@material-ui/core';
+import '../../theme/dashboard.css';
+import {
+  ArchiveIcon,
+  BatchIcon,
+  BenchmarkIcon,
+  ExecutiveIcon,
+  FindingsIcon,
+  RedFlagsIcon,
+  ResourceIcon,
+  SettingsIcon,
+  SlaMatrixIcon,
+  SowIcon,
+  UploadIcon,
+} from '../../theme/icons';
 
-const NAV_ITEMS: { path: string; label: string }[] = [
-  { path: '/upload', label: 'Upload & Intake' },
-  { path: '/executive', label: 'Executive Dashboard' },
-  { path: '/batch', label: 'Batch Review' },
-  { path: '/resource', label: 'Resource Review' },
-  { path: '/sla-matrix', label: 'SLA Matrix' },
-  { path: '/benchmark', label: 'Performance Benchmark' },
-  { path: '/sow', label: 'SOW Contract & Volume' },
-  { path: '/findings', label: 'PE Findings' },
-  { path: '/red-flags', label: 'Red Flags' },
-  { path: '/archive', label: 'Report Archive' },
-  { path: '/settings', label: 'Settings' },
+interface NavItem {
+  path: string;
+  label: string;
+  icon: React.ComponentType;
+}
+
+const WORKSPACE_ITEMS: NavItem[] = [
+  { path: '/upload', label: 'Upload & Intake', icon: UploadIcon },
+  { path: '/executive', label: 'Executive Dashboard', icon: ExecutiveIcon },
 ];
 
-const useStyles = makeStyles((theme: Theme) => ({
-  sidebar: {
-    width: 220,
-    minHeight: '100vh',
-    borderRight: `1px solid ${theme.palette.divider}`,
-  },
-  link: {
-    textDecoration: 'none',
-    color: 'inherit',
-    width: '100%',
-  },
-  activeItem: {
-    backgroundColor: theme.palette.action.selected,
-    borderLeft: `3px solid ${theme.palette.primary.main}`,
-  },
-}));
+const ANALYSIS_ITEMS: NavItem[] = [
+  { path: '/batch', label: 'Batch Review', icon: BatchIcon },
+  { path: '/resource', label: 'Resource Review', icon: ResourceIcon },
+  { path: '/sla-matrix', label: 'SLA Matrix', icon: SlaMatrixIcon },
+  { path: '/benchmark', label: 'Performance Benchmark', icon: BenchmarkIcon },
+  { path: '/sow', label: 'SOW Contract & Volume', icon: SowIcon },
+];
+
+const INTELLIGENCE_ITEMS: NavItem[] = [
+  { path: '/findings', label: 'PE Findings', icon: FindingsIcon },
+  { path: '/red-flags', label: 'Red Flags', icon: RedFlagsIcon },
+  { path: '/archive', label: 'Report Archive', icon: ArchiveIcon },
+  { path: '/settings', label: 'Settings', icon: SettingsIcon },
+];
+
+const NavGroup = ({ label, items }: { label: string; items: NavItem[] }) => (
+  <>
+    <span className="nav-section-label">{label}</span>
+    {items.map(({ path, label: itemLabel, icon: Icon }) => (
+      <NavLink key={path} to={path} className="nav-btn" activeClassName="active">
+        <Icon />
+        <span>{itemLabel}</span>
+      </NavLink>
+    ))}
+  </>
+);
 
 export function Sidebar() {
-  const classes = useStyles();
   return (
-    <Paper className={classes.sidebar} elevation={0} square component="nav" aria-label="Dashboard navigation">
-      <List>
-        {NAV_ITEMS.map((item) => (
-          <NavLink key={item.path} to={item.path} className={classes.link} activeClassName={classes.activeItem}>
-            <ListItem button>
-              <ListItemText primary={item.label} />
-            </ListItem>
-          </NavLink>
-        ))}
-      </List>
-    </Paper>
+    <aside
+      style={{
+        width: 240,
+        minHeight: '100vh',
+        background: '#06091a',
+        borderRight: '1px solid #1a2850',
+        display: 'flex',
+        flexDirection: 'column',
+        flexShrink: 0,
+      }}
+      aria-label="Dashboard navigation"
+    >
+      <div className="sidebar-accent-line" />
+
+      <div style={{ padding: '16px', borderBottom: '1px solid #1a2850' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div
+            className="brand-logo"
+            style={{ width: 40, height: 40, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+          >
+            <svg viewBox="0 0 32 32" width={24} height={24} fill="none">
+              <path d="M16 2 L30 16 L16 30 L2 16 Z" fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.2)" strokeWidth={0.5} />
+              <text x="5.5" y="21" fontFamily="'Sora','Inter',sans-serif" fontSize="13" fontWeight={800} fill="white" letterSpacing="-0.5">
+                PE
+              </text>
+            </svg>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div className="brand-name">PE Audit</div>
+            <div className="brand-sub">Control Tower</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12 }}>
+          <span className="metric-badge metric-badge-blue">Batch</span>
+          <span className="metric-badge metric-badge-teal">SLA</span>
+        </div>
+      </div>
+
+      <nav style={{ flex: 1, padding: '12px 8px', overflowY: 'auto' }}>
+        <NavGroup label="Workspace" items={WORKSPACE_ITEMS} />
+        <NavGroup label="Analysis" items={ANALYSIS_ITEMS} />
+        <NavGroup label="Intelligence" items={INTELLIGENCE_ITEMS} />
+      </nav>
+
+      <div style={{ padding: '10px 12px', borderTop: '1px solid #1a2850', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span className="version-badge">v2.1.0</span>
+      </div>
+    </aside>
   );
 }
+

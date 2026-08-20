@@ -2,10 +2,12 @@ import React, { ChangeEvent, useState } from 'react';
 import { Box, Button, CircularProgress, Paper, Typography, makeStyles } from '@material-ui/core';
 import { processBatchMulti, uploadDashboardFile } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
+import { BatchIcon, ResourceIcon } from '../../theme/icons';
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
-  row: { display: 'flex', gap: theme.spacing(2), alignItems: 'center', marginTop: theme.spacing(2), flexWrap: 'wrap' },
+  tileRow: { display: 'flex', gap: theme.spacing(2), marginTop: theme.spacing(3), flexWrap: 'wrap' },
+  tile: { flex: '1 1 260px', padding: theme.spacing(3), textAlign: 'center' },
   input: { display: 'none' },
   status: { marginTop: theme.spacing(1) },
   error: { color: theme.palette.error.main },
@@ -65,39 +67,64 @@ export function UploadPanel() {
   };
 
   return (
-    <Paper className={classes.panel} elevation={0}>
-      <Typography variant="h6">Upload &amp; Intake</Typography>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
+      <Typography variant="h6">Build the audit evidence set</Typography>
       <Typography variant="body2" color="textSecondary">
         Start with Ctrl-M execution history and resource evidence. All calculations are performed by the FastAPI backend.
       </Typography>
-      <Box className={classes.row}>
-        <input
-          className={classes.input}
-          id="batch-upload-input"
-          type="file"
-          accept=".csv,.xlsx,.xls"
-          multiple
-          onChange={handleBatchUpload}
-        />
-        <label htmlFor="batch-upload-input">
-          <Button component="span" variant="contained" color="primary" disabled={busy}>
-            Upload Ctrl-M Batch Export
-          </Button>
-        </label>
-        <input
-          className={classes.input}
-          id="resource-upload-input"
-          type="file"
-          accept=".csv,.doc,.docx,.pdf,.txt,.xls,.xlsx,.zip"
-          onChange={handleResourceUpload}
-        />
-        <label htmlFor="resource-upload-input">
-          <Button component="span" variant="outlined" disabled={busy}>
-            Upload Resource / SLA File
-          </Button>
-        </label>
-        {busy && <CircularProgress size={22} aria-label="Uploading" />}
+
+      <Box className={classes.tileRow}>
+        <Paper className={`${classes.tile} upload-tile`} elevation={0}>
+          <div className="upload-tile-icon" style={{ background: 'rgba(59,130,246,.12)', color: '#3b82f6', margin: '0 auto 12px' }}>
+            <BatchIcon />
+          </div>
+          <Typography variant="subtitle2">Ctrl-M Execution History</Typography>
+          <Typography variant="caption" color="textSecondary">.csv · .xlsx · .xls — up to 8 files</Typography>
+          <Box mt={2}>
+            <input
+              className={classes.input}
+              id="batch-upload-input"
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              multiple
+              onChange={handleBatchUpload}
+            />
+            <label htmlFor="batch-upload-input">
+              <Button component="span" variant="contained" color="primary" disabled={busy} fullWidth>
+                Upload Ctrl-M Batch Export
+              </Button>
+            </label>
+          </Box>
+        </Paper>
+
+        <Paper className={`${classes.tile} upload-tile`} elevation={0}>
+          <div className="upload-tile-icon" style={{ background: 'rgba(45,212,191,.12)', color: '#2dd4bf', margin: '0 auto 12px' }}>
+            <ResourceIcon />
+          </div>
+          <Typography variant="subtitle2">Resource / SLA Evidence</Typography>
+          <Typography variant="caption" color="textSecondary">Resource report, SLA matrix, benchmark, or SOW file</Typography>
+          <Box mt={2}>
+            <input
+              className={classes.input}
+              id="resource-upload-input"
+              type="file"
+              accept=".csv,.doc,.docx,.pdf,.txt,.xls,.xlsx,.zip"
+              onChange={handleResourceUpload}
+            />
+            <label htmlFor="resource-upload-input">
+              <Button component="span" variant="outlined" disabled={busy} fullWidth>
+                Upload Resource / SLA File
+              </Button>
+            </label>
+          </Box>
+        </Paper>
       </Box>
+
+      {busy && (
+        <Box mt={2}>
+          <CircularProgress size={22} aria-label="Uploading" />
+        </Box>
+      )}
       {batchStatus && <Typography className={classes.status} variant="body2">{batchStatus}</Typography>}
       {resourceStatus && <Typography className={classes.status} variant="body2">{resourceStatus}</Typography>}
       {error && (
@@ -108,3 +135,4 @@ export function UploadPanel() {
     </Paper>
   );
 }
+

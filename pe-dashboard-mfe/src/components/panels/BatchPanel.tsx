@@ -101,7 +101,7 @@ export function BatchPanel() {
 
   if (!data.batch) {
     return (
-      <Paper className={classes.panel} elevation={0}>
+      <Paper className={`${classes.panel} kpi-card`} elevation={0}>
         <Typography variant="h6">Batch Review</Typography>
         <Typography className={classes.empty} variant="body2" color="textSecondary">
           Upload a Ctrl-M batch export in Upload &amp; Intake to populate this view.
@@ -111,32 +111,32 @@ export function BatchPanel() {
   }
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Batch Review</Typography>
       <Box className={classes.kpiRow}>
-        <Paper className={classes.kpi} elevation={0} variant="outlined">
+        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
           <Typography variant="caption">Compliance</Typography>
           <Typography variant="h6">{(kpis.compliance_pct || 0).toFixed(1)}%</Typography>
         </Paper>
-        <Paper className={classes.kpi} elevation={0} variant="outlined">
+        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
           <Typography variant="caption">Total runs</Typography>
           <Typography variant="h6">{kpis.total_runs || 0}</Typography>
         </Paper>
-        <Paper className={classes.kpi} elevation={0} variant="outlined">
+        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
           <Typography variant="caption">Total jobs</Typography>
           <Typography variant="h6">{kpis.total_jobs || 0}</Typography>
         </Paper>
-        <Paper className={classes.kpi} elevation={0} variant="outlined">
+        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
           <Typography variant="caption">Breaching</Typography>
-          <Typography variant="h6">{kpis.jobs_breach || 0}</Typography>
+          <Typography variant="h6" style={{ color: '#f43f5e' }}>{kpis.jobs_breach || 0}</Typography>
         </Paper>
-        <Paper className={classes.kpi} elevation={0} variant="outlined">
+        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
           <Typography variant="caption">At risk</Typography>
-          <Typography variant="h6">{kpis.jobs_at_risk || 0}</Typography>
+          <Typography variant="h6" style={{ color: '#f59e0b' }}>{kpis.jobs_at_risk || 0}</Typography>
         </Paper>
-        <Paper className={classes.kpi} elevation={0} variant="outlined">
+        <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
           <Typography variant="caption">Failed runs</Typography>
-          <Typography variant="h6">{kpis.failed_runs || 0}</Typography>
+          <Typography variant="h6" style={{ color: '#f43f5e' }}>{kpis.failed_runs || 0}</Typography>
         </Paper>
       </Box>
 
@@ -150,7 +150,7 @@ export function BatchPanel() {
       {sortedJobs.length > 0 && (
         <Box className={classes.chart}>
           <Typography variant="subtitle2">Top jobs</Typography>
-          <Table size="small" aria-label="Top jobs table">
+          <Table size="small" className="pe-table" aria-label="Top jobs table">
             <TableHead>
               <TableRow>
                 <TableCell>

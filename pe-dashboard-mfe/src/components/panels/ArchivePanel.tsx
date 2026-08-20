@@ -44,7 +44,7 @@ export function ArchivePanel() {
   }, []);
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Report Archive</Typography>
       {busy && <CircularProgress size={22} aria-label="Loading archive" style={{ marginTop: 16 }} />}
       {error && <Typography variant="body2" color="error">{error}</Typography>}
@@ -54,7 +54,7 @@ export function ArchivePanel() {
         </Typography>
       )}
       {reports.length > 0 && (
-        <Table size="small" aria-label="Report archive table" style={{ marginTop: 16 }}>
+        <Table size="small" className="pe-table" aria-label="Report archive table" style={{ marginTop: 16 }}>
           <TableHead>
             <TableRow>
               <TableCell>Customer</TableCell>

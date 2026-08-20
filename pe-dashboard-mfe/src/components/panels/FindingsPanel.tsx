@@ -49,7 +49,7 @@ export function FindingsPanel() {
   const summary = data.findings?.summary as { critical?: number; warning?: number; total?: number } | undefined;
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">PE Findings</Typography>
       <Box className={classes.row}>
         <Button variant="contained" color="primary" onClick={handleGenerate} disabled={busy}>
@@ -71,7 +71,7 @@ export function FindingsPanel() {
             </Typography>
           )}
           {findings.map((finding, index) => (
-            <Paper key={index} className={classes.finding} variant="outlined">
+            <Paper key={index} className={`${classes.finding} insight-card ${finding.level}`} elevation={0}>
               <Typography variant="subtitle2" color={LEVEL_COLOR[finding.level]}>
                 {finding.level.toUpperCase()}: {finding.text}
               </Typography>

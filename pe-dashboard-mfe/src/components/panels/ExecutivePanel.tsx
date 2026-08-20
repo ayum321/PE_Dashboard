@@ -59,7 +59,7 @@ export function ExecutivePanel() {
   const subAppColumns = subAppMetrics.length > 0 ? Object.keys(subAppMetrics[0]).filter((key) => isPrimitive(subAppMetrics[0][key])) : [];
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Executive Dashboard</Typography>
       <Box className={classes.row}>
         <Button variant="contained" color="primary" onClick={handleGenerate} disabled={busy}>
@@ -77,19 +77,19 @@ export function ExecutivePanel() {
         <>
           <Box className={classes.kpiGrid}>
             {kpiEntries.map(([key, value]) => (
-              <Paper key={key} className={classes.kpi} elevation={0} variant="outlined">
+              <Paper key={key} className={`${classes.kpi} kpi-card`} elevation={0}>
                 <Typography variant="caption">{key.replace(/_/g, ' ')}</Typography>
                 <Typography variant="h6">{String(value)}</Typography>
               </Paper>
             ))}
           </Box>
           {typeof data.executive.narrative === 'string' && data.executive.narrative && (
-            <Paper className={classes.narrative} elevation={0} variant="outlined">
+            <Paper className={`${classes.narrative} chart-panel`} elevation={0}>
               <Typography variant="body2">{data.executive.narrative}</Typography>
             </Paper>
           )}
           {subAppMetrics.length > 0 && (
-            <Table size="small" aria-label="Sub-application metrics" style={{ marginTop: 16 }}>
+            <Table size="small" className="pe-table" aria-label="Sub-application metrics" style={{ marginTop: 16 }}>
               <TableHead>
                 <TableRow>
                   {subAppColumns.map((column) => (

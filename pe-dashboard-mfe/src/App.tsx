@@ -21,6 +21,8 @@ import { useDomHistoryMonitor } from '@jda/lui-portal-utilities';
 import { EventContext } from './context';
 import { Breadcrumbs } from './components/breadcrumbs/Breadcrumbs';
 import { AppDataProvider } from './context/AppDataContext';
+import { dashboardTheme } from './theme/dashboardTheme';
+import './theme/dashboard.css';
 import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
 import { UploadPanel } from './components/panels/UploadPanel';
@@ -44,11 +46,13 @@ function App() {
       <ThemeProvider theme={theme}>
         <LuiBackground>
           <Breadcrumbs />
+          <ThemeProvider theme={dashboardTheme}>
           <AppDataProvider>
+            <div className="pe-dashboard">
             <Header />
             <Box display="flex">
               <Sidebar />
-              <Box flexGrow={1} minWidth={0}>
+              <Box flexGrow={1} minWidth={0} style={{ background: '#060914', minHeight: '100vh' }}>
                 <Switch>
                   <Route exact path="/upload" component={UploadPanel} />
                   <Route exact path="/executive" component={ExecutivePanel} />
@@ -65,7 +69,9 @@ function App() {
                 </Switch>
               </Box>
             </Box>
+            </div>
           </AppDataProvider>
+          </ThemeProvider>
         </LuiBackground>
       </ThemeProvider>
     </div>

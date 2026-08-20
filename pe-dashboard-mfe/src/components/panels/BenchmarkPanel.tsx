@@ -86,7 +86,7 @@ export function BenchmarkPanel() {
   };
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Performance Benchmark</Typography>
       <Box className={classes.row}>
         <input className={classes.input} id="benchmark-input" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} />
@@ -106,27 +106,27 @@ export function BenchmarkPanel() {
       ) : (
         <>
           <Box className={classes.kpiRow}>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">Transactions</Typography>
               <Typography variant="h6">{Number(data.benchmark.total_transactions) || 0}</Typography>
             </Paper>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">Degraded</Typography>
-              <Typography variant="h6">{Number(data.benchmark.degraded) || 0}</Typography>
+              <Typography variant="h6" style={{ color: '#f43f5e' }}>{Number(data.benchmark.degraded) || 0}</Typography>
             </Paper>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">Improved</Typography>
-              <Typography variant="h6">{Number(data.benchmark.improved) || 0}</Typography>
+              <Typography variant="h6" style={{ color: '#10d96e' }}>{Number(data.benchmark.improved) || 0}</Typography>
             </Paper>
-            <Paper className={classes.kpi} elevation={0} variant="outlined">
+            <Paper className={`${classes.kpi} kpi-card`} elevation={0}>
               <Typography variant="caption">SLA breaches</Typography>
-              <Typography variant="h6">{Number(data.benchmark.sla_breaches) || 0}</Typography>
+              <Typography variant="h6" style={{ color: '#f43f5e' }}>{Number(data.benchmark.sla_breaches) || 0}</Typography>
             </Paper>
           </Box>
           <Box className={classes.row}>
             <TextField size="small" label="Filter transaction" value={filter} onChange={(event) => setFilter(event.target.value)} />
           </Box>
-          <Table size="small" aria-label="Benchmark table" style={{ marginTop: 16 }}>
+          <Table size="small" className="pe-table" aria-label="Benchmark table" style={{ marginTop: 16 }}>
             <TableHead>
               <TableRow>
                 <TableCell>

@@ -111,7 +111,7 @@ export function SowPanel() {
   const metrics = ((data.sowCompare?.metrics as SowMetric[]) || []);
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">SOW Contract &amp; Volume Compliance</Typography>
       <Box className={classes.row}>
         <input className={classes.input} id="sow-parse-input" type="file" accept=".pdf,.docx" onChange={handleParse} />
@@ -139,7 +139,7 @@ export function SowPanel() {
             Overall status: {String(data.sowCompare.overall_status)}
           </Typography>
           {metrics.length > 0 && (
-            <Table size="small" aria-label="SOW comparison table" style={{ marginTop: 8 }}>
+            <Table size="small" className="pe-table" aria-label="SOW comparison table" style={{ marginTop: 8 }}>
               <TableHead>
                 <TableRow>
                   <TableCell>Metric</TableCell>

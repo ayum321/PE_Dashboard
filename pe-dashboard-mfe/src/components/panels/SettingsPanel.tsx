@@ -59,14 +59,14 @@ export function SettingsPanel() {
 
   if (busy) {
     return (
-      <Paper className={classes.panel} elevation={0}>
+      <Paper className={`${classes.panel} kpi-card`} elevation={0}>
         <CircularProgress size={22} aria-label="Loading settings" />
       </Paper>
     );
   }
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Settings</Typography>
       {error && <Typography variant="body2" color="error">{error}</Typography>}
       <Box className={classes.fields}>

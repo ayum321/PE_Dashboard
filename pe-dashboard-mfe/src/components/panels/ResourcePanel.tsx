@@ -121,7 +121,7 @@ export function ResourcePanel() {
   };
 
   return (
-    <Paper className={classes.panel} elevation={0}>
+    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Resource Review</Typography>
 
       <Box className={classes.azureRow}>
@@ -160,7 +160,7 @@ export function ResourcePanel() {
               onChange={(event) => setFilter(event.target.value)}
             />
           </Box>
-          <Table size="small" aria-label="Resource review table">
+          <Table size="small" className="pe-table" aria-label="Resource review table">
             <TableHead>
               <TableRow>
                 <TableCell>

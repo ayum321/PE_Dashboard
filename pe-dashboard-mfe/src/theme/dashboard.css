@@ -1,0 +1,207 @@
+/* Ported from app/templates/index.html so the React MFE renders visually
+ * identical to the original Jinja/Tailwind PE Audit Dashboard. */
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #213060; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(59, 130, 246, .5); }
+
+.pe-dashboard {
+  font-family: 'Sora', 'Inter', system-ui, sans-serif;
+  background: #060914;
+  min-height: 100vh;
+  color: #f0f4ff;
+}
+
+/* ── Brand mark ─────────────────────────────────────────── */
+.brand-logo {
+  background: linear-gradient(135deg, #1d4ed8 0%, #7c3aed 50%, #0ea5e9 100%);
+  box-shadow: 0 0 16px rgba(59, 130, 246, .22);
+}
+.brand-name {
+  background: linear-gradient(90deg, #f0f4ff 0%, #93c5fd 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  font-size: 15px;
+  line-height: 1.2;
+}
+.brand-sub {
+  background: linear-gradient(90deg, #3b82f6, #a855f7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-size: .65rem;
+  margin-top: 2px;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+.sidebar-accent-line {
+  height: 2px;
+  background: linear-gradient(90deg, #3b82f6, #22d3ee);
+}
+.nav-section-label {
+  letter-spacing: .12em;
+  background: linear-gradient(90deg, #6b7db3, #3b82f6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 8px 12px 8px;
+  display: block;
+}
+.nav-btn {
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+  color: #6b7db3;
+  border-left: 2px solid transparent;
+  text-decoration: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.nav-btn:hover {
+  background: rgba(255, 255, 255, .04);
+  color: #f0f4ff;
+}
+.nav-btn.active {
+  background: linear-gradient(90deg, rgba(59, 130, 246, .18) 0%, rgba(59, 130, 246, .06) 100%);
+  border-left: 2px solid #3b82f6;
+  color: #f0f4ff;
+}
+.version-badge {
+  background: linear-gradient(135deg, rgba(59, 130, 246, .15), rgba(168, 85, 247, .15));
+  border: 1px solid rgba(59, 130, 246, .2);
+  border-radius: 4px;
+  font-size: .65rem;
+  font-family: 'JetBrains Mono', monospace;
+  padding: .15rem .5rem;
+  color: #6b7db3;
+  letter-spacing: .06em;
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.header-accent {
+  background: linear-gradient(90deg, #3b82f6 0%, #a855f7 40%, #22d3ee 100%);
+  height: 1px;
+  opacity: .6;
+}
+
+/* ── KPI / panel cards ───────────────────────────────────── */
+.kpi-card {
+  background: linear-gradient(135deg, rgba(13, 21, 38, .95) 0%, rgba(17, 29, 54, .95) 100%);
+  border: 1px solid rgba(59, 130, 246, .12);
+  border-radius: 12px;
+  transition: all .2s ease;
+}
+.kpi-card:hover {
+  border-color: rgba(59, 130, 246, .3);
+  box-shadow: 0 8px 32px rgba(59, 130, 246, .12), inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+.chart-panel {
+  background: rgba(9, 14, 31, .6);
+  border: 1px solid rgba(59, 130, 246, .1);
+  border-radius: .75rem;
+}
+.chart-panel-title {
+  font-size: .75rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #6b7db3;
+}
+.insight-card {
+  background: linear-gradient(135deg, rgba(9, 14, 31, .9) 0%, rgba(13, 21, 38, .9) 100%);
+  border-left: 3px solid #3b82f6;
+  border-radius: 8px;
+  transition: border-color .2s;
+}
+.insight-card.critical { border-left-color: #f43f5e; }
+.insight-card.warning  { border-left-color: #f59e0b; }
+.insight-card.ok       { border-left-color: #10d96e; }
+
+/* ── Badges ──────────────────────────────────────────────── */
+.metric-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  padding: .2rem .65rem;
+  border-radius: 9999px;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.metric-badge-green  { background: rgba(16, 217, 110, .12); color: #10d96e; border: 1px solid rgba(16, 217, 110, .25); }
+.metric-badge-amber  { background: rgba(245, 158, 11, .12); color: #f59e0b; border: 1px solid rgba(245, 158, 11, .25); }
+.metric-badge-red    { background: rgba(244, 63, 94, .12);  color: #f43f5e; border: 1px solid rgba(244, 63, 94, .25); }
+.metric-badge-blue   { background: rgba(59, 130, 246, .12); color: #3b82f6; border: 1px solid rgba(59, 130, 246, .25); }
+.metric-badge-purple { background: rgba(168, 85, 247, .12); color: #a855f7; border: 1px solid rgba(168, 85, 247, .25); }
+.metric-badge-teal   { background: rgba(45, 212, 191, .1);  color: #2dd4bf; border: 1px solid rgba(45, 212, 191, .25); }
+
+/* ── Status dots ─────────────────────────────────────────── */
+.status-dot-green { background: #10d96e; box-shadow: 0 0 6px #10d96e; }
+.status-dot-amber { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+.status-dot-red   { background: #f43f5e; box-shadow: 0 0 6px #f43f5e; }
+.status-dot-blue  { background: #3b82f6; box-shadow: 0 0 6px #3b82f6; }
+.status-dot-muted { background: #6b7db3; }
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+}
+
+/* ── Tables ──────────────────────────────────────────────── */
+.pe-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.pe-table th {
+  font-size: .7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: #6b7db3;
+  padding: .6rem .75rem;
+  background: rgba(6, 9, 26, .8);
+  border-bottom: 1px solid rgba(59, 130, 246, .15);
+}
+.pe-table td {
+  padding: .55rem .75rem;
+  font-size: .8rem;
+  border-bottom: 1px solid rgba(33, 48, 96, .4);
+  font-variant-numeric: tabular-nums;
+}
+.pe-table tr:hover td { background: rgba(59, 130, 246, .04); }
+
+/* ── Upload tiles ────────────────────────────────────────── */
+.upload-tile {
+  border: 1px dashed rgba(59, 130, 246, .3);
+  border-radius: 12px;
+  background: rgba(9, 14, 31, .5);
+  transition: all .2s ease;
+}
+.upload-tile:hover {
+  border-color: rgba(59, 130, 246, .6);
+  background: rgba(59, 130, 246, .05);
+}
+.upload-tile-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.section-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(59, 130, 246, .3) 30%, rgba(168, 85, 247, .3) 70%, transparent 100%);
+  border: none;
+  margin: 24px 0;
+}
