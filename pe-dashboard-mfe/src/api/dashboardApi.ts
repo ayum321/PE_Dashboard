@@ -135,6 +135,10 @@ export const uploadSlaMatrix = (file: File, slaMode = 'daily'): Promise<Dashboar
   return request<DashboardPayload>('/api/sla-matrix', { method: 'POST', body: formData });
 };
 
+/** Re-run batch KPIs from the cached Ctrl-M rows with current manual job exclusions. */
+export const refreshBatch = (manualExclusions: { name: string; reason: string }[] = []): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/batch/refresh', { manual_exclusions: manualExclusions });
+
 export const getConfig = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/config');
 
 export const updateConfig = (payload: DashboardPayload): Promise<DashboardPayload> =>
