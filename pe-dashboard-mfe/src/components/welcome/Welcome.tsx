@@ -28,13 +28,12 @@ import {
   Theme,
   Typography,
 } from '@material-ui/core';
-import { CentralZone, EastZone, LayoutWrapper, NorthZone, WestZone } from '@jda/lui-dashboard-scaffolding-layouts';
 import { LuiLogoStacked } from '@jda/lui-common-component-library';
 import {
   AuditContext,
   exportReport,
-  fetchAzureResources,
   generateFindings,
+  getAuditContext,
   getAzureStatus,
   getExecutiveDashboard,
   getRedFlags,
@@ -196,16 +195,12 @@ export function Welcome() {
 
   return (
     <div className={classes.welcomeContainer}>
-      <LayoutWrapper>
-        {/* 
-        // @ts-ignore */}
-        <NorthZone title={LOCAL_APP_NAME} stickyData="Sticky data hidden until scroll" isHidden={false} isSticky={true}>
-          <Paper className={classes.paperNorthZone}></Paper>
-        </NorthZone>
-        <WestZone isHidden={false} isCollapsed={false} isSticky={false}>
-          <Paper className={classes.paperWestZone}></Paper>
-        </WestZone>
-        <CentralZone>
+      <Box display="flex" flexDirection="column">
+        <Paper className={classes.paperNorthZone} component="header">
+          <Typography variant="subtitle1">{LOCAL_APP_NAME}</Typography>
+        </Paper>
+        <Box display="flex">
+          <Paper className={classes.paperWestZone} component="aside" />
           <Paper className={classes.welcomePaper} component="div">
             <Box className={classes.workspace} component="section">
               <Box className={classes.logoContainer} component="div">
@@ -385,11 +380,9 @@ export function Welcome() {
               )}
             </Box>
           </Paper>
-        </CentralZone>
-        <EastZone isHidden={false} isCollapsed={false} isSticky={false}>
-          <Paper className={classes.paperEastZone}></Paper>
-        </EastZone>
-      </LayoutWrapper>
+          <Paper className={classes.paperEastZone} component="aside" />
+        </Box>
+      </Box>
     </div>
   );
 }

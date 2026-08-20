@@ -20,10 +20,9 @@ import { Welcome } from './Welcome';
 describe('Welcome', () => {
   it('should render', () => {
     window['env'] = { LOCAL_APP_NAME: 'Local MFE' };
-    const { getByTestId } = render(<Welcome />);
+    const { getByRole } = render(<Welcome />);
 
-    expect(getByTestId('lui-scaffolding-layouts-north-zone-child-container')).toBeDefined();
-    expect(getByTestId('lui-scaffolding-layouts-north-zone-header-block')).toBeDefined();
-    expect(getByTestId('lui-scaffolding-layouts-north-zone-header-block-title-container')).toBeDefined();
+    expect(getByRole('heading', { name: 'Local MFE', level: 1 })).toBeDefined();
+    expect(getByRole('button', { name: 'Select PE document' })).toBeDefined();
   });
 });
