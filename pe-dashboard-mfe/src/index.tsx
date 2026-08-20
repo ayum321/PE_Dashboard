@@ -18,6 +18,7 @@ import ReactDOM from 'react-dom';
 import App from './App';
 import { EventsHandler } from './components/events-handler/EventsHandler';
 import { BrowserRouter } from 'react-router-dom';
+import './theme/highchartsSetup';
 
 const configuredFramePath = window.env.FRAME_URL_PATH || '';
 const FRAME_URL_PATH = configuredFramePath.includes('&lt;') ? '/' : configuredFramePath || '/';

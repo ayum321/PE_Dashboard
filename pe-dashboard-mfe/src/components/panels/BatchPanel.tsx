@@ -12,7 +12,7 @@ import {
   Typography,
   makeStyles,
 } from '@material-ui/core';
-import Highcharts from 'highcharts';
+import Highcharts from '../../theme/highchartsSetup';
 import HighchartsReact from 'highcharts-react-official';
 import { useAppData } from '../../context/AppDataContext';
 import { KpiStatCard } from '../shared/KpiStatCard';
@@ -29,6 +29,7 @@ interface BatchKpis {
   jobs_ok?: number;
   failed_runs?: number;
   fail_rate_pct?: number;
+  daily_limit_hrs?: number;
 }
 
 interface TopJobRow {
@@ -46,6 +47,7 @@ interface WindowPoint {
   total_hrs: number;
   job_count: number;
   breach: boolean;
+  top_job?: string | null;
 }
 
 interface ElapsedWindow {
@@ -76,11 +78,32 @@ interface SlaSourceInfo {
   adaptive_total_jobs: number;
 }
 
+interface DataWarning {
+  code: string;
+  text: string;
+  severity: string;
+}
+
 interface DataCoverage {
-  date_range?: string;
+  date_range?: [string, string] | string[];
   date_span_days?: number;
   confidence_label?: string;
-  warnings?: string[];
+  warnings?: DataWarning[];
+}
+
+interface SlaHeatmapCell {
+  job: string;
+  date: string;
+  hrs: number | null;
+  breach: boolean;
+  sla_limit?: number;
+}
+
+interface SlaHeatmap {
+  jobs: string[];
+  dates: string[];
+  cells: SlaHeatmapCell[];
+  limit: number;
 }
 
 const useStyles = makeStyles((theme) => ({
@@ -115,8 +138,9 @@ export function BatchPanel() {
   const worstJob = data.batch?.worst_job as WorstJob | undefined;
   const slaSource = data.batch?.sla_source as SlaSourceInfo | undefined;
   const dataCoverage = data.batch?.data_coverage as DataCoverage | undefined;
+  const slaHeatmap = data.batch?.sla_heatmap as SlaHeatmap | undefined;
   const windowCompliance = kpis.window_compliance_pct ?? kpis.batch_window_compliance ?? 0;
-
+  const slaCeilingHrs = kpis.daily_limit_hrs || 6;
 
   const sortedJobs = useMemo(() => {
     const rows = [...topJobs];
@@ -130,20 +154,105 @@ export function BatchPanel() {
   }, [topJobs, sortKey, sortDesc]);
 
   const chartOptions: Highcharts.Options = {
-    chart: { type: 'column', height: 260 },
+    chart: { type: 'column', height: 280 },
     title: { text: undefined },
     xAxis: { categories: window.map((point) => point.run_date) },
-    yAxis: { title: { text: 'Total hours' } },
+    yAxis: {
+      title: { text: 'Total hours' },
+      plotLines: [{
+        value: slaCeilingHrs,
+        color: '#f59e0b',
+        dashStyle: 'Dash',
+        width: 2,
+        label: { text: `SLA ceiling ${slaCeilingHrs}h`, style: { color: '#f59e0b', fontSize: '10px' } },
+      }],
+    },
+    tooltip: {
+      formatter(this: Highcharts.TooltipFormatterContextObject) {
+        const point = window[this.point.index];
+        if (!point) return `${this.x}: ${this.y}h`;
+        return `<b>${point.run_date}</b><br/>${point.total_hrs.toFixed(2)}h across ${point.job_count} job(s)` +
+          (point.top_job ? `<br/>Top job: ${point.top_job}` : '') +
+          (point.breach ? '<br/><span style="color:#f43f5e">BREACH</span>' : '');
+      },
+    },
     series: [
       {
         type: 'column',
         name: 'Daily batch hours',
-        data: window.map((point) => point.total_hrs),
-        color: '#3b82f6',
+        data: window.map((point) => ({
+          y: point.total_hrs,
+          color: point.breach ? '#f43f5e' : point.total_hrs >= slaCeilingHrs * 0.85 ? '#f59e0b' : '#10d96e',
+        })),
       },
     ],
-    credits: { enabled: false },
   };
+
+  const gaugeValue = worstJob ? Math.max(-100, Math.min(100, worstJob.buffer_pct)) : 0;
+  const gaugeOptions: Highcharts.Options = {
+    chart: { type: 'solidgauge', height: 220 },
+    title: { text: undefined },
+    pane: {
+      center: ['50%', '85%'],
+      size: '140%',
+      startAngle: -90,
+      endAngle: 90,
+      background: [{ backgroundColor: 'rgba(255,255,255,.05)', innerRadius: '60%', outerRadius: '100%', shape: 'arc' }],
+    },
+    yAxis: {
+      min: -100,
+      max: 100,
+      stops: [
+        [0.0, '#f43f5e'],
+        [0.5, '#f59e0b'],
+        [1.0, '#10d96e'],
+      ],
+      lineWidth: 0,
+      tickWidth: 0,
+      minorTickInterval: undefined,
+      labels: { enabled: false },
+    },
+    series: [{
+      type: 'solidgauge',
+      data: [gaugeValue],
+      dataLabels: {
+        format: `<div style="text-align:center"><span style="font-size:22px;font-weight:800;color:${worstJob && worstJob.buffer_pct < 0 ? '#f43f5e' : '#10d96e'}">{y:.1f}%</span></div>`,
+        useHTML: true,
+      },
+    }],
+  };
+
+  const heatmapOptions: Highcharts.Options | null = slaHeatmap && slaHeatmap.cells.length > 0 ? {
+    chart: { type: 'heatmap', height: Math.max(240, slaHeatmap.jobs.length * 24) },
+    title: { text: undefined },
+    xAxis: { categories: slaHeatmap.dates, labels: { rotation: -45 } },
+    yAxis: { categories: slaHeatmap.jobs, title: { text: undefined }, reversed: true },
+    colorAxis: {
+      min: 0,
+      stops: [
+        [0, '#10d96e'],
+        [0.7, '#f59e0b'],
+        [1, '#f43f5e'],
+      ],
+    },
+    tooltip: {
+      formatter(this: Highcharts.TooltipFormatterContextObject) {
+        const cell = slaHeatmap.cells[this.point.index];
+        if (!cell || cell.hrs == null) return 'No run';
+        return `<b>${cell.job}</b><br/>${cell.date}: ${cell.hrs.toFixed(2)}h` + (cell.breach ? ' <span style="color:#f43f5e">BREACH</span>' : '');
+      },
+    },
+    series: [{
+      type: 'heatmap',
+      data: slaHeatmap.cells.map((cell) => {
+        const jobIndex = slaHeatmap.jobs.indexOf(cell.job);
+        const dateIndex = slaHeatmap.dates.indexOf(cell.date);
+        const ceiling = cell.sla_limit || slaHeatmap.limit || 6;
+        const ratio = cell.hrs != null ? cell.hrs / ceiling : null;
+        return { x: dateIndex, y: jobIndex, value: ratio };
+      }),
+    }],
+  } : null;
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -183,8 +292,8 @@ export function BatchPanel() {
 
       {dataCoverage && (
         <Box display="flex" style={{ gap: 8, flexWrap: 'wrap', marginTop: 8, marginBottom: 4 }}>
-          {dataCoverage.date_range && (
-            <span className="metric-badge metric-badge-blue">{dataCoverage.date_range}</span>
+          {dataCoverage.date_range && dataCoverage.date_range.length === 2 && (
+            <span className="metric-badge metric-badge-blue">{dataCoverage.date_range[0]} to {dataCoverage.date_range[1]}</span>
           )}
           {dataCoverage.confidence_label && (
             <span
@@ -199,7 +308,13 @@ export function BatchPanel() {
             </span>
           )}
           {(dataCoverage.warnings || []).slice(0, 3).map((warning, index) => (
-            <span key={index} className="metric-badge metric-badge-amber">{warning}</span>
+            <span
+              key={index}
+              className={`metric-badge ${warning.severity === 'warning' ? 'metric-badge-amber' : 'metric-badge-blue'}`}
+              title={warning.text}
+            >
+              {warning.text.length > 60 ? `${warning.text.slice(0, 60)}…` : warning.text}
+            </span>
           ))}
         </Box>
       )}
@@ -259,10 +374,33 @@ export function BatchPanel() {
 
 
 
-      {window.length > 0 && (
+      {(window.length > 0 || worstJob) && (
+        <Box className={classes.chart} style={{ display: 'grid', gridTemplateColumns: worstJob ? '1fr 2fr' : '1fr', gap: 16 }}>
+          {worstJob && (
+            <Box className="chart-panel" style={{ padding: 16 }}>
+              <Typography variant="subtitle2">SLA Buffer Gauge</Typography>
+              <Typography variant="caption" color="textSecondary">Headroom between worst-job peak and the SLA ceiling</Typography>
+              <HighchartsReact highcharts={Highcharts} options={gaugeOptions} />
+              <Typography variant="caption" style={{ display: 'block', textAlign: 'center', color: '#6b7db3' }}>
+                {worstJob.job_name} · {worstJob.peak_hrs.toFixed(2)}h vs {worstJob.sla_hrs.toFixed(2)}h ceiling
+              </Typography>
+            </Box>
+          )}
+          {window.length > 0 && (
+            <Box className="chart-panel" style={{ padding: 16 }}>
+              <Typography variant="subtitle2">Daily Batch Window</Typography>
+              <Typography variant="caption" color="textSecondary">Bar color = SLA buffer that day</Typography>
+              <HighchartsReact highcharts={Highcharts} options={chartOptions} />
+            </Box>
+          )}
+        </Box>
+      )}
+
+      {slaHeatmap && slaHeatmap.cells.length > 0 && (
         <Box className={classes.chart}>
-          <Typography variant="subtitle2">Daily batch window</Typography>
-          <HighchartsReact highcharts={Highcharts} options={chartOptions} />
+          <Typography variant="subtitle2">SLA Compliance Heatmap</Typography>
+          <Typography variant="caption" color="textSecondary">Job × Date — green = healthy buffer, amber = near SLA, red = breach</Typography>
+          <HighchartsReact highcharts={Highcharts} options={heatmapOptions as Highcharts.Options} />
         </Box>
       )}
 

@@ -25,6 +25,7 @@ import {
 } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
 import { KpiStatCard } from '../shared/KpiStatCard';
+import { MiniGauge } from '../shared/MiniGauge';
 
 interface FleetKpis {
   fleet_grade?: string;
@@ -209,9 +210,9 @@ export function ResourcePanel() {
             {fleetKpis ? (
               <>
                 <KpiStatCard label="Fleet Grade" value={fleetKpis.fleet_grade || '?'} sub={`Score ${(fleetKpis.fleet_score || 0).toFixed(0)}/100`} accent="#a855f7" />
-                <KpiStatCard label="Avg CPU" value={`${(fleetKpis.avg_cpu || 0).toFixed(0)}%`} sub="Threshold 80%" accent={(fleetKpis.avg_cpu || 0) >= 80 ? '#f43f5e' : '#10d96e'} />
-                <KpiStatCard label="Avg Memory" value={`${(fleetKpis.avg_mem || 0).toFixed(0)}%`} sub="Threshold 80%" accent={(fleetKpis.avg_mem || 0) >= 80 ? '#f43f5e' : '#10d96e'} />
-                <KpiStatCard label="Avg Disk" value={`${(fleetKpis.avg_disk || 0).toFixed(0)}%`} sub="Threshold 85%" accent={(fleetKpis.avg_disk || 0) >= 85 ? '#f43f5e' : '#10d96e'} />
+                <MiniGauge label="Avg CPU" value={fleetKpis.avg_cpu || 0} threshold={80} sub="Threshold 80%" />
+                <MiniGauge label="Avg Memory" value={fleetKpis.avg_mem || 0} threshold={80} sub="Threshold 80%" />
+                <MiniGauge label="Avg Disk" value={fleetKpis.avg_disk || 0} threshold={85} sub="Threshold 85%" />
                 <KpiStatCard label="Health" accent="#f43f5e" value={
                   <span>
                     <span style={{ color: '#f43f5e' }}>{fleetKpis.n_critical || 0}</span>
@@ -224,9 +225,9 @@ export function ResourcePanel() {
               </>
             ) : (
               <>
-                <KpiStatCard label="Avg CPU" value={`${fleetAvg.cpu.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.cpu >= 80 ? '#f43f5e' : '#10d96e'} />
-                <KpiStatCard label="Avg Memory" value={`${fleetAvg.mem.toFixed(0)}%`} sub="Threshold 80%" accent={fleetAvg.mem >= 80 ? '#f43f5e' : '#10d96e'} />
-                <KpiStatCard label="Avg Disk" value={`${fleetAvg.disk.toFixed(0)}%`} sub="Threshold 85%" accent={fleetAvg.disk >= 85 ? '#f43f5e' : '#10d96e'} />
+                <MiniGauge label="Avg CPU" value={fleetAvg.cpu} threshold={80} sub="Threshold 80%" />
+                <MiniGauge label="Avg Memory" value={fleetAvg.mem} threshold={80} sub="Threshold 80%" />
+                <MiniGauge label="Avg Disk" value={fleetAvg.disk} threshold={85} sub="Threshold 85%" />
                 <KpiStatCard label="Fleet Health" value={fleetAvg.health.toFixed(0)} sub="Score /100" accent="#a855f7" />
               </>
             )}
