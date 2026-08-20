@@ -23,6 +23,7 @@ interface BatchKpis {
   compliance_pct?: number;
   window_compliance_pct?: number;
   batch_window_compliance?: number;
+  window_day_compliance_pct?: number;
   total_runs?: number;
   total_jobs?: number;
   total_hrs?: number;
@@ -59,6 +60,8 @@ interface WindowPoint {
   job_count: number;
   breach: boolean;
   top_job?: string | null;
+  effective_hrs?: number;
+  elapsed_hrs?: number;
 }
 
 interface ElapsedWindow {
@@ -335,7 +338,11 @@ export function BatchPanel() {
   const slaHeatmap = data.batch?.sla_heatmap as SlaHeatmap | undefined;
   const fleetSlaBuffer = kpis.fleet_sla_buffer;
   const longpole = data.batch?.longpole_matrix as LongpoleMatrix | undefined;
-  const windowCompliance = kpis.window_compliance_pct ?? kpis.batch_window_compliance ?? 0;
+  // Day-level window compliance (calendar days where every in-scope sub-app finished
+  // within its ceiling) is the canonical headline metric — identical to the Executive
+  // Dashboard/PE Findings. It must be tried BEFORE the pair-level window_compliance_pct
+  // (sub-app × day), which is a different, usually-higher number.
+  const windowCompliance = kpis.window_day_compliance_pct ?? kpis.batch_window_compliance ?? kpis.window_compliance_pct ?? 0;
   const slaCeilingHrs = kpis.daily_limit_hrs || 6;
   const concurrency = data.batch?.concurrency as Concurrency | undefined;
   const hourHeatmap = data.batch?.hour_heatmap as HourHeatmapData | undefined;
@@ -360,14 +367,17 @@ export function BatchPanel() {
       const name = j.Job_Name;
       if (manualInclude.has(name)) return;
       const customReason = manualExcludeReasons.get(name);
+      const reason = j.utility_reason || 'utility pattern';
       rows.set(name.toUpperCase(), {
         name,
-        category: 'UTILITY',
-        why: _exclusionWhy(j.utility_reason || 'utility pattern'),
+        // Real category is the uppercased raw reason token (e.g. RUNTIME_GATED:EXPORT,
+        // STRONG_UTILITY:FILE_WATCHER) — NOT a generic "UTILITY" label. Verified against
+        // the real dashboard's _exclusionCategory() output on live Dawnfoods data.
+        category: _exclusionCategory(reason),
+        why: customReason || _exclusionWhy(reason),
         scope: 'ALL_METRICS',
         isUtil: true,
       });
-      if (customReason) rows.get(name.toUpperCase())!.why = customReason;
     });
     (dataCoverage?.excluded_jobs || []).forEach((j) => {
       const name = j.job_name || j.name || '?';
@@ -449,6 +459,40 @@ export function BatchPanel() {
     setManualInclude(new Set()); setManualExclude(new Set()); setManualExcludeReasons(new Map());
     applyExclusions(new Set(), new Set(), new Map());
   };
+
+  // ── Effective Window KPI \u2014 the SLA-binding LONGEST CONTIGUOUS block per day
+  // (window[].effective_hrs), NOT the first\u2192last elapsed SPAN (window[].elapsed_hrs),
+  // which is mostly idle gaps on spread/sequenced batches. Ported from the effRows
+  // logic in renderBatchLayerCards() (app.js) \u2014 falls back to elapsed_window.worst_day
+  // only when the per-day window[] array is unavailable. ──
+  const effectiveWindowDisplay = useMemo(() => {
+    const effRows = window
+      .map((w) => ({
+        date: w.run_date,
+        eff: Number(w.effective_hrs ?? w.elapsed_hrs ?? w.total_hrs ?? 0),
+        span: Number(w.elapsed_hrs ?? 0),
+        breach: !!w.breach,
+      }))
+      .filter((r) => r.date && r.eff > 0);
+    if (effRows.length) {
+      const worst = [...effRows].sort((a, b) => b.eff - a.eff)[0];
+      const avgEff = effRows.reduce((sum, r) => sum + r.eff, 0) / effRows.length;
+      const spanTxt = worst.span > worst.eff + 0.05 ? ` \u00b7 span ${worst.span.toFixed(1)}h` : '';
+      return {
+        value: `${worst.eff.toFixed(1)}h`,
+        sub: `Worst day: ${worst.date} \u00b7 Avg ${avgEff.toFixed(1)}h${spanTxt}`,
+        breach: worst.breach,
+      };
+    }
+    if (elapsedWindow?.available && elapsedWindow.worst_day) {
+      return {
+        value: `${Number(elapsedWindow.worst_day.elapsed_hrs || 0).toFixed(1)}h`,
+        sub: `Worst day: ${elapsedWindow.worst_day.run_date || ''} \u00b7 Avg ${Number(elapsedWindow.avg_elapsed_hrs || 0).toFixed(1)}h`,
+        breach: false,
+      };
+    }
+    return null;
+  }, [window, elapsedWindow]);
 
   // Real narrative formulas ported from renderBatchStory()/_buildBatchNarrative() (app.js) —
   // derived from the same window[] data, not fabricated wording.
@@ -915,11 +959,12 @@ export function BatchPanel() {
       })()}
 
       <Box className={classes.kpiRow} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
-        {elapsedWindow?.available && (
+        {effectiveWindowDisplay && (
           <KpiStatCard
             label="Effective Window"
-            value={`${Number(elapsedWindow.worst_day?.elapsed_hrs || 0).toFixed(1)}h`}
-            sub={`avg ${Number(elapsedWindow.avg_elapsed_hrs || 0).toFixed(1)}h · ${elapsedWindow.worst_day?.run_date || ''}`}
+            value={effectiveWindowDisplay.value}
+            sub={effectiveWindowDisplay.sub}
+            valueColor={effectiveWindowDisplay.breach ? '#f43f5e' : '#a855f7'}
             accent="#a855f7"
           />
         )}
@@ -1045,8 +1090,8 @@ export function BatchPanel() {
 
       {hourHeatmapOptions && (
         <Box className={classes.chart}>
-          <Typography variant="subtitle2">Hour-of-Day Scheduling Contention</Typography>
-          <Typography variant="caption" color="textSecondary">Sub-application × hour — bright cells are peak scheduling contention windows.</Typography>
+          <Typography variant="subtitle2">Ctrl-M Execution Density Heatmap</Typography>
+          <Typography variant="caption" color="textSecondary">Sub-Application × Hour of Day — colour intensity shows job execution count (contention windows)</Typography>
           <HighchartsReact highcharts={Highcharts} options={hourHeatmapOptions} />
         </Box>
       )}
@@ -1134,10 +1179,15 @@ export function BatchPanel() {
         </Box>
       )}
 
-      {topBreaches.length > 0 && (
+      {topBreaches.length > 0 && (() => {
+        const hasBreach = topBreaches.some((j) => j.buffer_pct != null && j.buffer_pct < 0);
+        const shown = Math.min(9, topBreaches.length);
+        return (
         <Box className={classes.chart}>
-          <Typography variant="subtitle2">Top Performance Regressions</Typography>
-          <Typography variant="caption" color="textSecondary">Jobs with the least SLA buffer remaining — highest breach risk first.</Typography>
+          <Typography variant="subtitle2">{`Top ${shown} Jobs by Peak Runtime`}</Typography>
+          <Typography variant="caption" color="textSecondary">
+            {hasBreach ? 'Ranked by SLA buffer — highest breach risk first.' : `No SLA breaches — showing ranked jobs by peak runtime · ${window.length} day(s)`}
+          </Typography>
           <Table size="small" className="pe-table" aria-label="Top performance regressions table" style={{ marginTop: 8 }}>
             <TableHead>
               <TableRow>
@@ -1184,7 +1234,8 @@ export function BatchPanel() {
             </TableBody>
           </Table>
         </Box>
-      )}
+        );
+      })()}
     </Paper>
   );
 }

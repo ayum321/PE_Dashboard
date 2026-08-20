@@ -7,6 +7,7 @@ import {
   getAzureAuthStatus,
   parseSow,
   processBatchMulti,
+  refreshBatch,
   ResourceServer,
   uploadBenchmark,
   uploadDashboardFile,
@@ -44,7 +45,7 @@ const useStyles = makeStyles((theme) => ({
 
 export function UploadPanel() {
   const classes = useStyles();
-  const { setBatch, setResource, setSlaMatrix, setBenchmark, setSowBaseline, setCustomerName } = useAppData();
+  const { data, setBatch, setResource, setSlaMatrix, setBenchmark, setSowBaseline, setCustomerName } = useAppData();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -61,6 +62,11 @@ export function UploadPanel() {
     try {
       const result = await processBatchMulti(files);
       setBatch(result);
+      // The backend always computes a full per-job SLA matrix alongside batch KPIs
+      // (BatchResponse.sla_matrix) — wire it into the SLA Matrix tab immediately so
+      // it doesn't sit empty until a separate SLA-matrix-specific file is uploaded.
+      const embeddedSlaMatrix = (result as { sla_matrix?: Record<string, unknown> }).sla_matrix;
+      if (embeddedSlaMatrix) setSlaMatrix(embeddedSlaMatrix);
       const customer = (result as { customer_name?: string }).customer_name;
       if (customer) setCustomerName(customer);
       setStatus(`Processed ${files.length} Ctrl-M file(s).`);
@@ -91,6 +97,20 @@ export function UploadPanel() {
     try {
       const result = await uploadSlaMatrix(files[0]);
       setSlaMatrix(result);
+      // Batch Review's KPIs (SLA source, job/window compliance, buffer gauge) were
+      // computed with the OLD ceiling — re-run /api/batch/refresh so they reflect
+      // this newly-uploaded SLA file immediately, matching the real dashboard's
+      // upload-then-auto-refresh flow (no stale-banner step needed here).
+      if (data.batch) {
+        try {
+          const refreshed = await refreshBatch();
+          setBatch(refreshed);
+          const embeddedSlaMatrix = (refreshed as { sla_matrix?: Record<string, unknown> }).sla_matrix;
+          if (embeddedSlaMatrix) setSlaMatrix(embeddedSlaMatrix);
+        } catch {
+          // Refresh is best-effort — the SLA matrix upload itself still succeeded.
+        }
+      }
       setStatus(`Workflow SLA info loaded: ${Number(result.compliance_pct) || 0}% compliance.`);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Workflow SLA upload failed.');

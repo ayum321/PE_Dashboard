@@ -65,6 +65,18 @@ interface ResourceLinkedRun {
   resource_signal?: ResourceSignal;
 }
 
+interface WorkflowSummaryRow {
+  workflow_key?: string;
+  workflow_name?: string;
+  sub_application?: string;
+  batch_type?: string;
+  runtime_h?: number;
+  sla_h?: number;
+  sla_source?: string;
+  buffer_pct?: number;
+  status?: string;
+}
+
 interface JobBaseline {
   runs: number;
   avg_hrs: number;
@@ -99,6 +111,15 @@ const CONFIDENCE_LABEL: Record<string, string> = {
 };
 const DRILL_LABEL: Record<string, string> = { OK: 'OK', LONG_JOB: 'Long Job', AT_RISK: 'At Risk', BREACH: 'Breach', FAILED: 'Failed' };
 const DRILL_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#3b82f6', AT_RISK: '#f59e0b', BREACH: '#f43f5e', FAILED: '#6b7db3' };
+const WF_STATUS_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#2dd4bf', AT_RISK: '#f59e0b', BREACH: '#f43f5e', UNKNOWN: '#6b7db3' };
+
+/** Tier bucket from a workflow row's sla_source, mirrors the real dashboard's
+ * "Active SLA Commitments" Tier 1 (BatchSLA XLSX) / Tier 2 (SOW) / Tier 3 (default) split. */
+function _workflowTier(src: string): 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides' | 'Tier 2 \u2014 SOW Contract Batch Window Ceilings' | 'Tier 3 \u2014 Global Defaults' {
+  if (src.startsWith('batch_sla_xlsx')) return 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides';
+  if (src === 'sow_extracted') return 'Tier 2 \u2014 SOW Contract Batch Window Ceilings';
+  return 'Tier 3 \u2014 Global Defaults';
+}
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -141,9 +162,31 @@ export function SlaMatrixPanel() {
   const jobBaselines = (slaMatrix.job_baselines as Record<string, JobBaseline>) || {};
   const outliers = (slaMatrix.outliers as Outlier[]) || [];
   const resourceLinked = (slaMatrix.resource_linked as ResourceLinkedRun[]) || [];
+  const workflowSummary = (slaMatrix.workflow_summary as WorkflowSummaryRow[]) || [];
   const compliancePct = Number(slaMatrix.compliance_pct) || 0;
   const windowDayPct = slaMatrix.window_day_compliance_pct != null ? Number(slaMatrix.window_day_compliance_pct) : compliancePct;
   const explicitSlaMatrix = slaMatrix.explicit_sla_matrix === true;
+
+  // ── Tightest Buffer — the single job closest to its SLA ceiling, ported from
+  // #slak-tightbuf (_renderSlaMatrix(), app.js). ──
+  const tightestBuffer = useMemo(() => {
+    const scored = jobSummary.filter((j) => j.buffer_pct != null && Number.isFinite(j.buffer_pct));
+    if (!scored.length) return null;
+    return scored.reduce((a, b) => (Number(b.buffer_pct) < Number(a.buffer_pct) ? b : a));
+  }, [data.slaMatrix]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Active SLA Commitments — Tier 1/2/3 workflow-level table, ported from
+  // _renderSlaCommitmentsPanel() (app.js). Sourced from the same workflow_summary
+  // field the real dashboard writes to session_cache["resolved_workflow_df"]. ──
+  const workflowByTier = useMemo(() => {
+    const groups = new Map<string, WorkflowSummaryRow[]>();
+    workflowSummary.forEach((wf) => {
+      const tier = _workflowTier(wf.sla_source || '');
+      if (!groups.has(tier)) groups.set(tier, []);
+      groups.get(tier)!.push(wf);
+    });
+    return groups;
+  }, [data.slaMatrix]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lowBufferJobs = useMemo(
     () =>
@@ -324,6 +367,51 @@ export function SlaMatrixPanel() {
             </Box>
           )}
 
+          {/* ── Active SLA Commitments — Tier 1/2/3 workflow table, ported from
+              _renderSlaCommitmentsPanel() (app.js). ── */}
+          {workflowSummary.length > 0 && (
+            <Box style={{ borderRadius: 12, border: '1px solid #213060', background: 'rgba(17,29,54,.5)', padding: 12, marginTop: 12 }}>
+              <Typography variant="subtitle2">Active SLA Commitments</Typography>
+              <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
+              {Array.from(workflowByTier.entries()).map(([tier, rows]) => (
+                <Box key={tier} style={{ marginTop: 12 }}>
+                  <Typography variant="caption" style={{ fontWeight: 700, color: '#a855f7' }}>{tier}</Typography>
+                  <Table size="small" className="pe-table" aria-label={`SLA commitments ${tier}`} style={{ marginTop: 4 }}>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Workflow</TableCell>
+                        <TableCell>Type</TableCell>
+                        <TableCell align="right">SLA</TableCell>
+                        <TableCell align="right">Peak Window</TableCell>
+                        <TableCell align="right">Buffer %</TableCell>
+                        <TableCell>Status</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {rows.slice(0, 20).map((wf, index) => (
+                        <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
+                          <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
+                          <TableCell>{wf.batch_type || '\u2014'}</TableCell>
+                          <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
+                          <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                          <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
+                            {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
+                          </TableCell>
+                          <TableCell>
+                            <span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Box>
+              ))}
+              <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 8, fontSize: 9 }}>
+                OK {'>'}40% {'\u00b7'} LONG_JOB 15{'\u2013'}40% {'\u00b7'} AT_RISK 0{'\u2013'}15% {'\u00b7'} BREACH {'<'}0% {'\u00b7'} Buffer=(SLA-rt)÷SLA×100
+              </Typography>
+            </Box>
+          )}
+
           <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16 }}>
             <KpiStatCard
               label="Compliance"
@@ -332,6 +420,19 @@ export function SlaMatrixPanel() {
               accent="#10d96e"
             />
             <KpiStatCard label="Total Runs" value={Number(slaMatrix.total_runs) || 0} sub={`${Number(slaMatrix.total_jobs) || 0} unique jobs`} accent="#3b82f6" />
+            <KpiStatCard
+              label="Drifting Jobs"
+              value={outliers.length}
+              sub="vs own baseline"
+              accent={outliers.length > 0 ? '#f59e0b' : '#10d96e'}
+              valueColor={outliers.length > 0 ? '#f59e0b' : '#10d96e'}
+            />
+            <KpiStatCard
+              label="Tightest Buffer"
+              value={tightestBuffer ? `${Number(tightestBuffer.buffer_pct).toFixed(1)}%` : '\u2014'}
+              sub={tightestBuffer ? (tightestBuffer.job_name || tightestBuffer.Job_Name || 'job-level headroom') : 'job-level headroom'}
+              accent={tightestBuffer ? (Number(tightestBuffer.buffer_pct) >= 40 ? '#10d96e' : Number(tightestBuffer.buffer_pct) >= 15 ? '#f59e0b' : '#f43f5e') : '#6b7db3'}
+            />
             <KpiStatCard label="Breaching" value={Number(slaMatrix.breaching_runs) || 0} sub="Over SLA ceiling" accent="#f43f5e" />
             <KpiStatCard label="At Risk" value={Number(slaMatrix.at_risk_runs) || 0} sub="Near SLA ceiling" accent="#f59e0b" />
             <KpiStatCard label="Long Jobs" value={Number(slaMatrix.long_job_runs) || 0} sub={'15\u201340% of SLA ceiling'} accent="#2dd4bf" />
@@ -624,14 +725,20 @@ export function SlaMatrixPanel() {
             </Box>
           )}
 
-          {(lowBufferJobs.length > 0 || unexplainedBreaches.length > 0) && (
-            <Box
-              className={classes.section}
-              style={{ borderRadius: 12, border: '1px solid rgba(245,158,11,.3)', background: 'rgba(245,158,11,.05)', padding: 16 }}
-            >
-              <Typography variant="subtitle2" style={{ color: '#f59e0b' }}>SLA Triage — Action Required</Typography>
+          <Box
+            className={classes.section}
+            style={{ borderRadius: 12, border: '1px solid rgba(245,158,11,.3)', background: 'rgba(245,158,11,.05)', padding: 16 }}
+          >
+            <Typography variant="subtitle2" style={{ color: '#f59e0b' }}>SLA Triage — Action Required</Typography>
+            <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>Low-buffer jobs at risk {'\u00b7'} Unexplained SLA breaches {'\u00b7'} Unresolved cases</Typography>
 
-              {lowBufferJobs.length > 0 && (
+            {lowBufferJobs.length === 0 && unexplainedBreaches.length === 0 ? (
+              <Typography variant="body2" style={{ color: '#10d96e', marginTop: 8 }}>
+                {'\u2705'} No low-buffer jobs or unexplained breaches — all SLA triage checks pass.
+              </Typography>
+            ) : null}
+
+            {lowBufferJobs.length > 0 && (
                 <>
                   <Typography variant="caption" style={{ display: 'block', marginTop: 12, color: '#6b7db3' }}>
                     {lowBufferJobs.length} job(s) with under {LOW_BUFFER_THRESHOLD}% buffer to the SLA ceiling
@@ -697,8 +804,7 @@ export function SlaMatrixPanel() {
                   </Table>
                 </>
               )}
-            </Box>
-          )}
+          </Box>
 
           {baselineEntries.length > 0 && (
             <Box className={classes.section}>
