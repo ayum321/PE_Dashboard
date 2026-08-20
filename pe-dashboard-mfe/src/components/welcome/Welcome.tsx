@@ -31,9 +31,15 @@ import {
 import { LuiLogoStacked } from '@jda/lui-common-component-library';
 import {
   AuditContext,
+  connectAzure,
+  discoverAzureVms,
+  disconnectAzure,
   exportReport,
   generateFindings,
   getAuditContext,
+  getAzureAuthStatus,
+  getAzureResourceGroups,
+  getAzureSubscriptions,
   getAzureStatus,
   getExecutiveDashboard,
   getRedFlags,
@@ -110,6 +116,13 @@ const useStyles = makeStyles((theme: Theme) => {
       padding: theme.spacing(1.5),
       border: `1px solid ${theme.palette.divider}`,
     },
+    azureControls: {
+      display: 'flex',
+      gap: theme.spacing(1),
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      marginTop: theme.spacing(2),
+    },
     panel: {
       marginTop: theme.spacing(3),
       padding: theme.spacing(2),
@@ -136,6 +149,11 @@ export function Welcome() {
   const [error, setError] = useState<string | null>(null);
   const [downstream, setDownstream] = useState<Record<string, unknown>>({});
   const [azure, setAzure] = useState<Record<string, unknown> | null>(null);
+  const [azureAuth, setAzureAuth] = useState<Record<string, unknown> | null>(null);
+  const [azureSubscriptions, setAzureSubscriptions] = useState<Record<string, unknown>[]>([]);
+  const [azureGroups, setAzureGroups] = useState<Record<string, unknown>[]>([]);
+  const [azureVms, setAzureVms] = useState<Record<string, unknown>[]>([]);
+  const [azureBusy, setAzureBusy] = useState(false);
 
   useEffect(() => {
     getAuditContext()
@@ -144,7 +162,54 @@ export function Welcome() {
     getAzureStatus()
       .then(setAzure)
       .catch(() => setAzure(null));
+    getAzureAuthStatus()
+      .then(setAzureAuth)
+      .catch(() => setAzureAuth(null));
   }, []);
+
+  const handleAzureConnect = async () => {
+    setAzureBusy(true);
+    setError(null);
+    try {
+      const result = await connectAzure();
+      setAzureAuth(result);
+      const subscriptions = await getAzureSubscriptions();
+      setAzureSubscriptions((subscriptions.subscriptions as Record<string, unknown>[]) || []);
+    } catch (azureError) {
+      setError(azureError instanceof Error ? azureError.message : 'Azure sign-in failed.');
+    } finally {
+      setAzureBusy(false);
+    }
+  };
+
+  const handleAzureDisconnect = async () => {
+    setAzureBusy(true);
+    try {
+      await disconnectAzure();
+      setAzureAuth({ method: 'none' });
+      setAzureSubscriptions([]);
+      setAzureGroups([]);
+      setAzureVms([]);
+    } catch (azureError) {
+      setError(azureError instanceof Error ? azureError.message : 'Azure sign-out failed.');
+    } finally {
+      setAzureBusy(false);
+    }
+  };
+
+  const handleAzureScope = async (subscriptionId: string) => {
+    setAzureBusy(true);
+    try {
+      const groups = await getAzureResourceGroups(subscriptionId);
+      setAzureGroups((groups.resource_groups as Record<string, unknown>[]) || []);
+      const discovered = await discoverAzureVms({ subscription_id: subscriptionId });
+      setAzureVms((discovered.vms as Record<string, unknown>[]) || []);
+    } catch (azureError) {
+      setError(azureError instanceof Error ? azureError.message : 'Azure resource discovery failed.');
+    } finally {
+      setAzureBusy(false);
+    }
+  };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -350,8 +415,29 @@ export function Welcome() {
                   Upload SOW or benchmark files through the same control to populate their backend results.
                 </Typography>
                 <Typography variant="body2" color="textSecondary">
-                  Azure connection: {azure ? (azure.configured ? 'configured' : 'not configured') : 'status unavailable'}
+                  Azure connection: {azureAuth?.method === 'browser'
+                    ? `connected as ${azureAuth.display_name || azureAuth.name || 'Azure user'}`
+                    : azure?.configured ? 'configured; connect with your Azure account' : 'not configured'}
                 </Typography>
+                <Box className={classes.azureControls}>
+                  {azureAuth?.method === 'browser' ? (
+                    <Button variant="outlined" onClick={handleAzureDisconnect} disabled={azureBusy}>Disconnect Azure</Button>
+                  ) : (
+                    <Button variant="outlined" onClick={handleAzureConnect} disabled={azureBusy}>Connect Azure</Button>
+                  )}
+                  {azureSubscriptions.length > 0 && (
+                    <select aria-label="Azure subscription" onChange={(event) => handleAzureScope(event.target.value)} defaultValue="">
+                      <option value="" disabled>Select subscription</option>
+                      {azureSubscriptions.map((subscription) => (
+                        <option key={String(subscription.id)} value={String(subscription.id)}>
+                          {String(subscription.name || subscription.id)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {azureGroups.length > 0 && <Typography variant="caption">{azureGroups.length} resource groups found</Typography>}
+                  {azureVms.length > 0 && <Typography variant="caption">{azureVms.length} VMs discovered</Typography>}
+                </Box>
                 <Button
                   variant="outlined"
                   disabled={!upload}

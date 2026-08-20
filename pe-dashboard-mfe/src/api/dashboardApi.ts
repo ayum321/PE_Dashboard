@@ -140,6 +140,23 @@ export const uploadBenchmark = (file: File): Promise<DashboardPayload> => {
 
 export const getAzureStatus = (): Promise<AzureStatus> => request<AzureStatus>('/api/azure/status');
 
+export const getAzureAuthStatus = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/azure/auth-status');
+
+export const connectAzure = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/azure/browser-login', { method: 'POST' });
+
+export const disconnectAzure = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/azure/browser-logout', { method: 'POST' });
+
+export const getAzureSubscriptions = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/azure/subscriptions');
+
+export const getAzureResourceGroups = (subscriptionId: string): Promise<DashboardPayload> =>
+  request<DashboardPayload>(`/api/azure/resource-groups?subscription_id=${encodeURIComponent(subscriptionId)}`);
+
+export const discoverAzureVms = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/azure/discover-vms', payload);
+
 export const fetchAzureResources = (payload: DashboardPayload = {}): Promise<DashboardPayload> =>
   postDashboardPayload('/api/azure/fetch-resources', payload);
 
