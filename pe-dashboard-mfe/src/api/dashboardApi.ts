@@ -49,6 +49,14 @@ export interface SlaBreach {
   breach_margin_hrs?: number;
 }
 
+export type DashboardPayload = Record<string, unknown>;
+
+export interface AzureStatus {
+  configured: boolean;
+  authenticated?: boolean;
+  [key: string]: unknown;
+}
+
 const getApiBaseUrl = (): string => (window.env.API_BASE_URL || '').replace(/\/$/, '');
 
 const readError = async (response: Response): Promise<string> => {
@@ -92,3 +100,60 @@ export const uploadDashboardFile = (file: File): Promise<SmartUploadResponse> =>
     body: formData,
   });
 };
+
+export const postDashboardPayload = <T = DashboardPayload>(path: string, payload: DashboardPayload): Promise<T> =>
+  request<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+export const processBatch = (file: File): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request<DashboardPayload>('/api/process-batch', { method: 'POST', body: formData });
+};
+
+export const generateFindings = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/generate-findings', payload);
+
+export const getRedFlags = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/red-flags', payload);
+
+export const getExecutiveDashboard = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/executive-dashboard', payload);
+
+export const compareSow = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/sow/compare', payload);
+
+export const parseSow = (file: File): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request<DashboardPayload>('/api/sow/parse', { method: 'POST', body: formData });
+};
+
+export const uploadBenchmark = (file: File): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request<DashboardPayload>('/api/benchmark', { method: 'POST', body: formData });
+};
+
+export const getAzureStatus = (): Promise<AzureStatus> => request<AzureStatus>('/api/azure/status');
+
+export const fetchAzureResources = (payload: DashboardPayload = {}): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/azure/fetch-resources', payload);
+
+export const fetchAzureTimeseries = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/azure/timeseries', payload);
+
+export const exportReport = (payload: DashboardPayload): Promise<Blob> =>
+  fetch(`${getApiBaseUrl()}/api/export-report`, {
+    method: 'POST',
+    headers: { Accept: 'text/html', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(async (response) => {
+    if (!response.ok) {
+      throw new Error(await readError(response));
+    }
+    return response.blob();
+  });

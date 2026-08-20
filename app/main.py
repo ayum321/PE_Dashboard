@@ -53,6 +53,7 @@ if pe_config.AI_ENABLED:
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
+MFE_DIR = BASE_DIR / "mfe"
 
 # ── Engagement-specific keys that must NEVER outlive a session ──
 # These keys hold data from a specific customer's SOW upload.
@@ -280,6 +281,8 @@ async def get_audit_context() -> dict:
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(request: Request) -> HTMLResponse:
     """Render the SPA shell. Cache-bust key via content hash of app.js."""
+    if (MFE_DIR / "index.html").is_file():
+        return HTMLResponse((MFE_DIR / "index.html").read_text(encoding="utf-8"))
     _v = _file_content_hash(STATIC_DIR / "app.js")
     response = templates.TemplateResponse(request, "index.html", {"static_v": _v})
     response.headers["Cache-Control"] = "no-store"
@@ -313,3 +316,16 @@ async def health() -> dict:
     no foreign app is squatting on this port."""
     return {"status": "ok", "service": _PE_IDENTITY, "version": app.version,
             "pid": os.getpid()}
+
+
+@app.get("/{file_path:path}", include_in_schema=False)
+async def serve_mfe(file_path: str):
+    """Serve the built React MFE when the container includes one."""
+    if not MFE_DIR.is_dir() or not file_path:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    candidate = (MFE_DIR / file_path).resolve()
+    if not candidate.is_relative_to(MFE_DIR.resolve()) or not candidate.is_file():
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    return FileResponse(candidate)

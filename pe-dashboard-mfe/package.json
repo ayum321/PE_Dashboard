@@ -31,7 +31,7 @@
     "test": "npm run setLocalEnv && react-scripts test --coverage --watchAll=false",
     "eject": "react-scripts eject",
     "setLocalEnv": "cross-env DOTENV_CONFIG_PATH=./.github/envs/.env node -r dotenv/config .github/scripts/setRuntimeEnv.js public/",
-    "start:standalone": "npm run setLocalEnv && react-scripts start",
+    "start:standalone": "npm run setLocalEnv && cross-env PORT=3000 BROWSER=none react-scripts start",
     "test-no-coverage": "react-scripts test",
     "lint": "eslint src/**/*.ts src/**/*.tsx",
     "prettier": "prettier --check src/**/*.js src/**/*.jsx src/**/*.ts src/**/*.tsx",

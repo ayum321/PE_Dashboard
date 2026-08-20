@@ -1,0 +1,10 @@
+.git
+.venv
+node_modules
+pe-dashboard-mfe/node_modules
+pe-dashboard-mfe/build
+__pycache__
+*.pyc
+.pe_config.json
+.env
+*.log

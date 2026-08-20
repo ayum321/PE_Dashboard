@@ -1,0 +1,12 @@
+services:
+  pe-dashboard:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8765}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+    restart: unless-stopped
