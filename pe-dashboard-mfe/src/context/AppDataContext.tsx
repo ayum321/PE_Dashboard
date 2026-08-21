@@ -40,6 +40,7 @@ export interface AppData {
   customerName: string | null;
   issues: IssueRecord[];
   approvals: ApprovalsState;
+  reviewedProducts: string[];
 }
 
 const EMPTY_APP_DATA: AppData = {
@@ -55,6 +56,7 @@ const EMPTY_APP_DATA: AppData = {
   customerName: null,
   issues: [],
   approvals: EMPTY_APPROVALS,
+  reviewedProducts: [],
 };
 
 interface AppDataContextValue {
@@ -71,6 +73,7 @@ interface AppDataContextValue {
   setCustomerName: (value: string | null) => void;
   setIssues: (value: IssueRecord[]) => void;
   setApprovals: (value: ApprovalsState) => void;
+  setReviewedProducts: (value: string[]) => void;
   resetSession: () => Promise<void>;
 }
 
@@ -124,6 +127,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     (value: ApprovalsState) => setData((prev) => ({ ...prev, approvals: value })),
     [],
   );
+  const setReviewedProducts = useCallback(
+    (value: string[]) => setData((prev) => ({ ...prev, reviewedProducts: value })),
+    [],
+  );
 
   const resetSession = useCallback(async () => {
     try {
@@ -148,6 +155,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setCustomerName,
       setIssues,
       setApprovals,
+      setReviewedProducts,
       resetSession,
     }),
     [
@@ -164,6 +172,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setCustomerName,
       setIssues,
       setApprovals,
+      setReviewedProducts,
       resetSession,
     ],
   );

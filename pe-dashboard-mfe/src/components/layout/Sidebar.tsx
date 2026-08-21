@@ -32,7 +32,7 @@ const ANALYSIS_ITEMS: NavItem[] = [
   { path: '/resource', label: 'Resource Review', icon: ResourceIcon },
   { path: '/sla-matrix', label: 'SLA Matrix', icon: SlaMatrixIcon },
   { path: '/benchmark', label: 'Performance Benchmark', icon: BenchmarkIcon },
-  { path: '/sow', label: 'SOW Contract & Volume', icon: SowIcon },
+  { path: '/sow', label: 'SOW Volume & Products', icon: SowIcon },
 ];
 
 const INTELLIGENCE_ITEMS: NavItem[] = [

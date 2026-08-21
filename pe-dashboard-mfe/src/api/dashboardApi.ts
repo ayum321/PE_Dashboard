@@ -202,6 +202,12 @@ export const getSowSlaWindows = (): Promise<DashboardPayload> => request<Dashboa
 export const getSowProductTaxonomy = (): Promise<DashboardPayload> =>
   request<DashboardPayload>('/api/sow/product-taxonomy');
 
+export const getReviewedProducts = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/sow/reviewed-products');
+
+export const saveReviewedProducts = (products: string[]): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/sow/reviewed-products', { products });
+
 export const generateFindings = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/generate-findings', payload);
 
