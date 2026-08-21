@@ -1,6 +1,21 @@
 /* Ported from app/templates/index.html so the React MFE renders visually
  * identical to the original Jinja/Tailwind PE Audit Dashboard. */
 
+/* CRA ships no baseline reset, so <body> falls back to the browser's default
+ * serif font. MUI portals (Menu/Popover/Tooltip/Dialog) render outside the
+ * .pe-dashboard wrapper directly into <body>, so they need this too. */
+body {
+  font-family: 'Sora', 'Inter', system-ui, sans-serif;
+}
+
+/* Browsers do not inherit font-family into form controls by default (they use
+ * the OS UI font) — without this, every raw <button>/<select>/<input> (Azure
+ * modal filters, native selects, etc.) renders in Arial/Times New Roman
+ * instead of Sora, even though the rest of the app inherits it correctly. */
+button, input, select, textarea, optgroup {
+  font-family: inherit;
+}
+
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #213060; border-radius: 3px; }

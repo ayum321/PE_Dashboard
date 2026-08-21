@@ -104,8 +104,12 @@ _CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.stri
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    # Must be True (with explicit, non-wildcard origins above) so the React
+    # MFE's cross-origin fetches carry the pe_sid session cookie — without
+    # this, every Azure/session-scoped call from the MFE looks like a brand
+    # new anonymous session and "Connect Azure" never appears connected.
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
 

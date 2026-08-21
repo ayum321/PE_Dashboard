@@ -1,6 +1,32 @@
 import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import { clearSession, DashboardPayload, ResourceServer } from '../api/dashboardApi';
 
+export interface IssueRecord {
+  ID: string;
+  Type: string;
+  Severity: string;
+  Status: string;
+  Owner: string;
+  ETA: string;
+  Description: string;
+  Mitigation: string;
+  Logged: string;
+}
+
+export interface ApprovalsState {
+  checklist: Record<'batch' | 'issues' | 'ui' | 'res' | 'perf' | 'sow' | 'data' | 'ctrlm' | 'res15', boolean>;
+  pe: { name: string; approved: boolean; date: string | null; override_blockers: boolean };
+  customer: { name: string; approved: boolean; date: string | null };
+  notes: string;
+}
+
+const EMPTY_APPROVALS: ApprovalsState = {
+  checklist: { batch: false, issues: false, ui: false, res: false, perf: false, sow: false, data: false, ctrlm: false, res15: false },
+  pe: { name: '', approved: false, date: null, override_blockers: false },
+  customer: { name: '', approved: false, date: null },
+  notes: '',
+};
+
 export interface AppData {
   batch: DashboardPayload | null;
   resource: { servers: ResourceServer[] } | null;
@@ -12,6 +38,8 @@ export interface AppData {
   redFlags: DashboardPayload | null;
   executive: DashboardPayload | null;
   customerName: string | null;
+  issues: IssueRecord[];
+  approvals: ApprovalsState;
 }
 
 const EMPTY_APP_DATA: AppData = {
@@ -25,6 +53,8 @@ const EMPTY_APP_DATA: AppData = {
   redFlags: null,
   executive: null,
   customerName: null,
+  issues: [],
+  approvals: EMPTY_APPROVALS,
 };
 
 interface AppDataContextValue {
@@ -39,6 +69,8 @@ interface AppDataContextValue {
   setRedFlags: (value: DashboardPayload | null) => void;
   setExecutive: (value: DashboardPayload | null) => void;
   setCustomerName: (value: string | null) => void;
+  setIssues: (value: IssueRecord[]) => void;
+  setApprovals: (value: ApprovalsState) => void;
   resetSession: () => Promise<void>;
 }
 
@@ -84,6 +116,14 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     (value: string | null) => setData((prev) => ({ ...prev, customerName: value })),
     [],
   );
+  const setIssues = useCallback(
+    (value: IssueRecord[]) => setData((prev) => ({ ...prev, issues: value })),
+    [],
+  );
+  const setApprovals = useCallback(
+    (value: ApprovalsState) => setData((prev) => ({ ...prev, approvals: value })),
+    [],
+  );
 
   const resetSession = useCallback(async () => {
     try {
@@ -106,6 +146,8 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setRedFlags,
       setExecutive,
       setCustomerName,
+      setIssues,
+      setApprovals,
       resetSession,
     }),
     [
@@ -120,6 +162,8 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setRedFlags,
       setExecutive,
       setCustomerName,
+      setIssues,
+      setApprovals,
       resetSession,
     ],
   );

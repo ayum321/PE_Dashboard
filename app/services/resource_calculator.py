@@ -459,6 +459,7 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
     exec_summary = _build_executive_summary(
         known, n_crit, n_warn, n_ok, grade, score,
         agg_trap_servers, dual_press_servers,
+        n_all_rows=n_total,
     )
 
     # Compute fleet-adaptive thresholds (mean + σ)
@@ -601,6 +602,7 @@ def _build_executive_summary(
     score: float,
     agg_trap_servers: List[dict],
     dual_press_servers: List[dict],
+    n_all_rows: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Generate the 4-part executive resource summary:
     1. True Health Verdict — real status after filtering false alarms
@@ -610,6 +612,11 @@ def _build_executive_summary(
     """
     n_total = len(known)
     n_agg   = len(agg_trap_servers)
+    # `known` already excludes image-only VMs (no reporting metrics), so it can
+    # be a SUBSET of the fleet the Servers KPI tile/table counts. When that
+    # differs, say so explicitly — otherwise "All N servers healthy" here next
+    # to a bigger "Servers: M" tile reads as a contradiction (7c).
+    n_excluded = (n_all_rows - n_total) if n_all_rows is not None and n_all_rows > n_total else 0
 
     # ── Part 1: True Health Verdict ──────────────────────────
     # After excluding aggregation-trap false alarms,
@@ -641,7 +648,9 @@ def _build_executive_summary(
     elif n_total > 0:
         verdict = "HEALTHY"
         verdict_detail = (
-            f"All {n_total} server(s) within acceptable operating range."
+            f"All {n_total} metrics-reporting server(s) within acceptable operating range."
+            + (f" ({n_excluded} additional server(s) excluded — no metrics reported, e.g. image-only entries.)"
+               if n_excluded else "")
             + (f" {n_agg} high-Max-CPU reading(s) correctly identified as "
                f"aggregation artifacts (short spikes, not sustained load)."
                if n_agg else "")

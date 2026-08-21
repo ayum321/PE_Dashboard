@@ -85,6 +85,10 @@ const readError = async (response: Response): Promise<string> => {
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     ...init,
+    // Required so the pe_sid session cookie (Azure credential cache, batch
+    // session cache, etc.) is sent on cross-origin requests from the MFE
+    // dev server (localhost:3000) to the API (127.0.0.1:8765).
+    credentials: 'include',
     headers: {
       Accept: 'application/json',
       ...(init?.headers || {}),
@@ -100,13 +104,37 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
 
 export const getAuditContext = (): Promise<AuditContext> => request<AuditContext>('/api/audit-context');
 
-export const uploadDashboardFile = (file: File): Promise<SmartUploadResponse> => {
+/** Same contract as request(), but uses XMLHttpRequest instead of fetch so
+ * real upload-progress events are available (fetch has no upload progress
+ * API) — drives the percentage shown by UploadTile's progress bar. */
+const requestWithProgress = <T>(path: string, formData: FormData, onProgress?: (pct: number) => void): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${getApiBaseUrl()}${path}`);
+    xhr.withCredentials = true;
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (event) => {
+      if (onProgress && event.lengthComputable) {
+        onProgress(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve((xhr.response ?? {}) as T);
+      } else {
+        const detail = xhr.response?.detail || xhr.response?.message;
+        reject(new Error(typeof detail === 'string' ? detail : `Request failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Network error during upload.'));
+    xhr.send(formData);
+  });
+
+export const uploadDashboardFile = (file: File, onProgress?: (pct: number) => void): Promise<SmartUploadResponse> => {
   const formData = new FormData();
   formData.append('file', file);
-  return request<SmartUploadResponse>('/api/smart-upload', {
-    method: 'POST',
-    body: formData,
-  });
+  return requestWithProgress<SmartUploadResponse>('/api/smart-upload', formData, onProgress);
 };
 
 export const postDashboardPayload = <T = DashboardPayload>(path: string, payload: DashboardPayload): Promise<T> =>
@@ -122,10 +150,10 @@ export const processBatch = (file: File): Promise<DashboardPayload> => {
   return request<DashboardPayload>('/api/process-batch', { method: 'POST', body: formData });
 };
 
-export const processBatchMulti = (files: File[]): Promise<DashboardPayload> => {
+export const processBatchMulti = (files: File[], onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
-  return request<DashboardPayload>('/api/process-batch/multi', { method: 'POST', body: formData });
+  return requestWithProgress<DashboardPayload>('/api/process-batch/multi', formData, onProgress);
 };
 
 export const uploadSlaMatrix = (file: File, slaMode = 'daily'): Promise<DashboardPayload> => {
@@ -133,6 +161,18 @@ export const uploadSlaMatrix = (file: File, slaMode = 'daily'): Promise<Dashboar
   formData.append('file', file);
   formData.append('sla_mode', slaMode);
   return request<DashboardPayload>('/api/sla-matrix', { method: 'POST', body: formData });
+};
+
+/** Upload the customer's per-workflow SLA contract (BatchSLA_info.xlsx) — the
+ * Tier-1 source every batch SLA calculation reads. Distinct from
+ * uploadSlaMatrix() above, which POSTs a Ctrl-M file to /api/sla-matrix for a
+ * separate flat-custom-ceiling comparison view (SLA Matrix tab). Confusing
+ * two different backend features by name was the root cause of Batch Review
+ * never recomputing after a "Workflow SLA Info" upload. */
+export const uploadBatchSlaXlsx = (file: File, onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return requestWithProgress<DashboardPayload>('/api/batch-sla/upload', formData, onProgress);
 };
 
 /** Re-run batch KPIs from the cached Ctrl-M rows with current manual job exclusions. */
@@ -174,16 +214,16 @@ export const getExecutiveDashboard = (payload: DashboardPayload): Promise<Dashbo
 export const compareSow = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/sow/compare', payload);
 
-export const parseSow = (file: File): Promise<DashboardPayload> => {
+export const parseSow = (file: File, onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
   const formData = new FormData();
   formData.append('file', file);
-  return request<DashboardPayload>('/api/sow/parse', { method: 'POST', body: formData });
+  return requestWithProgress<DashboardPayload>('/api/sow/parse', formData, onProgress);
 };
 
-export const uploadBenchmark = (file: File): Promise<DashboardPayload> => {
+export const uploadBenchmark = (file: File, onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
   const formData = new FormData();
   formData.append('file', file);
-  return request<DashboardPayload>('/api/benchmark', { method: 'POST', body: formData });
+  return requestWithProgress<DashboardPayload>('/api/benchmark', formData, onProgress);
 };
 
 export const getAzureStatus = (): Promise<AzureStatus> => request<AzureStatus>('/api/azure/status');
@@ -205,6 +245,9 @@ export const getAzureResourceGroups = (subscriptionId: string): Promise<Dashboar
 export const discoverAzureVms = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/azure/discover-vms', payload);
 
+export const searchAzureVms = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/azure/search-vms', payload);
+
 export const fetchAzureResources = (payload: DashboardPayload = {}): Promise<DashboardPayload> =>
   postDashboardPayload('/api/azure/fetch-resources', payload);
 
@@ -217,6 +260,7 @@ export const processResource = (servers: ResourceServer[]): Promise<DashboardPay
 export const exportReport = (payload: DashboardPayload): Promise<Blob> =>
   fetch(`${getApiBaseUrl()}/api/export-report`, {
     method: 'POST',
+    credentials: 'include',
     headers: { Accept: 'text/html', 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }).then(async (response) => {

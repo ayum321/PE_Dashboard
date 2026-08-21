@@ -7,6 +7,7 @@ import {
   BenchmarkIcon,
   ExecutiveIcon,
   FindingsIcon,
+  GovernanceIcon,
   RedFlagsIcon,
   ResourceIcon,
   SettingsIcon,
@@ -37,7 +38,8 @@ const ANALYSIS_ITEMS: NavItem[] = [
 const INTELLIGENCE_ITEMS: NavItem[] = [
   { path: '/findings', label: 'PE Findings', icon: FindingsIcon },
   { path: '/red-flags', label: 'Red Flags', icon: RedFlagsIcon },
-  { path: '/archive', label: 'Report Archive', icon: ArchiveIcon },
+  { path: '/governance', label: 'Governance', icon: GovernanceIcon },
+  { path: '/archive', label: 'Review Registry', icon: ArchiveIcon },
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -58,7 +60,10 @@ export function Sidebar() {
     <aside
       style={{
         width: 240,
-        minHeight: '100vh',
+        height: '100vh',
+        position: 'sticky',
+        top: 0,
+        alignSelf: 'flex-start',
         background: '#06091a',
         borderRight: '1px solid #1a2850',
         display: 'flex',

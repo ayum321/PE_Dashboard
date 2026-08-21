@@ -9,7 +9,6 @@ import {
   TableCell,
   TableHead,
   TableRow,
-  TableSortLabel,
   Typography,
   makeStyles,
 } from '@material-ui/core';
@@ -62,6 +61,8 @@ interface WindowPoint {
   top_job?: string | null;
   effective_hrs?: number;
   elapsed_hrs?: number;
+  min_buffer_pct?: number | null;
+  active_busy_hrs?: number;
 }
 
 interface ElapsedWindow {
@@ -90,6 +91,9 @@ interface SlaSourceInfo {
   adaptive_active: boolean;
   adaptive_job_count: number;
   adaptive_total_jobs: number;
+  resolved_ceilings?: number[];
+  resolved_ceiling_min?: number;
+  resolved_ceiling_max?: number;
 }
 
 interface DataWarning {
@@ -121,6 +125,7 @@ interface SlaHeatmap {
   dates: string[];
   cells: SlaHeatmapCell[];
   limit: number;
+  job_priority?: Record<string, { priority?: string; score?: number; reason?: string }>;
 }
 
 interface FleetSlaBuffer {
@@ -310,8 +315,6 @@ const useStyles = makeStyles((theme) => ({
   empty: { marginTop: theme.spacing(2) },
 }));
 
-type SortKey = 'Job_Name' | 'peak_hrs' | 'avg_hrs' | 'total_hrs';
-
 const CONFIDENCE_COLOR: Record<string, string> = {
   HIGH: '#10d96e',
   MEDIUM: '#3b82f6',
@@ -334,8 +337,6 @@ const SLA_LONGJOB_PCT = 40;
 export function BatchPanel() {
   const classes = useStyles();
   const { data, setBatch } = useAppData();
-  const [sortKey, setSortKey] = useState<SortKey>('peak_hrs');
-  const [sortDesc, setSortDesc] = useState(true);
   const [manualInclude, setManualInclude] = useState<Set<string>>(new Set());
   const [manualExcludeReasons, setManualExcludeReasons] = useState<Map<string, string>>(new Map());
   const [manualExclude, setManualExclude] = useState<Set<string>>(new Set());
@@ -346,7 +347,6 @@ export function BatchPanel() {
   const [exclusionsBusy, setExclusionsBusy] = useState(false);
 
   const kpis = (data.batch?.kpis || {}) as BatchKpis;
-  const topJobs = ((data.batch?.top_jobs as TopJobRow[]) || []).slice();
   const topBreaches = ((data.batch?.top_breaches as TopJobRow[]) || []).slice();
   const window = ((data.batch?.window as WindowPoint[]) || []).slice();
   const elapsedWindow = data.batch?.elapsed_window as ElapsedWindow | undefined;
@@ -550,16 +550,24 @@ export function BatchPanel() {
     return { total, breachDays, cleanDays, compliancePct, worstBreach, tone };
   }, [window, windowCompliance]);
 
-  const sortedJobs = useMemo(() => {
-    const rows = [...topJobs];
-    rows.sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
-      const cmp = typeof av === 'string' ? String(av).localeCompare(String(bv)) : Number(av) - Number(bv);
-      return sortDesc ? -cmp : cmp;
-    });
-    return rows;
-  }, [topJobs, sortKey, sortDesc]);
+  // ── Multiple distinct SLA ceilings in scope (e.g. an SLA matrix resolving
+  // several customer windows across different sub-apps) — draw one dashed
+  // reference line per distinct ceiling instead of a single line, ported from
+  // slaLinePlugin()'s dedup logic (app.js). Falls back to the single dominant
+  // ceiling when only one (or no) customer-sourced ceiling is in scope. ──
+  const windowChartCeilings = useMemo(() => {
+    const raw = (slaSource?.resolved_ceilings || []).filter((v) => Number.isFinite(v) && v > 0);
+    if (raw.length <= 1) return [slaCeilingHrs];
+    const seen = new Set<string>();
+    const list: number[] = [];
+    for (const v of raw) {
+      const key = v.toFixed(2);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      list.push(v);
+    }
+    return list.sort((a, b) => a - b);
+  }, [slaSource, slaCeilingHrs]);
 
   const chartOptions: Highcharts.Options = {
     chart: { type: 'column', height: 280 },
@@ -567,13 +575,18 @@ export function BatchPanel() {
     xAxis: { categories: window.map((point) => point.run_date) },
     yAxis: {
       title: { text: 'Total hours' },
-      plotLines: [{
-        value: slaCeilingHrs,
+      plotLines: windowChartCeilings.map((ceil, idx) => ({
+        value: ceil,
         color: '#f59e0b',
-        dashStyle: 'Dash',
+        dashStyle: 'Dash' as const,
         width: 2,
-        label: { text: `SLA ceiling ${slaCeilingHrs}h`, style: { color: '#f59e0b', fontSize: '10px' } },
-      }],
+        zIndex: 4,
+        label: {
+          text: windowChartCeilings.length > 1 ? `${ceil}h` : `SLA ceiling ${ceil}h`,
+          align: (idx % 2 === 0 ? 'left' : 'right') as 'left' | 'right',
+          style: { color: '#f59e0b', fontSize: '10px' },
+        },
+      })),
     },
     tooltip: {
       formatter(this: Highcharts.TooltipFormatterContextObject) {
@@ -581,6 +594,7 @@ export function BatchPanel() {
         if (!point) return `${this.x}: ${this.y}h`;
         return `<b>${point.run_date}</b><br/>${point.total_hrs.toFixed(2)}h across ${point.job_count} job(s)` +
           (point.top_job ? `<br/>Top job: ${point.top_job}` : '') +
+          ((point.active_busy_hrs || 0) > 0 ? `<br/>Active busy time: ${point.active_busy_hrs!.toFixed(2)}h (real compute \u2014 overlaps counted once)` : '') +
           (point.breach ? '<br/><span style="color:#f43f5e">BREACH</span>' : '');
       },
     },
@@ -588,11 +602,35 @@ export function BatchPanel() {
       {
         type: 'column',
         name: 'Daily batch hours',
-        data: window.map((point) => ({
-          y: point.total_hrs,
-          color: point.breach ? '#f43f5e' : point.total_hrs >= slaCeilingHrs * 0.85 ? '#f59e0b' : '#10d96e',
-        })),
+        data: window.map((point) => {
+          // Prefer the day's OWN tightest sub-app buffer (min_buffer_pct) when the
+          // backend supplies it, so the bar colour reflects the real per-day
+          // ceiling instead of always the single global default — mirrors
+          // vanilla's _dayBand() (app.js).
+          let band: 'red' | 'amber' | 'green';
+          if (point.breach) {
+            band = 'red';
+          } else {
+            const bufPct = point.min_buffer_pct != null && Number.isFinite(point.min_buffer_pct)
+              ? point.min_buffer_pct
+              : (slaCeilingHrs > 0 ? ((slaCeilingHrs - point.total_hrs) / slaCeilingHrs) * 100 : 100);
+            band = bufPct <= SLA_ATRISK_PCT ? 'red' : bufPct <= SLA_LONGJOB_PCT ? 'amber' : 'green';
+          }
+          return { y: point.total_hrs, color: band === 'red' ? '#f43f5e' : band === 'amber' ? '#f59e0b' : '#10d96e' };
+        }),
       },
+      // Active busy time (interval union) overlaid as a teal line so the gap
+      // between an inflated elapsed span and real compute time is visible at
+      // a glance — ported from renderWindowTrendChart()'s teal dataset (app.js).
+      ...(window.some((p) => (p.active_busy_hrs || 0) > 0) ? [{
+        type: 'area' as const,
+        name: 'Active busy time (h)',
+        data: window.map((p) => p.active_busy_hrs || 0),
+        color: 'rgba(45,212,191,0.95)',
+        fillOpacity: 0.12,
+        lineWidth: 2,
+        marker: { radius: 2.5, fillColor: 'rgba(45,212,191,1)' },
+        }] : []),
     ],
   };
 
@@ -632,70 +670,74 @@ export function BatchPanel() {
     }],
   };
 
-  const heatmapOptions: Highcharts.Options | null = slaHeatmap && slaHeatmap.cells.length > 0 ? {
-    chart: { type: 'heatmap', height: Math.max(240, slaHeatmap.jobs.length * 24) },
-    title: { text: undefined },
-    xAxis: { categories: slaHeatmap.dates, labels: { rotation: -45 } },
-    yAxis: { categories: slaHeatmap.jobs, title: { text: undefined }, reversed: true },
-    colorAxis: {
-      min: 0,
-      stops: [
-        [0, '#10d96e'],
-        [0.7, '#f59e0b'],
-        [1, '#f43f5e'],
-      ],
-    },
-    tooltip: {
-      formatter(this: Highcharts.TooltipFormatterContextObject) {
-        const cell = slaHeatmap.cells[this.point.index];
-        if (!cell || cell.hrs == null) return 'No run';
-        return `<b>${cell.job}</b><br/>${cell.date}: ${cell.hrs.toFixed(2)}h` + (cell.breach ? ' <span style="color:#f43f5e">BREACH</span>' : '');
-      },
-    },
-    series: [{
-      type: 'heatmap',
-      data: slaHeatmap.cells.map((cell) => {
-        const jobIndex = slaHeatmap.jobs.indexOf(cell.job);
-        const dateIndex = slaHeatmap.dates.indexOf(cell.date);
-        const ceiling = cell.sla_limit || slaHeatmap.limit || 6;
-        const ratio = cell.hrs != null ? cell.hrs / ceiling : null;
-        return { x: dateIndex, y: jobIndex, value: ratio };
-      }),
-    }],
-  } : null;
+  // ── SLA Compliance Heatmap \u2014 ported from renderSlaHeatmap() (app.js) as a
+  // plain HTML table with DISCRETE 4-band status coloring, NOT a Highcharts
+  // heatmap with a continuous colorAxis. The continuous ratio scale (0\u20131+)
+  // is what produced the "hazy"/inconsistent look \u2014 vanilla never used a
+  // gradient here, it uses the exact same buffer-band colors as the gauge
+  // and daily-window bars (green/amber/red/dark-green-no-run). ──
+  const slaHeatmapRows = useMemo(() => {
+    if (!slaHeatmap || !slaHeatmap.cells.length) return null;
+    const lookup = new Map<string, SlaHeatmapCell>();
+    for (const c of slaHeatmap.cells) lookup.set(`${c.job}||${c.date}`, c);
+    const jobPriority = slaHeatmap.job_priority || {};
+    const priorityRank = (p?: string) => (p === 'critical' ? 2 : p === 'warning' ? 1 : 0);
+    const orderedJobs = [...slaHeatmap.jobs].sort((a, b) => {
+      const ma = jobPriority[a] || {};
+      const mb = jobPriority[b] || {};
+      const pa = priorityRank(ma.priority);
+      const pb = priorityRank(mb.priority);
+      if (pa !== pb) return pb - pa;
+      const sa = typeof ma.score === 'number' ? ma.score : 0;
+      const sb = typeof mb.score === 'number' ? mb.score : 0;
+      if (sb !== sa) return sb - sa;
+      return a.localeCompare(b);
+    });
+    return { lookup, orderedJobs, jobPriority };
+  }, [slaHeatmap]);
 
-  // ── Hour-of-day scheduling contention heatmap, ported from renderHourHeatmap() (app.js) ──
-  const hourHeatmapOptions: Highcharts.Options | null = hourHeatmap && hourHeatmap.cells.length > 0 ? {
-    chart: { type: 'heatmap', height: Math.max(220, hourHeatmap.sub_apps.length * 26) },
-    title: { text: undefined },
-    xAxis: { categories: hourHeatmap.hours.map((h) => `${String(h).padStart(2, '0')}:00`), opposite: true },
-    yAxis: { categories: hourHeatmap.sub_apps, title: { text: undefined }, reversed: true },
-    colorAxis: { min: 0, minColor: 'rgba(34,211,238,0.08)', maxColor: '#22d3ee' },
-    legend: { enabled: false },
-    tooltip: {
-      formatter(this: Highcharts.TooltipFormatterContextObject) {
-        const cell = hourHeatmap.cells[this.point.index];
-        if (!cell || !cell.count) return 'No jobs';
-        return `<b>${cell.sub_app}</b> @ ${String(cell.hour).padStart(2, '0')}:00<br/>${cell.count} job(s), ${cell.total_hrs.toFixed(1)}h total`;
-      },
-    },
-    series: [{
-      type: 'heatmap',
-      data: hourHeatmap.cells.map((cell) => ({
-        x: hourHeatmap.hours.indexOf(cell.hour),
-        y: hourHeatmap.sub_apps.indexOf(cell.sub_app),
-        value: cell.count,
-      })),
-    }],
-  } : null;
+  const spikeDateSet = useMemo(() => new Set(patternDetection.map((p) => p.date)), [patternDetection]);
 
-  const handleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDesc(!sortDesc);
-    } else {
-      setSortKey(key);
-      setSortDesc(true);
+  const slaCellColor = (cell?: SlaHeatmapCell): string => {
+    if (!cell || cell.hrs == null) return '#0f3d24';
+    const ceiling = cell.sla_limit ?? slaHeatmap?.limit ?? 6;
+    if (cell.breach) return '#f43f5e';
+    if (cell.hrs > ceiling * 0.85) return '#f59e0b';
+    return '#10d96e';
+  };
+  const slaCellTitle = (cell?: SlaHeatmapCell): string => {
+    if (!cell || cell.hrs == null) return 'No run';
+    const ceiling = cell.sla_limit ?? slaHeatmap?.limit ?? 6;
+    return `${cell.hrs.toFixed(2)}h \u2014 ${cell.breach ? 'BREACH' : 'OK'} (SLA: ${ceiling.toFixed(2)}h)`;
+  };
+  const shortDate = (d: string): string => {
+    const parts = String(d).split(/[-/]/);
+    return parts.length === 3 ? `${parts[1]}-${parts[2]}` : String(d).slice(-5);
+  };
+
+  // ── Ctrl-M Execution Density Heatmap \u2014 ported from renderHourHeatmap()
+  // (app.js), also a plain HTML table (continuous cyan intensity IS correct
+  // here \u2014 this one measures a count, not a status band). ──
+  const hourHeatmapRows = useMemo(() => {
+    if (!hourHeatmap || !hourHeatmap.cells.length) return null;
+    const lookup = new Map<string, HourHeatmapCell>();
+    let maxCount = 1;
+    for (const c of hourHeatmap.cells) {
+      lookup.set(`${c.sub_app}||${c.hour}`, c);
+      if ((c.count || 0) > maxCount) maxCount = c.count;
     }
+    const hours = hourHeatmap.hours.length ? hourHeatmap.hours : Array.from({ length: 24 }, (_, i) => i);
+    return { lookup, maxCount, hours };
+  }, [hourHeatmap]);
+
+  const hourCellBg = (cell: HourHeatmapCell | undefined, maxCount: number): string => {
+    if (!cell || !cell.count) return 'rgba(33,48,96,.25)';
+    const t = Math.min(cell.count / maxCount, 1);
+    return `rgba(34,211,238,${(0.10 + t * 0.80).toFixed(2)})`;
+  };
+  const hourCellTitle = (cell: HourHeatmapCell | undefined, hour: number): string => {
+    if (!cell || !cell.count) return 'No jobs';
+    return `${cell.sub_app} @ ${String(hour).padStart(2, '0')}:00: ${cell.count} job(s), ${(cell.total_hrs || 0).toFixed(1)}h total`;
   };
 
   if (!data.batch) {
@@ -763,6 +805,41 @@ export function BatchPanel() {
         </Box>
       )}
 
+      {/* ── Batch Story — the headline narrative, ported from renderBatchStory() (app.js).
+          Answers "Are we meeting batch SLAs?" FIRST, before the coverage strip/KPI
+          grid, matching vanilla's order. ── */}
+      {narrative && (
+        <Box
+          style={{
+            borderRadius: 16,
+            border: `1px solid ${narrative.tone === 'ok' ? 'rgba(16,217,110,.35)' : narrative.tone === 'critical' ? 'rgba(244,63,94,.35)' : 'rgba(245,158,11,.35)'}`,
+            background: `linear-gradient(135deg, ${narrative.tone === 'ok' ? 'rgba(16,217,110,.07)' : narrative.tone === 'critical' ? 'rgba(244,63,94,.07)' : 'rgba(245,158,11,.07)'}, rgba(17,29,54,.45))`,
+            padding: 16,
+            marginTop: 8,
+            marginBottom: 12,
+          }}
+        >
+          <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.1em', color: '#6b7db3', fontWeight: 700 }}>
+            Batch SLA — the headline question
+          </Typography>
+          <Typography variant="subtitle1" style={{ marginTop: 4 }}>Are we meeting batch SLAs?</Typography>
+          <Typography
+            variant="body2"
+            style={{ marginTop: 4, fontWeight: 700, color: narrative.tone === 'ok' ? '#10d96e' : narrative.tone === 'critical' ? '#f43f5e' : '#f59e0b' }}
+          >
+            {narrative.breachDays === 0
+              ? `Yes — every one of the ${narrative.total} day(s) finished inside the window (${narrative.compliancePct.toFixed(0)}% day compliance).`
+              : `${narrative.cleanDays}/${narrative.total} day(s) finished inside the window — ${narrative.compliancePct.toFixed(0)}% day compliance, ${narrative.breachDays} breach${narrative.breachDays > 1 ? 'es' : ''}.`}
+          </Typography>
+          {narrative.worstBreach && (
+            <Typography variant="body2" style={{ marginTop: 8, color: '#f0f4ff' }}>
+              Worst breach: {narrative.worstBreach.run_date} ran {narrative.worstBreach.total_hrs.toFixed(2)}h
+              {narrative.worstBreach.top_job && `; longest job ${narrative.worstBreach.top_job}.`}
+            </Typography>
+          )}
+        </Box>
+      )}
+
       {/* ── PE Audit Coverage Strip — ported from renderBatchCoverageStrip() (app.js) ── */}
       {dataCoverage && (() => {
         const span = dataCoverage.date_span_days || 0;
@@ -812,10 +889,65 @@ export function BatchPanel() {
         );
       })()}
 
-      {/* ── Excluded Jobs manager — ported from renderExcludedJobsPanel() (app.js) ── */}
+      <Box className={classes.kpiRow} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+        {effectiveWindowDisplay && (
+          <KpiStatCard
+            label="Effective Window"
+            value={effectiveWindowDisplay.value}
+            sub={effectiveWindowDisplay.sub}
+            valueColor={effectiveWindowDisplay.breach ? '#f43f5e' : '#a855f7'}
+            accent="#a855f7"
+          />
+        )}
+        {summedRuntime && (
+          <KpiStatCard
+            label="Summed Runtime"
+            value={`${summedRuntime.total_hrs.toFixed(1)}h`}
+            sub={`worst day ${summedRuntime.worst_day_hrs.toFixed(1)}h · avg ${summedRuntime.avg_day_hrs.toFixed(1)}h`}
+            accent="#3b82f6"
+          />
+        )}
+        {worstJob && (
+          <KpiStatCard
+            label="Worst-Job Peak"
+            value={`${worstJob.peak_hrs.toFixed(2)}h`}
+            sub={`${worstJob.job_name} · ${worstJob.buffer_pct.toFixed(1)}% buffer`}
+            accent="#f59e0b"
+          />
+        )}
+        <KpiStatCard label="Job SLA" value={`${(kpis.compliance_pct || 0).toFixed(1)}%`} sub="Peak job runtime vs SLA ceiling" accent="#10d96e" />
+        <KpiStatCard label="Window SLA" value={`${windowCompliance.toFixed(1)}%`} sub="Day-level batch window vs ceiling" accent="#f59e0b" />
+        <KpiStatCard label="Peak · Risk · OK" accent="#f43f5e" value={
+          <span>
+            <span style={{ color: '#f43f5e' }}>{kpis.jobs_breach || 0}</span>
+            <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
+            <span style={{ color: '#f59e0b' }}>{kpis.jobs_at_risk || 0}</span>
+            <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
+            <span style={{ color: '#10d96e' }}>{kpis.jobs_ok || 0}</span>
+          </span>
+        } sub="Job-level SLA status by peak runtime" />
+        <KpiStatCard label="Failed Runs" value={kpis.failed_runs || 0} sub={`${(kpis.fail_rate_pct || 0).toFixed(1)}% of all runs`} accent="#fb923c" />
+        {slaSource && (
+          <KpiStatCard
+            label="SLA Source"
+            value={slaSource.adaptive_active ? 'Adaptive' : slaSource.type}
+            valueColor="#2dd4bf"
+            sub={slaSource.adaptive_active ? `${slaSource.adaptive_job_count}/${slaSource.adaptive_total_jobs} jobs on adaptive baseline` : `${slaSource.daily_hrs}h daily ceiling`}
+            accent="#2dd4bf"
+          />
+        )}
+      </Box>
+      <Typography variant="caption" style={{ display: 'block', marginTop: 12, color: '#6b7db3' }}>
+        <span style={{ color: '#3b82f6' }}>ℹ</span>{' '}
+        <strong style={{ color: '#f0f4ff' }}>Job SLA</strong> = % of jobs whose own peak runtime beat its SLA ceiling.
+        <strong style={{ color: '#f0f4ff' }}> Window SLA</strong> = % of days the full batch window beat the same ceiling.
+      </Typography>
+
+      {/* ── Excluded Jobs manager — ported from renderExcludedJobsPanel() (app.js). Sits
+          directly under the KPI strip, matching vanilla's insertion point exactly. ── */}
       {(unifiedExclusions.length > 0 || includedBackJobs.length > 0) && (
         <Box
-          style={{ borderRadius: 12, border: '1px solid rgba(45,212,191,.28)', background: 'rgba(45,212,191,.05)', padding: 12, marginBottom: 12 }}
+          style={{ borderRadius: 12, border: '1px solid rgba(45,212,191,.28)', background: 'rgba(45,212,191,.05)', padding: 12, marginTop: 12, marginBottom: 12 }}
         >
           <Box
             display="flex" alignItems="center" justifyContent="space-between" style={{ gap: 12, flexWrap: 'wrap', cursor: 'pointer' }}
@@ -935,7 +1067,10 @@ export function BatchPanel() {
         </Box>
       )}
 
-      {/* ── Concurrent Jobs Evidence — ported from renderBatchConcurrencyEvidence() (app.js) ── */}
+      {/* ── Concurrent Jobs Evidence — ported from renderBatchConcurrencyEvidence() (app.js).
+          Each group card is a native <details>/<summary> — collapsed by default, click to
+          reveal occurrence rows — matching vanilla's show/hide affordance exactly (previously
+          always rendered fully expanded with no way to hide it). ── */}
       {concurrency && concurrency.groups.length > 0 && (
         <Box style={{ borderRadius: 8, border: '1px solid rgba(34,211,238,.28)', background: 'rgba(34,211,238,.04)', padding: 10, marginBottom: 12 }}>
           <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap' }}>
@@ -943,31 +1078,35 @@ export function BatchPanel() {
             <Typography variant="caption" color="textSecondary">{concurrency.total_days_with_concurrency} affected day(s)</Typography>
           </Box>
           <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4 }}>
-            Ranked by peak simultaneity — the most jobs running at the same instant. Severity is the tercile of peak across these groups.
+            Ranked by peak simultaneity — the most jobs running at the same instant. Severity is the tercile of peak across these groups. Click a row for occurrence detail.
           </Typography>
           {concurrency.groups.slice(0, 10).map((group, idx) => {
             const sev = _concSeverityTheme(group.severity_level);
             return (
-              <Box key={`${group.example_sub_app}-${idx}`} style={{ borderRadius: 8, border: `1px solid ${sev.color}47`, background: `${sev.color}0d`, marginTop: 6, padding: '6px 10px' }}>
-                <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap' }}>
-                  <Typography variant="body2" style={{ flex: 1, minWidth: 120, fontWeight: 600 }}>{group.example_sub_app}</Typography>
-                  <span style={{ fontSize: 16, fontWeight: 800, color: sev.color }}>{group.peak_concurrent}</span>
-                  <Typography variant="caption" style={{ color: sev.color, textTransform: 'uppercase', fontSize: 9 }}>peak</Typography>
-                  <span className="metric-badge" style={{ color: sev.color, borderColor: `${sev.color}47`, background: `${sev.color}1a` }}>{sev.label}</span>
-                  <Typography variant="caption" color="textSecondary">{group.days_seen}d · {group.occurrences} occ</Typography>
-                </Box>
-                <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4 }}>
-                  {_concExplainSentence(group)}
-                </Typography>
-                {group.bursts.slice(0, 3).map((burst, bIdx) => (
-                  <Box key={bIdx} display="flex" style={{ gap: 8, marginTop: 2 }}>
-                    <Typography variant="caption" style={{ fontFamily: 'monospace', color: '#6b7db3', width: 70 }}>{burst.run_date}</Typography>
-                    <Typography variant="caption" style={{ fontFamily: 'monospace', color: '#f0f4ff', width: 90 }}>{burst.start_clock}–{burst.end_clock}</Typography>
-                    <Typography variant="caption" style={{ fontWeight: 700, color: sev.color }}>peak {burst.peak_concurrent}</Typography>
-                    <Typography variant="caption" color="textSecondary">· {burst.job_count} in window</Typography>
+              <details key={`${group.example_sub_app}-${idx}`} style={{ borderRadius: 8, border: `1px solid ${sev.color}47`, background: `${sev.color}0d`, marginTop: 6 }}>
+                <summary style={{ cursor: 'pointer', listStyle: 'none', padding: '6px 10px' }}>
+                  <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap' }}>
+                    <Typography component="span" variant="body2" style={{ flex: 1, minWidth: 120, fontWeight: 600 }}>{group.example_sub_app}</Typography>
+                    <span style={{ fontSize: 16, fontWeight: 800, color: sev.color }}>{group.peak_concurrent}</span>
+                    <Typography component="span" variant="caption" style={{ color: sev.color, textTransform: 'uppercase', fontSize: 9 }}>peak</Typography>
+                    <span className="metric-badge" style={{ color: sev.color, borderColor: `${sev.color}47`, background: `${sev.color}1a` }}>{sev.label}</span>
+                    <Typography component="span" variant="caption" color="textSecondary">{group.days_seen}d · {group.occurrences} occ</Typography>
                   </Box>
-                ))}
-              </Box>
+                </summary>
+                <Box style={{ padding: '0 10px 8px' }}>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4 }}>
+                    {_concExplainSentence(group)}
+                  </Typography>
+                  {group.bursts.slice(0, 3).map((burst, bIdx) => (
+                    <Box key={bIdx} display="flex" style={{ gap: 8, marginTop: 2 }}>
+                      <Typography variant="caption" style={{ fontFamily: 'monospace', color: '#6b7db3', width: 70 }}>{burst.run_date}</Typography>
+                      <Typography variant="caption" style={{ fontFamily: 'monospace', color: '#f0f4ff', width: 90 }}>{burst.start_clock}–{burst.end_clock}</Typography>
+                      <Typography variant="caption" style={{ fontWeight: 700, color: sev.color }}>peak {burst.peak_concurrent}</Typography>
+                      <Typography variant="caption" color="textSecondary">· {burst.job_count} in window</Typography>
+                    </Box>
+                  ))}
+                </Box>
+              </details>
             );
           })}
         </Box>
@@ -1000,92 +1139,6 @@ export function BatchPanel() {
           </Box>
         );
       })()}
-
-      <Box className={classes.kpiRow} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
-        {effectiveWindowDisplay && (
-          <KpiStatCard
-            label="Effective Window"
-            value={effectiveWindowDisplay.value}
-            sub={effectiveWindowDisplay.sub}
-            valueColor={effectiveWindowDisplay.breach ? '#f43f5e' : '#a855f7'}
-            accent="#a855f7"
-          />
-        )}
-        {summedRuntime && (
-          <KpiStatCard
-            label="Summed Runtime"
-            value={`${summedRuntime.total_hrs.toFixed(1)}h`}
-            sub={`worst day ${summedRuntime.worst_day_hrs.toFixed(1)}h · avg ${summedRuntime.avg_day_hrs.toFixed(1)}h`}
-            accent="#3b82f6"
-          />
-        )}
-        {worstJob && (
-          <KpiStatCard
-            label="Worst-Job Peak"
-            value={`${worstJob.peak_hrs.toFixed(2)}h`}
-            sub={`${worstJob.job_name} · ${worstJob.buffer_pct.toFixed(1)}% buffer`}
-            accent="#f59e0b"
-          />
-        )}
-        <KpiStatCard label="Job SLA" value={`${(kpis.compliance_pct || 0).toFixed(1)}%`} sub="Peak job runtime vs SLA ceiling" accent="#10d96e" />
-        <KpiStatCard label="Window SLA" value={`${windowCompliance.toFixed(1)}%`} sub="Day-level batch window vs ceiling" accent="#f59e0b" />
-        <KpiStatCard label="Peak · Risk · OK" accent="#f43f5e" value={
-          <span>
-            <span style={{ color: '#f43f5e' }}>{kpis.jobs_breach || 0}</span>
-            <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
-            <span style={{ color: '#f59e0b' }}>{kpis.jobs_at_risk || 0}</span>
-            <span style={{ color: '#6b7db3', margin: '0 4px', fontSize: 16 }}>·</span>
-            <span style={{ color: '#10d96e' }}>{kpis.jobs_ok || 0}</span>
-          </span>
-        } sub="Job-level SLA status by peak runtime" />
-        <KpiStatCard label="Failed Runs" value={kpis.failed_runs || 0} sub={`${(kpis.fail_rate_pct || 0).toFixed(1)}% of all runs`} accent="#fb923c" />
-        {slaSource && (
-          <KpiStatCard
-            label="SLA Source"
-            value={slaSource.adaptive_active ? 'Adaptive' : slaSource.type}
-            valueColor="#2dd4bf"
-            sub={slaSource.adaptive_active ? `${slaSource.adaptive_job_count}/${slaSource.adaptive_total_jobs} jobs on adaptive baseline` : `${slaSource.daily_hrs}h daily ceiling`}
-            accent="#2dd4bf"
-          />
-        )}
-      </Box>
-      <Typography variant="caption" style={{ display: 'block', marginTop: 12, color: '#6b7db3' }}>
-        <span style={{ color: '#3b82f6' }}>ℹ</span>{' '}
-        <strong style={{ color: '#f0f4ff' }}>Job SLA</strong> = % of jobs whose own peak runtime beat its SLA ceiling.
-        <strong style={{ color: '#f0f4ff' }}> Window SLA</strong> = % of days the full batch window beat the same ceiling.
-      </Typography>
-
-      {narrative && (
-        <Box
-          className={classes.chart}
-          style={{
-            borderRadius: 16,
-            border: `1px solid ${narrative.tone === 'ok' ? 'rgba(16,217,110,.35)' : narrative.tone === 'critical' ? 'rgba(244,63,94,.35)' : 'rgba(245,158,11,.35)'}`,
-            background: `linear-gradient(135deg, ${narrative.tone === 'ok' ? 'rgba(16,217,110,.07)' : narrative.tone === 'critical' ? 'rgba(244,63,94,.07)' : 'rgba(245,158,11,.07)'}, rgba(17,29,54,.45))`,
-            padding: 16,
-          }}
-        >
-          <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.1em', color: '#6b7db3', fontWeight: 700 }}>
-            Batch SLA — the headline question
-          </Typography>
-          <Typography variant="subtitle1" style={{ marginTop: 4 }}>Are we meeting batch SLAs?</Typography>
-          <Typography
-            variant="body2"
-            style={{ marginTop: 4, fontWeight: 700, color: narrative.tone === 'ok' ? '#10d96e' : narrative.tone === 'critical' ? '#f43f5e' : '#f59e0b' }}
-          >
-            {narrative.breachDays === 0
-              ? `Yes — every one of the ${narrative.total} day(s) finished inside the window (${narrative.compliancePct.toFixed(0)}% day compliance).`
-              : `${narrative.cleanDays}/${narrative.total} day(s) finished inside the window — ${narrative.compliancePct.toFixed(0)}% day compliance, ${narrative.breachDays} breach${narrative.breachDays > 1 ? 'es' : ''}.`}
-          </Typography>
-          {narrative.worstBreach && (
-            <Typography variant="body2" style={{ marginTop: 8, color: '#f0f4ff' }}>
-              Worst breach: {narrative.worstBreach.run_date} ran {narrative.worstBreach.total_hrs.toFixed(2)}h
-              {narrative.worstBreach.top_job && `; longest job ${narrative.worstBreach.top_job}.`}
-            </Typography>
-          )}
-        </Box>
-      )}
-
 
       {(window.length > 0 || gaugeSource) && (
         <Box className={classes.chart} style={{ display: 'grid', gridTemplateColumns: gaugeSource ? '1fr 2fr' : '1fr', gap: 16 }}>
@@ -1128,7 +1181,9 @@ export function BatchPanel() {
           {window.length > 0 && (
             <Box className="chart-panel" style={{ padding: 16 }}>
               <Typography variant="subtitle2">Daily Batch Window</Typography>
-              <Typography variant="caption" color="textSecondary">Bar color = SLA buffer that day</Typography>
+              <Typography variant="caption" color="textSecondary">
+                Bar color = SLA buffer that day{window.some((p) => (p.active_busy_hrs || 0) > 0) ? ' \u00b7 teal line = active busy time (real compute)' : ''}{windowChartCeilings.length > 1 ? ` \u00b7 dashed lines mark ${windowChartCeilings.length} distinct contracted windows (${windowChartCeilings[0]}\u2013${windowChartCeilings[windowChartCeilings.length - 1]}h)` : ''}
+              </Typography>
               <HighchartsReact highcharts={Highcharts} options={chartOptions} />
               {patternDetection.length > 0 && (
                 <Box style={{ marginTop: 8, borderRadius: 12, border: '1px solid rgba(245,158,11,.3)', background: 'rgba(245,158,11,.04)', padding: '8px 12px' }}>
@@ -1156,22 +1211,6 @@ export function BatchPanel() {
               )}
             </Box>
           )}
-        </Box>
-      )}
-
-      {slaHeatmap && slaHeatmap.cells.length > 0 && (
-        <Box className={classes.chart}>
-          <Typography variant="subtitle2">SLA Compliance Heatmap</Typography>
-          <Typography variant="caption" color="textSecondary">Job × Date — green = healthy buffer, amber = near SLA, red = breach</Typography>
-          <HighchartsReact highcharts={Highcharts} options={heatmapOptions as Highcharts.Options} />
-        </Box>
-      )}
-
-      {hourHeatmapOptions && (
-        <Box className={classes.chart}>
-          <Typography variant="subtitle2">Ctrl-M Execution Density Heatmap</Typography>
-          <Typography variant="caption" color="textSecondary">Sub-Application × Hour of Day — colour intensity shows job execution count (contention windows)</Typography>
-          <HighchartsReact highcharts={Highcharts} options={hourHeatmapOptions} />
         </Box>
       )}
 
@@ -1273,58 +1312,31 @@ export function BatchPanel() {
         );
       })()}
 
-      {sortedJobs.length > 0 && (
-        <Box className={classes.chart}>
-          <Typography variant="subtitle2">Top jobs</Typography>
-          <Table size="small" className="pe-table" aria-label="Top jobs table">
-            <TableHead>
-              <TableRow>
-                <TableCell>
-                  <TableSortLabel active={sortKey === 'Job_Name'} direction={sortDesc ? 'desc' : 'asc'} onClick={() => handleSort('Job_Name')}>
-                    Job
-                  </TableSortLabel>
-                </TableCell>
-                <TableCell align="right">
-                  <TableSortLabel active={sortKey === 'peak_hrs'} direction={sortDesc ? 'desc' : 'asc'} onClick={() => handleSort('peak_hrs')}>
-                    Peak hours
-                  </TableSortLabel>
-                </TableCell>
-                <TableCell align="right">
-                  <TableSortLabel active={sortKey === 'avg_hrs'} direction={sortDesc ? 'desc' : 'asc'} onClick={() => handleSort('avg_hrs')}>
-                    Avg hours
-                  </TableSortLabel>
-                </TableCell>
-                <TableCell>Status</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {sortedJobs.slice(0, 25).map((job) => (
-                <TableRow key={job.Job_Name}>
-                  <TableCell>{job.Job_Name}</TableCell>
-                  <TableCell align="right">{job.peak_hrs.toFixed(2)}</TableCell>
-                  <TableCell align="right">{job.avg_hrs.toFixed(2)}</TableCell>
-                  <TableCell>
-                    <span className="metric-badge" style={{ color: STATUS_COLOR[job.buffer_status] || '#6b7db3', borderColor: `${STATUS_COLOR[job.buffer_status] || '#6b7db3'}40`, background: `${STATUS_COLOR[job.buffer_status] || '#6b7db3'}1f` }}>
-                      {job.buffer_status}
-                    </span>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Box>
-      )}
-
       {topBreaches.length > 0 && (() => {
         const hasBreach = topBreaches.some((j) => j.buffer_pct != null && j.buffer_pct < 0);
-        const shown = Math.min(9, topBreaches.length);
+        const breachCount = topBreaches.filter((j) => j.buffer_pct != null && j.buffer_pct < 0).length;
+        const isAdaptive = !!slaSource?.adaptive_active;
+        const shown = Math.min(hasBreach ? breachCount : 10, topBreaches.length);
+        const title = hasBreach
+          ? (isAdaptive ? `Top ${shown} Performance Regressions` : `Top ${shown} Breaching Jobs`)
+          : 'Top 10 Jobs by Peak Runtime';
+        const subtitle = hasBreach
+          ? (isAdaptive
+            ? `${shown} job(s) exceeded adaptive history baseline · no contract SLA loaded`
+            : `${shown} job(s) exceeded their SLA window`)
+          : `No SLA breaches — showing ranked jobs by peak runtime · ${window.length} day(s)`;
         return (
         <Box className={classes.chart}>
-          <Typography variant="subtitle2">{`Top ${shown} Jobs by Peak Runtime`}</Typography>
-          <Typography variant="caption" color="textSecondary">
-            {hasBreach ? 'Ranked by SLA buffer — highest breach risk first.' : `No SLA breaches — showing ranked jobs by peak runtime · ${window.length} day(s)`}
-          </Typography>
-          <Table size="small" className="pe-table" aria-label="Top performance regressions table" style={{ marginTop: 8 }}>
+          <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
+            <Typography variant="subtitle2">{title}</Typography>
+            {hasBreach && (
+              <span className={`metric-badge ${isAdaptive ? 'metric-badge-amber' : 'metric-badge-red'}`}>
+                {shown} {isAdaptive ? `regression${shown !== 1 ? 's' : ''}` : `breach${shown !== 1 ? 'es' : ''}`}
+              </span>
+            )}
+          </Box>
+          <Typography variant="caption" color="textSecondary">{subtitle}</Typography>
+          <Table size="small" className="pe-table" aria-label="Top breaching jobs table" style={{ marginTop: 8 }}>
             <TableHead>
               <TableRow>
                 <TableCell>Job</TableCell>
@@ -1372,6 +1384,113 @@ export function BatchPanel() {
         </Box>
         );
       })()}
+
+      {/* ── SLA Compliance Heatmap + Ctrl-M Execution Density Heatmap — LAST in the
+          panel, matching vanilla's exact order (these are separate sections
+          rendered after the whole batch-review-body, not before Long-Pole/Top
+          Breaching Jobs). Both are plain HTML tables (ported verbatim from
+          renderSlaHeatmap()/renderHourHeatmap() in app.js), not Highcharts
+          heatmaps — the prior Highcharts port's continuous colorAxis produced
+          a hazy, inconsistent look on a metric that is actually a discrete
+          4-band status (same bands as the gauge/daily-window bars). ── */}
+      {slaHeatmapRows && (
+        <Box className={classes.chart}>
+          <Typography variant="subtitle2">SLA Compliance Heatmap</Typography>
+          <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginBottom: 8 }}>
+            Job × Date — colour = SLA buffer that run (green = healthy buffer · amber = within 15% of the SLA ceiling · red = breach)
+          </Typography>
+          <Box display="flex" alignItems="center" style={{ gap: 16, marginBottom: 10, fontSize: 10, flexWrap: 'wrap' }}>
+            <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#0f3d24', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">No run</Typography></Box>
+            <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#10d96e', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">Healthy (&gt;15% buffer)</Typography></Box>
+            <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#f59e0b', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">Within 15% of SLA</Typography></Box>
+            <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#f43f5e', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">BREACH</Typography></Box>
+          </Box>
+          <Box style={{ overflowX: 'auto' }}>
+            <table style={{ fontSize: 10, borderCollapse: 'collapse', minWidth: 'max-content' }}>
+              <thead>
+                <tr>
+                  <th style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', textAlign: 'left', paddingRight: 12, paddingBottom: 4, color: '#6b7db3', fontWeight: 700, whiteSpace: 'nowrap', minWidth: 150 }}>Job</th>
+                  {slaHeatmap!.dates.map((d) => {
+                    const isSpike = spikeDateSet.has(d);
+                    return (
+                      <th key={d} title={`${d}${isSpike ? ' \u26a1 Spike day' : ''}`} style={{ paddingBottom: 4, paddingLeft: 2, paddingRight: 2, color: '#6b7db3', fontWeight: 400, textAlign: 'center', whiteSpace: 'nowrap', background: isSpike ? 'rgba(245,158,11,.18)' : undefined, borderBottom: isSpike ? '2px solid #f59e0b' : undefined }}>
+                        {shortDate(d)}{isSpike && <><br /><span style={{ color: '#f59e0b', fontSize: 8 }}>{'\u26a1'}</span></>}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {slaHeatmapRows.orderedJobs.map((job) => {
+                  const meta = slaHeatmapRows.jobPriority[job] || {};
+                  const pr = meta.priority || 'normal';
+                  const prColor = pr === 'critical' ? '#f43f5e' : pr === 'warning' ? '#f59e0b' : '#10d96e';
+                  const prLabel = pr === 'critical' ? 'PRIORITY' : pr === 'warning' ? 'WATCH' : '';
+                  return (
+                    <tr key={job} style={pr !== 'normal' ? { background: `${prColor}0f`, boxShadow: `inset 2px 0 0 ${prColor}` } : undefined}>
+                      <td title={`${job}${meta.reason ? ` \u00b7 ${meta.reason}` : ''}`} style={{ position: 'sticky', left: 0, background: '#111d36', paddingRight: 12, paddingTop: 2, paddingBottom: 2, color: '#f0f4ff', fontFamily: 'monospace', whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        <Box display="flex" alignItems="center" style={{ gap: 6 }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{job}</span>
+                          {prLabel && <span style={{ display: 'inline-flex', alignItems: 'center', padding: '1px 5px', borderRadius: 4, fontSize: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', color: prColor, background: `${prColor}24`, border: `1px solid ${prColor}59` }}>{prLabel}</span>}
+                        </Box>
+                      </td>
+                      {slaHeatmap!.dates.map((date) => {
+                        const cell = slaHeatmapRows.lookup.get(`${job}||${date}`);
+                        const isSpike = spikeDateSet.has(date);
+                        return (
+                          <td key={date} title={`${slaCellTitle(cell)}${isSpike ? ' \u26a1' : ''}`} style={{ padding: '2px 2px', textAlign: 'center', minWidth: 22, background: isSpike ? 'rgba(245,158,11,.06)' : undefined }}>
+                            <div style={{ width: 20, height: 15, background: slaCellColor(cell), borderRadius: 2, margin: 'auto', border: isSpike ? '1px solid rgba(245,158,11,.5)' : undefined }} />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Box>
+        </Box>
+      )}
+
+      {hourHeatmapRows && (
+        <Box className={classes.chart}>
+          <Typography variant="subtitle2">Ctrl-M Execution Density Heatmap</Typography>
+          <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginBottom: 8 }}>Sub-Application × Hour of Day — colour intensity shows job execution count (contention windows)</Typography>
+          <Box style={{ overflowX: 'auto' }}>
+            <table style={{ fontSize: 10, borderCollapse: 'collapse', minWidth: 'max-content' }}>
+              <thead>
+                <tr>
+                  <th style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', textAlign: 'left', paddingRight: 12, paddingBottom: 4, color: '#6b7db3', fontWeight: 700, whiteSpace: 'nowrap', minWidth: 130 }}>Sub-App</th>
+                  {hourHeatmapRows.hours.map((h) => (
+                    <th key={h} style={{ paddingBottom: 4, color: '#6b7db3', fontWeight: 400, textAlign: 'center', whiteSpace: 'nowrap', minWidth: 28, fontSize: 9 }}>{String(h).padStart(2, '0')}:00</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {hourHeatmap!.sub_apps.map((app) => (
+                  <tr key={app}>
+                    <td title={app} style={{ position: 'sticky', left: 0, background: '#111d36', paddingRight: 12, paddingTop: 2, paddingBottom: 2, color: '#f0f4ff', fontFamily: 'monospace', whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}>{app}</td>
+                    {hourHeatmapRows.hours.map((h) => {
+                      const cell = hourHeatmapRows.lookup.get(`${app}||${h}`);
+                      return (
+                        <td key={h} title={hourCellTitle(cell, h)} style={{ padding: '2px 2px' }}>
+                          <div style={{ width: 22, height: 16, borderRadius: 2, margin: 'auto', background: hourCellBg(cell, hourHeatmapRows.maxCount) }} />
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Box>
+          <Box display="flex" alignItems="center" style={{ gap: 10, marginTop: 12, fontSize: 10, color: '#6b7db3' }}>
+            <span>Low</span>
+            <div style={{ height: 8, width: 120, borderRadius: 4, background: 'linear-gradient(to right, rgba(34,211,238,.10), rgba(34,211,238,.26), rgba(34,211,238,.42), rgba(34,211,238,.58), rgba(34,211,238,.74), rgba(34,211,238,.90))' }} />
+            <span>High</span>
+            <span style={{ marginLeft: 16, fontStyle: 'italic' }}>Bright columns = peak scheduling contention windows</span>
+          </Box>
+        </Box>
+      )}
     </Paper>
   );
 }

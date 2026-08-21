@@ -35,6 +35,7 @@ import { BenchmarkPanel } from './components/panels/BenchmarkPanel';
 import { SowPanel } from './components/panels/SowPanel';
 import { FindingsPanel } from './components/panels/FindingsPanel';
 import { RedFlagsPanel } from './components/panels/RedFlagsPanel';
+import { GovernancePanel } from './components/panels/GovernancePanel';
 import { ArchivePanel } from './components/panels/ArchivePanel';
 import { SettingsPanel } from './components/panels/SettingsPanel';
 
@@ -50,10 +51,10 @@ function App() {
           <ThemeProvider theme={dashboardTheme}>
           <AppDataProvider>
             <div className="pe-dashboard">
-            <Header />
-            <Box display="flex">
+            <Box display="flex" style={{ height: '100vh', overflowY: 'auto' }}>
               <Sidebar />
               <Box flexGrow={1} minWidth={0} style={{ background: '#060914', minHeight: '100vh' }}>
+                <Header />
                 <Box p={2} pb={0}>
                   <CustomerAuditBanner />
                 </Box>
@@ -67,6 +68,7 @@ function App() {
                   <Route exact path="/sow" component={SowPanel} />
                   <Route exact path="/findings" component={FindingsPanel} />
                   <Route exact path="/red-flags" component={RedFlagsPanel} />
+                  <Route exact path="/governance" component={GovernancePanel} />
                   <Route exact path="/archive" component={ArchivePanel} />
                   <Route exact path="/settings" component={SettingsPanel} />
                   <Redirect exact from="/" to="/upload" />

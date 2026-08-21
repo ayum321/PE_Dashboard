@@ -1,20 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Button, CircularProgress, Paper, Typography, makeStyles } from '@material-ui/core';
+import { useHistory } from 'react-router-dom';
 import {
   connectAzure,
   disconnectAzure,
-  fetchAzureResources,
   getAzureAuthStatus,
   parseSow,
   processBatchMulti,
   refreshBatch,
   ResourceServer,
+  uploadBatchSlaXlsx,
   uploadBenchmark,
   uploadDashboardFile,
-  uploadSlaMatrix,
 } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
 import { BatchIcon, BenchmarkIcon, ResourceIcon, SlaMatrixIcon, SowIcon } from '../../theme/icons';
+import { AzureFetchModal } from '../shared/AzureFetchModal';
 import { UploadTile } from '../shared/UploadTile';
 
 const useStyles = makeStyles((theme) => ({
@@ -45,12 +46,18 @@ const useStyles = makeStyles((theme) => ({
 
 export function UploadPanel() {
   const classes = useStyles();
+  const history = useHistory();
   const { data, setBatch, setResource, setSlaMatrix, setBenchmark, setSowBaseline, setCustomerName } = useAppData();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [azureAuth, setAzureAuth] = useState<Record<string, unknown> | null>(null);
   const [azureBusy, setAzureBusy] = useState(false);
+  const [azureModalOpen, setAzureModalOpen] = useState(false);
+  const [progress, setProgress] = useState<Record<string, number | null>>({});
+
+  const trackProgress = (key: string) => (pct: number) => setProgress((prev) => ({ ...prev, [key]: pct }));
+  const clearProgress = (key: string) => setProgress((prev) => ({ ...prev, [key]: null }));
 
   useEffect(() => {
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);
@@ -60,7 +67,7 @@ export function UploadPanel() {
     setBusy(true);
     setError(null);
     try {
-      const result = await processBatchMulti(files);
+      const result = await processBatchMulti(files, trackProgress('batch'));
       setBatch(result);
       // The backend always computes a full per-job SLA matrix alongside batch KPIs
       // (BatchResponse.sla_matrix) — wire it into the SLA Matrix tab immediately so
@@ -74,6 +81,7 @@ export function UploadPanel() {
       setError(uploadError instanceof Error ? uploadError.message : 'Batch upload failed.');
     } finally {
       setBusy(false);
+      clearProgress('batch');
     }
   };
 
@@ -81,13 +89,14 @@ export function UploadPanel() {
     setBusy(true);
     setError(null);
     try {
-      const result = await uploadDashboardFile(files[0]);
+      const result = await uploadDashboardFile(files[0], trackProgress('resource'));
       setResource({ servers: result.data.servers || [] });
       setStatus(`${result.data.server_count || 0} server(s) parsed from ${result.filename}.`);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Resource upload failed.');
     } finally {
       setBusy(false);
+      clearProgress('resource');
     }
   };
 
@@ -95,8 +104,14 @@ export function UploadPanel() {
     setBusy(true);
     setError(null);
     try {
-      const result = await uploadSlaMatrix(files[0]);
-      setSlaMatrix(result);
+      // uploadBatchSlaXlsx hits /api/batch-sla/upload — the endpoint that
+      // actually parses per-workflow SLA contracts and persists them as the
+      // Tier-1 source every batch SLA calculation reads (_batch_sla_xlsx in
+      // config_store). It also returns updated_batch_kpis as an immediate
+      // partial recompute when Ctrl-M is already loaded.
+      const result = await uploadBatchSlaXlsx(files[0], trackProgress('sla'));
+      const workflowCount = Number(result.workflow_count) || 0;
+      const withSla = Number(result.with_sla_count) || 0;
       // Batch Review's KPIs (SLA source, job/window compliance, buffer gauge) were
       // computed with the OLD ceiling — re-run /api/batch/refresh so they reflect
       // this newly-uploaded SLA file immediately, matching the real dashboard's
@@ -111,11 +126,12 @@ export function UploadPanel() {
           // Refresh is best-effort — the SLA matrix upload itself still succeeded.
         }
       }
-      setStatus(`Workflow SLA info loaded: ${Number(result.compliance_pct) || 0}% compliance.`);
+      setStatus(`Workflow SLA info loaded: ${withSla}/${workflowCount} workflow(s) with an explicit SLA ceiling.`);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Workflow SLA upload failed.');
     } finally {
       setBusy(false);
+      clearProgress('sla');
     }
   };
 
@@ -123,13 +139,14 @@ export function UploadPanel() {
     setBusy(true);
     setError(null);
     try {
-      const result = await uploadBenchmark(files[0]);
+      const result = await uploadBenchmark(files[0], trackProgress('benchmark'));
       setBenchmark(result);
       setStatus(`Benchmark loaded: ${Number(result.total_transactions) || 0} transactions.`);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Benchmark upload failed.');
     } finally {
       setBusy(false);
+      clearProgress('benchmark');
     }
   };
 
@@ -137,13 +154,14 @@ export function UploadPanel() {
     setBusy(true);
     setError(null);
     try {
-      const result = await parseSow(files[0]);
+      const result = await parseSow(files[0], trackProgress('sow'));
       setSowBaseline(result);
       setStatus(`SOW contract parsed from ${files[0].name}.`);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'SOW parse failed.');
     } finally {
       setBusy(false);
+      clearProgress('sow');
     }
   };
 
@@ -160,18 +178,12 @@ export function UploadPanel() {
     }
   };
 
-  const handleAzureFetch = async () => {
-    setAzureBusy(true);
-    setError(null);
-    try {
-      const result = await fetchAzureResources({});
-      setResource({ servers: (result.servers as ResourceServer[]) || [] });
-      setStatus('Live Azure Monitor metrics fetched.');
-    } catch (fetchError) {
-      setError(fetchError instanceof Error ? fetchError.message : 'Azure fetch failed.');
-    } finally {
-      setAzureBusy(false);
-    }
+  const handleAzureFetched = (servers: ResourceServer[]) => {
+    setResource({ servers });
+    setStatus(`Live Azure Monitor metrics fetched for ${servers.length} server(s).`);
+    // Matches vanilla's runAzureFetch(): jump straight to Resource Review so
+    // the fetch result is immediately visible instead of sitting on Upload.
+    history.push('/resource');
   };
 
   const handleAzureDisconnect = async () => {
@@ -228,6 +240,7 @@ export function UploadPanel() {
             accept=".csv,.xlsx,.xls"
             multiple
             disabled={busy}
+            progress={progress.batch}
             onFiles={handleBatchUpload}
           />
         </Box>
@@ -260,7 +273,7 @@ export function UploadPanel() {
                 size="small"
                 variant="outlined"
                 style={{ flex: 1, fontSize: 10, borderColor: 'rgba(59,130,246,.4)', color: '#3b82f6' }}
-                onClick={connected ? handleAzureFetch : handleAzureConnect}
+                onClick={connected ? () => setAzureModalOpen(true) : handleAzureConnect}
                 disabled={azureBusy}
               >
                 {azureBusy ? '...' : connected ? 'Fetch live metrics' : 'Connect Azure'}
@@ -278,7 +291,7 @@ export function UploadPanel() {
                   }}
                 />
                 <Button component="span" size="small" variant="outlined" style={{ fontSize: 10, borderColor: '#213060', color: '#6b7db3' }} disabled={busy}>
-                  Import supplied report
+                  {progress.resource != null && progress.resource < 100 ? `Uploading\u2026 ${progress.resource}%` : 'Import supplied report'}
                 </Button>
               </label>
             </Box>
@@ -305,6 +318,7 @@ export function UploadPanel() {
             browseLabel="browse"
             accept=".xlsx,.xls,.csv"
             disabled={busy}
+            progress={progress.sla}
             onFiles={handleWorkflowSlaUpload}
           />
         </Box>
@@ -331,6 +345,7 @@ export function UploadPanel() {
             accept=".xlsx,.xls,.csv"
             disabled={busy}
             compact
+            progress={progress.benchmark}
             onFiles={handleBenchmarkUpload}
           />
           <UploadTile
@@ -342,6 +357,7 @@ export function UploadPanel() {
             accept=".xlsx,.xls,.csv"
             disabled={busy}
             compact
+            progress={progress.benchmark}
             onFiles={handleBenchmarkUpload}
           />
         </Box>
@@ -359,6 +375,7 @@ export function UploadPanel() {
             browseLabel="browse"
             accept=".pdf,.docx,.txt"
             disabled={busy}
+            progress={progress.sow}
             onFiles={handleSowUpload}
           />
         </Box>
@@ -380,6 +397,7 @@ export function UploadPanel() {
           {error}
         </Typography>
       )}
+      <AzureFetchModal open={azureModalOpen} onClose={() => setAzureModalOpen(false)} onFetched={handleAzureFetched} />
     </Paper>
   );
 }

@@ -27,6 +27,7 @@ export function CustomerAuditBanner() {
   const { data } = useAppData();
   const customerName = data.customerName;
   const batch = data.batch as { window?: WindowRow[]; kpis?: Record<string, unknown>; filename?: string } | null;
+  const resource = data.resource as { servers?: { environment?: string }[] } | null;
 
   const pulse = useMemo(() => {
     const winRows = (batch?.window as WindowRow[]) || [];
@@ -63,7 +64,17 @@ export function CustomerAuditBanner() {
     return { rangeStr, spanStr, vals, max, breachCount, auditId, dotColor, hasWindow: winRows.length > 0 };
   }, [batch, customerName]);
 
-  if (!customerName && !batch) return null;
+  // Environment mix, so the persistent header carries "which environment" too,
+  // not just "which customer" — derived from whatever data is actually loaded
+  // (Azure-fetched or DOCX-parsed resource rows), not just the Ctrl-M batch file.
+  const envBadge = useMemo(() => {
+    const envs = (resource?.servers || []).map((s) => s.environment).filter(Boolean) as string[];
+    if (!envs.length) return null;
+    const unique = Array.from(new Set(envs));
+    return unique.length === 1 ? unique[0] : `Mixed (${unique.join(' + ')})`;
+  }, [resource]);
+
+  if (!customerName && !batch && !resource) return null;
 
   const sparkPoints = pulse.vals
     .map((v, i) => {
@@ -99,7 +110,12 @@ export function CustomerAuditBanner() {
           <Typography variant="h5" style={{ fontWeight: 900, color: '#f0f4ff', lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {customerName || '\u2014'}
           </Typography>
-          <Typography variant="caption" style={{ color: '#6b7db3', display: 'block', marginTop: 2 }}>Sourced from Ctrl-M filename</Typography>
+          <Box display="flex" alignItems="center" style={{ gap: 6, marginTop: 2 }}>
+            <Typography variant="caption" style={{ color: '#6b7db3' }}>
+              {customerName ? (batch ? 'Sourced from Ctrl-M filename' : 'Sourced from Azure tags') : 'No customer identified yet'}
+            </Typography>
+            {envBadge && <span className="metric-badge" style={{ fontSize: 8 }}>{envBadge}</span>}
+          </Box>
         </Box>
       </Box>
 

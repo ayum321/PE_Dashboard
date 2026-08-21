@@ -8,11 +8,13 @@ interface MiniGaugeProps {
   sub: string;
   threshold: number;
   size?: number;
+  tooltip?: string;
+  overrideColor?: string;
 }
 
 /** Small solid-gauge ring matching the original dashboard's Avg CPU/Mem/Disk rings. */
-export function MiniGauge({ label, value, sub, threshold, size = 90 }: MiniGaugeProps) {
-  const color = value >= threshold ? '#f43f5e' : value >= threshold * 0.8 ? '#f59e0b' : '#10d96e';
+export function MiniGauge({ label, value, sub, threshold, size = 90, tooltip, overrideColor }: MiniGaugeProps) {
+  const color = overrideColor || (value >= threshold ? '#f43f5e' : value >= threshold * 0.8 ? '#f59e0b' : '#10d96e');
 
   const options: Highcharts.Options = {
     chart: { type: 'solidgauge', height: size, width: size, backgroundColor: 'transparent' },
@@ -40,7 +42,8 @@ export function MiniGauge({ label, value, sub, threshold, size = 90 }: MiniGauge
   return (
     <div
       className="kpi-card"
-      style={{ borderRadius: 12, padding: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 120 }}
+      title={tooltip}
+      style={{ borderRadius: 12, padding: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 120, cursor: tooltip ? 'help' : 'default' }}
     >
       <div style={{ fontSize: '10.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.1em', color: '#6b7db3' }}>{label}</div>
       <HighchartsReact highcharts={Highcharts} options={options} />

@@ -854,6 +854,11 @@ class TimeseriesRequest(BaseModel):
     hours_back: int = Field(default=24, ge=1, le=720)
     start_utc: Optional[str] = None
     end_utc: Optional[str] = None
+    # Keyed by full ARM resource_id — the role (APP/DB/SRE) already correctly
+    # classified with real Azure tags during the resource fetch. Lets the spike
+    # detector judge DB servers against the DB memory band instead of a fresh
+    # name-only guess that misses names like "prbd..." (see fetch_vm_timeseries).
+    vm_types: Optional[Dict[str, str]] = None
 
 
 @router.post("/azure/timeseries")
@@ -888,6 +893,7 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
             body.hours_back,
             start_utc=start_dt,
             end_utc=end_dt,
+            vm_types=body.vm_types,
         )
     except AzureConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

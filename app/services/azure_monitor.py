@@ -1561,12 +1561,22 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
 def fetch_vm_timeseries(credential, resource_ids: List[str],
                         hours_back: int,
                         start_utc: Optional[datetime] = None,
-                        end_utc: Optional[datetime] = None) -> Dict[str, Any]:
+                        end_utc: Optional[datetime] = None,
+                        vm_types: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Fetch time-series data + spike detection for a list of VMs.
     
     When start_utc/end_utc are provided they override hours_back for the
     query window (used for custom time-range deep dives from the UI).
+
+    ``vm_types``, keyed by full ARM resource_id, carries the role
+    (APP/DB/SRE) already correctly classified during the resource fetch
+    (which has real Azure tags available). Without it this function falls
+    back to a name-only guess that misses any VM whose name doesn't contain
+    the literal substring "db" (e.g. "prbd..." has "bd", not "db") — which
+    silently strips DB servers of their more lenient memory band and makes
+    the spike detector flag their expected 80-92% SGA/PGA allocation as a
+    critical incident, contradicting the DB-expected badge shown elsewhere.
     
     Returns {
       vm_name: {
@@ -1635,7 +1645,9 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                         _rg = _parts[_parts.index("resourceGroups") + 1]
                 except Exception:
                     _rg = ""
-                _vm_role = _infer_server_type(vm_name, None, _rg)
+                # Prefer the caller-supplied role (tag-aware, computed during the
+                # resource fetch) over a fresh name-only guess — see docstring.
+                _vm_role = (vm_types or {}).get(rid) or _infer_server_type(vm_name, None, _rg)
                 _vm_is_db = (_vm_role == "DB")
 
                 # Compute stats and spikes per metric

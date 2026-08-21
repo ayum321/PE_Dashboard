@@ -46,7 +46,7 @@ export function ArchivePanel() {
 
   return (
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
-      <Typography variant="h6">Report Archive</Typography>
+      <Typography variant="h6">Review Registry</Typography>
       {busy && <CircularProgress size={22} aria-label="Loading archive" style={{ marginTop: 16 }} />}
       {error && <Typography variant="body2" color="error">{error}</Typography>}
       {!busy && reports.length === 0 && (
