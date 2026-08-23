@@ -11,6 +11,7 @@ baseline snapshot writer → cold-start gate. Single-worker uvicorn only.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,8 @@ from services.spike_schema import make_spike_record
 
 logger = logging.getLogger("pe_dashboard.baseline_store")
 
-_DB_PATH = Path(__file__).resolve().parent.parent / ".pe_baseline.db"
+_STATE_DIR = Path(os.environ.get("PE_STATE_DIR", Path(__file__).resolve().parent.parent))
+_DB_PATH = _STATE_DIR / ".pe_baseline.db"
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 
@@ -36,6 +38,7 @@ def _connect() -> sqlite3.Connection:
     global _conn
     if _conn is not None:
         return _conn
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
@@ -103,8 +106,15 @@ def baseline_confidence(customer_id: str, vm_id: str, metric: str) -> dict:
         tot = sum(r[2] for r in rows) or 1
         mean = round(sum(r[0] * r[2] for r in rows) / tot, 1)
         std = round(sum(r[1] * r[2] for r in rows) / tot, 1)
+    # A minimum baseline makes the immediate z-score calculation usable, but
+    # it is not enough history for a trustworthy prior-vs-current regime
+    # comparison.  Return that stricter threshold to the MFE so four pulls are
+    # described honestly as an initial baseline rather than "established".
+    mature_min_pulls = pe_config.MIN_BASELINE_PULLS + pe_config.MIN_PRIOR_PULLS
     return {"pulls": n, "retention_days": pe_config.BASELINE_RETENTION_DAYS,
-            "min_pulls": pe_config.MIN_BASELINE_PULLS, "degraded": n < pe_config.MIN_BASELINE_PULLS,
+            "min_pulls": pe_config.MIN_BASELINE_PULLS,
+            "mature_min_pulls": mature_min_pulls,
+            "degraded": n < pe_config.MIN_BASELINE_PULLS,
             "baseline_mean": mean, "baseline_std": std}
 
 

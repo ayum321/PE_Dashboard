@@ -76,6 +76,7 @@ interface ExecutiveSummary {
   verdict_detail: string;
   false_alarms: ExecutiveFalseAlarm[];
   bottlenecks: ExecutiveBottleneck[];
+  monitoring_notes?: ExecutiveBottleneck[];
   summary_line1: string;
   summary_line2: string;
 }
@@ -144,10 +145,14 @@ interface DeepDiveStat {
 
 interface DeepDiveVm {
   series?: Record<string, { t: string; v: number }[]>;
+  // FastAPI provides the timestamp-aligned Azure MAXIMUM aggregation separately
+  // from the AVERAGE series.  Keep it distinct: a whole-window maximum line is
+  // not a valid replacement for the peak within each aggregation bucket.
+  series_max?: Record<string, { t: string; v: number }[]>;
   spikes?: Record<string, DeepDiveSpike[]>;
   stats?: Record<string, DeepDiveStat>;
   waveforms?: Record<string, { shape?: string; label?: string; icon?: string; risk?: string; meaning?: string; action?: string; confidence?: number; confidence_label?: string }>;
-  baseline_confidence?: { pulls: number; min_pulls: number; degraded: boolean; retention_days?: number; baseline_mean?: number | null; baseline_std?: number | null };
+  baseline_confidence?: { pulls: number; min_pulls: number; mature_min_pulls?: number; degraded: boolean; retention_days?: number; baseline_mean?: number | null; baseline_std?: number | null };
   resource_id?: string;
 }
 
@@ -159,7 +164,9 @@ interface DeepDivePattern {
   vms?: string[];
   metrics?: string[];
   metric?: string;
-  time_utc?: number;
+  // FastAPI emits a human-readable UTC time-of-day (for example "01:30")
+  // for cross-server coincidence groups, not a numeric timestamp.
+  time_utc?: string | number;
   hour?: number;
   recurrence_days?: number;
   recurrence_ratio?: number;
@@ -168,6 +175,8 @@ interface DeepDivePattern {
   peak_mean?: number;
   total_duration_min?: number;
   count?: number;
+  worst_vm?: string;
+  worst_peak?: number;
   mean_prior?: number;
   mean_recent?: number;
   worsening?: boolean;
@@ -175,7 +184,7 @@ interface DeepDivePattern {
 
 interface DeepDiveHeatmapGrid {
   name: string;
-  values: (number | null)[];
+  values: (number | string | null)[];
 }
 
 interface DeepDiveResponse {
@@ -184,10 +193,10 @@ interface DeepDiveResponse {
   patterns?: DeepDivePattern[];
   baseline?: { days_observed?: number };
   spike_attribution?: {
-    rows: { vm: string; metric: string; peak?: number; severity?: string; concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number }[];
+    rows: { vm: string; metric: string; peak?: number; severity?: string; concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }[];
     summary: { spikes_total: number; spikes_attributed: number; attribution_rate: number; runs_loaded: number; caveat: string };
   };
-  window?: { timezone?: string };
+  window?: { timezone?: string; start_utc?: string; end_utc?: string; grain?: string; data_points?: number; is_custom?: boolean };
   summary?: { vm_count: number; hours_back: number; total_critical: number; total_warning: number; affected_vms: number };
 }
 
@@ -283,6 +292,152 @@ function humanizeDurationMin(min: number): string {
   return `${Math.round(min)}m`;
 }
 
+type HeatmapMetric = 'cpu' | 'memory' | 'disk';
+
+interface FleetHeatmapView {
+  columns: { label: string; title: string }[];
+  rows: { name: string; values: (number | null)[] }[];
+  bucketSize: number;
+}
+
+const FLEET_HEATMAP_MAX_COLUMNS = 48;
+
+function finiteMetricValue(value: number | string | null | undefined): number | null {
+  if (value == null || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatHeatmapTimestamp(timestamp: string): string {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
+}
+
+/**
+ * Turns the dense Azure Monitor matrix into a display-safe grid.  CPU/Disk
+ * retain the highest observed value in a bucket; available-memory retains the
+ * lowest value because that is the operationally worst reading.  This avoids
+ * losing a short pressure event while keeping 15-day heatmaps legible.
+ */
+export function buildFleetHeatmapView(
+  heatmap: DeepDiveResponse['heatmap'] | undefined,
+  metric: HeatmapMetric,
+  maxColumns = FLEET_HEATMAP_MAX_COLUMNS,
+): FleetHeatmapView | null {
+  const timestamps = heatmap?.timestamps || [];
+  const sourceRows = heatmap?.grids?.[metric] || [];
+  if (!timestamps.length || !sourceRows.length) return null;
+
+  const bucketSize = Math.max(1, Math.ceil(timestamps.length / maxColumns));
+  const columns: FleetHeatmapView['columns'] = [];
+  for (let start = 0; start < timestamps.length; start += bucketSize) {
+    const end = Math.min(timestamps.length, start + bucketSize);
+    const first = formatHeatmapTimestamp(timestamps[start]);
+    const last = formatHeatmapTimestamp(timestamps[end - 1]);
+    columns.push({ label: bucketSize === 1 ? first : `${first}–${last}`, title: bucketSize === 1 ? first : `${first} to ${last}` });
+  }
+
+  let numericCells = 0;
+  const rows = sourceRows.map((row) => {
+    const values: (number | null)[] = [];
+    for (let start = 0; start < timestamps.length; start += bucketSize) {
+      const bucket = row.values.slice(start, start + bucketSize)
+        .map(finiteMetricValue)
+        .filter((value): value is number => value != null);
+      if (!bucket.length) {
+        values.push(null);
+        continue;
+      }
+      const value = metric === 'memory' ? Math.min(...bucket) : Math.max(...bucket);
+      values.push(value);
+      numericCells++;
+    }
+    return { name: row.name, values };
+  });
+
+  return numericCells ? { columns, rows, bucketSize } : null;
+}
+
+function fleetHeatmapCellColor(value: number | null, metric: HeatmapMetric): string {
+  // Missing telemetry is deliberately patterned and bordered.  It must never
+  // disappear into the panel background or be mistaken for a healthy period.
+  if (value == null) return 'repeating-linear-gradient(135deg, rgba(100,116,139,.28) 0, rgba(100,116,139,.28) 2px, rgba(15,23,42,.92) 2px, rgba(15,23,42,.92) 5px)';
+  // Memory is an *available* percentage, so low values are the risk state.
+  if (metric === 'memory') return value <= 15 ? '#f43f5e' : value <= 40 ? '#f59e0b' : '#10b981';
+  return value >= 85 ? '#f43f5e' : value >= 65 ? '#f59e0b' : '#10b981';
+}
+
+export interface CrossServerCorrelationGroup {
+  timeUtc: string;
+  metrics: string[];
+  vms: string[];
+  eventCount: number;
+  severity: string;
+}
+
+function normalizedVmIdentity(vm: string): string {
+  return String(vm || '').trim().toLowerCase().replace(/\.$/, '');
+}
+
+function appendUniqueVm(target: string[], candidate: string): void {
+  const identity = normalizedVmIdentity(candidate);
+  if (identity && !target.some((existing) => normalizedVmIdentity(existing) === identity)) target.push(candidate);
+}
+
+/** Group the API's raw coincidence patterns into an operational review unit. */
+export function groupCrossServerCorrelations(patterns: DeepDivePattern[]): CrossServerCorrelationGroup[] {
+  const groups = new Map<string, CrossServerCorrelationGroup>();
+  for (const pattern of patterns) {
+    if (pattern.type !== 'cross_vm_correlation' || !pattern.vms?.length) continue;
+    const timeUtc = pattern.time_utc == null ? 'time unavailable' : String(pattern.time_utc);
+    const metrics = (pattern.metrics || (pattern.metric ? [pattern.metric] : [])).slice().sort();
+    const key = `${timeUtc}|${metrics.join('|')}`;
+    const existing = groups.get(key);
+    if (existing) {
+      pattern.vms.forEach((vm) => appendUniqueVm(existing.vms, vm));
+      existing.eventCount += pattern.count || pattern.vms.length;
+      if (pattern.severity === 'critical') existing.severity = 'critical';
+      continue;
+    }
+    const vms: string[] = [];
+    pattern.vms.forEach((vm) => appendUniqueVm(vms, vm));
+    groups.set(key, {
+      timeUtc,
+      metrics,
+      vms,
+      eventCount: pattern.count || pattern.vms.length,
+      severity: pattern.severity || 'warning',
+    });
+  }
+  return Array.from(groups.values()).sort((a, b) => b.vms.length - a.vms.length || b.eventCount - a.eventCount);
+}
+
+/** Select the metric with the most material evidence for a freshly loaded
+ * fleet. This prevents an all-clear CPU heatmap being the default while the
+ * selected window actually contains memory warnings or breaches. */
+export function preferredFleetHeatmapMetric(response: Pick<DeepDiveResponse, 'vms'>): HeatmapMetric {
+  const score: Record<HeatmapMetric, number> = { cpu: 0, memory: 0, disk: 0 };
+  for (const vmData of Object.values(response.vms || {})) {
+    for (const [metric, spikes] of Object.entries(vmData.spikes || {})) {
+      const target: HeatmapMetric | null = /memory/i.test(metric)
+        ? 'memory'
+        : /disk/i.test(metric)
+          ? 'disk'
+          : /cpu/i.test(metric)
+            ? 'cpu'
+            : null;
+      if (!target) continue;
+      for (const spike of spikes) {
+        score[target] += spike.severity === 'critical_sustained' ? 3 : spike.severity === 'critical' ? 2 : 1;
+      }
+    }
+  }
+  return (['memory', 'cpu', 'disk'] as HeatmapMetric[]).reduce(
+    (best, metric) => score[metric] > score[best] ? metric : best,
+    'cpu',
+  );
+}
+
 const SEVERITY_COLOR: Record<string, string> = {
   'CRITICAL SUSTAINED': '#a855f7', CRITICAL: '#f43f5e', WARNING: '#f59e0b', NOTABLE: '#6b7db3', ELEVATED: '#f59e0b',
 };
@@ -363,6 +518,7 @@ export function ResourcePanel() {
   const [ddTypeFilter, setDdTypeFilter] = useState<Set<string>>(new Set());
   const [ddShowMaxOverlay, setDdShowMaxOverlay] = useState(true);
   const [ddShowMinOverlay, setDdShowMinOverlay] = useState(false);
+  const [correlatedVms, setCorrelatedVms] = useState<Set<string>>(new Set());
   // ── Custom absolute time range, ported from toggleDeepDiveCustomPicker()/
   // setDeepDiveCustomRange() (app.js) — scope the deep dive to one batch
   // night or one incident instead of a rolling preset window. ──
@@ -521,6 +677,7 @@ export function ResourcePanel() {
       const result = await fetchAzureTimeseries(payload);
       const dd = result as unknown as DeepDiveResponse;
       setDeepDive(dd);
+      setHeatmapMetric(preferredFleetHeatmapMetric(dd));
       // Prefer auto-opening a VM with detected spikes (matches vanilla's
       // "auto-open one card so the highest-priority evidence is visible").
       const vmEntries = Object.entries(dd.vms || {});
@@ -536,43 +693,30 @@ export function ResourcePanel() {
 
   const handleApplyCustomRange = () => {
     if (!ddCustomStart || !ddCustomEnd) return;
+    if (new Date(ddCustomStart).getTime() >= new Date(ddCustomEnd).getTime()) {
+      setDeepDiveError('The end of a custom time range must be later than its start.');
+      return;
+    }
     setDdCustomActive(true);
+    setDeepDiveError(null);
+    setDeepDive(null);
     setDdCustomPickerOpen(false);
   };
   const handleClearCustomRange = () => {
     setDdCustomActive(false);
     setDdCustomStart('');
     setDdCustomEnd('');
+    setDeepDive(null);
   };
 
   // ── Deep Dive derived views ──
-  const heatmapOptions: Highcharts.Options | null = useMemo(() => {
-    const grid = deepDive?.heatmap?.grids?.[heatmapMetric];
-    const timestamps = deepDive?.heatmap?.timestamps || [];
-    if (!grid || !grid.length || !timestamps.length) return null;
-    return {
-      chart: { type: 'heatmap', height: Math.max(220, grid.length * 24) },
-      title: { text: undefined },
-      xAxis: { categories: timestamps.map((t) => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' })), labels: { rotation: -45, style: { fontSize: '8px' } } },
-      yAxis: { categories: grid.map((g) => g.name), title: { text: undefined }, reversed: true },
-      colorAxis: { min: 0, max: 100, stops: [[0, '#10d96e'], [0.7, '#f59e0b'], [1, '#f43f5e']] },
-      legend: { enabled: true },
-      tooltip: {
-        formatter(this: Highcharts.TooltipFormatterContextObject) {
-          const rowIdx = Math.floor(this.point.index / timestamps.length);
-          const colIdx = this.point.index % timestamps.length;
-          const row = grid[rowIdx];
-          if (!row) return '';
-          const val = row.values[colIdx];
-          return `<b>${row.name}</b><br/>${timestamps[colIdx]}<br/>${val != null ? val.toFixed(1) + '%' : 'no data'}`;
-        },
-      },
-      series: [{
-        type: 'heatmap',
-        data: grid.flatMap((row, y) => row.values.map((v, x) => ({ x, y, value: v }))),
-      }],
-    };
-  }, [deepDive, heatmapMetric]);
+  // Plain grid rather than a Highcharts heatmap: the previous dense series
+  // could leave only the colour legend visible when Monitor returned a long
+  // window or sparse values.  This renders every available sample explicitly.
+  const fleetHeatmapView = useMemo(
+    () => buildFleetHeatmapView(deepDive?.heatmap, heatmapMetric),
+    [deepDive, heatmapMetric],
+  );
 
   const deepDiveVmChart: Highcharts.Options | null = useMemo(() => {
     const vmData = deepDive?.vms?.[deepDiveVm];
@@ -593,46 +737,68 @@ export function ResourcePanel() {
       type: 'line',
       name: shortMetric(metric),
       color: colors[metric] || undefined,
+      lineWidth: 2,
+      marker: { enabled: false },
       data: points.map((p) => [new Date(p.t).getTime(), p.v]),
     }));
-    // "Show Max"/"Show Min" overlays — matches the Azure portal's own Avg+Max
-    // panel: an average alone hides a short saturation spike (or dip) inside
-    // one bucket.
-    const cpuPoints = vmData.series['Percentage CPU'];
-    if (ddShowMaxOverlay && cpuPoints?.length) {
-      const cpuMax = vmData.stats?.['Percentage CPU']?.max;
-      if (cpuMax != null) {
+    // True per-bucket MAXIMUM series from FastAPI.  This is deliberately
+    // timestamp-aligned rather than a horizontal whole-window max: the latter
+    // falsely implies every average bucket peaked at the same value.
+    if (ddShowMaxOverlay) {
+      for (const [metric, points] of seriesEntries) {
+        const maxima = vmData.series_max?.[metric] || [];
+        if (!maxima.length) continue;
+        const averageByTime = new Map(points.map((p) => [p.t, p.v]));
+        const aligned = maxima.filter((p) => averageByTime.has(p.t));
+        const hasMeaningfulGap = aligned.some((p) => p.v - (averageByTime.get(p.t) || 0) >= 2);
+        if (!hasMeaningfulGap) continue;
         series.push({
           type: 'line',
-          name: 'CPU % (max)',
-          color: '#3b82f6',
+          name: `${shortMetric(metric)} peak`,
+          color: colors[metric] || '#94a3b8',
           dashStyle: 'ShortDot',
-          opacity: 0.5,
+          lineWidth: 1,
+          opacity: 0.58,
           marker: { enabled: false },
-          data: [[new Date(cpuPoints[0].t).getTime(), cpuMax], [new Date(cpuPoints[cpuPoints.length - 1].t).getTime(), cpuMax]],
+          data: aligned.map((p) => [new Date(p.t).getTime(), p.v]),
         });
       }
     }
-    if (ddShowMinOverlay && cpuPoints?.length) {
-      const cpuMin = vmData.stats?.['Percentage CPU']?.min;
-      if (cpuMin != null) {
+    // The API currently returns per-bucket averages and maxima, not minima.
+    // Keep an explicitly labelled low-water mark available, without pretending
+    // it is an Azure per-bucket MINIMUM aggregation.
+    if (ddShowMinOverlay) {
+      for (const [metric, points] of seriesEntries) {
+        const observedFloor = vmData.stats?.[metric]?.min;
+        if (observedFloor == null || !points.length) continue;
         series.push({
           type: 'line',
-          name: 'CPU % (min)',
-          color: '#3b82f6',
+          name: `${shortMetric(metric)} observed floor`,
+          color: colors[metric] || '#94a3b8',
           dashStyle: 'Dash',
-          opacity: 0.4,
+          lineWidth: 1,
+          opacity: 0.34,
           marker: { enabled: false },
-          data: [[new Date(cpuPoints[0].t).getTime(), cpuMin], [new Date(cpuPoints[cpuPoints.length - 1].t).getTime(), cpuMin]],
+          data: [[new Date(points[0].t).getTime(), observedFloor], [new Date(points[points.length - 1].t).getTime(), observedFloor]],
         });
       }
     }
+    const spikeBands = Object.entries(vmData.spikes || {}).flatMap(([metric, spikes]) => spikes
+      .filter((spike) => spike.start && spike.end)
+      .map((spike) => ({
+        from: new Date(spike.start as string).getTime(),
+        to: new Date(spike.end as string).getTime(),
+        color: `${SEVERITY_COLOR[(spike.severity || 'CRITICAL').toUpperCase().replace('_', ' ')] || '#f43f5e'}18`,
+        borderColor: `${SEVERITY_COLOR[(spike.severity || 'CRITICAL').toUpperCase().replace('_', ' ')] || '#f43f5e'}66`,
+        borderWidth: 1,
+      })));
     return {
-      chart: { type: 'line', height: 300, zooming: { type: 'x' } },
+      chart: { type: 'line', height: 320, zooming: { type: 'x' }, backgroundColor: 'transparent' },
       title: { text: undefined },
-      xAxis: { type: 'datetime' },
-      yAxis: { title: { text: '%' }, min: 0, max: 100 },
-      tooltip: { shared: true, valueDecimals: 1 },
+      xAxis: { type: 'datetime', plotBands: spikeBands, labels: { style: { color: '#94a3b8', fontSize: '10px' } } },
+      yAxis: { title: { text: 'Utilization (%)', style: { color: '#94a3b8', fontSize: '10px' } }, min: 0, max: 100, gridLineColor: 'rgba(71,85,105,.34)', gridLineDashStyle: 'Dash' },
+      legend: { itemStyle: { color: '#cbd5e1', fontSize: '10px', fontWeight: '500' } },
+      tooltip: { shared: true, valueDecimals: 1, backgroundColor: 'rgba(9,14,31,.98)', borderColor: 'rgba(96,165,250,.42)', style: { color: '#e2e8f0' } },
       series,
     };
   }, [deepDive, deepDiveVm, ddShowMaxOverlay, ddShowMinOverlay]);
@@ -655,6 +821,25 @@ export function ResourcePanel() {
       if (p.severity === 'critical') critical++;
     }
     return { total: patterns.length, critical, byType };
+  }, [deepDive]);
+
+  const correlationGroups = useMemo(
+    () => groupCrossServerCorrelations(deepDive?.patterns || []),
+    [deepDive],
+  );
+
+  // Surface the detector's own baseline quality at fleet level.  A few low-pull
+  // VMs can otherwise look equally trustworthy beside well-observed ones.
+  const baselineQuality = useMemo(() => {
+    const entries = Object.entries(deepDive?.vms || {})
+      .map(([vm, data]) => ({ vm, confidence: data.baseline_confidence }))
+      .filter((entry): entry is { vm: string; confidence: NonNullable<DeepDiveVm['baseline_confidence']> } => Boolean(entry.confidence));
+    if (!entries.length) return null;
+    const degraded = entries.filter((entry) => entry.confidence.degraded);
+    const minPulls = Math.min(...entries.map((entry) => entry.confidence.pulls));
+    const matureMinPulls = Math.max(...entries.map((entry) => entry.confidence.mature_min_pulls ?? entry.confidence.min_pulls));
+    const initial = entries.filter((entry) => entry.confidence.pulls < (entry.confidence.mature_min_pulls ?? entry.confidence.min_pulls));
+    return { observed: entries.length, degraded, initial, minPulls, matureMinPulls };
   }, [deepDive]);
 
   const ddCards = useMemo(() => {
@@ -810,10 +995,10 @@ export function ResourcePanel() {
     const attributionRows = deepDive?.spike_attribution?.rows || [];
     const findCtrlM = (row: { metric: string } & DeepDiveSpike) =>
       attributionRows.find((a) => a.vm === deepDiveVm && a.metric === row.metric && a.peak === row.peak) as
-        | { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number }
+        | { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }
         | undefined;
 
-    const groupedRows: Array<{ row: typeof rows[number]; recurring: boolean; count: number; days: number; avgDuration: number; maxPeak: number; ctrlM?: { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number } }> = [];
+    const groupedRows: Array<{ row: typeof rows[number]; recurring: boolean; count: number; days: number; avgDuration: number; maxPeak: number; ctrlM?: { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] } }> = [];
     const used = new Set<number>();
     rows.forEach((row, index) => {
       if (used.has(index)) return;
@@ -884,7 +1069,7 @@ export function ResourcePanel() {
           Upload a resource report in Upload &amp; Intake, or fetch live Azure metrics below, to populate this view.
         </Typography>
         <AzureConnectionCard authInfo={azureAuth} onOpen={() => setAzureModalOpen(true)} />
-        <AzureFetchModal open={azureModalOpen} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} />
+        <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} />
       </Paper>
     );
   }
@@ -894,7 +1079,7 @@ export function ResourcePanel() {
       <Typography variant="h6">Resource Review</Typography>
 
       <AzureConnectionCard authInfo={azureAuth} onOpen={() => setAzureModalOpen(true)} />
-      <AzureFetchModal open={azureModalOpen} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} />
+      <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} />
 
       <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16, marginBottom: 16 }}>
         <KpiStatCard label="Servers" value={servers.length} sub={`${servers.filter((s) => (s.type || 'APP') === 'APP').length} APP \u00b7 ${servers.filter((s) => s.type === 'DB').length} DB`} accent="#3b82f6" />
@@ -962,7 +1147,13 @@ export function ResourcePanel() {
           memory allocation) and a 2-line executive summary. \u2500\u2500 */}
       {execSummary && (() => {
         const vc = VERDICT_COLOR[execSummary.verdict] || '#6b7db3';
-        const allExpected = execSummary.bottlenecks.length > 0 && execSummary.bottlenecks.every((b) => b.issues.join(' ').includes('expected range for DB'));
+        // New API contract keeps expected DB allocation separate from actual
+        // bottlenecks.  The fallback supports a cached response from an older
+        // API while the backend is being restarted locally.
+        const monitoringNotes = execSummary.monitoring_notes || execSummary.bottlenecks.filter((b) => b.issues.join(' ').includes('expected range for DB'));
+        const actualBottlenecks = execSummary.bottlenecks.filter((b) => !b.issues.join(' ').includes('expected range for DB'));
+        const allExpected = monitoringNotes.length > 0 && actualBottlenecks.length === 0;
+        const diagnosisItems = allExpected ? monitoringNotes : actualBottlenecks;
         const verdictDisplay = execSummary.verdict === 'HEALTHY' && allExpected ? 'HEALTHY \u2014 EXPECTED ALLOCATION' : execSummary.verdict;
         return (
           <Box className={classes.section} style={{ borderRadius: 12, border: `1px solid ${vc}66`, background: `${vc}0d`, padding: 16 }}>
@@ -983,13 +1174,13 @@ export function ResourcePanel() {
               </Box>
             )}
 
-            {execSummary.bottlenecks.length > 0 && (
+            {diagnosisItems.length > 0 && (
               <Box style={{ marginTop: 10 }}>
                 <Typography variant="caption" style={{ fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.1em', fontSize: 9, color: allExpected ? '#6b7db3' : '#f43f5e' }}>
-                  {allExpected ? '\ud83d\udccb Monitoring Notes' : '\ud83d\udd25 Root Cause Candidates'} ({execSummary.bottlenecks.length})
+                  {allExpected ? '\ud83d\udccb Monitoring Notes' : '\ud83d\udd25 Root Cause Candidates'} ({diagnosisItems.length})
                 </Typography>
                 <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 8, marginTop: 6 }}>
-                  {execSummary.bottlenecks.map((bn, i) => {
+                  {diagnosisItems.map((bn, i) => {
                     const isExpected = bn.issues.join(' ').includes('expected range for DB');
                     const cardColor = isExpected ? '#6b7db3' : '#f43f5e';
                     const statusLabel = isExpected ? 'EXPECTED DB LOAD' : bn.status;
@@ -1092,9 +1283,9 @@ export function ResourcePanel() {
               };
               const cpuNote = aggNote(cpuVal, s.cpu_avg_pct ?? s.cpu_used);
               const bars = [
-                { label: 'CPU', val: cpuVal, color: cpuColor, note: cpuNote, title: cpuVal != null ? `${cpuVal.toFixed(1)}% (threshold 80%)` : 'No data' },
-                { label: 'Mem avail', val: memAvailVal, color: memColor, note: null, title: dbExpected ? `${(memAvailVal ?? 0).toFixed(1)}% available \u2014 DB expected SGA/PGA band (\u224838\u201320% available is normal for DB)` : memAvailVal != null ? `${memAvailVal.toFixed(1)}% available (threshold 20%)` : 'No data' },
-                { label: 'Disk I/O', val: diskVal, color: diskColor, note: null, title: diskVal != null ? `${diskVal.toFixed(1)}% (threshold 80%)` : 'Disk I/O metric not emitted by this VM SKU/agent.' },
+                { label: 'CPU', val: cpuVal, color: cpuColor, note: cpuNote, title: cpuVal != null ? `${cpuVal.toFixed(1)}% (${utilAggMode}; threshold 80%)` : 'No data' },
+                { label: 'Mem avail', val: memAvailVal, color: memColor, note: null, title: dbExpected ? `${(memAvailVal ?? 0).toFixed(1)}% available (${utilAggMode}) \u2014 DB expected SGA/PGA band (\u224838\u201320% available is normal for DB)` : memAvailVal != null ? `${memAvailVal.toFixed(1)}% available (${utilAggMode}; threshold 20%)` : 'No data' },
+                { label: 'Disk I/O', val: diskVal, color: diskColor, note: null, title: diskVal != null ? `${diskVal.toFixed(1)}% (${utilAggMode}; threshold 80%)` : 'Disk I/O metric not emitted by this VM SKU/agent.' },
               ];
               return (
                 <Box key={s.host} display="flex" alignItems="center" style={{ gap: 12, padding: '4px 0', borderBottom: '1px solid rgba(33,48,96,.2)' }}>
@@ -1107,7 +1298,7 @@ export function ResourcePanel() {
                       <Box title={m.title} style={{ height: 8, borderRadius: 4, background: 'rgba(255,255,255,.06)', overflow: 'hidden', cursor: 'help' }}>
                         {m.val != null && <Box style={{ width: `${Math.min(100, Math.max(0, m.val))}%`, height: '100%', background: m.color }} />}
                       </Box>
-                      <Typography variant="caption" style={{ color: m.color, fontSize: 9 }}>{m.label} {m.val != null ? `${m.val.toFixed(0)}%` : 'N/A'}</Typography>
+                      <Typography variant="caption" style={{ color: m.color, fontSize: 9 }}>{m.label} ({utilAggMode}) {m.val != null ? `${m.val.toFixed(0)}%` : 'N/A'}</Typography>
                       {m.note && <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 7 }}>{m.note}</Typography>}
                     </Box>
                   ))}
@@ -1258,7 +1449,7 @@ export function ResourcePanel() {
             <Box>
               <Typography variant="subtitle2">Metrics Deep Dive {'\u2014'} Time-Series &amp; Anomaly Detection</Typography>
               <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>Critical anomalies only {'\u2014'} normal &amp; moderate filtered out. Pattern detection across fleet (z-score {'\u2265'} 3{'\u03c3'})</Typography>
-              <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, opacity: 0.8 }}>Metric source: Azure Monitor (Average aggregation, auto grain by selected time range)</Typography>
+              <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, opacity: 0.8 }}>Metric source: Azure Monitor Average + timestamp-aligned Maximum aggregation, with automatic grain by selected time range.</Typography>
             </Box>
             <Button size="small" variant="contained" color="primary" onClick={handleLoadDeepDive} disabled={deepDiveBusy}>
               {deepDiveBusy ? <CircularProgress size={16} color="inherit" /> : 'Load Time-Series'}
@@ -1269,7 +1460,7 @@ export function ResourcePanel() {
           <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
             <Typography component="span" variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#6b7db3', marginRight: 4 }}>Time Range</Typography>
             {[{ h: 1, l: '1h' }, { h: 6, l: '6h' }, { h: 12, l: '12h' }, { h: 24, l: '24h' }, { h: 48, l: '48h' }, { h: 72, l: '3d' }, { h: 168, l: '7d' }, { h: 360, l: '15d' }, { h: 720, l: '30d' }].map((p) => (
-              <button key={p.h} onClick={() => { setHoursBack(p.h); setDdCustomActive(false); }} style={ddPillStyle(!ddCustomActive && hoursBack === p.h)}>{p.l}</button>
+              <button key={p.h} onClick={() => { setHoursBack(p.h); setDdCustomActive(false); setDeepDive(null); }} style={ddPillStyle(!ddCustomActive && hoursBack === p.h)}>{p.l}</button>
             ))}
             <button onClick={() => setDdCustomPickerOpen((v) => !v)} style={ddPillStyle(ddCustomActive)} title={'Pick an exact start and end instead of a rolling window \u2014 for scoping the deep dive to one batch night or one incident.'}>{'\ud83d\udcc5'} Custom{'\u2026'}</button>
           </Box>
@@ -1321,6 +1512,25 @@ export function ResourcePanel() {
               {/* Three-way pattern taxonomy \u2014 a DIFFERENT measure from the banner
                   above: the banner counts raw critical SPIKE EVENTS, this counts
                   detected PATTERNS (one pattern groups multiple events) (ADD + IMPROVE). */}
+              {baselineQuality && (
+                <Box style={{ marginTop: 8, borderRadius: 8, border: `1px solid ${baselineQuality.degraded.length || baselineQuality.initial.length ? 'rgba(245,158,11,.40)' : 'rgba(16,217,110,.30)'}`, background: baselineQuality.degraded.length || baselineQuality.initial.length ? 'rgba(245,158,11,.07)' : 'rgba(16,217,110,.05)', padding: '7px 10px' }}>
+                  <Typography variant="caption" style={{ display: 'block', fontWeight: 700, color: baselineQuality.degraded.length || baselineQuality.initial.length ? '#f59e0b' : '#10d96e' }}>
+                    {baselineQuality.degraded.length
+                      ? `Baseline confidence reduced on ${baselineQuality.degraded.length}/${baselineQuality.observed} VM(s)`
+                      : baselineQuality.initial.length
+                        ? `Initial baseline only on ${baselineQuality.initial.length}/${baselineQuality.observed} VM(s)`
+                        : `Longitudinal baseline established across ${baselineQuality.observed} VM(s)`}
+                  </Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 2, fontSize: 9 }}>
+                    {baselineQuality.degraded.length
+                      ? `${baselineQuality.degraded.slice(0, 3).map((entry) => entry.vm).join(', ')}${baselineQuality.degraded.length > 3 ? ` +${baselineQuality.degraded.length - 3} more` : ''} have fewer than the minimum stored pulls; anomaly results may miss events or overstate them.`
+                      : baselineQuality.initial.length
+                        ? `Lowest observed history: ${baselineQuality.minPulls} pull${baselineQuality.minPulls === 1 ? '' : 's'}. Basic calibration is available, but ${baselineQuality.matureMinPulls} pulls are required before longitudinal regime comparison is considered mature.`
+                        : `Lowest observed history: ${baselineQuality.minPulls} pulls. Per-VM baseline details remain visible in the investigation cards.`}
+                  </Typography>
+                </Box>
+              )}
+
               {patternTaxonomy && (
                 <Box style={{ marginTop: 10, borderRadius: 10, border: '1px solid #213060', background: 'rgba(17,29,54,.5)', padding: 10 }}>
                   <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -1330,8 +1540,40 @@ export function ResourcePanel() {
                     <span className="metric-badge" style={{ fontSize: 8, color: '#f43f5e' }}>{patternTaxonomy.byType.sustained_pressure} Sustained Pressure</span>
                   </Box>
                   <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, fontSize: 8 }}>
-                    {patternTaxonomy.total} pattern{patternTaxonomy.total !== 1 ? 's' : ''} detected ({patternTaxonomy.critical} critical-severity){' \u2014 a different measure from the banner above, which counts individual critical spike EVENTS. One pattern here can bundle several of those events into a single recurring/correlated finding.'}
+                    {patternTaxonomy.total} grouped pattern{patternTaxonomy.total !== 1 ? 's' : ''}; the critical-event count above remains the raw event total.
                   </Typography>
+                </Box>
+              )}
+
+              {correlationGroups.length > 0 && (
+                <Box style={{ marginTop: 10, borderRadius: 10, border: '1px solid rgba(34,211,238,.35)', background: 'rgba(34,211,238,.05)', padding: 10 }}>
+                  <Box display="flex" alignItems="center" justifyContent="space-between" style={{ gap: 8, flexWrap: 'wrap' }}>
+                    <Box>
+                      <Typography variant="subtitle2" style={{ color: '#22d3ee' }}>Cross-Server Correlation</Typography>
+                      <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Coincident spikes are evidence for a shared workload or dependency; they are not root-cause proof.</Typography>
+                    </Box>
+                    {correlatedVms.size > 0 && <Button size="small" variant="outlined" onClick={() => setCorrelatedVms(new Set())}>Clear highlight</Button>}
+                  </Box>
+                  <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 8, marginTop: 8 }}>
+                    {correlationGroups.map((group, index) => {
+                      const active = group.vms.some((vm) => correlatedVms.has(vm));
+                      return (
+                        <Box
+                          key={`${group.timeUtc}-${group.metrics.join('-')}-${index}`}
+                          onClick={() => {
+                            setCorrelatedVms(new Set(group.vms));
+                            if (group.vms[0]) setDeepDiveVm(group.vms[0]);
+                          }}
+                          style={{ borderRadius: 8, border: `1px solid ${active ? '#22d3ee' : 'rgba(34,211,238,.25)'}`, background: active ? 'rgba(34,211,238,.11)' : 'rgba(17,29,54,.45)', padding: 9, cursor: 'pointer' }}
+                          title="Highlight related investigation cards and open the first server's evidence."
+                        >
+                          <Typography variant="caption" style={{ color: '#22d3ee', fontWeight: 800 }}>{group.timeUtc === 'time unavailable' ? 'Selected window' : `Around ${group.timeUtc} UTC`}</Typography>
+                          <Typography variant="body2" style={{ marginTop: 3, fontWeight: 700 }}>{group.vms.join(' + ')}</Typography>
+                          <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 3 }}>{group.metrics.map(shortMetric).join(' · ') || 'Metric unavailable'} · {group.eventCount} correlated event{group.eventCount === 1 ? '' : 's'}</Typography>
+                        </Box>
+                      );
+                    })}
+                  </Box>
                 </Box>
               )}
 
@@ -1341,15 +1583,60 @@ export function ResourcePanel() {
                   <Box display="flex" alignItems="center" justifyContent="space-between">
                     <Typography variant="subtitle2">Fleet Heatmap</Typography>
                     <Box display="flex" style={{ gap: 4 }}>
-                      {(['cpu', 'memory', 'disk'] as const).map((m) => (
+                      {(['cpu', 'memory', 'disk'] as HeatmapMetric[]).map((m) => (
                         <Button key={m} size="small" variant={heatmapMetric === m ? 'contained' : 'outlined'} onClick={() => setHeatmapMetric(m)}>{m.toUpperCase()}</Button>
                       ))}
                     </Box>
                   </Box>
-                  {heatmapOptions ? (
-                    <HighchartsReact highcharts={Highcharts} options={heatmapOptions} />
+                  {fleetHeatmapView ? (
+                    <>
+                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, fontSize: 9 }}>
+                        {heatmapMetric === 'memory'
+                          ? 'Each cell shows the lowest available-memory value in its time bucket; lower availability is higher risk.'
+                          : 'Each cell shows the highest observed value in its time bucket; higher utilization is higher risk.'}
+                        {' Outlined hatched cells mean this metric was not emitted by Azure Monitor; they are not healthy samples.'}
+                        {fleetHeatmapView.bucketSize > 1 ? ` ${fleetHeatmapView.bucketSize} Monitor samples are combined per visible cell for readability.` : ''}
+                      </Typography>
+                      <Box className="pe-table-shell pe-heatmap-shell" style={{ marginTop: 8, maxHeight: 360, overflow: 'auto' }}>
+                        <table className="pe-heatmap-table" aria-label={`Fleet ${heatmapMetric} heatmap`} style={{ borderCollapse: 'separate', borderSpacing: 2, minWidth: Math.max(680, 170 + fleetHeatmapView.columns.length * 18) }}>
+                          <thead>
+                            <tr>
+                              <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#111d36', minWidth: 150, textAlign: 'left' }}>Server</th>
+                              {fleetHeatmapView.columns.map((column, index) => (
+                                <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: 16, maxWidth: 28, padding: '4px 1px', fontSize: 7, whiteSpace: 'nowrap', writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>{column.label}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {fleetHeatmapView.rows.map((row) => (
+                              <tr key={row.name}>
+                                <td style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', padding: '3px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{row.name}</td>
+                                {row.values.map((value, index) => {
+                                  const state = value == null ? 'not emitted' : `${value.toFixed(1)}%`;
+                                  return (
+                                    <td
+                                      key={index}
+                                      aria-label={`${row.name}, ${fleetHeatmapView.columns[index].title}: ${state}`}
+                                      title={`${row.name}\n${fleetHeatmapView.columns[index].title}\n${state}`}
+                                      style={{ width: 16, minWidth: 16, height: 20, padding: 0, background: fleetHeatmapCellColor(value, heatmapMetric), border: value == null ? '1px solid rgba(148,163,184,.72)' : '1px solid rgba(255,255,255,.16)' }}
+                                    />
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </Box>
+                      <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
+                        <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Legend:</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#10d96e' }}>■ healthy</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#f59e0b' }}>■ watch</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#f43f5e' }}>■ pressure</Typography>
+                        <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}><span style={{ display: 'inline-block', width: 10, height: 10, marginRight: 3, verticalAlign: '-1px', border: '1px solid rgba(148,163,184,.9)', background: 'repeating-linear-gradient(135deg, rgba(100,116,139,.45) 0, rgba(100,116,139,.45) 2px, rgba(15,23,42,.92) 2px, rgba(15,23,42,.92) 5px)' }} />metric not emitted</Typography>
+                      </Box>
+                    </>
                   ) : (
-                    <Typography variant="caption" color="textSecondary">No {heatmapMetric} heatmap data in this window.</Typography>
+                    <Typography variant="caption" color="textSecondary">No {heatmapMetric} metric was emitted by the selected VMs in this window.</Typography>
                   )}
                 </Box>
               )}
@@ -1391,13 +1678,13 @@ export function ResourcePanel() {
                       ))}
                       <button onClick={() => setDdTypeFilter(new Set())} style={ddPillStyle(ddTypeFilter.size === 0)}>All</button>
                     </Box>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', cursor: 'pointer' }} title="Overlays the per-bucket maximum as a dashed line above the average — an average alone hides short saturation.">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', cursor: 'pointer' }} title="Shows Azure Monitor's timestamp-aligned Maximum aggregation beside the Average series, exposing short peaks that average values can hide.">
                       <input type="checkbox" checked={ddShowMaxOverlay} onChange={(e) => setDdShowMaxOverlay(e.target.checked)} style={{ accentColor: '#3b82f6' }} />
-                      <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Show Max</Typography>
+                      <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Show bucket peaks</Typography>
                     </label>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Overlays the per-bucket minimum as a dashed line below the average — shows the best point the metric touched in this window.">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows the lowest observed Average sample in this window. The API does not currently provide a per-bucket Minimum aggregation.">
                       <input type="checkbox" checked={ddShowMinOverlay} onChange={(e) => setDdShowMinOverlay(e.target.checked)} style={{ accentColor: '#3b82f6' }} />
-                      <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Show Min</Typography>
+                      <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Show low-water mark</Typography>
                     </label>
                   </Box>
 
@@ -1406,12 +1693,13 @@ export function ResourcePanel() {
                   <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
                     {ddCards.critical.map((c) => {
                       const isSelected = c.vmName === deepDiveVm;
+                      const isCorrelated = correlatedVms.has(c.vmName);
                       const points = c.vmData.series?.[c.domLabel === 'MEM' ? 'Available Memory Percentage' : c.domLabel === 'DISK' ? 'OS Disk Bandwidth Consumed Percentage' : 'Percentage CPU'] || [];
                       return (
                         <Box
                           key={c.vmName}
-                          onClick={() => setDeepDiveVm(c.vmName)}
-                          style={{ borderRadius: 10, border: `1px solid ${isSelected ? '#f43f5e' : 'rgba(244,63,94,.3)'}`, background: 'rgba(244,63,94,.04)', padding: 10, cursor: 'pointer', boxShadow: isSelected ? '0 0 0 2px rgba(244,63,94,.3)' : undefined }}
+                          onClick={() => { setDeepDiveVm(c.vmName); setCorrelatedVms(new Set()); }}
+                          style={{ borderRadius: 10, border: `1px solid ${isSelected ? '#f43f5e' : isCorrelated ? '#22d3ee' : 'rgba(244,63,94,.3)'}`, background: isCorrelated ? 'rgba(34,211,238,.07)' : 'rgba(244,63,94,.04)', padding: 10, cursor: 'pointer', boxShadow: isSelected ? '0 0 0 2px rgba(244,63,94,.3)' : isCorrelated ? '0 0 0 1px rgba(34,211,238,.35)' : undefined }}
                         >
                           <Box display="flex" alignItems="flex-start" justifyContent="space-between" style={{ gap: 8 }}>
                             <Box style={{ minWidth: 0 }}>
@@ -1476,6 +1764,11 @@ export function ResourcePanel() {
                       <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 2 }}>
                         Source: Azure Monitor {'\u00b7'} Aggregation: Average {'\u00b7'} Grain: {ddDetail.grainLabel} {'\u00b7'} Datapoints: {ddDetail.datapoints}
                       </Typography>
+                      {ddDetail.ctrlMActive && (
+                        <Typography variant="caption" style={{ display: 'block', fontSize: 9, marginTop: 2, color: '#2dd4bf' }}>
+                          Ctrl-M matches show time overlap only; they do not prove job-to-host causation.
+                        </Typography>
+                      )}
 
                       {ddDetail.insight && (
                         <Box style={{ marginTop: 8, borderRadius: 6, border: '1px solid rgba(34,211,238,.25)', background: 'rgba(34,211,238,.08)', padding: '6px 10px' }}>
@@ -1518,9 +1811,16 @@ export function ResourcePanel() {
                                     <TableCell style={{ fontSize: 10 }}>
                                       <span title={s.severity_reason || ''}>{s.severity_reason || '\u2014'}</span>
                                       {ctrlM && ctrlM.concurrent_jobs > 0 && (
-                                        <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf', marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
-                                          {'\ud83d\udd17'} {ctrlM.heaviest} ({(ctrlM.heaviest_hrs || 0).toFixed(1)}h) running · {ctrlM.concurrent_jobs} job(s) overlapped
-                                        </Typography>
+                                        <Box style={{ marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
+                                          <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf' }}>
+                                            {'\ud83d\udd17'} {ctrlM.heaviest} ({(ctrlM.heaviest_hrs || 0).toFixed(1)}h) running · {ctrlM.concurrent_jobs} job(s) overlapped · time overlap only
+                                          </Typography>
+                                          {ctrlM.jobs && ctrlM.jobs.length > 1 && (
+                                            <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 2 }}>
+                                              Jobs: {ctrlM.jobs.map((job) => `${job.job} (${(job.hrs || 0).toFixed(1)}h)`).join(' · ')}
+                                            </Typography>
+                                          )}
+                                        </Box>
                                       )}
                                     </TableCell>
                                   </TableRow>
@@ -1547,7 +1847,7 @@ export function ResourcePanel() {
                         <Box style={{ marginTop: 12 }}>
                           <Typography variant="subtitle2">Unified Time-Series {'\u2014'} All Metrics</Typography>
                           <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginBottom: 4 }}>
-                            The shaded/dashed max line shows a bucket that briefly ran hotter than its own average suggests.
+                            Shaded windows are detected anomaly events. Dotted lines are Azure bucket peaks; average lines remain the primary time series.
                           </Typography>
                           {(() => {
                             const waveforms = deepDive?.vms?.[deepDiveVm]?.waveforms;
@@ -1674,7 +1974,9 @@ function AzureConnectionCard({ authInfo, onOpen }: AzureConnectionCardProps) {
           {connected ? `Connected as ${authInfo?.display_name || authInfo?.name}` : 'Not connected'}
         </Typography>
       </Box>
-      <Button size="small" variant="contained" color="primary" onClick={onOpen}>Fetch from Azure Monitor</Button>
+      <Button size="small" variant="contained" color="primary" onClick={onOpen}>
+        {connected ? 'Fetch from Azure Monitor' : 'Connect Azure'}
+      </Button>
     </Box>
   );
 }

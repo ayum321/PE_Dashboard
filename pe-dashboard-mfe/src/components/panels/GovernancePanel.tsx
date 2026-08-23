@@ -2,8 +2,8 @@ import React, { useMemo, useState } from 'react';
 import { Box, Button, Paper, TextField, Typography, makeStyles } from '@material-ui/core';
 import { useAppData } from '../../context/AppDataContext';
 import { ApprovalsState, IssueRecord } from '../../context/AppDataContext';
-import { buildAnalysisPayload } from '../../utils/buildAnalysisPayload';
-import { exportReport } from '../../api/dashboardApi';
+import { buildExportPayload } from '../../utils/buildAnalysisPayload';
+import { exportReportWithStatus } from '../../api/dashboardApi';
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -53,6 +53,7 @@ export function GovernancePanel() {
   const [descError, setDescError] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
 
   const issues = data.issues;
   const approvals = data.approvals;
@@ -135,13 +136,39 @@ export function GovernancePanel() {
   const handleExportReport = async () => {
     setExportBusy(true);
     setExportError(null);
+    setArchiveNotice(null);
     try {
-      const payload = { ...buildAnalysisPayload(data), approvals, issues };
-      const blob = await exportReport(payload);
+      // The FastAPI archive records engagement identity from the frozen
+      // approvals object (not from the convenience top-level fields). Keep
+      // that contract explicit so a successful HTML download also produces a
+      // usable Review Registry entry.
+      const exportEvidence = buildExportPayload(data);
+      const archiveEnv = typeof exportEvidence.env_type === 'string'
+        ? exportEvidence.env_type
+        : 'Not Detected';
+      const payload = {
+        ...exportEvidence,
+        approvals: {
+          ...approvals,
+          customer_name: data.customerName || '',
+          env_type: archiveEnv,
+        },
+        issues,
+      };
+      const { blob, archiveStatus } = await exportReportWithStatus(payload);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = `PE_Audit_${(data.customerName || 'Report').replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.html`; a.click();
       URL.revokeObjectURL(url);
+      setArchiveNotice(
+        archiveStatus === 'saved'
+          ? 'Report exported and its frozen evidence snapshot was saved to Review Registry.'
+          : archiveStatus === 'skipped'
+            ? 'Report exported, but Review Registry was skipped because this engagement has no customer name.'
+            : archiveStatus === 'failed'
+              ? 'Report exported, but Review Registry could not save the frozen snapshot. The downloaded HTML is still valid.'
+              : 'Report exported. Archive status was not returned by the server; refresh Review Registry to confirm the save.',
+      );
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed.');
     } finally {
@@ -355,6 +382,7 @@ export function GovernancePanel() {
           {exportBusy ? 'Generating\u2026' : 'Export HTML Report'}
         </Button>
         {exportError && <Typography variant="caption" style={{ color: '#f43f5e' }}>{exportError}</Typography>}
+        {archiveNotice && <Typography variant="caption" style={{ color: archiveNotice.startsWith('Report exported and') ? '#10d96e' : '#f59e0b', maxWidth: 310, textAlign: 'right' }}>{archiveNotice}</Typography>}
       </Box>
     </Paper>
   );

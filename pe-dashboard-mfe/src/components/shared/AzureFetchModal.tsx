@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Button, CircularProgress, Typography } from '@material-ui/core';
 import {
   connectAzure,
@@ -31,8 +31,11 @@ export interface AzureVm {
 
 interface Props {
   open: boolean;
+  /** Start browser sign-in from an explicit parent "Connect Azure" action. */
+  autoStartAuth?: boolean;
   onClose: () => void;
   onFetched: (servers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => void;
+  onAuthChanged?: (auth: DashboardPayload) => void;
 }
 
 const TYPE_COLOR: Record<string, string> = { APP: '#10b981', DB: '#3b82f6', SRE: '#f59e0b' };
@@ -75,9 +78,13 @@ const chipStyle: React.CSSProperties = { fontSize: 9, opacity: 0.8, marginLeft: 
 /** Full "Fetch from Azure Monitor" workflow — search/browse → discover → fleet
  * filters (type/env/region/product group) → customer-grouped VM selection →
  * fetch. Ported from the #azure-fetch-modal two-step dialog (index.html/app.js). */
-export function AzureFetchModal({ open, onClose, onFetched }: Props) {
+export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetched, onAuthChanged }: Props) {
   const [authInfo, setAuthInfo] = useState<DashboardPayload | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  // State updates are asynchronous. A ref closes the small gap in which two
+  // clicks can both enter handleSignIn before React re-renders the button.
+  const signInInFlight = useRef(false);
+  const autoSignInAttempted = useRef(false);
   const [step, setStep] = useState<1 | 2>(1);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -85,6 +92,7 @@ export function AzureFetchModal({ open, onClose, onFetched }: Props) {
   const [discoverStatus, setDiscoverStatus] = useState<{ text: string; tone: 'muted' | 'amber' | 'red' | 'green' } | null>(null);
 
   const [subscriptions, setSubscriptions] = useState<{ id: string; name: string }[]>([]);
+  const [subscriptionsWarming, setSubscriptionsWarming] = useState(false);
   const [selectedSub, setSelectedSub] = useState('');
   const [groups, setGroups] = useState<{ name: string }[]>([]);
   const [selectedGroup, setSelectedGroup] = useState('');
@@ -103,42 +111,115 @@ export function AzureFetchModal({ open, onClose, onFetched }: Props) {
   const [fetchBusy, setFetchBusy] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
 
+  /**
+   * Browser credentials live in the API process and are scoped to its pe_sid
+   * cookie.  A restarted local API (or an expired portal session) can make a
+   * previously rendered identity stale.  Never leave the modal saying
+   * "Signed in" once a protected endpoint has rejected that same session.
+   */
+  const invalidateAzureSession = useCallback((message: string) => {
+    setAuthInfo({ method: 'none' });
+    setSubscriptions([]);
+    setSubscriptionsWarming(false);
+    setSelectedSub('');
+    setGroups([]);
+    setSelectedGroup('');
+    setDiscoverStatus({ text: message, tone: 'red' });
+  }, []);
+
+  const loadSubscriptions = useCallback(async () => {
+    const result = await getAzureSubscriptions();
+    if (result.ok === false) {
+      invalidateAzureSession(typeof result.error === 'string'
+        ? `${result.error} Your local Azure session may have expired or the API was restarted.`
+        : 'Azure session is no longer available. Sign in with Browser again.');
+      return false;
+    }
+    const rows = (result.subscriptions as { id: string; name: string }[]) || [];
+    const warming = result._cache_warming === true && rows.length === 0;
+    setSubscriptions(rows);
+    setSubscriptionsWarming(warming);
+    setDiscoverStatus(warming
+      ? { text: 'Azure sign-in succeeded. Loading accessible subscriptions…', tone: 'muted' }
+      : null);
+    return !warming;
+  }, [invalidateAzureSession]);
+
   useEffect(() => {
     if (!open) return;
     setStep(1);
     setFetchStatus(null);
+    setDiscoverStatus(null);
+    setSubscriptionsWarming(false);
     getAzureAuthStatus()
       .then((result) => {
-        setAuthInfo(result);
-        if (result.method === 'browser') {
-          getAzureSubscriptions()
-            .then((subs) => setSubscriptions((subs.subscriptions as { id: string; name: string }[]) || []))
-            .catch(() => undefined);
+        if (result.method !== 'browser') {
+          setAuthInfo({ method: 'none' });
+          setSubscriptions([]);
+          return;
         }
+        setAuthInfo(result);
+        loadSubscriptions().catch(() =>
+          invalidateAzureSession('Azure session could not be verified. Sign in with Browser again.')
+        );
       })
-      .catch(() => setAuthInfo(null));
-  }, [open]);
+      .catch(() => {
+        setAuthInfo({ method: 'none' });
+        setSubscriptions([]);
+      });
+  }, [open, loadSubscriptions, invalidateAzureSession]);
 
-  const handleSignIn = async () => {
+  // The API deliberately warms a large tenant's subscription list in the
+  // background. Poll only while it says it is warming, then stop immediately.
+  useEffect(() => {
+    if (!open || authInfo?.method !== 'browser' || !subscriptionsWarming) return;
+    const timer = window.setTimeout(() => {
+      loadSubscriptions().catch(() =>
+        invalidateAzureSession('Azure session could not be verified. Sign in with Browser again.')
+      );
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [open, authInfo?.method, subscriptionsWarming, loadSubscriptions, invalidateAzureSession]);
+
+  const handleSignIn = useCallback(async () => {
+    if (signInInFlight.current) return;
+    signInInFlight.current = true;
     setAuthBusy(true);
+    setDiscoverStatus({ text: 'Waiting for Azure browser sign-in to complete\u2026', tone: 'muted' });
     try {
       const result = await connectAzure();
       setAuthInfo(result);
-      const subs = await getAzureSubscriptions();
-      setSubscriptions((subs.subscriptions as { id: string; name: string }[]) || []);
+      onAuthChanged?.(result);
+      await loadSubscriptions();
     } catch (error) {
       setDiscoverStatus({ text: error instanceof Error ? error.message : 'Azure sign-in failed.', tone: 'red' });
     } finally {
+      signInInFlight.current = false;
       setAuthBusy(false);
     }
-  };
+  }, [loadSubscriptions, onAuthChanged]);
+
+  // "Connect Azure" is already an explicit user gesture. When a parent uses
+  // it, do not make the analyst click a second Sign in button in this dialog.
+  useEffect(() => {
+    if (!open) {
+      autoSignInAttempted.current = false;
+      return;
+    }
+    if (autoStartAuth && authInfo?.method === 'none' && !autoSignInAttempted.current) {
+      autoSignInAttempted.current = true;
+      void handleSignIn();
+    }
+  }, [open, autoStartAuth, authInfo?.method, handleSignIn]);
 
   const handleSignOut = async () => {
     setAuthBusy(true);
     try {
       await disconnectAzure();
       setAuthInfo({ method: 'none' });
+      onAuthChanged?.({ method: 'none' });
       setSubscriptions([]);
+      setSubscriptionsWarming(false);
       setDiscoveredVms([]);
     } finally {
       setAuthBusy(false);
@@ -438,7 +519,13 @@ export function AzureFetchModal({ open, onClose, onFetched }: Props) {
               <Box style={{ flex: 1 }}>
                 <Typography variant="caption" style={{ display: 'block', color: '#6b7db3', fontWeight: 700, fontSize: 9, textTransform: 'uppercase', marginBottom: 4 }}>Subscription</Typography>
                 <select value={selectedSub} onChange={(e) => handleSubscriptionChange(e.target.value)} style={selectStyle}>
-                  <option value="">{subscriptions.length ? 'Select subscription' : 'Loading subscriptions\u2026'}</option>
+                  <option value="">
+                    {subscriptions.length
+                      ? 'Select subscription'
+                      : subscriptionsWarming
+                        ? 'Loading subscriptions\u2026'
+                        : 'No accessible subscriptions found'}
+                  </option>
                   {subscriptions.map((sub) => <option key={sub.id} value={sub.id}>{sub.name || sub.id}</option>)}
                 </select>
               </Box>

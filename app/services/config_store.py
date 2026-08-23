@@ -23,7 +23,16 @@ from typing import Any
 
 logger = logging.getLogger("pe_dashboard.config_store")
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".pe_config.json"
+_LOCAL_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".pe_config.json"
+
+
+def _state_path(filename: str, local_default: Path) -> Path:
+    """Resolve persisted state into the deployment-owned state volume when set."""
+    state_dir = os.environ.get("PE_STATE_DIR", "").strip()
+    return Path(state_dir).expanduser() / filename if state_dir else local_default
+
+
+_CONFIG_PATH = _state_path(".pe_config.json", _LOCAL_CONFIG_PATH)
 
 # Thread lock — prevents concurrent writes from corrupting the JSON file
 _lock = threading.Lock()
@@ -124,6 +133,7 @@ def _save(data: dict) -> None:
     """Write config to disk and update the in-memory cache atomically."""
     global _cache, _cache_ts
     try:
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         _cache = data
@@ -150,12 +160,12 @@ def get_all() -> dict:
 
 
 def get_gemini_key() -> str:
-    key = get("gemini_api_key", "")
-    # Also fall back to environment variables
+    # Runtime secrets take precedence over legacy local config.  This keeps
+    # container/portal secret injection authoritative without persisting keys.
     return (
-        str(key).strip()
-        or os.environ.get("GOOGLE_API_KEY", "")
-        or os.environ.get("GEMINI_API_KEY", "")
+        os.environ.get("GOOGLE_API_KEY", "").strip()
+        or os.environ.get("GEMINI_API_KEY", "").strip()
+        or str(get("gemini_api_key", "")).strip()
     )
 
 
@@ -164,11 +174,10 @@ def set_gemini_key(key: str) -> None:
 
 
 def get_nvidia_key() -> str:
-    key = get("nvidia_api_key", "")
     return (
-        str(key).strip()
-        or os.environ.get("NVIDIA_API_KEY", "")
-        or os.environ.get("NIM_API_KEY", "")
+        os.environ.get("NVIDIA_API_KEY", "").strip()
+        or os.environ.get("NIM_API_KEY", "").strip()
+        or str(get("nvidia_api_key", "")).strip()
     )
 
 

@@ -2,11 +2,28 @@ services:
   pe-dashboard:
     build: .
     ports:
-      - "8765:8765"
+      # Local-only default. The deployment team should expose the container
+      # through the authenticated Stratosphere/ingress endpoint instead.
+      - "${PE_DASHBOARD_BIND_ADDRESS:-127.0.0.1}:8765:8765"
     environment:
+      PE_STATE_DIR: /data
+      # Keep false for direct local HTTP compose use. Production ingress must set true.
+      PE_COOKIE_SECURE: ${PE_COOKIE_SECURE:-false}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8765}
       AI_ENABLED: ${AI_ENABLED:-false}
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+    volumes:
+      - pe-dashboard-state:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+
+volumes:
+  pe-dashboard-state:

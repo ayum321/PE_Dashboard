@@ -29,14 +29,16 @@ const EMPTY_APPROVALS: ApprovalsState = {
 
 export interface AppData {
   batch: DashboardPayload | null;
-  resource: { servers: ResourceServer[] } | null;
+  resource: (DashboardPayload & { servers: ResourceServer[] }) | null;
   slaMatrix: DashboardPayload | null;
   benchmark: DashboardPayload | null;
   sowBaseline: DashboardPayload | null;
   sowCompare: DashboardPayload | null;
   findings: DashboardPayload | null;
   redFlags: DashboardPayload | null;
+  peNarrative: DashboardPayload | null;
   executive: DashboardPayload | null;
+  finalJudgment: DashboardPayload | null;
   customerName: string | null;
   issues: IssueRecord[];
   approvals: ApprovalsState;
@@ -52,7 +54,9 @@ const EMPTY_APP_DATA: AppData = {
   sowCompare: null,
   findings: null,
   redFlags: null,
+  peNarrative: null,
   executive: null,
+  finalJudgment: null,
   customerName: null,
   issues: [],
   approvals: EMPTY_APPROVALS,
@@ -62,14 +66,16 @@ const EMPTY_APP_DATA: AppData = {
 interface AppDataContextValue {
   data: AppData;
   setBatch: (value: DashboardPayload | null) => void;
-  setResource: (value: { servers: ResourceServer[] } | null) => void;
+  setResource: (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => void;
   setSlaMatrix: (value: DashboardPayload | null) => void;
   setBenchmark: (value: DashboardPayload | null) => void;
   setSowBaseline: (value: DashboardPayload | null) => void;
   setSowCompare: (value: DashboardPayload | null) => void;
   setFindings: (value: DashboardPayload | null) => void;
   setRedFlags: (value: DashboardPayload | null) => void;
+  setPeNarrative: (value: DashboardPayload | null) => void;
   setExecutive: (value: DashboardPayload | null) => void;
+  setFinalJudgment: (value: DashboardPayload | null) => void;
   setCustomerName: (value: string | null) => void;
   setIssues: (value: IssueRecord[]) => void;
   setApprovals: (value: ApprovalsState) => void;
@@ -84,7 +90,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
 
   const setBatch = useCallback((value: DashboardPayload | null) => setData((prev) => ({ ...prev, batch: value })), []);
   const setResource = useCallback(
-    (value: { servers: ResourceServer[] } | null) => setData((prev) => ({ ...prev, resource: value })),
+    (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => setData((prev) => ({ ...prev, resource: value })),
     [],
   );
   const setSlaMatrix = useCallback(
@@ -111,8 +117,16 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, redFlags: value })),
     [],
   );
+  const setPeNarrative = useCallback(
+    (value: DashboardPayload | null) => setData((prev) => ({ ...prev, peNarrative: value })),
+    [],
+  );
   const setExecutive = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, executive: value })),
+    [],
+  );
+  const setFinalJudgment = useCallback(
+    (value: DashboardPayload | null) => setData((prev) => ({ ...prev, finalJudgment: value })),
     [],
   );
   const setCustomerName = useCallback(
@@ -151,7 +165,9 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setSowCompare,
       setFindings,
       setRedFlags,
+      setPeNarrative,
       setExecutive,
+      setFinalJudgment,
       setCustomerName,
       setIssues,
       setApprovals,
@@ -168,7 +184,9 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setSowCompare,
       setFindings,
       setRedFlags,
+      setPeNarrative,
       setExecutive,
+      setFinalJudgment,
       setCustomerName,
       setIssues,
       setApprovals,

@@ -5,7 +5,6 @@ import {
   Checkbox,
   CircularProgress,
   Dialog,
-  IconButton,
   TextField,
   Typography,
 } from '@material-ui/core';
@@ -295,17 +294,16 @@ export function SowPanel() {
 
       {/* Audit Scope: Products / Modules Reviewed */}
       <Box
+        className="scope-card"
         style={{
-          borderRadius: 16, border: '1px solid rgba(168,85,247,.3)',
-          background: 'linear-gradient(135deg, #0d1526 0%, #111d36 100%)',
           padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap',
         }}
       >
         <Box style={{ display: 'flex', alignItems: 'flex-start', gap: 12, minWidth: 0 }}>
           <Box
+            className="scope-card__icon"
             style={{
-              width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-              background: 'rgba(168,85,247,.2)', border: '1px solid rgba(168,85,247,.45)',
+              width: 40, height: 40, flexShrink: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#a855f7',
             }}
           >
@@ -314,7 +312,7 @@ export function SowPanel() {
             </svg>
           </Box>
           <Box>
-            <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.15em', color: '#6b7db3', fontWeight: 700 }}>Audit Scope</Typography>
+            <Typography className="scope-card__eyebrow" variant="caption">Audit Scope</Typography>
             <Typography variant="subtitle1" style={{ fontWeight: 800, lineHeight: 1.2 }}>Products / Modules Reviewed</Typography>
             {reviewedProducts.length === 0 ? (
               <Typography variant="caption" color="textSecondary">
@@ -330,11 +328,11 @@ export function SowPanel() {
           </Box>
         </Box>
         <Button
+          className="scope-card__button"
           variant="outlined"
           onClick={openPicker}
           style={{
-            borderColor: 'rgba(168,85,247,.45)', color: '#f1f5f9', textTransform: 'none',
-            padding: '8px 18px', borderRadius: 12,
+            textTransform: 'none', padding: '8px 18px',
           }}
         >
           {reviewedProducts.length ? 'Edit Scope' : 'Select Products'}
@@ -408,7 +406,7 @@ export function SowPanel() {
                       value={baseValues[key] || ''}
                       onChange={(e) => setBaseValues((prev) => ({ ...prev, [key]: e.target.value }))}
                       InputProps={{ style: { textAlign: 'right', fontWeight: 700, color: '#f1f5f9', background: 'rgba(30,41,59,.7)' } }}
-                      inputProps={{ style: { textAlign: 'right' }, min: 0 }}
+                      inputProps={{ 'aria-label': label, style: { textAlign: 'right' }, min: 0 }}
                     />
                   </Box>
                   <Box>
@@ -418,7 +416,7 @@ export function SowPanel() {
                       value={actualValues[key] || ''}
                       onChange={(e) => setActualValues((prev) => ({ ...prev, [key]: e.target.value }))}
                       InputProps={{ style: { textAlign: 'right', fontWeight: 700, color: '#f1f5f9', background: 'rgba(30,41,59,.7)' } }}
-                      inputProps={{ style: { textAlign: 'right' }, min: 0 }}
+                      inputProps={{ 'aria-label': `${label} actual`, style: { textAlign: 'right' }, min: 0 }}
                     />
                   </Box>
                 </Box>
@@ -577,56 +575,64 @@ export function SowPanel() {
       )}
 
       {/* Products / Modules Reviewed picker dialog */}
-      <Dialog open={pickerOpen} onClose={() => setPickerOpen(false)} maxWidth="md" fullWidth PaperProps={{ style: { background: '#0b0f1c', border: '1px solid #1a2850', borderRadius: 16, height: '80vh' } }}>
+      <Dialog
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        maxWidth={false}
+        fullWidth
+        PaperProps={{ className: 'scope-picker-dialog' }}
+        BackdropProps={{ style: { backgroundColor: 'rgba(2, 5, 13, .82)', backdropFilter: 'blur(8px)' } }}
+      >
         <Box style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <Box style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid #1a2850' }}>
-            <Box>
+          <Box className="scope-picker-header">
+            <Box style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
+              <Box className="scope-picker-header__icon">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" width={22} height={22}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 6A2.25 2.25 0 0 1 15.75 3.75H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25 2.25H15.75A2.25 2.25 0 0 1 13.5 8.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25a2.25 2.25 0 0 1-2.25-2.25v-2.25Z" />
+                </svg>
+              </Box>
+              <Box>
               <Typography variant="subtitle1" style={{ fontWeight: 800 }}>Products / Modules Reviewed</Typography>
               <Typography variant="caption" color="textSecondary">{'Defines audit scope \u2014 flows into SOW, Executive Dashboard, PE Findings and the final report.'}</Typography>
+              </Box>
             </Box>
-            <IconButton size="small" onClick={() => setPickerOpen(false)} aria-label="Close"><span style={{ fontSize: 20, color: '#94a3b8' }}>{'\u00D7'}</span></IconButton>
+            <Button className="scope-picker-close" size="small" onClick={() => setPickerOpen(false)}>Close · Esc</Button>
           </Box>
 
-          <Box style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 20px', borderBottom: '1px solid #1a2850', flexWrap: 'wrap' }}>
+          <Box className="scope-picker-toolbar">
             <TextField
-              size="small" placeholder={'Search products, modules or aliases\u2026'} value={search}
+              className="scope-picker-search"
+              size="small" variant="outlined" placeholder={'Search products, modules or aliases\u2026'} value={search}
               onChange={(e) => setSearch(e.target.value)}
               style={{ minWidth: 260, flex: 1 }}
             />
-            <Button size="small" variant="outlined" onClick={selectAllVisible}>Select visible</Button>
-            <Button size="small" variant="outlined" onClick={clearAllDraft}>Clear all</Button>
-            <span className="metric-badge metric-badge-teal">{draftSelected.size} selected</span>
+            <Button className="scope-picker-action" size="small" variant="outlined" onClick={selectAllVisible}>Select visible</Button>
+            <Button className="scope-picker-action" size="small" variant="outlined" onClick={clearAllDraft}>Clear all</Button>
+            <span className="scope-picker-count">{draftSelected.size} selected</span>
           </Box>
 
-          <Box style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <Box style={{ width: 220, flexShrink: 0, borderRight: '1px solid #1a2850', overflowY: 'auto', padding: 10 }}>
+          <Box className="scope-picker-body">
+            <Box className="scope-picker-families">
+              <Typography className="scope-picker-label" variant="caption">Families</Typography>
               <Button
+                className={`scope-picker-family${activeFamily === 'ALL' ? ' is-active' : ''}`}
                 fullWidth
                 onClick={() => setActiveFamily('ALL')}
-                style={{
-                  justifyContent: 'flex-start', textTransform: 'none', marginBottom: 4,
-                  background: activeFamily === 'ALL' ? 'rgba(59,130,246,.15)' : 'transparent',
-                  color: activeFamily === 'ALL' ? '#60a5fa' : '#94a3b8',
-                }}
               >
-                All products
+                <span>All products</span><span>{draftSelected.size}/{taxonomy.reduce((sum, group) => sum + group.items.length, 0)}</span>
               </Button>
               {taxonomy.map((g) => (
                 <Button
                   key={g.key}
+                  className={`scope-picker-family${activeFamily === g.key ? ' is-active' : ''}`}
                   fullWidth
                   onClick={() => setActiveFamily(g.key)}
-                  style={{
-                    justifyContent: 'flex-start', textTransform: 'none', marginBottom: 4, fontSize: 12,
-                    background: activeFamily === g.key ? 'rgba(59,130,246,.15)' : 'transparent',
-                    color: activeFamily === g.key ? '#60a5fa' : '#94a3b8',
-                  }}
                 >
-                  {g.label}
+                  <span>{g.label}</span><span>{g.items.filter((item) => draftSelected.has(item.value)).length}/{g.items.length}</span>
                 </Button>
               ))}
             </Box>
-            <Box style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 16 }}>
+            <Box className="scope-picker-products">
               {visibleItems.length === 0 && (
                 <Typography variant="body2" color="textSecondary">No products match your search.</Typography>
               )}
@@ -636,18 +642,18 @@ export function SowPanel() {
                   return acc;
                 }, {}),
               ).map(([group, items]) => (
-                <Box key={group} style={{ marginBottom: 16 }}>
-                  <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.08em', color: '#64748b', fontWeight: 700 }}>{group}</Typography>
-                  <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+                <Box key={group} className="scope-picker-group">
+                  <Box className="scope-picker-group__heading"><Typography variant="caption">{group}</Typography><span>{items.length}</span></Box>
+                  <Box className="scope-picker-grid">
                     {items.map((it) => (
-                      <Box key={it.value} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <label key={it.value} htmlFor={`pr-${it.value}`} className={`scope-picker-item${draftSelected.has(it.value) ? ' is-selected' : ''}`}>
                         <Checkbox
                           size="small" checked={draftSelected.has(it.value)}
                           onChange={() => toggleDraft(it.value)}
                           id={`pr-${it.value}`}
                         />
-                        <label htmlFor={`pr-${it.value}`} style={{ cursor: 'pointer', fontSize: 13 }}>{it.label}</label>
-                      </Box>
+                        <span>{it.label}</span>
+                      </label>
                     ))}
                   </Box>
                 </Box>
@@ -655,9 +661,12 @@ export function SowPanel() {
             </Box>
           </Box>
 
-          <Box style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '14px 20px', borderTop: '1px solid #1a2850' }}>
-            <Button onClick={() => setPickerOpen(false)} style={{ textTransform: 'none', color: '#94a3b8' }}>Cancel</Button>
-            <Button variant="contained" color="primary" onClick={handleSaveScope} style={{ textTransform: 'none' }}>Save scope</Button>
+          <Box className="scope-picker-footer">
+            <Typography className="scope-picker-footer__hint" variant="caption">Changes are saved only when you select Save scope.</Typography>
+            <Box style={{ display: 'flex', gap: 8 }}>
+              <Button className="scope-picker-cancel" onClick={() => setPickerOpen(false)}>Cancel</Button>
+              <Button className="scope-picker-save" variant="contained" color="primary" onClick={handleSaveScope}>Save scope</Button>
+            </Box>
           </Box>
         </Box>
       </Dialog>

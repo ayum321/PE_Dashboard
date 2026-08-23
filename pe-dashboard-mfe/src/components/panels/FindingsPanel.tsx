@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { Box, Button, CircularProgress, Paper, Typography, makeStyles } from '@material-ui/core';
-import { generateFindings } from '../../api/dashboardApi';
+import { generateFindings, getFinalJudgment, getPeNarrative, getRedFlags } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
-import { buildAnalysisPayload } from '../../utils/buildAnalysisPayload';
+import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
 import { KpiStatCard } from '../shared/KpiStatCard';
+import { FinalJudgmentCard } from './FinalJudgmentCard';
+import { PeReviewSummary } from './PeReviewSummary';
 
 interface Finding {
   level: string;
@@ -41,7 +43,7 @@ const LEVEL_COLOR: Record<string, 'error' | 'textSecondary' | 'primary' | undefi
 
 export function FindingsPanel() {
   const classes = useStyles();
-  const { data, setFindings } = useAppData();
+  const { data, setFindings, setFinalJudgment, setPeNarrative, setRedFlags } = useAppData();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,8 +51,29 @@ export function FindingsPanel() {
     setBusy(true);
     setError(null);
     try {
-      const result = await generateFindings(buildAnalysisPayload(data));
-      setFindings(result);
+      const payload = buildAnalysisPayload(data);
+      const findings = await generateFindings(payload);
+      setFindings(findings);
+
+      // Mirror the local dashboard: findings refresh produces the supporting
+      // red-flag evidence and then refreshes the one final PE decision.
+      let redFlags = data.redFlags;
+      try {
+        redFlags = await getRedFlags(payload);
+        setRedFlags(redFlags);
+      } catch {
+        // Existing red flags remain valid when the optional refresh fails.
+      }
+      try {
+        setPeNarrative(await getPeNarrative(buildPeNarrativePayload(data, { findings, redFlags })));
+      } catch {
+        // The flat deterministic findings remain usable if narrative enrichment is unavailable.
+      }
+      try {
+        setFinalJudgment(await getFinalJudgment(buildFinalJudgmentPayload(data, { findings, redFlags })));
+      } catch {
+        // Findings are still a complete deterministic result if judgment is unavailable.
+      }
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : 'Generating findings failed.');
     } finally {
@@ -72,11 +95,15 @@ export function FindingsPanel() {
         {busy && <CircularProgress size={22} aria-label="Generating findings" />}
       </Box>
       {error && <Typography variant="body2" color="error">{error}</Typography>}
+      <PeReviewSummary />
 
       {!data.findings ? (
-        <Typography className={classes.empty} variant="body2" color="textSecondary">
-          Upload batch and resource data first, then generate findings from the collected evidence.
-        </Typography>
+        <>
+          <Typography className={classes.empty} variant="body2" color="textSecondary">
+            Upload batch and resource data first, then generate findings from the collected evidence.
+          </Typography>
+          <FinalJudgmentCard />
+        </>
       ) : (
         <>
           <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12, marginTop: 12 }}>
@@ -119,6 +146,7 @@ export function FindingsPanel() {
               )}
             </Paper>
           ))}
+          <FinalJudgmentCard />
         </>
       )}
     </Paper>

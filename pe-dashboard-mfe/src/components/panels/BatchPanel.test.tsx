@@ -17,6 +17,7 @@ const RICH_BATCH_PAYLOAD = {
     failed_runs: 2,
     fail_rate_pct: 0.5,
     daily_limit_hrs: 6,
+    window_dominant_ceiling_hrs: 6,
     batch_env: 'PROD',
     fleet_sla_buffer: { buffer_hrs: 1.2, buffer_pct: 18, status: 'AT_RISK', sla_source: 'sla_matrix' },
   },
@@ -27,7 +28,13 @@ const RICH_BATCH_PAYLOAD = {
   top_breaches: [
     { Job_Name: 'JOB_A', Sub_Application: 'FIN', peak_hrs: 5.4, avg_hrs: 4.1, total_hrs: 40, sla_hrs: 6, buffer_pct: 10, buffer_status: 'AT_RISK' },
   ],
-  window: [{ run_date: '2026-08-01', total_hrs: 5.2, job_count: 12, breach: false, top_job: 'JOB_A' }],
+  window: [{
+    run_date: '2026-08-01', total_hrs: 5.2, job_count: 12, breach: false, top_job: 'JOB_A',
+    effective_hrs: 4.8, elapsed_hrs: 7.1, active_busy_hrs: 4.2, idle_gap_hrs: 2.9, idle_pct: 40.8,
+    raw_job_count: 13, raw_run_count: 15, scope_run_count: 14, excluded_job_count: 1,
+    raw_total_hrs: 5.3, excluded_hrs: 0.1, min_buffer_pct: 20,
+    batch_blocks: [{ start: '01:00', end: '05:48', span_hrs: 4.8, runs: 14 }],
+  }],
   data_coverage: {
     date_range: ['2026-08-01', '2026-08-15'],
     date_span_days: 15,
@@ -48,7 +55,7 @@ const RICH_BATCH_PAYLOAD = {
   hour_heatmap: {
     sub_apps: ['FIN'], hours: [1, 2], cells: [{ sub_app: 'FIN', hour: 1, count: 3, total_hrs: 4.2 }],
   },
-  sla_source: { type: 'sla_matrix', daily_hrs: 6, adaptive_active: false, adaptive_job_count: 0, adaptive_total_jobs: 0 },
+  sla_source: { type: 'sla_matrix', daily_hrs: 6, adaptive_active: false, adaptive_job_count: 0, adaptive_total_jobs: 0, resolved_ceilings: [6, 8] },
 };
 
 function BatchDataInjector({ children }: { children: React.ReactNode }) {
@@ -71,9 +78,9 @@ describe('BatchPanel', () => {
     expect(getByText(/No Ctrl-M data loaded yet/i)).toBeDefined();
   });
 
-  it('renders excluded jobs, concurrency evidence and coverage strip without crashing on real-shaped data', () => {
+  it('renders bordered evidence tables with semantic risk rows on real-shaped data', () => {
     window['env'] = { LOCAL_APP_NAME: 'Local MFE' };
-    const { getByText } = render(
+    const { container, getByText } = render(
       <MemoryRouter>
         <AppDataProvider>
           <BatchDataInjector>
@@ -86,5 +93,10 @@ describe('BatchPanel', () => {
     expect(getByText(/Excluded Jobs/i)).toBeDefined();
     expect(getByText(/Concurrent Jobs/i)).toBeDefined();
     expect(getByText(/15-Day Evidence/i)).toBeDefined();
+    expect(getByText(/Bar labels show executions/i)).toBeDefined();
+    expect(getByText(/2 contracted ceilings: 6–8h/i)).toBeDefined();
+    expect(container.querySelector('[aria-label="Top breaching jobs table"]')).not.toBeNull();
+    expect(container.querySelector('.pe-table-shell')).not.toBeNull();
+    expect(container.querySelector('.pe-table-row-warning')).not.toBeNull();
   });
 });

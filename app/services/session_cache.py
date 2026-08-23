@@ -41,6 +41,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 _lock = threading.Lock()
@@ -64,7 +65,16 @@ _PERSIST_AC_SLOTS = {
     "sla_resolved",
     "resource_summary", "regression_df", "adaptive_sla", "sla_matrix_kpis",
 }
-_CACHE_FILE = os.path.join(os.path.dirname(__file__), "..", ".pe_cache.json")
+_LOCAL_CACHE_FILE = Path(__file__).resolve().parent.parent / ".pe_cache.json"
+
+
+def _cache_path() -> Path:
+    """Use the mounted deployment state directory when PE_STATE_DIR is set."""
+    state_dir = os.environ.get("PE_STATE_DIR", "").strip()
+    return Path(state_dir).expanduser() / ".pe_cache.json" if state_dir else _LOCAL_CACHE_FILE
+
+
+_CACHE_FILE = _cache_path()
 
 # These must be defined before _flush() and _load_from_disk() use them
 _AC_KEY    = "__audit_context__"
@@ -89,6 +99,7 @@ def _flush() -> None:
 
     def _write():
         try:
+            _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(_CACHE_FILE, "w", encoding="utf-8") as fh:
                 json.dump(snapshot, fh, default=str)
         except Exception:

@@ -86,6 +86,18 @@ def main():
     assert crit2 and str(crit2[0].get("reason_code", "")).startswith("abs"), sp2
     print("  [OK] sustained 92% CPU -> critical (typed reason_code, absolute significance gate)")
 
+    # DB VMs reserve SGA/PGA.  89% used (=11% available) is inside the
+    # configured DB watch band, so it is a WARNING, not a generic-app critical
+    # incident.  The exact same samples stay critical for an APP VM.
+    db_mem = [{"t": (b + timedelta(minutes=i * 5)).isoformat() + "Z", "v": v}
+              for i, v in enumerate([30] * 20 + [11] * 12 + [30] * 20)]
+    db_spikes = az._detect_spikes(db_mem, 2.0, "Available Memory Percentage", is_db=True)
+    app_spikes = az._detect_spikes(db_mem, 2.0, "Available Memory Percentage", is_db=False)
+    assert db_spikes and all(not x["severity"].startswith("critical") for x in db_spikes), db_spikes
+    assert any(x["severity"] == "warning" for x in db_spikes), db_spikes
+    assert any(x["severity"].startswith("critical") for x in app_spikes), app_spikes
+    print("  [OK] DB memory expected band stays warning; generic APP thresholds remain critical")
+
     # canonical schema contract: every spike from every path has identical keys
     from services.spike_schema import make_spike_record
     canon = set(make_spike_record(start="", end="", peak=0, peak_time="", duration_min=0,

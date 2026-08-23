@@ -37,6 +37,13 @@ const RICH_SLA_PAYLOAD = {
     { job_name: 'JOB_A', run_date: '2026-08-01', start_hour: 1, run_hrs: 7.2, resource_signal: { verdict: 'RESOURCE_LINK', fleet_cpu: 88, fleet_mem: 79, hot_hour_jobs: 4, critical_hosts: ['db01'] } },
     { job_name: 'JOB_B', run_date: '2026-08-02', start_hour: 2, run_hrs: 5.9, resource_signal: { verdict: 'ISOLATED', fleet_cpu: 30, fleet_mem: 40, hot_hour_jobs: 0, critical_hosts: [] } },
   ],
+  workflow_summary: [
+    {
+      workflow_name: 'FIN_DAILY', batch_type: 'DAILY', runtime_h: 5.4, sla_h: 6,
+      buffer_pct: 10, status: 'AT_RISK', sla_source: 'batch_sla_xlsx',
+      clock_buffer_mins: 34, start_delay_mins: 48, start_time_status: 'LATE_START', contract_start_time: '01:00',
+    },
+  ],
 };
 
 function SlaDataInjector({ children }: { children: React.ReactNode }) {
@@ -75,6 +82,9 @@ describe('SlaMatrixPanel', () => {
     expect(getByText(/is the worst offender/i)).toBeDefined();
     expect(getByText(/Job Summary/i)).toBeDefined();
     expect(getByText(/Resource-Linked Breaches/i)).toBeDefined();
+    expect(getByText(/Headroom min/i)).toBeDefined();
+    expect(getByText('34m left')).toBeDefined();
+    expect(getByText('+48m late')).toBeDefined();
     expect(getAllByText(/JOB_A/i).length).toBeGreaterThan(0);
   });
 });

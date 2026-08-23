@@ -6,5 +6,15 @@ pe-dashboard-mfe/build
 __pycache__
 *.pyc
 .pe_config.json
+.pe_cache.json
+.env*
+*.pem
+*.key
+*.pfx
+test_exp.txt
+data/
+app/_test_*.py
+app/_check_*.py
+app/_debug_*.js
 .env
 *.log

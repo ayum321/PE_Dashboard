@@ -204,6 +204,107 @@ if "!PY!"=="" (
 goto :eof
 
 
+REM ================================================================
+REM  React MFE prerequisites -- Node 18+ and locked npm dependencies
+REM ================================================================
+:ensure_node
+echo.
+echo        Checking Node.js for the React dashboard...
+
+where node >nul 2>&1
+if errorlevel 1 (
+    if exist "C:\nvm4w\nodejs\node.exe" set "PATH=C:\nvm4w\nodejs;!PATH!"
+    if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;!PATH!"
+)
+
+where node >nul 2>&1
+if errorlevel 1 goto :install_node
+
+for /f "tokens=1 delims=." %%V in ('node -p "process.versions.node" 2^>nul') do set "NODE_MAJOR=%%V"
+if not defined NODE_MAJOR goto :install_node
+if !NODE_MAJOR! LSS 18 goto :upgrade_node
+
+where npm >nul 2>&1
+if errorlevel 1 goto :install_node
+
+echo        Node.js !NODE_MAJOR!.x and npm are ready.
+goto :eof
+
+:upgrade_node
+echo        Node.js !NODE_MAJOR!.x is too old. Upgrading to the current LTS release...
+where winget >nul 2>&1
+if errorlevel 1 (
+    echo   [ERROR] Node.js 18+ is required and winget is not installed.
+    echo          Upgrade Node.js from https://nodejs.org, then re-run start.bat.
+    pause
+    exit /b 1
+)
+
+winget upgrade --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    echo   [ERROR] Node.js LTS upgrade failed. Check network/proxy access, then re-run start.bat.
+    pause
+    exit /b 1
+)
+
+if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;!PATH!"
+goto :ensure_node
+
+:install_node
+echo        Node.js 18+ is required. Installing the current LTS release...
+where winget >nul 2>&1
+if errorlevel 1 (
+    echo   [ERROR] Node.js is not available and winget is not installed.
+    echo          Install Node.js LTS from https://nodejs.org, then re-run start.bat.
+    pause
+    exit /b 1
+)
+
+winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    echo   [ERROR] Node.js LTS installation failed. Check network/proxy access, then re-run start.bat.
+    pause
+    exit /b 1
+)
+
+if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;!PATH!"
+where node >nul 2>&1
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo   [ERROR] Node.js installed but is not available in this window yet.
+    echo          Close this window, open a new Command Prompt, and run start.bat again.
+    pause
+    exit /b 1
+)
+goto :ensure_node
+
+:ensure_mfe
+echo        Checking React dashboard dependencies...
+if not exist "pe-dashboard-mfe\package-lock.json" (
+    echo   [ERROR] Missing pe-dashboard-mfe\package-lock.json.
+    pause
+    exit /b 1
+)
+
+if exist "pe-dashboard-mfe\node_modules\react-scripts\bin\react-scripts.js" (
+    call npm --prefix pe-dashboard-mfe ls --depth=0 >nul 2>&1
+    if not errorlevel 1 (
+        echo        React dependencies are ready.
+        goto :eof
+    )
+)
+
+echo        Installing React dependencies from package-lock.json (first run may take a few minutes)...
+call npm --prefix pe-dashboard-mfe ci --no-audit --no-fund
+if errorlevel 1 (
+    echo   [ERROR] React dependency installation failed. Check network/proxy access, then re-run start.bat.
+    pause
+    exit /b 1
+)
+echo        React dependencies are ready.
+goto :eof
+
+
 :found_python
 echo        Found : !PY!
 !PY! --version
@@ -364,6 +465,11 @@ if "!FILES_OK!"=="0" (
     pause
     exit /b 1
 )
+
+call :ensure_node
+if errorlevel 1 exit /b 1
+call :ensure_mfe
+if errorlevel 1 exit /b 1
 
 !PY! -c "import uvicorn" >nul 2>&1
 if errorlevel 1 (
@@ -558,18 +664,16 @@ echo.
 echo   [7/7] Starting server  (Ctrl+C to stop)...
 echo.
 
-if not exist "pe-dashboard-mfe\node_modules\react-scripts\bin\react-scripts.js" (
-    echo   [ERROR] React MFE dependencies are not installed.
-    echo          Run: cd pe-dashboard-mfe ^&^& npm ci
-    pause
-    exit /b 1
-)
-
 set "MFE_API_URL=http://%HOST%:!PORT!"
 set "API_BASE_URL=!MFE_API_URL!"
 set "appName=PE Audit Dashboard"
 set "frameUrlPath=/"
 call npm --prefix pe-dashboard-mfe run setLocalEnv >nul 2>&1
+if errorlevel 1 (
+    echo   [ERROR] React runtime configuration could not be generated.
+    pause
+    exit /b 1
+)
 start "PE MFE" cmd /c "set API_BASE_URL=!MFE_API_URL! ^& set appName=PE Audit Dashboard ^& set frameUrlPath=/ ^& cd /d %CD%\pe-dashboard-mfe ^& npm run start:standalone"
 start "PE Browser" /B !PY! app\_open_browser.py 127.0.0.1 3000 mfe
 !PY! -m uvicorn %APP% --app-dir app --host %HOST% --port !PORT! --reload --reload-dir app\routers --reload-dir app\services --reload-dir app\templates --reload-dir app\static

@@ -38,7 +38,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("pe_dashboard.report_archive")
 
-_ROOT       = Path(__file__).resolve().parent.parent
+_ROOT       = Path(os.environ.get("PE_STATE_DIR", Path(__file__).resolve().parent.parent))
 _DB_PATH    = _ROOT / ".pe_report_archive.db"
 _FILES_DIR  = _ROOT / "data" / "report_archive"
 

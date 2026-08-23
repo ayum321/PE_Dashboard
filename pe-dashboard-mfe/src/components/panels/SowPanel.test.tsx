@@ -25,7 +25,6 @@ describe('SowPanel', () => {
 
     await waitFor(() => expect(global.fetch).toHaveBeenCalled());
     expect(getByLabelText('Daily DFU')).toBeDefined();
-    expect(getByRole('button', { name: 'Save Baseline' })).toBeDefined();
-    expect(getByRole('button', { name: 'Compare Against Actuals' })).toBeDefined();
+    expect(getByRole('button', { name: 'Save & Compare vs Actuals' })).toBeDefined();
   });
 });

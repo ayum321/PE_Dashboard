@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, waitFor } from '@testing-library/react';
+import { render } from '@testing-library/react';
 import { ArchivePanel } from './ArchivePanel';
 
 describe('ArchivePanel', () => {
@@ -30,8 +30,9 @@ describe('ArchivePanel', () => {
       }),
     } as Response);
 
-    const { findByText } = render(<ArchivePanel />);
+    const { findAllByText, findByRole } = render(<ArchivePanel />);
 
-    expect(await findByText('Acme Corp')).toBeDefined();
+    expect((await findAllByText('Acme Corp')).length).toBeGreaterThan(0);
+    expect(await findByRole('link', { name: /open exported report/i })).toBeDefined();
   });
 });

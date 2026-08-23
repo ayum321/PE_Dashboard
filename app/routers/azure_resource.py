@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 import uuid
@@ -79,6 +80,28 @@ _PE_SID_COOKIE = "pe_sid"
 _PE_SID_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 
+def _secure_cookie() -> bool:
+    """Enable the Secure flag for HTTPS-proxied production deployments.
+
+    Local FastAPI/React development remains HTTP unless explicitly opted in.
+    """
+    return os.environ.get("PE_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cookie_samesite() -> str:
+    """Return a safe, deployment-configurable SameSite policy for pe_sid.
+
+    Local development uses ``lax`` with one canonical localhost hostname.
+    A portal that hosts the MFE and API on different HTTPS sites must opt into
+    ``PE_COOKIE_SECURE=true`` and ``PE_COOKIE_SAMESITE=none``; browsers reject
+    SameSite=None cookies without Secure.
+    """
+    value = os.environ.get("PE_COOKIE_SAMESITE", "lax").strip().lower()
+    if value not in {"lax", "strict", "none"}:
+        return "lax"
+    return value if value != "none" or _secure_cookie() else "lax"
+
+
 def _session_id(request: Request, response: Optional[Response] = None) -> str:
     """Read the caller's session id from the pe_sid cookie, minting one if absent.
     When a Response is supplied the cookie is (re)set so the same browser reuses
@@ -89,7 +112,8 @@ def _session_id(request: Request, response: Optional[Response] = None) -> str:
     if response is not None:
         response.set_cookie(
             _PE_SID_COOKIE, sid,
-            max_age=_PE_SID_MAX_AGE, httponly=True, samesite="lax", path="/",
+            max_age=_PE_SID_MAX_AGE, httponly=True, samesite=_cookie_samesite(), path="/",
+            secure=_secure_cookie(),
         )
     return sid
 
@@ -104,13 +128,19 @@ _TS_CACHE_MAX = 64   # hard cap on retained result sets
 
 
 def _ts_cache_key(session_id: str, vm_ids: List[str], hours_back: int,
-                  start_utc: Optional[str], end_utc: Optional[str]) -> str:
+                  start_utc: Optional[str], end_utc: Optional[str],
+                  vm_types: Optional[Dict[str, str]] = None) -> str:
     # SECURITY: the session id is part of the key. Azure credentials are
     # per-session (see _build_credential), so a key built only from request
     # params let a second session read the first session's cached Azure metrics
     # without ever presenting a credential.
+    canonical_roles = {
+        str(resource_id).strip().lower(): str(role).strip().upper()
+        for resource_id, role in (vm_types or {}).items()
+        if resource_id and role
+    }
     canonical = json.dumps(
-        {"sid": session_id, "ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc},
+        {"sid": session_id, "ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc, "roles": canonical_roles},
         sort_keys=True,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -145,6 +175,13 @@ _sub_cache: Dict[str, Dict[str, Any]] = {}
 _sub_cache_lock = threading.Lock()
 _SUB_CACHE_TTL = 600  # 10 minutes
 
+# Keep an interactive browser login single-flight per analyst session.  The
+# Azure SDK already serializes it internally, but rejecting a duplicate HTTP
+# request immediately is important: otherwise a double click can wait behind
+# the first account-picker flow for up to the browser-auth timeout.
+_login_request_sessions: set[str] = set()
+_login_request_lock = threading.Lock()
+
 
 def _sub_cache_entry(session_id=None) -> Dict[str, Any]:
     """Return the current session's subscription-cache entry while locked."""
@@ -155,6 +192,20 @@ def _sub_cache_entry(session_id=None) -> Dict[str, Any]:
 
 def _session_cache_key(session_id=None) -> str:
     return (session_id or "").strip() or "_default"
+
+
+def _claim_login_request(session_id=None) -> bool:
+    key = _session_cache_key(session_id)
+    with _login_request_lock:
+        if key in _login_request_sessions:
+            return False
+        _login_request_sessions.add(key)
+        return True
+
+
+def _release_login_request(session_id=None) -> None:
+    with _login_request_lock:
+        _login_request_sessions.discard(_session_cache_key(session_id))
 
 
 def _reset_sub_cache(session_id=None) -> None:
@@ -316,57 +367,65 @@ def azure_browser_login(request: Request, response: Response) -> Dict[str, Any]:
     API calls. Returns identity info + available subscriptions.
     """
     sid = _session_id(request, response)
+    if not _claim_login_request(sid):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Azure sign-in is already in progress. Complete the browser sign-in window before trying again.",
+        )
     try:
-        info = browser_login(sid)
-    except AzureNetworkError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    except AzureConfigError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
-        ) from exc
-
-    # New identity signed in — drop any subscription list cached for a
-    # previous user so the dropdown reflects THIS user's access.
-    _reset_sub_cache(sid)
-
-    # Keep browser-login endpoint fast: subscription enumeration can be slow
-    # in tenants with many subscriptions. Frontend loads subscriptions in a
-    # separate call after auth succeeds.
-    info["subscriptions"] = []
-
-    # ── Post-login pre-warm: kick off subscription list + VM inventory in parallel
-    # so they are cached and ready before the user types a VM name.
-    # Both run as daemon threads — login endpoint returns immediately.
-    threading.Thread(target=_populate_sub_cache, args=(sid,), daemon=True).start()
-    # Pre-warm VM inventory for the saved subscription (if any)
-    def _prewarm_after_login():
         try:
-            _bc = get_browser_credential(sid)
-            if _bc is None:
-                return
-            from services import config_store as _cs
-            sub_id = _cs.get("azure_subscription_id", "").strip()
-            if not sub_id:
-                # No saved sub — wait for subs to load then pre-warm first one
-                import time as _t
-                for _ in range(12):  # wait up to 60s for sub cache
-                    _t.sleep(5)
-                    with _sub_cache_lock:
-                        subs = _sub_cache_entry(sid)["subs"] or []
-                    if subs:
-                        sub_id = subs[0].get("id", "")
-                        break
-            if sub_id:
-                prewarm_vm_inventory(_bc, sub_id, session_id=sid)
-        except Exception:
-            pass
-    threading.Thread(target=_prewarm_after_login, daemon=True).start()
+            info = browser_login(sid)
+        except AzureNetworkError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except AzureConfigError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(exc),
+            ) from exc
 
-    return info
+        # New identity signed in — drop any subscription list cached for a
+        # previous user so the dropdown reflects THIS user's access.
+        _reset_sub_cache(sid)
+
+        # Keep browser-login endpoint fast: subscription enumeration can be slow
+        # in tenants with many subscriptions. Frontend loads subscriptions in a
+        # separate call after auth succeeds.
+        info["subscriptions"] = []
+
+        # ── Post-login pre-warm: kick off subscription list + VM inventory in parallel
+        # so they are cached and ready before the user types a VM name.
+        # Both run as daemon threads — login endpoint returns immediately.
+        threading.Thread(target=_populate_sub_cache, args=(sid,), daemon=True).start()
+        # Pre-warm VM inventory for the saved subscription (if any)
+        def _prewarm_after_login():
+            try:
+                _bc = get_browser_credential(sid)
+                if _bc is None:
+                    return
+                from services import config_store as _cs
+                sub_id = _cs.get("azure_subscription_id", "").strip()
+                if not sub_id:
+                    # No saved sub — wait for subs to load then pre-warm first one
+                    import time as _t
+                    for _ in range(12):  # wait up to 60s for sub cache
+                        _t.sleep(5)
+                        with _sub_cache_lock:
+                            subs = _sub_cache_entry(sid)["subs"] or []
+                        if subs:
+                            sub_id = subs[0].get("id", "")
+                            break
+                if sub_id:
+                    prewarm_vm_inventory(_bc, sub_id, session_id=sid)
+            except Exception:
+                pass
+        threading.Thread(target=_prewarm_after_login, daemon=True).start()
+
+        return info
+    finally:
+        _release_login_request(sid)
 
 
 @router.get("/azure/vm-cache-status")
@@ -409,9 +468,11 @@ def azure_auth_status(request: Request, response: Response) -> Dict[str, Any]:
     """
     sid = _session_id(request, response)
     # In-memory only — persistent token caches are deliberately disabled.
-    from services.azure_monitor import _get_cred, _get_info
-    mem_info = dict(_get_info(sid) or {})
-    if _get_cred(sid) is not None and mem_info.get("logged_in"):
+    # Use the same public credential lookup as every protected Azure endpoint;
+    # returning a browser identity that subscriptions/search cannot use creates
+    # a misleading "signed in" state in the React MFE.
+    mem_info = dict(get_browser_credential_info(sid) or {})
+    if get_browser_credential(sid) is not None and mem_info.get("logged_in"):
         return {
             "method": "browser",
             "name": mem_info.get("name", ""),
@@ -870,7 +931,9 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
     Result is cached for 5 minutes so spike drill-down clicks are instant.
     """
     sid = _session_id(request, response)
-    cache_key = _ts_cache_key(sid, body.vm_ids, body.hours_back, body.start_utc, body.end_utc)
+    cache_key = _ts_cache_key(
+        sid, body.vm_ids, body.hours_back, body.start_utc, body.end_utc, body.vm_types,
+    )
     cached = _ts_cache_get(cache_key)
     if cached is not None:
         return cached

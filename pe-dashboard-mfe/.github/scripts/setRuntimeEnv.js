@@ -1,42 +1,32 @@
 const path = require('path');
 const ejs = require('ejs');
-const fs = require('fs-extra');
+const fs = require('fs');
 
-const args = process.argv.slice(2);
 const sourceEnvFile = path.join(__dirname, '..', 'envs', 'env.ejs');
-console.log(`sourceEnvFile=${sourceEnvFile}`);
-const destinationEnvFile = `${args[0]}env.js`;
+const outputDirectory = process.argv[2];
 
 async function writeRuntimeEnv() {
-  try {
-    await writeOutPutFile(destinationEnvFile, sourceEnvFile, process.env);
-    process.exit(0);
-  } catch (e) {
-    console.error(e);
-    process.exit(1);
+  if (!outputDirectory) {
+    throw new Error('Output directory is required. Example: node setRuntimeEnv.js ./build/');
   }
+
+  const destinationEnvFile = path.resolve(outputDirectory, 'env.js');
+  // Local scripts historically used camel-case names while deployment systems
+  // conventionally expose uppercase variables. Supporting both keeps env.js
+  // portable without placing configuration in the compiled React bundle.
+  const runtimeData = {
+    ...process.env,
+    appName: process.env.appName || process.env.LOCAL_APP_NAME || 'PE Audit Dashboard',
+    frameUrlPath: process.env.frameUrlPath || process.env.FRAME_URL_PATH || '/',
+    apiBaseUrl: process.env.apiBaseUrl || process.env.API_BASE_URL || '',
+  };
+  const envFile = await ejs.renderFile(sourceEnvFile, { data: runtimeData }, { async: true });
+  await fs.promises.mkdir(path.dirname(destinationEnvFile), { recursive: true });
+  await fs.promises.writeFile(destinationEnvFile, envFile, 'utf8');
+  console.log(`Runtime environment ready: ${path.relative(process.cwd(), destinationEnvFile)}`);
 }
 
-async function writeOutPutFile(fileName, templateFileName, environmentVariables) {
-  console.log(`fileName=${fileName}`);
-  if (!fileName) {
-    console.error(`Output filename missing`);
-  }
-  if (!templateFileName) {
-    console.error(`Output template missing`);
-  }
-  console.log(`About to write to file ${fileName} using template ${templateFileName}:\n`);
-  const envFileBuffer = await ejs
-    .renderFile(`${templateFileName}`, { data: environmentVariables }, { async: true })
-    .catch((error) => {
-      console.error(error);
-    });
-  try {
-    fs.outputFileSync(fileName, envFileBuffer);
-  } catch (ex) {
-    console.error(ex);
-  }
-  console.log(`Writing to file ${fileName} using template ${templateFileName}:\nBuffer:\n${envFileBuffer}`);
-}
-
-writeRuntimeEnv();
+writeRuntimeEnv().catch((error) => {
+  console.error(`Unable to generate runtime environment: ${error.message}`);
+  process.exitCode = 1;
+});

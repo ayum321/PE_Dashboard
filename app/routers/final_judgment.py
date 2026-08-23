@@ -3,7 +3,7 @@ Cross-pillar Final Judgment endpoint.
 
 POST /api/final-judgment
     body: { resource, batch, sla_matrix, benchmark, correlation, sow,
-            redflags, executive }   (any subset; all optional)
+            redflags, executive, findings, issues }   (any subset; all optional)
     response: {
         verdict: str,
         decision: "GO" | "HOLD" | "REMEDIATE",
@@ -43,6 +43,8 @@ class FinalJudgmentRequest(BaseModel):
     sow_contract: Optional[Dict[str, Any]] = None   # contract intelligence from Zone F upload
     redflags:     Optional[Dict[str, Any]] = None   # /api/red-flags payload
     executive:   Optional[Dict[str, Any]] = None   # /api/executive-dashboard payload
+    findings:    Optional[Dict[str, Any]] = None   # /api/generate-findings payload
+    issues:      Optional[List[Dict[str, Any]]] = None  # browser-only Issues Register
 
 
 class FinalJudgmentResponse(BaseModel):
@@ -376,6 +378,26 @@ def _build_digest(body: FinalJudgmentRequest, pillars: Dict[str, float]) -> Dict
 
     if body.executive:
         d["executive_kpis"] = body.executive.get("kpis")
+
+    if body.findings:
+        findings = body.findings.get("findings") or []
+        d["findings"] = {
+            "summary": body.findings.get("summary") or {},
+            "critical": [f for f in findings if str(f.get("level", "")).lower() == "critical"][:6],
+        }
+
+    if body.issues:
+        d["issues"] = {
+            "open_count": sum(
+                1 for issue in body.issues
+                if str(issue.get("Status", "")).lower() in ("open", "in progress")
+            ),
+            "critical_open": sum(
+                1 for issue in body.issues
+                if str(issue.get("Status", "")).lower() in ("open", "in progress")
+                and str(issue.get("Severity", "")).lower() == "critical"
+            ),
+        }
 
     return d
 

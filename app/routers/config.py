@@ -7,14 +7,29 @@ POST /api/config/test-key → validate a Gemini API key live
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services import config_store
 
 router = APIRouter()
+
+_SECRET_CONFIG_KEYS = {"gemini_api_key", "nvidia_api_key"}
+
+
+def _ui_secret_config_allowed() -> bool:
+    """Secret configuration belongs in deployment secret injection by default."""
+    return os.environ.get("PE_ALLOW_UI_SECRET_CONFIG", "").strip().casefold() == "true"
+
+
+def _masked_key(value: str, prefix: int, suffix: int) -> str:
+    value = value.strip()
+    if len(value) > prefix + suffix:
+        return value[:prefix] + "••••" + value[-suffix:]
+    return "(configured)" if value else "(not set)"
 
 
 class ConfigPayload(BaseModel):
@@ -48,18 +63,16 @@ class TestKeyRequest(BaseModel):
 
 @router.get("/config")
 def get_config() -> dict[str, Any]:
-    data = config_store.get_all()
-    key = data.get("gemini_api_key", "")
-    if key and len(key) > 8:
-        data["gemini_api_key_masked"] = key[:6] + "••••" + key[-4:]
-    else:
-        data["gemini_api_key_masked"] = "(not set)"
-
-    nvkey = data.get("nvidia_api_key", "")
-    if nvkey and len(nvkey) > 12:
-        data["nvidia_api_key_masked"] = nvkey[:8] + "••••" + nvkey[-4:]
-    else:
-        data["nvidia_api_key_masked"] = "(not set)"
+    # config_store returns its read-through cache; copy before removing secrets
+    # so this response shaping never mutates the persisted configuration.
+    data = dict(config_store.get_all())
+    # Never expose provider secrets to a browser response.  The effective key
+    # includes deployment environment overrides, so the mask still accurately
+    # tells an operator whether the service is configured.
+    data.pop("gemini_api_key", None)
+    data.pop("nvidia_api_key", None)
+    data["gemini_api_key_masked"] = _masked_key(config_store.get_gemini_key(), 6, 4)
+    data["nvidia_api_key_masked"] = _masked_key(config_store.get_nvidia_key(), 8, 4)
 
     # Expose the canonical buffer-band thresholds (single source: pe_config) so the
     # frontend gauge, daily-bar colouring, legends and the batch narrative all share
@@ -89,6 +102,15 @@ def get_config() -> dict[str, Any]:
 @router.post("/config")
 def update_config(payload: ConfigPayload) -> dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
+    blocked_secrets = sorted(_SECRET_CONFIG_KEYS.intersection(updates))
+    if blocked_secrets and not _ui_secret_config_allowed():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "AI provider keys must be supplied by deployment secrets. "
+                "Set PE_ALLOW_UI_SECRET_CONFIG=true only for an explicitly approved local setup."
+            ),
+        )
     for k, v in updates.items():
         config_store.set(k, v)
     # Hot-reload pe_config so a Settings save (e.g. daily_sla_hrs) takes effect

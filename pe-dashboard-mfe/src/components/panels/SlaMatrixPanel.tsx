@@ -76,6 +76,14 @@ interface WorkflowSummaryRow {
   sla_source?: string;
   buffer_pct?: number;
   status?: string;
+  // Direct evidence from the canonical workflow result. A fixed contract end
+  // time produces clock_buffer_mins; without one, the UI falls back to the
+  // same SLA-duration arithmetic used by buffer_pct.
+  clock_buffer_mins?: number | null;
+  clock_sla_status?: string | null;
+  start_delay_mins?: number | null;
+  start_time_status?: string | null;
+  contract_start_time?: string | null;
 }
 
 interface JobBaseline {
@@ -120,6 +128,22 @@ function _workflowTier(src: string): 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow 
   if (src.startsWith('batch_sla_xlsx')) return 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides';
   if (src === 'sow_extracted') return 'Tier 2 \u2014 SOW Contract Batch Window Ceilings';
   return 'Tier 3 \u2014 Global Defaults';
+}
+
+function _finiteNumber(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function _workflowHeadroom(wf: WorkflowSummaryRow): { minutes: number; source: 'clock' | 'duration' } | null {
+  const clockMinutes = _finiteNumber(wf.clock_buffer_mins);
+  if (clockMinutes != null) return { minutes: Math.round(clockMinutes), source: 'clock' };
+
+  const runtime = _finiteNumber(wf.runtime_h);
+  const sla = _finiteNumber(wf.sla_h);
+  if (runtime == null || sla == null || sla <= 0) return null;
+  return { minutes: Math.round((sla - runtime) * 60), source: 'duration' };
 }
 
 const useStyles = makeStyles((theme) => ({
@@ -317,6 +341,27 @@ export function SlaMatrixPanel() {
     }],
   };
 
+  const renderHeadroomCell = (wf: WorkflowSummaryRow) => {
+    const headroom = _workflowHeadroom(wf);
+    if (!headroom) return <TableCell align="right" style={{ color: '#6b7db3' }}>—</TableCell>;
+    const color = headroom.minutes < 0 ? '#f43f5e' : headroom.minutes <= 15 ? '#f59e0b' : '#10d96e';
+    const text = headroom.minutes < 0 ? `${Math.abs(headroom.minutes)}m over` : `${headroom.minutes}m left`;
+    const title = headroom.source === 'clock'
+      ? 'Actual end time against the contracted clock deadline. Positive means the workflow finished before deadline.'
+      : 'SLA duration minus observed workflow runtime. Used because this contract has no fixed clock deadline.';
+    return <TableCell align="right" title={title} style={{ color, fontFamily: 'monospace', fontWeight: 700 }}>{text}</TableCell>;
+  };
+
+  const renderStartDelayCell = (wf: WorkflowSummaryRow) => {
+    const delay = _finiteNumber(wf.start_delay_mins);
+    if (delay == null) return <TableCell align="right" style={{ color: '#6b7db3' }}>—</TableCell>;
+    const status = wf.start_time_status || '';
+    const color = status === 'SEVERELY_LATE' ? '#f43f5e' : status === 'LATE_START' ? '#f59e0b' : '#10d96e';
+    const text = delay > 0 ? `+${Math.round(delay)}m late` : delay < 0 ? `${Math.abs(Math.round(delay))}m early` : 'On time';
+    const title = `Actual workflow start compared with the contracted start${wf.contract_start_time ? ` (${wf.contract_start_time})` : ''}.`;
+    return <TableCell align="right" title={title} style={{ color, fontFamily: 'monospace', fontWeight: 700 }}>{text}</TableCell>;
+  };
+
   return (
     <Box style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <SectionBanner
@@ -377,6 +422,7 @@ export function SlaMatrixPanel() {
               <Box>
                 <Typography variant="subtitle2">Active SLA Commitments</Typography>
                 <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
+                <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#6b7db3' }}>Headroom is shown in minutes; start delay appears only where the contract defines a start time.</Typography>
               </Box>
               <Link to="/sow" style={{ fontSize: 10, fontWeight: 700, color: '#22d3ee', textDecoration: 'none' }}>View SOW Contract {'\u2192'}</Link>
             </Box>
@@ -399,6 +445,8 @@ export function SlaMatrixPanel() {
                       <TableCell>Type</TableCell>
                       <TableCell align="right">SLA</TableCell>
                       <TableCell align="right">Peak Window</TableCell>
+                      <TableCell align="right">Headroom min</TableCell>
+                      <TableCell align="right">Start delay</TableCell>
                       <TableCell align="right">Buffer %</TableCell>
                       <TableCell>Status</TableCell>
                     </TableRow>
@@ -410,6 +458,8 @@ export function SlaMatrixPanel() {
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
                         <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
                         <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        {renderHeadroomCell(wf)}
+                        {renderStartDelayCell(wf)}
                         <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
                           {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                         </TableCell>
@@ -437,6 +487,8 @@ export function SlaMatrixPanel() {
                       <TableCell>Type</TableCell>
                       <TableCell align="right">SLA</TableCell>
                       <TableCell align="right">Peak Window</TableCell>
+                      <TableCell align="right">Headroom min</TableCell>
+                      <TableCell align="right">Start delay</TableCell>
                       <TableCell align="right">Buffer %</TableCell>
                       <TableCell>Status</TableCell>
                     </TableRow>
@@ -448,6 +500,8 @@ export function SlaMatrixPanel() {
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
                         <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
                         <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        {renderHeadroomCell(wf)}
+                        {renderStartDelayCell(wf)}
                         <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
                           {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                         </TableCell>
@@ -473,6 +527,8 @@ export function SlaMatrixPanel() {
                       <TableCell>Type</TableCell>
                       <TableCell align="right">SLA</TableCell>
                       <TableCell align="right">Peak Window</TableCell>
+                      <TableCell align="right">Headroom min</TableCell>
+                      <TableCell align="right">Start delay</TableCell>
                       <TableCell align="right">Buffer %</TableCell>
                       <TableCell>Status</TableCell>
                     </TableRow>
@@ -484,6 +540,8 @@ export function SlaMatrixPanel() {
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
                         <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
                         <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        {renderHeadroomCell(wf)}
+                        {renderStartDelayCell(wf)}
                         <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
                           {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                         </TableCell>

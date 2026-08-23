@@ -200,9 +200,23 @@ _METRIC_UNITS = {
 # the list is unsupported for that VM, so metrics are requested in small groups
 # and each group is failure-isolated — a VM without AMA still returns CPU, and a
 # VM that does not expose the availability metric still returns everything else.
+# Keep the platform percentage metrics independently queryable.  Memory
+# counters require AMA on many customer VMs, while Percentage CPU is available
+# on every running VM.  Keeping them in one Azure query meant a VM without the
+# memory counter lost its *CPU* series too, so the Fleet Heatmap rendered a
+# misleading empty row instead of the full healthy CPU history.
+#
+# Each bucket below is deliberately a small failure-isolation boundary.  A
+# missing optional metric must never suppress a different metric which the VM
+# did emit.  The extra calls are bounded by the selected VM count and are worth
+# the auditability gain: an empty heatmap cell now means "metric not emitted",
+# never "a sibling metric was unsupported".
 _TS_METRIC_GROUPS = [
-    _VM_METRICS_PLATFORM,
-    _VM_METRICS_DISK,
+    ["Percentage CPU"],
+    ["Available Memory Percentage"],
+    ["Available Memory Bytes"],
+    ["OS Disk Bandwidth Consumed Percentage"],
+    ["Data Disk Bandwidth Consumed Percentage"],
     _VM_METRICS_THROUGHPUT,
     _VM_METRICS_AVAILABILITY,
 ]
@@ -1620,6 +1634,16 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         return {"vms": {}, "patterns": [], "baseline": {}}
 
     t0 = _t.perf_counter()
+    # ARM resource IDs are case-insensitive.  Normalize both sides before
+    # looking up the tag-aware role supplied by the Resource fetch, otherwise
+    # an innocuous casing difference falls back to hostname guessing (which
+    # misses names such as prbd...) and grades expected DB SGA/PGA memory as an
+    # application incident.
+    _vm_types_by_resource_id = {
+        str(resource_id).strip().lower(): str(role).strip().upper()
+        for resource_id, role in (vm_types or {}).items()
+        if resource_id and role
+    }
     result = {}
     workers = min(20, len(resource_ids))
 
@@ -1647,7 +1671,10 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                     _rg = ""
                 # Prefer the caller-supplied role (tag-aware, computed during the
                 # resource fetch) over a fresh name-only guess — see docstring.
-                _vm_role = (vm_types or {}).get(rid) or _infer_server_type(vm_name, None, _rg)
+                _vm_role = (
+                    _vm_types_by_resource_id.get(rid.strip().lower())
+                    or str(_infer_server_type(vm_name, None, _rg) or "APP").upper()
+                )
                 _vm_is_db = (_vm_role == "DB")
 
                 # Compute stats and spikes per metric

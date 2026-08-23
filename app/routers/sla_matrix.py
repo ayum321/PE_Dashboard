@@ -631,7 +631,7 @@ def _compute_sla_matrix(
         elif sla_hrs <= 0:
             reason_code = "SLA_MISSING"
             buffer_pct_val = None
-            st_label = "FAILED" if is_failure else "OK"  # cannot classify without SLA
+            st_label = "FAILED" if is_failure else "SLA_MISSING"
         else:
             reason_code = None
             buffer_pct_val = round((sla_hrs - hrs) / sla_hrs * 100, 2)
@@ -669,7 +669,9 @@ def _compute_sla_matrix(
     # FAILED runs are isolated — not counted toward SLA compliance/breach
     total_runs     = len(rdf)
     failed_count   = int((rdf["status"] == "FAILED").sum())   if not rdf.empty else 0
-    eligible_runs  = total_runs - failed_count
+    # Missing SLA is a data-quality gap, not a passing run or a breach.  Keep it
+    # visible in the matrix while excluding it from compliance denominators.
+    eligible_runs  = int(rdf["status"].isin(["OK", "LONG_JOB", "AT_RISK", "BREACH"]).sum()) if not rdf.empty else 0
     breach_count   = int((rdf["status"] == "BREACH").sum())   if not rdf.empty else 0
     atrisk_count   = int((rdf["status"] == "AT_RISK").sum())  if not rdf.empty else 0
     longjob_count  = int((rdf["status"] == "LONG_JOB").sum()) if not rdf.empty else 0

@@ -147,7 +147,18 @@ async def serve_static(file_path: str):
     """Serve static files with no-cache headers and ETag so code
     changes propagate immediately on browser reload."""
     full = STATIC_DIR / file_path
-    if not full.resolve().is_relative_to(STATIC_DIR.resolve()) or not full.is_file():
+    static_root = STATIC_DIR.resolve()
+    # The React production build keeps its hashed bundles under mfe/static.
+    # Prefer legacy app/static when a name exists in both locations, then fall
+    # back to the MFE bundle so /static/js/*.js remains deployable via Docker.
+    if not full.resolve().is_relative_to(static_root) or not full.is_file():
+        mfe_static_root = (MFE_DIR / "static").resolve()
+        mfe_full = MFE_DIR / "static" / file_path
+        if not mfe_full.resolve().is_relative_to(mfe_static_root) or not mfe_full.is_file():
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        full = mfe_full
+    if not full.is_file():
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
     suffix = full.suffix.lower()
@@ -327,12 +338,35 @@ async def health() -> dict:
 
 @app.get("/{file_path:path}", include_in_schema=False)
 async def serve_mfe(file_path: str):
-    """Serve the built React MFE when the container includes one."""
+    """Serve built React files and let the client router handle SPA routes.
+
+    Docker copies the React build to ``app/mfe``.  A browser refresh at a
+    client-side route such as ``/batch`` does not name a physical file, so it
+    must receive the SPA shell.  Requests which look like missing assets (or
+    API paths) stay 404s: returning HTML for a missing JavaScript file hides
+    deployment errors and causes opaque browser failures.
+    """
     if not MFE_DIR.is_dir() or not file_path:
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
     candidate = (MFE_DIR / file_path).resolve()
-    if not candidate.is_relative_to(MFE_DIR.resolve()) or not candidate.is_file():
+    if not candidate.is_relative_to(MFE_DIR.resolve()):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
-    return FileResponse(candidate)
+    if candidate.is_file():
+        return FileResponse(candidate)
+
+    # API routes are never React routes.  A suffix means this was intended to
+    # be a physical asset (for example /static/js/main.hash.js), not an SPA
+    # navigation target.
+    if file_path.startswith("api/") or Path(file_path).suffix:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    index_file = MFE_DIR / "index.html"
+    if not index_file.is_file():
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    response = FileResponse(index_file, media_type="text/html")
+    response.headers["Cache-Control"] = "no-store"
+    return response

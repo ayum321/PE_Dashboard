@@ -58,13 +58,30 @@ export interface AzureStatus {
 }
 
 export const getApiBaseUrl = (): string => {
+  const isLocalPage = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
   const configured = (window.env.API_BASE_URL || '').trim();
   if (configured) {
+    // Older local env.js files used 127.0.0.1 while CRA opens localhost.  Keep
+    // the endpoint's port but use the page host so an existing dev session
+    // cannot split the Azure pe_sid cookie across two browser sites.
+    try {
+      const configuredUrl = new URL(configured);
+      const configuredIsLocal = configuredUrl.hostname === '127.0.0.1' || configuredUrl.hostname === 'localhost';
+      if (isLocalPage && configuredIsLocal && configuredUrl.hostname !== window.location.hostname) {
+        return `${configuredUrl.protocol}//${window.location.hostname}${configuredUrl.port ? `:${configuredUrl.port}` : ''}`;
+      }
+    } catch {
+      // Preserve the supplied value below; request() will surface a clear error.
+    }
     return configured.replace(/\/$/, '');
   }
-  return window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost'
-    ? 'http://127.0.0.1:8765'
-    : '';
+  // Keep the API hostname aligned with the page hostname in local mode.
+  // `localhost` and `127.0.0.1` are different browser sites: mixing them
+  // prevents the pe_sid Azure session cookie from surviving login → discovery.
+  if (isLocalPage) {
+    return `http://${window.location.hostname}:8765`;
+  }
+  return '';
 };
 
 const readError = async (response: Response): Promise<string> => {
@@ -87,7 +104,7 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
     ...init,
     // Required so the pe_sid session cookie (Azure credential cache, batch
     // session cache, etc.) is sent on cross-origin requests from the MFE
-    // dev server (localhost:3000) to the API (127.0.0.1:8765).
+    // dev server to its same-host local API (for example localhost:8765).
     credentials: 'include',
     headers: {
       Accept: 'application/json',
@@ -107,7 +124,14 @@ export const getAuditContext = (): Promise<AuditContext> => request<AuditContext
 /** Same contract as request(), but uses XMLHttpRequest instead of fetch so
  * real upload-progress events are available (fetch has no upload progress
  * API) — drives the percentage shown by UploadTile's progress bar. */
-const requestWithProgress = <T>(path: string, formData: FormData, onProgress?: (pct: number) => void): Promise<T> =>
+/**
+ * The additional byte arguments deliberately remain optional.  Existing
+ * callers that only need a percentage retain their current contract, while
+ * Upload & Intake can show the same loaded/total detail as the local app.
+ */
+export type UploadProgressHandler = (pct: number, loaded?: number, total?: number) => void;
+
+const requestWithProgress = <T>(path: string, formData: FormData, onProgress?: UploadProgressHandler): Promise<T> =>
   new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${getApiBaseUrl()}${path}`);
@@ -115,7 +139,7 @@ const requestWithProgress = <T>(path: string, formData: FormData, onProgress?: (
     xhr.responseType = 'json';
     xhr.upload.onprogress = (event) => {
       if (onProgress && event.lengthComputable) {
-        onProgress(Math.round((event.loaded / event.total) * 100));
+        onProgress(Math.round((event.loaded / event.total) * 100), event.loaded, event.total);
       }
     };
     xhr.onload = () => {
@@ -131,7 +155,7 @@ const requestWithProgress = <T>(path: string, formData: FormData, onProgress?: (
     xhr.send(formData);
   });
 
-export const uploadDashboardFile = (file: File, onProgress?: (pct: number) => void): Promise<SmartUploadResponse> => {
+export const uploadDashboardFile = (file: File, onProgress?: UploadProgressHandler): Promise<SmartUploadResponse> => {
   const formData = new FormData();
   formData.append('file', file);
   return requestWithProgress<SmartUploadResponse>('/api/smart-upload', formData, onProgress);
@@ -150,7 +174,7 @@ export const processBatch = (file: File): Promise<DashboardPayload> => {
   return request<DashboardPayload>('/api/process-batch', { method: 'POST', body: formData });
 };
 
-export const processBatchMulti = (files: File[], onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
+export const processBatchMulti = (files: File[], onProgress?: UploadProgressHandler): Promise<DashboardPayload> => {
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
   return requestWithProgress<DashboardPayload>('/api/process-batch/multi', formData, onProgress);
@@ -169,7 +193,7 @@ export const uploadSlaMatrix = (file: File, slaMode = 'daily'): Promise<Dashboar
  * separate flat-custom-ceiling comparison view (SLA Matrix tab). Confusing
  * two different backend features by name was the root cause of Batch Review
  * never recomputing after a "Workflow SLA Info" upload. */
-export const uploadBatchSlaXlsx = (file: File, onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
+export const uploadBatchSlaXlsx = (file: File, onProgress?: UploadProgressHandler): Promise<DashboardPayload> => {
   const formData = new FormData();
   formData.append('file', file);
   return requestWithProgress<DashboardPayload>('/api/batch-sla/upload', formData, onProgress);
@@ -214,19 +238,28 @@ export const generateFindings = (payload: DashboardPayload): Promise<DashboardPa
 export const getRedFlags = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/red-flags', payload);
 
+/** The populated four-section PE review shown by the local FastAPI dashboard.
+ * The backend owns the calculations and text; the MFE only renders this
+ * evidence response. */
+export const getPeNarrative = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/pe-narrative', payload);
+
 export const getExecutiveDashboard = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/executive-dashboard', payload);
+
+export const getFinalJudgment = (payload: DashboardPayload): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/final-judgment', payload);
 
 export const compareSow = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/sow/compare', payload);
 
-export const parseSow = (file: File, onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
+export const parseSow = (file: File, onProgress?: UploadProgressHandler): Promise<DashboardPayload> => {
   const formData = new FormData();
   formData.append('file', file);
   return requestWithProgress<DashboardPayload>('/api/sow/parse', formData, onProgress);
 };
 
-export const uploadBenchmark = (file: File, onProgress?: (pct: number) => void): Promise<DashboardPayload> => {
+export const uploadBenchmark = (file: File, onProgress?: UploadProgressHandler): Promise<DashboardPayload> => {
   const formData = new FormData();
   formData.append('file', file);
   return requestWithProgress<DashboardPayload>('/api/benchmark', formData, onProgress);
@@ -263,15 +296,27 @@ export const fetchAzureTimeseries = (payload: DashboardPayload): Promise<Dashboa
 export const processResource = (servers: ResourceServer[]): Promise<DashboardPayload> =>
   postDashboardPayload('/api/process-resource', { servers });
 
-export const exportReport = (payload: DashboardPayload): Promise<Blob> =>
-  fetch(`${getApiBaseUrl()}/api/export-report`, {
+export interface ExportReportResult {
+  blob: Blob;
+  /** FastAPI writes this only after it attempts the frozen Review Registry save. */
+  archiveStatus: 'saved' | 'skipped' | 'failed' | 'unknown';
+}
+
+export const exportReportWithStatus = async (payload: DashboardPayload): Promise<ExportReportResult> => {
+  const response = await fetch(`${getApiBaseUrl()}/api/export-report`, {
     method: 'POST',
     credentials: 'include',
     headers: { Accept: 'text/html', 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  }).then(async (response) => {
-    if (!response.ok) {
-      throw new Error(await readError(response));
-    }
-    return response.blob();
   });
+  if (!response.ok) throw new Error(await readError(response));
+  const archiveStatus = response.headers.get('X-Archive-Status');
+  return {
+    blob: await response.blob(),
+    archiveStatus: archiveStatus === 'saved' || archiveStatus === 'skipped' || archiveStatus === 'failed' ? archiveStatus : 'unknown',
+  };
+};
+
+/** Compatibility for callers that only need a downloaded blob. */
+export const exportReport = async (payload: DashboardPayload): Promise<Blob> =>
+  (await exportReportWithStatus(payload)).blob;

@@ -675,8 +675,13 @@ def _build_executive_summary(
             ),
         })
 
-    # ── Part 3: Actual Bottlenecks ───────────────────────────
+    # ── Part 3: Actual Bottlenecks / monitoring notes ────────
+    # A DB using its expected SGA/PGA allocation is operational context, not
+    # a bottleneck.  Keeping it in the same list previously produced the
+    # self-contradictory sentence "Action required" followed by "No action
+    # needed".  Preserve the evidence, but classify it separately.
     bottlenecks = []
+    monitoring_notes = []
     for s in known:
         if s.get("agg_trap"):
             continue  # Already classified as false alarm
@@ -703,13 +708,20 @@ def _build_executive_summary(
         if s.get("dual_pressure"):
             issues.append("DUAL PRESSURE — CPU + Memory both saturated; likely swapping, check OOM killer logs")
         if issues:
-            bottlenecks.append({
+            item = {
                 "host":   s["host"],
                 "type":   s["type"],
                 "environment": s.get("environment", ""),
                 "status": s["status"],
                 "issues": issues,
-            })
+            }
+            is_expected_db_memory_only = all(
+                "expected range for DB" in issue for issue in issues
+            )
+            if is_expected_db_memory_only:
+                monitoring_notes.append(item)
+            else:
+                bottlenecks.append(item)
 
     # ── Part 4: Executive Summary (2 lines) ──────────────────
     # Keep the diagnosis byte-for-byte consistent with the KPI tile.  The
@@ -754,6 +766,13 @@ def _build_executive_summary(
             f"{'...' if len(bottlenecks) > 3 else ''}. "
             f"{rca_hint}"
         )
+    elif monitoring_notes:
+        top_hosts = ", ".join(note["host"].split(".")[0] for note in monitoring_notes[:3])
+        line2 = (
+            f"No capacity action required. {len(monitoring_notes)} DB server(s) "
+            f"are within the expected 80–92% SGA/PGA allocation range: {top_hosts}"
+            f"{'...' if len(monitoring_notes) > 3 else ''}. Monitor only for growth above 92% used."
+        )
     elif n_agg and real_crit == 0 and real_warn == 0:
         line2 = (
             "All apparent CPU alerts trace back to short-lived aggregation spikes. "
@@ -773,6 +792,7 @@ def _build_executive_summary(
         "threshold_warning": real_warn,
         "false_alarms":  false_alarms,
         "bottlenecks":   bottlenecks,
+        "monitoring_notes": monitoring_notes,
         "summary_line1": line1,
         "summary_line2": line2,
     }

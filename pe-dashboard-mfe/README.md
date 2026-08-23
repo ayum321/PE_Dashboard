@@ -2,6 +2,8 @@
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app) and the Luminate Portal Create MFE template
 
+For the company-portal build, static publish target, and runtime API configuration, see [DEPLOYMENT_HANDOFF.md](DEPLOYMENT_HANDOFF.md).
+
 ## Available Scripts
 
 ---
@@ -12,7 +14,7 @@ This project was bootstrapped with [Create React App](https://github.com/faceboo
 ### `npm start`
 
 Runs the app in the development mode.\
-Open [http://localhost:7777](http://localhost:7777) to view it in the browser within a local portal instance.
+Open the local portal at the URL printed by `launch-luminate-portal`.
 
 The page will reload if you make edits.\
 You will also see any lint errors in the console.
@@ -50,7 +52,9 @@ You don’t have to ever use `eject`. The curated feature set is suitable for sm
 
 ### `start:standalone`
 
-This command runs the application in standalone mode, without the portal shell, so you can use other local version of portal rather than the one that is offered as package
+This command runs the React dashboard in standalone mode on [http://localhost:3000](http://localhost:3000), without the portal shell, and opens the default browser after the first successful compile.
+
+For Windows, run `start-mfe.bat [API_BASE_URL]` from the repository root. It installs locked MFE dependencies when needed, starts the local audit API when the default `http://127.0.0.1:8765` endpoint is absent, verifies its health, and then starts the React dashboard. The optional API URL is for an already-running remote or local API.
 
 ### `test-no-coverage`
 

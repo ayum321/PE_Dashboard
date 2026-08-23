@@ -108,11 +108,13 @@ export function CustomerAuditBanner() {
         <Box style={{ minWidth: 0 }}>
           <Typography variant="caption" style={{ textTransform: 'uppercase', letterSpacing: '.18em', color: '#6b7db3', fontWeight: 700, fontSize: 10 }}>Customer</Typography>
           <Typography variant="h5" style={{ fontWeight: 900, color: '#f0f4ff', lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {customerName || '\u2014'}
+            {customerName || 'Unassigned engagement'}
           </Typography>
           <Box display="flex" alignItems="center" style={{ gap: 6, marginTop: 2 }}>
             <Typography variant="caption" style={{ color: '#6b7db3' }}>
-              {customerName ? (batch ? 'Sourced from Ctrl-M filename' : 'Sourced from Azure tags') : 'No customer identified yet'}
+              {customerName
+                ? (batch ? 'Sourced from Ctrl-M filename' : 'Sourced from Azure tags')
+                : 'No customer tag was supplied; fleet analysis remains valid.'}
             </Typography>
             {envBadge && <span className="metric-badge" style={{ fontSize: 8 }}>{envBadge}</span>}
           </Box>
