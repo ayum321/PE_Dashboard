@@ -2,7 +2,7 @@
 
 Run [`start.bat`](start.bat) to start the original FastAPI browser dashboard locally.
 
-- Browser UI: `http://localhost:8765/legacy`
+- Browser UI: `http://127.0.0.1:8765/legacy`
 - Purpose: parity comparison and local review only
 - Not deployed to the Blue Yonder Portal
 

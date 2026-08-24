@@ -49,7 +49,7 @@ if errorlevel 1 (
 )
 
 echo PE Audit API local mode
-echo   API: http://localhost:8765
+echo   API: http://127.0.0.1:8765
 echo   This window supplies upload, SLA, findings, and Azure API calls for the React MFE.
 echo   Press Ctrl+C to stop the local API.
 echo.

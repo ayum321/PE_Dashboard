@@ -4,8 +4,8 @@ There are two browser dashboards. They use the same FastAPI processing API, but 
 
 | What you need | Run | Browser address | Deployment use |
 | --- | --- | --- | --- |
-| React Portal MFE | `react-dashboard\\start.bat` | `http://localhost:3000` | Blue Yonder Portal / Stratosphere MFE |
-| Original FastAPI dashboard | `fastapi-dashboard\\start.bat` | `http://localhost:8765/legacy` | Local legacy comparison only |
+| React Portal MFE | `react-dashboard\\start.bat` | `http://127.0.0.1:3000` | Blue Yonder Portal / Stratosphere MFE |
+| Original FastAPI dashboard | `fastapi-dashboard\\start.bat` | `http://127.0.0.1:8765/legacy` | Local legacy comparison only |
 
 You may run both at once. They intentionally reuse one local API process on port `8765` and therefore show the same local audit session data.
 

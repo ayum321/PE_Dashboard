@@ -62,26 +62,26 @@ if not exist "%MFE_DIR%\node_modules\react-scripts\bin\react-scripts.js" (
 rem Optional first argument: API endpoint. It is an endpoint only, never a password or secret.
 set "LOCAL_API_URL=%~1"
 set "LOCAL_API_ARGUMENT=%~1"
-if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://localhost:8765"
+if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://127.0.0.1:8765"
 
 call :ensure_api
 if errorlevel 1 exit /b 1
 
 rem Never start a second development server on the same port. Two React
-rem servers can bind different localhost address families and make the browser
+rem servers can bind different loopback address families and make the browser
 rem appear to serve stale code.  Check this only after the API is healthy, so
 rem start-mfe.bat also repairs an API that was stopped under an existing UI.
 call :ui_is_ready
 if not errorlevel 1 (
-  echo React MFE is already running at http://localhost:3000
-  start "" "http://localhost:3000"
+  echo React MFE is already running at http://127.0.0.1:3000
+  start "" "http://127.0.0.1:3000"
   exit /b 0
 )
 
 rem These values override the deployment template for this local process only.
 set "appName=PE Audit Dashboard (Local)"
 set "frameUrlPath=/"
-rem With no explicit endpoint, dashboardApi derives localhost/127.0.0.1 from
+rem With no explicit endpoint, dashboardApi derives the page host from
 rem the browser URL. That keeps the pe_sid Azure session cookie first-party.
 set "apiBaseUrl="
 if not "%LOCAL_API_ARGUMENT%"=="" set "apiBaseUrl=%LOCAL_API_URL%"
@@ -89,7 +89,7 @@ if not "%LOCAL_API_ARGUMENT%"=="" set "apiBaseUrl=%LOCAL_API_URL%"
 echo.
 echo React MFE local mode
 echo   Node: %NODE_VERSION%  ^|  npm: %NPM_VERSION%
-echo   UI:   http://localhost:3000
+echo   UI:   http://127.0.0.1:3000
 echo   API:  %LOCAL_API_URL%
 echo.
 echo The local audit API is ready. The React MFE will now start.
@@ -99,7 +99,7 @@ echo.
 rem react-scripts has no reliable browser-launch behaviour in this MFE setup.
 rem Open the dashboard only after the server answers, avoiding a browser
 rem connection-refused page during initial compilation.
-start "" /b powershell -NoProfile -WindowStyle Hidden -Command "$deadline=(Get-Date).AddSeconds(45); while((Get-Date) -lt $deadline){ try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://localhost:3000'; if($r.StatusCode -eq 200){ Start-Process 'http://localhost:3000'; break } } catch {}; Start-Sleep -Seconds 1 }"
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "$deadline=(Get-Date).AddSeconds(45); while((Get-Date) -lt $deadline){ try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:3000'; if($r.StatusCode -eq 200){ Start-Process 'http://127.0.0.1:3000'; break } } catch {}; Start-Sleep -Seconds 1 }"
 
 pushd "%MFE_DIR%"
 call npm run start:standalone
@@ -111,13 +111,13 @@ exit /b %EXIT_CODE%
 call :api_is_ready
 if not errorlevel 1 goto :eof
 
-if /i not "%LOCAL_API_URL%"=="http://localhost:8765" (
+if /i not "%LOCAL_API_URL%"=="http://127.0.0.1:8765" (
   echo ERROR: The configured API is not reachable: %LOCAL_API_URL%
   echo Start that API service or run start-mfe.bat with a reachable API URL.
   exit /b 1
 )
 
-echo Starting local audit API on http://localhost:8765 ...
+echo Starting local audit API on http://127.0.0.1:8765 ...
 start "PE Audit API (local)" /d "%CD%" cmd /k call start-api-local.bat
 
 for /l %%R in (1,1,20) do (
@@ -135,5 +135,5 @@ powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -T
 exit /b %ERRORLEVEL%
 
 :ui_is_ready
-powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://localhost:3000'; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:3000'; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
 exit /b %ERRORLEVEL%
