@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import os
 
@@ -51,8 +51,18 @@ if pe_config.AI_ENABLED:
 
 # ── Paths ───────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATES_DIR = BASE_DIR / "templates"
+# FastAPI remains the processing API for both local experiences.  Only the
+# retired browser UI lives outside it so Portal MFE deployments cannot serve
+# legacy HTML by accident.
+PROJECT_DIR = BASE_DIR.parent
+LEGACY_UI_DIR = Path(
+    os.environ.get("PE_LEGACY_UI_DIR", PROJECT_DIR / "fastapi-dashboard" / "legacy-ui")
+).resolve()
+LEGACY_STATIC_DIR = LEGACY_UI_DIR / "static"
+LEGACY_TEMPLATES_DIR = LEGACY_UI_DIR / "templates"
+UI_MODE = os.environ.get("PE_UI_MODE", "api").strip().lower()
+if UI_MODE not in {"api", "legacy", "dual", "bundled_mfe"}:
+    raise RuntimeError("PE_UI_MODE must be one of: api, legacy, dual, bundled_mfe")
 MFE_DIR = BASE_DIR / "mfe"
 
 # ── Engagement-specific keys that must NEVER outlive a session ──
@@ -121,7 +131,7 @@ from starlette.responses import Response as _StarletteResponse
 import hashlib as _hashlib
 import mimetypes as _mimetypes
 
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+legacy_templates = Jinja2Templates(directory=str(LEGACY_TEMPLATES_DIR))
 
 _STATIC_MIME_OVERRIDES = {
     ".js": "application/javascript",
@@ -146,20 +156,18 @@ def _file_content_hash(path: Path) -> str:
 async def serve_static(file_path: str):
     """Serve static files with no-cache headers and ETag so code
     changes propagate immediately on browser reload."""
-    full = STATIC_DIR / file_path
-    static_root = STATIC_DIR.resolve()
-    # The React production build keeps its hashed bundles under mfe/static.
-    # Prefer legacy app/static when a name exists in both locations, then fall
-    # back to the MFE bundle so /static/js/*.js remains deployable via Docker.
-    if not full.resolve().is_relative_to(static_root) or not full.is_file():
+    if UI_MODE in {"legacy", "dual", "api"}:
+        full = LEGACY_STATIC_DIR / file_path
+        static_root = LEGACY_STATIC_DIR.resolve()
+        if not full.resolve().is_relative_to(static_root) or not full.is_file():
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+    elif UI_MODE == "bundled_mfe":
         mfe_static_root = (MFE_DIR / "static").resolve()
         mfe_full = MFE_DIR / "static" / file_path
         if not mfe_full.resolve().is_relative_to(mfe_static_root) or not mfe_full.is_file():
-            from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Not found"}, status_code=404)
         full = mfe_full
-    if not full.is_file():
-        from fastapi.responses import JSONResponse
+    else:
         return JSONResponse({"detail": "Not found"}, status_code=404)
     suffix = full.suffix.lower()
     media = _STATIC_MIME_OVERRIDES.get(suffix) or _mimetypes.guess_type(str(full))[0] or "application/octet-stream"
@@ -298,11 +306,30 @@ async def get_audit_context() -> dict:
 # ── Shell route ─────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(request: Request) -> HTMLResponse:
-    """Render the SPA shell. Cache-bust key via content hash of app.js."""
-    if (MFE_DIR / "index.html").is_file():
+    """Render only the explicitly selected local UI shell."""
+    if UI_MODE in {"legacy", "dual"} and (LEGACY_TEMPLATES_DIR / "index.html").is_file():
+        _v = _file_content_hash(LEGACY_STATIC_DIR / "app.js")
+        response = legacy_templates.TemplateResponse(request, "index.html", {"static_v": _v})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    if UI_MODE == "bundled_mfe" and (MFE_DIR / "index.html").is_file():
         return HTMLResponse((MFE_DIR / "index.html").read_text(encoding="utf-8"))
-    _v = _file_content_hash(STATIC_DIR / "app.js")
-    response = templates.TemplateResponse(request, "index.html", {"static_v": _v})
+    return JSONResponse({"detail": "PE Audit API is running. Launch a dashboard UI separately."}, status_code=404)
+
+
+@app.get("/legacy", response_class=HTMLResponse, include_in_schema=False)
+async def legacy_index(request: Request) -> HTMLResponse:
+    """Expose the local comparison UI without requiring a second API server.
+
+    React uses the same API process from port 3000.  This route is available
+    only when the legacy assets are present in a local checkout; the API-only
+    Docker image intentionally does not contain those files.
+    """
+    index_file = LEGACY_TEMPLATES_DIR / "index.html"
+    app_js = LEGACY_STATIC_DIR / "app.js"
+    if not index_file.is_file() or not app_js.is_file():
+        return JSONResponse({"detail": "The local legacy dashboard assets are unavailable."}, status_code=404)
+    response = legacy_templates.TemplateResponse(request, "index.html", {"static_v": _file_content_hash(app_js)})
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -312,7 +339,9 @@ async def report_archive_page(request: Request) -> HTMLResponse:
     """Standalone local Report Archive page — separate from the main
     dashboard SPA on purpose, so browsing past reports never risks the
     main app's state/tabs. Data comes from /api/report-archive*."""
-    response = templates.TemplateResponse(request, "report_archive.html", {})
+    if UI_MODE not in {"legacy", "dual"} or not (LEGACY_TEMPLATES_DIR / "report_archive.html").is_file():
+        return JSONResponse({"detail": "The legacy dashboard UI is not running."}, status_code=404)
+    response = legacy_templates.TemplateResponse(request, "report_archive.html", {})
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -320,7 +349,7 @@ async def report_archive_page(request: Request) -> HTMLResponse:
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon() -> FileResponse:
     """Serve SVG favicon — eliminates the 404 in browser console."""
-    ico = BASE_DIR / "static" / "favicon.svg"
+    ico = LEGACY_STATIC_DIR / "favicon.svg"
     if ico.exists():
         return FileResponse(str(ico), media_type="image/svg+xml")
     return RedirectResponse("/static/favicon.svg")
@@ -333,7 +362,7 @@ async def health() -> dict:
     """Liveness probe + identity. start.bat uses 'service' to verify
     no foreign app is squatting on this port."""
     return {"status": "ok", "service": _PE_IDENTITY, "version": app.version,
-            "pid": os.getpid()}
+            "pid": os.getpid(), "ui_mode": UI_MODE}
 
 
 @app.get("/{file_path:path}", include_in_schema=False)
@@ -346,12 +375,10 @@ async def serve_mfe(file_path: str):
     API paths) stay 404s: returning HTML for a missing JavaScript file hides
     deployment errors and causes opaque browser failures.
     """
-    if not MFE_DIR.is_dir() or not file_path:
-        from fastapi.responses import JSONResponse
+    if UI_MODE != "bundled_mfe" or not MFE_DIR.is_dir() or not file_path:
         return JSONResponse({"detail": "Not found"}, status_code=404)
     candidate = (MFE_DIR / file_path).resolve()
     if not candidate.is_relative_to(MFE_DIR.resolve()):
-        from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
     if candidate.is_file():
         return FileResponse(candidate)
@@ -360,12 +387,10 @@ async def serve_mfe(file_path: str):
     # be a physical asset (for example /static/js/main.hash.js), not an SPA
     # navigation target.
     if file_path.startswith("api/") or Path(file_path).suffix:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
 
     index_file = MFE_DIR / "index.html"
     if not index_file.is_file():
-        from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
     response = FileResponse(index_file, media_type="text/html")
     response.headers["Cache-Control"] = "no-store"

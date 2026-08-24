@@ -8,7 +8,7 @@ This folder is the company-portal deployment artifact. Build and publish the Rea
 
 ## Build
 
-Run the following with `pe-dashboard-mfe` as the working directory:
+Run the following with `react-dashboard` as the working directory:
 
 ```sh
 npm ci
@@ -17,7 +17,7 @@ npx tsc --noEmit --pretty false
 npm run build
 ```
 
-Publish the contents of `pe-dashboard-mfe/build/` to the approved Stratosphere static-content location.
+Publish the contents of `react-dashboard/build/` to the approved Stratosphere static-content location.
 
 ## Runtime configuration
 
@@ -45,7 +45,7 @@ For deployment, the static MFE is independent of the local `.bat` files: DevOps 
 
 ## Pipeline ownership
 
-The workflow files under `pe-dashboard-mfe/.github/workflows/` are reference templates. Because this repository's Git root is one level above `pe-dashboard-mfe`, GitHub will not discover them automatically. The DevOps-owned pipeline must target this folder for its Node version, dependency cache, build, runtime-env generation, and static-content upload.
+The workflow files under `react-dashboard/.github/workflows/` are reference templates. Because this repository's Git root is one level above `react-dashboard`, GitHub will not discover them automatically. The DevOps-owned pipeline must target this folder for its Node version, dependency cache, build, runtime-env generation, and static-content upload.
 
 ## Deployment completion boundary
 

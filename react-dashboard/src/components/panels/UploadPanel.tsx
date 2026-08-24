@@ -16,6 +16,7 @@ import {
   uploadBatchSlaXlsx,
   uploadBenchmark,
   uploadDashboardFile,
+  workbookSlaSnapshotFromUpload,
 } from '../../api/dashboardApi';
 import { AppData, useAppData } from '../../context/AppDataContext';
 import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
@@ -273,20 +274,15 @@ export function UploadPanel() {
       const result = await processBatchMulti(files, trackProgress('batch'));
       markProcessing('batch');
       let resolvedBatch = result;
-      // The backend always computes a full per-job SLA matrix alongside batch KPIs
-      // (BatchResponse.sla_matrix) — wire it into the SLA Matrix tab immediately so
-      // it doesn't sit empty until a separate SLA-matrix-specific file is uploaded.
-      // Re-read once the Ctrl-M upload has committed.  If a Workflow SLA upload
-      // finished in parallel, this is the reconciliation point that guarantees
-      // Batch Review uses its Tier-1 ceiling rather than the pre-upload default.
+      // Ctrl-M is Batch Review evidence. It may use the workbook's ceilings for
+      // its own KPI calculation, but it must never populate or replace the
+      // workbook-only SLA Matrix tab.
       try {
         resolvedBatch = await refreshBatch();
       } catch {
         // The original process response is already a valid full batch result.
       }
       setBatch(resolvedBatch);
-      const embeddedSlaMatrix = (resolvedBatch as { sla_matrix?: Record<string, unknown> }).sla_matrix;
-      if (embeddedSlaMatrix) setSlaMatrix(embeddedSlaMatrix);
       const customer = (resolvedBatch as { customer_name?: string }).customer_name;
       if (customer) setCustomerName(customer);
       // A new Ctrl-M extract creates a new shared evidence set.  Clear every
@@ -295,7 +291,7 @@ export function UploadPanel() {
       const nextData: AppData = {
         ...data,
         batch: resolvedBatch,
-        slaMatrix: embeddedSlaMatrix || data.slaMatrix,
+        slaMatrix: data.slaMatrix,
         customerName: customer || data.customerName,
         findings: null,
         redFlags: null,
@@ -339,49 +335,57 @@ export function UploadPanel() {
   const handleWorkflowSlaUpload = async (files: File[]) => {
     beginUpload('sla', files, 'Workflow SLA contract');
     try {
-      // uploadBatchSlaXlsx hits /api/batch-sla/upload — the endpoint that
-      // actually parses per-workflow SLA contracts and persists them as the
-      // Tier-1 source every batch SLA calculation reads (_batch_sla_xlsx in
-      // config_store). It also returns updated_batch_kpis as an immediate
-      // partial recompute when Ctrl-M is already loaded.
+      // The workbook response includes the standalone SLA Matrix snapshot.
+      // Ctrl-M can use the same ceilings for Batch Review, but cannot replace
+      // this contract/observation view.
       const result = await uploadBatchSlaXlsx(files[0], trackProgress('sla'));
       markProcessing('sla');
+      if (result.file_role === 'batch_execution_history') {
+        const batchPayload = result.batch_payload;
+        if (!batchPayload || typeof batchPayload !== 'object' || Array.isArray(batchPayload)) {
+          throw new Error('Execution-history handoff returned no Batch Review payload.');
+        }
+        setBatch(batchPayload as AppData['batch']);
+        clearDerivedEvidence();
+        completeUpload('sla', 'Execution-history workbook detected and loaded into Batch Review. No SLA contract was inferred because the source has no SLA target.', 'Batch Review');
+        history.push('/batch');
+        return;
+      }
       const workflowCount = Number(result.workflow_count) || 0;
       const withSla = Number(result.with_sla_count) || 0;
+      const mappingReport = result.mapping_report as { sheets?: Array<{ mapped?: unknown[]; absent_optional?: unknown[] }> } | undefined;
+      const mappingSheet = mappingReport?.sheets?.find((sheet) => (sheet.mapped || []).length > 0);
+      const mappedFields = mappingSheet?.mapped?.length || 0;
+      const absentOptional = mappingSheet?.absent_optional?.length || 0;
+      const mappingSummary = `Schema mapping: ${mappedFields} field(s) mapped${absentOptional ? ` · ${absentOptional} optional field(s) not present in source` : ''}.`;
       let refreshedBatch: AppData['batch'] = null;
-      let refreshedSlaMatrix = data.slaMatrix;
-      // Batch Review's KPIs (SLA source, job/window compliance, buffer gauge) were
-      // computed with the OLD ceiling — re-run /api/batch/refresh so they reflect
-      // this newly-uploaded SLA file immediately, matching the real dashboard's
-      // upload-then-auto-refresh flow (no stale-banner step needed here).
+      const workbookSlaMatrix = workbookSlaSnapshotFromUpload(result);
+      setSlaMatrix(workbookSlaMatrix);
+      // Recompute Batch Review only when its Ctrl-M evidence is already cached;
+      // this has no effect on the workbook SLA Matrix snapshot above.
       try {
         const refreshed = await refreshBatch();
         setBatch(refreshed);
-        const embeddedSlaMatrix = (refreshed as { sla_matrix?: Record<string, unknown> }).sla_matrix;
         refreshedBatch = refreshed;
-        if (embeddedSlaMatrix) {
-          refreshedSlaMatrix = embeddedSlaMatrix;
-          setSlaMatrix(embeddedSlaMatrix);
-        }
       } catch {
-        // Ctrl-M may still be uploading in parallel. Its post-upload refresh
-        // performs the same reconciliation after the shared rows are ready.
+        // Batch evidence may still be uploading in parallel. The workbook SLA
+        // Matrix is already complete and remains independent.
       }
       if (refreshedBatch) {
         clearDerivedEvidence();
         const refreshStatus = await refreshDerivedEvidence({
           ...data,
           batch: refreshedBatch,
-          slaMatrix: refreshedSlaMatrix,
+          slaMatrix: workbookSlaMatrix || data.slaMatrix,
           findings: null,
           redFlags: null,
           peNarrative: null,
           executive: null,
           finalJudgment: null,
         });
-        completeUpload('sla', `Workflow SLA info loaded: ${withSla}/${workflowCount} workflow(s) with an explicit SLA ceiling. ${refreshStatus}`, `${withSla}/${workflowCount} SLA`);
+        completeUpload('sla', `Workflow SLA info loaded: ${withSla}/${workflowCount} workflow(s) with an explicit SLA ceiling. ${mappingSummary} ${refreshStatus}`, `${withSla}/${workflowCount} SLA`);
       } else {
-        completeUpload('sla', `Workflow SLA info loaded: ${withSla}/${workflowCount} workflow(s) with an explicit SLA ceiling. Ctrl-M can finish uploading in parallel; it will reconcile against this contract automatically.`, `${withSla}/${workflowCount} SLA`);
+        completeUpload('sla', `Workbook SLA Matrix loaded: ${withSla}/${workflowCount} workflow(s) with an SLA ceiling. ${mappingSummary} Batch Review can be uploaded separately when Ctrl-M evidence is available.`, `${withSla}/${workflowCount} SLA`);
       }
     } catch (uploadError) {
       failUpload('sla', uploadError instanceof Error ? uploadError.message : 'Workflow SLA upload failed.');

@@ -30,6 +30,17 @@ type NarrativeSection = {
   provenance?: { label?: string; note?: string; tone?: string };
 };
 type RedFlag = { id?: string; category?: string; context?: string; question?: string; risk?: string; data_point?: string };
+type BackendUat = {
+  available?: boolean;
+  evidence_type?: string;
+  severity?: string;
+  question?: string;
+  transactions?: number;
+  degraded?: number;
+  sla_breaches?: number;
+  comparable_jobs?: number;
+  regressions?: number;
+};
 
 const SECTION_STYLE: Record<string, { accent: string; number: number }> = {
   data_volume: { accent: '#22d3ee', number: 1 },
@@ -55,6 +66,11 @@ const QUESTION_SECTION: Record<string, string> = {
   Monitoring: 'uat',
   Governance: 'uat',
   Approval: 'uat',
+  UAT: 'uat',
+  UI: 'uat',
+  'UI Performance': 'uat',
+  'Batch Performance': 'uat',
+  Performance: 'uat',
 };
 
 const TONE_COLOR: Record<string, string> = {
@@ -138,6 +154,50 @@ export function PeReviewSummary() {
   const verdictColor = verdict === 'APPROVED' ? '#10d96e' : verdict === 'BLOCKED' ? '#f43f5e' : '#f59e0b';
   const sections = (narrative.sections as NarrativeSection[]) || [];
   const flags = (data.redFlags?.flags as RedFlag[]) || [];
+  const backendUat = data.findings?.uat as BackendUat | undefined;
+  // UAT questions must be evidence-led. The backend may support them with an
+  // explicit UAT artefact, a UI benchmark, or a batch-performance comparison;
+  // therefore use the returned UAT section as the contract, but suppress an
+  // explicit missing/NA placeholder.
+  const narrativeHasUatEvidence = sections.some((section) => {
+    if ((section.id || '').toLowerCase() !== 'uat') return false;
+    const evidenceText = [
+      section.prose,
+      section.provenance?.label,
+      section.provenance?.note,
+      section.table_caption,
+      ...(section.table?.headers || []).map(text),
+      ...((section.table?.rows || []).flatMap((row) => (Array.isArray(row) ? row : [row])).map(text)),
+    ].join(' ').trim().toLowerCase();
+    const hasStructuredEvidence = Boolean(section.panel || section.table?.rows?.length);
+    return (hasStructuredEvidence || Boolean(evidenceText))
+      && !/^(n\/?a|not loaded|no uat|no ui|missing evidence)[\s.!-]*$/.test(evidenceText)
+      && !/no (uat|ui|performance) (evidence|document|benchmark|data)|uat (evidence|data) (is )?not (loaded|available)/.test(evidenceText);
+  });
+  const hasBackendUatEvidence = backendUat?.available === true;
+  const hasUatEvidence = hasBackendUatEvidence || narrativeHasUatEvidence;
+  const backendUatSection: NarrativeSection | null = hasBackendUatEvidence ? {
+    id: 'uat',
+    title: 'UAT Validation',
+    prose: backendUat.question,
+    provenance: {
+      label: `Evidence: ${text(backendUat.evidence_type).replace(/_/g, ' ')}`,
+      tone: backendUat.severity,
+    },
+    table: {
+      headers: ['Comparable', 'Degraded / regressed', 'SLA breaches'],
+      rows: [[
+        backendUat.comparable_jobs ?? backendUat.transactions ?? '—',
+        backendUat.regressions ?? backendUat.degraded ?? '—',
+        backendUat.sla_breaches ?? '—',
+      ]],
+    },
+  } : null;
+  const hasNarrativeUatSection = sections.some((section) => (section.id || '').toLowerCase() === 'uat' && narrativeHasUatEvidence);
+  const sectionSource = hasBackendUatEvidence && !hasNarrativeUatSection
+    ? [...sections.filter((section) => (section.id || '').toLowerCase() !== 'uat'), backendUatSection!]
+    : sections;
+  const visibleSections = sectionSource.filter((section) => (section.id || '').toLowerCase() !== 'uat' || hasUatEvidence);
 
   return (
     <Paper className="kpi-card" elevation={0} style={{ marginTop: 16, padding: 16 }}>
@@ -146,7 +206,6 @@ export function PeReviewSummary() {
           <Box display="flex" alignItems="center" style={{ gap: 8 }}>
             <Typography variant="h6">PE Review Summary</Typography>
             <span className="metric-badge" style={{ color: verdictColor, borderColor: `${verdictColor}66`, background: `${verdictColor}1f` }}>{verdict}</span>
-            <span className="metric-badge metric-badge-blue">{text(narrative.model).replace('models/', '')}</span>
           </Box>
           <Typography variant="body2" style={{ marginTop: 6 }}>{text(narrative.summary)}</Typography>
         </Box>
@@ -158,7 +217,7 @@ export function PeReviewSummary() {
         </Box>
       )}
 
-      {sections.map((section, index) => {
+      {visibleSections.map((section, index) => {
         const style = SECTION_STYLE[section.id || ''] || { accent: '#3b82f6', number: index + 1 };
         const table = section.table || {};
         const headers = table.headers || [];

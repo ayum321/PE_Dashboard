@@ -51,6 +51,115 @@ export interface SlaBreach {
 
 export type DashboardPayload = Record<string, unknown>;
 
+const finiteNumber = (value: unknown): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/**
+ * Preferred contract: `/api/batch-sla/upload` returns `sla_matrix` directly.
+ * This fallback keeps a locally running older FastAPI process usable while the
+ * React MFE has already been updated. It uses only the returned workbook rows;
+ * it never asks Ctrl-M for a runtime and never invents an observation.
+ */
+export const workbookSlaSnapshotFromUpload = (payload: DashboardPayload): DashboardPayload => {
+  const supplied = payload.sla_matrix;
+  // When raw workbook rows accompany the response, rebuild the snapshot from
+  // them. This prevents a locally running older FastAPI process from returning
+  // a stale pre-fix `sla_matrix` that suppresses a supplied Current end time.
+  if (supplied && typeof supplied === 'object' && !Array.isArray(supplied) && !Array.isArray(payload.workflows)) return supplied as DashboardPayload;
+
+  const rawWorkflows = Array.isArray(payload.workflows) ? payload.workflows : [];
+  let observed = 0;
+  const counts: Record<string, number> = { OK: 0, LONG_JOB: 0, AT_RISK: 0, NO_BUFFER: 0, BREACH: 0 };
+  const workflowSummary = rawWorkflows.map((item) => {
+    const row = (item && typeof item === 'object' ? item : {}) as DashboardPayload;
+    const contractConflict = row.contract_conflict === true || String(row.sla_source || '').toUpperCase() === 'CONTRACT_CONFLICT';
+    const declared = String(row.sla_source || '').toUpperCase() === 'BATCH_SLA_XLSX';
+    const sla = declared ? finiteNumber(row.sla_hours) : null;
+    const endEqualsTarget = row.runtime_source_caveat === 'REPORTED_END_EQUALS_TARGET'
+      || row.reported_end_equals_target === true;
+    const candidateRuntime = finiteNumber(row.last_run_hours_xlsx);
+    const runtime = sla != null && candidateRuntime != null ? candidateRuntime : null;
+    const measured = runtime != null && sla != null && sla > 0;
+    let status: string;
+    let reasonCode: string;
+    let reasonDetail: string;
+    if (measured) {
+      observed += 1;
+      status = String(row.compliance || 'UNKNOWN');
+      if (counts[status] != null) counts[status] += 1;
+      reasonCode = endEqualsTarget ? 'REPORTED_END_EQUALS_TARGET' : 'WORKBOOK_REPORTED_COMPLETION';
+      reasonDetail = endEqualsTarget
+        ? 'Duration is calculated from supplied Start Time and Current end time. Current end equals Expected End; verify the source completion value.'
+        : 'Duration is calculated from workbook timing returned by the BatchSLA upload.';
+    } else if (contractConflict) {
+      status = 'SLA_CONTRACT_CONFLICT';
+      reasonCode = 'CLOCK_DURATION_CONFLICT';
+      reasonDetail = String(row.contract_conflict_detail || 'Workbook clock-window and declared Duration values conflict; no SLA was selected.');
+    } else if (!declared) {
+      status = 'SLA_MISSING';
+      reasonCode = 'SLA_NOT_DECLARED_IN_WORKBOOK';
+      reasonDetail = 'This workbook does not declare an SLA target for this row.';
+    } else if (row.runtime_is_placeholder === true) {
+      status = 'NOT_OBSERVED';
+      reasonCode = 'PLACEHOLDER_CURRENT_END';
+      reasonDetail = 'Current end equals the contractual target and is not treated as an observed completion.';
+    } else {
+      status = 'NOT_OBSERVED';
+      reasonCode = 'COMPLETION_NOT_REPORTED';
+      reasonDetail = 'The workbook supplies the contract but not a distinct reported completion.';
+    }
+    const buffer = measured && sla != null && runtime != null ? ((sla - runtime) / sla) * 100 : null;
+    return {
+      workflow_name: row.workflow,
+      workflow_key: row.workflow,
+      batch_type: row.batch_type,
+      sla_h: sla,
+      sla_source: contractConflict ? 'batch_sla_xlsx_conflict' : declared ? 'batch_sla_xlsx' : 'global',
+      runtime_h: runtime,
+      buffer_pct: buffer,
+      duration_headroom_mins: measured && sla != null && runtime != null ? Math.round((sla - runtime) * 60) : null,
+      status,
+      workbook_timing_source: row.workbook_timing_source || (endEqualsTarget ? 'WORKBOOK_REPORTED_CURRENT_END_EQUALS_TARGET' : measured ? 'WORKBOOK_REPORTED_COMPLETION' : 'WORKBOOK_COMPLETION_NOT_REPORTED'),
+      workbook_start_time: row.workbook_start_time || row.sla_start_time,
+      workbook_expected_end: row.workbook_expected_end || row.sla_end_time,
+      workbook_reported_end: row.workbook_reported_end,
+      workbook_clock_window_hours: finiteNumber(row.workbook_clock_window_hours),
+      workbook_contract_duration_hours: finiteNumber(row.workbook_contract_duration_hours),
+      runtime_source_caveat: endEqualsTarget ? 'REPORTED_END_EQUALS_TARGET' : row.runtime_source_caveat,
+      contract_conflict: contractConflict,
+      contract_conflict_detail: row.contract_conflict_detail,
+      measurement_reason_code: reasonCode,
+      measurement_reason_detail: reasonDetail,
+    };
+  });
+  const declared = workflowSummary.map((row) => finiteNumber(row.sla_h)).filter((value): value is number => value != null && value > 0);
+  const compliance = observed ? 100 * (counts.OK + counts.LONG_JOB + counts.AT_RISK + counts.NO_BUFFER) / observed : null;
+  return {
+    workbook_only: true,
+    filename: payload.filename,
+    total_jobs: workflowSummary.length,
+    total_runs: observed,
+    observed_workflow_count: observed,
+    not_observed_workflow_count: workflowSummary.length - observed,
+    compliance_pct: compliance,
+    window_day_compliance_pct: compliance,
+    ok_runs: counts.OK,
+    long_job_runs: counts.LONG_JOB,
+    at_risk_runs: counts.AT_RISK,
+    no_buffer_runs: counts.NO_BUFFER,
+    breaching_runs: counts.BREACH,
+    failed_runs: 0,
+    explicit_sla_matrix: declared.length > 0,
+    sla_limit_hrs: declared.length ? Math.max(...declared) : null,
+    sla_label: 'Workbook-declared SLA',
+    workflow_summary: workflowSummary,
+    job_summary: [], breaches: [], outliers: [], resource_linked: [],
+    batch_sla_mapping_report: payload.mapping_report || {},
+  };
+};
+
 export interface AzureStatus {
   configured: boolean;
   authenticated?: boolean;
@@ -148,7 +257,12 @@ const requestWithProgress = <T>(path: string, formData: FormData, onProgress?: U
         resolve((xhr.response ?? {}) as T);
       } else {
         const detail = xhr.response?.detail || xhr.response?.message;
-        reject(new Error(typeof detail === 'string' ? detail : `Request failed (${xhr.status})`));
+        const message = typeof detail === 'string'
+          ? detail
+          : typeof detail?.message === 'string'
+            ? detail.message
+            : `Request failed (${xhr.status})`;
+        reject(new Error(message));
       }
     };
     xhr.onerror = () => reject(new Error('Network error during upload.'));

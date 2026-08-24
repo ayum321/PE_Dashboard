@@ -1,9 +1,13 @@
 @echo off
 setlocal EnableExtensions
 
+rem Local dual mode keeps the React MFE and comparison UI on one shared API.
+rem Production Docker remains API-only through PE_UI_MODE=api.
+set "PE_UI_MODE=dual"
+
 rem React MFE local launcher. It deliberately does not start the legacy FastAPI dashboard.
 cd /d "%~dp0"
-set "MFE_DIR=%CD%\pe-dashboard-mfe"
+set "MFE_DIR=%CD%\react-dashboard"
 
 if not exist "%MFE_DIR%\package.json" (
   echo ERROR: React MFE folder not found: "%MFE_DIR%"
@@ -63,6 +67,17 @@ if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://localhost:8765"
 call :ensure_api
 if errorlevel 1 exit /b 1
 
+rem Never start a second development server on the same port. Two React
+rem servers can bind different localhost address families and make the browser
+rem appear to serve stale code.  Check this only after the API is healthy, so
+rem start-mfe.bat also repairs an API that was stopped under an existing UI.
+call :ui_is_ready
+if not errorlevel 1 (
+  echo React MFE is already running at http://localhost:3000
+  start "" "http://localhost:3000"
+  exit /b 0
+)
+
 rem These values override the deployment template for this local process only.
 set "appName=PE Audit Dashboard (Local)"
 set "frameUrlPath=/"
@@ -81,6 +96,11 @@ echo The local audit API is ready. The React MFE will now start.
 echo Press Ctrl+C to stop the React development server.
 echo.
 
+rem react-scripts has no reliable browser-launch behaviour in this MFE setup.
+rem Open the dashboard only after the server answers, avoiding a browser
+rem connection-refused page during initial compilation.
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "$deadline=(Get-Date).AddSeconds(45); while((Get-Date) -lt $deadline){ try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://localhost:3000'; if($r.StatusCode -eq 200){ Start-Process 'http://localhost:3000'; break } } catch {}; Start-Sleep -Seconds 1 }"
+
 pushd "%MFE_DIR%"
 call npm run start:standalone
 set "EXIT_CODE=%ERRORLEVEL%"
@@ -98,7 +118,7 @@ if /i not "%LOCAL_API_URL%"=="http://localhost:8765" (
 )
 
 echo Starting local audit API on http://localhost:8765 ...
-start "PE Audit API (local)" cmd /k "call \"%CD%\start-api-local.bat\""
+start "PE Audit API (local)" /d "%CD%" cmd /k call start-api-local.bat
 
 for /l %%R in (1,1,20) do (
   timeout /t 1 /nobreak >nul
@@ -112,4 +132,8 @@ exit /b 1
 
 :api_is_ready
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 '%LOCAL_API_URL%/api/health'; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
+exit /b %ERRORLEVEL%
+
+:ui_is_ready
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://localhost:3000'; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
 exit /b %ERRORLEVEL%

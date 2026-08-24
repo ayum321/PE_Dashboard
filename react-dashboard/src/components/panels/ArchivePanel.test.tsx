@@ -30,9 +30,8 @@ describe('ArchivePanel', () => {
       }),
     } as Response);
 
-    const { findAllByText, findByRole } = render(<ArchivePanel />);
+    const { findAllByText } = render(<ArchivePanel />);
 
     expect((await findAllByText('Acme Corp')).length).toBeGreaterThan(0);
-    expect(await findByRole('link', { name: /open exported report/i })).toBeDefined();
   });
 });

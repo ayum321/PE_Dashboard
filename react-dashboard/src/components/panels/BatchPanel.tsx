@@ -90,6 +90,15 @@ interface WindowPoint {
   excluded_hrs?: number;
   raw_total_hrs?: number;
   raw_job_names?: string[];
+  spike?: {
+    is_spike?: boolean;
+    z_score?: number;
+    baseline_mean_hrs?: number;
+    baseline_std_hrs?: number;
+    threshold_z?: number;
+    trigger_reason?: string;
+    metric?: string;
+  } | null;
 }
 
 interface ElapsedWindow {
@@ -311,6 +320,21 @@ function _longpoleCellStyle(mins: number, maxMin: number): React.CSSProperties {
   return { background: `rgba(${base},${intensity})`, border: `1px solid rgba(${base},.8)` };
 }
 
+function _longpoleCellTone(mins: number, maxMin: number): 'idle' | 'short' | 'long' | 'longest' {
+  if (!mins) return 'idle';
+  const ratio = Math.min(1, mins / maxMin);
+  if (ratio >= 0.8) return 'longest';
+  if (ratio >= 0.5) return 'long';
+  return 'short';
+}
+
+function _overlapTone(job: TopJobRow): 'info' | 'watch' | 'critical' {
+  const concurrent = Number(job.concurrent_job_count) || 0;
+  if (concurrent >= 5) return 'critical';
+  if (concurrent >= 3) return 'watch';
+  return 'info';
+}
+
 /** "2026-06-01" -> "06/01", ported from renderLongpoleHeatmap()'s _short() (app.js). */
 function _shortDate(d: string): string {
   const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -381,6 +405,30 @@ const STATUS_COLOR: Record<string, string> = {
 const SLA_ATRISK_PCT = 15;
 const SLA_LONGJOB_PCT = 40;
 
+function _configuredSlaThresholds(payload: Record<string, unknown>): { atRiskPct: number; longJobPct: number } {
+  const thresholds = payload.thresholds as Record<string, unknown> | undefined;
+  const asValid = (value: unknown, fallback: number) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : fallback;
+  };
+  return {
+    atRiskPct: asValid(thresholds?.sla_at_risk_pct ?? thresholds?.at_risk_pct ?? payload.sla_at_risk_pct, SLA_ATRISK_PCT),
+    longJobPct: asValid(thresholds?.sla_long_job_pct ?? thresholds?.long_job_pct ?? payload.sla_long_job_pct, SLA_LONGJOB_PCT),
+  };
+}
+
+interface PatternDetectionItem {
+  date: string;
+  val: number;
+  count: number;
+  type: 'breach' | 'spike';
+  top: string;
+  reason?: string;
+  threshold?: number;
+  zScore?: number;
+  source: 'server' | 'legacy';
+}
+
 export function BatchPanel() {
   const classes = useStyles();
   const { data, setBatch } = useAppData();
@@ -394,6 +442,7 @@ export function BatchPanel() {
   const [exclusionsBusy, setExclusionsBusy] = useState(false);
 
   const kpis = (data.batch?.kpis || {}) as BatchKpis;
+  const slaThresholds = _configuredSlaThresholds((data.batch || {}) as Record<string, unknown>);
   const topBreaches = ((data.batch?.top_breaches as TopJobRow[]) || []).slice();
   const window = ((data.batch?.window as WindowPoint[]) || []).slice();
   const elapsedWindow = data.batch?.elapsed_window as ElapsedWindow | undefined;
@@ -580,29 +629,67 @@ export function BatchPanel() {
     };
   }, [window]);
 
-  // ── Pattern Detection — statistical z-score spike detection on the same
-  // SLA-binding value shown by the bars. A day is anomalous if z > 2.0, or
-  // z > 1.5 while also a breach day. ──
-  const patternDetection = useMemo(() => {
+  // Legacy fallback only. New responses carry server-owned `window[].spike`
+  // metadata calculated against the canonical SLA-measured duration.
+  const legacyPatternDetection = useMemo<PatternDetectionItem[]>(() => {
     const values = windowMetric.values;
     if (!values.length) return [];
     const mean = values.reduce((s, v) => s + v, 0) / values.length;
     const std = Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length);
-    const items: { date: string; val: number; count: number; type: 'breach' | 'spike'; top: string }[] = [];
+    const items: PatternDetectionItem[] = [];
     window.forEach((w, i) => {
       const z = std > 0 ? (values[i] - mean) / std : 0;
       const isSpike = z > 2.0 || (z > 1.5 && w.breach);
       if (isSpike || w.breach) {
-        items.push({ date: w.run_date, val: values[i], count: w.job_count, type: w.breach ? 'breach' : 'spike', top: w.top_job || '' });
+        items.push({ date: w.run_date, val: values[i], count: w.job_count, type: w.breach ? 'breach' : 'spike', top: w.top_job || '', reason: 'legacy client z-score fallback', source: 'legacy' });
       }
     });
     return items;
   }, [window, windowMetric]);
 
+  const serverSpikeMetadataAvailable = window.some((point) => Object.prototype.hasOwnProperty.call(point, 'spike'));
+  const patternDetection = useMemo<PatternDetectionItem[]>(() => {
+    if (!serverSpikeMetadataAvailable) return legacyPatternDetection;
+    return window.flatMap((point, index) => {
+      const spike = point.spike;
+      if (!spike?.is_spike && !point.breach) return [];
+      return [{
+        date: point.run_date,
+        val: windowMetric.values[index] || 0,
+        count: point.job_count,
+        type: point.breach ? 'breach' as const : 'spike' as const,
+        top: point.top_job || '',
+        reason: spike?.trigger_reason,
+        threshold: spike?.threshold_z,
+        zScore: spike?.z_score,
+        source: 'server' as const,
+      }];
+    });
+  }, [legacyPatternDetection, serverSpikeMetadataAvailable, window, windowMetric]);
+
   const spikeDateSet = useMemo(
     () => new Set(patternDetection.filter((item) => item.type === 'spike').map((item) => item.date)),
     [patternDetection],
   );
+
+  // Persistent markers make an anomalous day legible without requiring a hover.
+  // The server-owned window values remain the chart's source of truth; this only
+  // annotates the existing statistical detection.
+  const chartSpikeMarkers = useMemo(() => patternDetection.map((item) => ({
+    x: window.findIndex((point) => point.run_date === item.date),
+    y: item.val,
+    name: item.type === 'breach' ? 'SLA breach' : 'Statistical spike',
+    color: item.type === 'breach' ? '#f43f5e' : '#f59e0b',
+    marker: { symbol: 'diamond', radius: 6, lineColor: '#fff1f2', lineWidth: 1 },
+    dataLabels: {
+      enabled: true,
+      format: item.type === 'breach' ? '⚠ BREACH' : '⚡ SPIKE',
+      y: -11,
+      crop: false,
+      overflow: 'allow' as const,
+      style: { color: item.type === 'breach' ? '#ff8aa5' : '#ffd166', fontSize: '9px', fontWeight: '800', textOutline: 'none' },
+    },
+  })).filter((point) => point.x >= 0), [patternDetection, window]);
 
   // Real narrative formulas ported from renderBatchStory()/_buildBatchNarrative() (app.js) —
   // derived from the same window[] data, not fabricated wording.
@@ -732,6 +819,7 @@ export function BatchPanel() {
           ? _chartNumber(point.breach_overrun_hrs)
           : Math.max(effective - ceiling, 0);
         const isSpike = spikeDateSet.has(point.run_date);
+        const spikeEvidence = patternDetection.find((item) => item.date === point.run_date);
         const blocks = Array.isArray(point.batch_blocks) ? point.batch_blocks : [];
         const blockLines = blocks.length > 1
           ? `<div style="margin-top:6px;color:#8fa3d2">Batch blocks: ${blocks.length} clusters separated by idle gaps</div>${blocks.slice(0, 4).map((block) => `<div style="padding-left:8px;color:#b8c7e7">&bull; ${_escapeChartHtml(block.start)}-${_escapeChartHtml(block.end)} &middot; ${_chartNumber(block.span_hrs).toFixed(2)}h &middot; ${_chartNumber(block.runs)} runs</div>`).join('')}${blocks.length > 4 ? `<div style="padding-left:8px;color:#7d91be">+${blocks.length - 4} more cluster(s)</div>` : ''}`
@@ -755,6 +843,7 @@ export function BatchPanel() {
           <div style="margin-top:6px">Unique jobs: <b>${shownJobs}</b>${rawJobs !== shownJobs ? ` &middot; ${rawJobs} in raw file` : ''}</div>
           ${executionLine}
           ${point.top_job ? `<div>Longest job: <b>${_escapeChartHtml(point.top_job)}</b></div>` : ''}
+          ${spikeEvidence?.reason ? `<div style="margin-top:6px;color:#ffd166"><b>Spike reason:</b> ${_escapeChartHtml(spikeEvidence.reason)}${spikeEvidence.zScore != null ? ` · z=${Number(spikeEvidence.zScore).toFixed(2)}` : ''}${spikeEvidence.threshold != null ? ` (threshold ${Number(spikeEvidence.threshold).toFixed(2)})` : ''}</div>` : ''}
           ${point.breach ? `<div style="margin-top:6px;color:#ff648f;font-weight:800">SLA breach${point.breach_sub_app ? ` &middot; ${_escapeChartHtml(point.breach_sub_app)}` : ''} +${overrun.toFixed(2)}h over ${ceiling.toFixed(2)}h ceiling</div>` : ''}
         </div>`;
       },
@@ -775,7 +864,7 @@ export function BatchPanel() {
             const bufPct = point.min_buffer_pct != null && Number.isFinite(point.min_buffer_pct)
               ? point.min_buffer_pct
               : (slaCeilingHrs > 0 ? ((slaCeilingHrs - windowMetric.values[index]) / slaCeilingHrs) * 100 : 100);
-            band = bufPct <= SLA_ATRISK_PCT ? 'red' : bufPct <= SLA_LONGJOB_PCT ? 'amber' : 'green';
+            band = bufPct <= slaThresholds.atRiskPct ? 'red' : bufPct <= slaThresholds.longJobPct ? 'amber' : 'green';
           }
           const color = band === 'red' ? '#f43f5e' : band === 'amber' ? '#f59e0b' : '#10d96e';
           const isSpike = spikeDateSet.has(point.run_date);
@@ -787,6 +876,14 @@ export function BatchPanel() {
           };
         }),
       },
+      ...(chartSpikeMarkers.length ? [{
+        type: 'scatter' as const,
+        name: 'Spike / breach marker',
+        data: chartSpikeMarkers,
+        zIndex: 7,
+        enableMouseTracking: true,
+        tooltip: { pointFormat: '<b>{point.name}</b><br/>{point.y:.2f}h' },
+      }] : []),
       // Active busy time (interval union) overlaid as a teal line so the gap
       // between an inflated elapsed span and real compute time is visible at
       // a glance — ported from renderWindowTrendChart()'s teal dataset (app.js).
@@ -806,7 +903,7 @@ export function BatchPanel() {
   const gaugeNeedle = gaugeSource ? Math.max(0, Math.min(100, gaugeSource.buffer_pct)) : 0;
   const gaugeStatus = gaugeSource?.status;
   const gaugeColor = gaugeStatus ? (STATUS_COLOR[gaugeStatus] || '#6b7db3') : (gaugeSource && gaugeSource.buffer_pct <= 0 ? '#f43f5e' : '#10d96e');
-  const gaugeBand = gaugeSource && gaugeSource.buffer_pct <= SLA_ATRISK_PCT ? 'at risk' : gaugeSource && gaugeSource.buffer_pct <= SLA_LONGJOB_PCT ? 'tight' : 'healthy';
+  const gaugeBand = gaugeSource && gaugeSource.buffer_pct <= slaThresholds.atRiskPct ? 'at risk' : gaugeSource && gaugeSource.buffer_pct <= slaThresholds.longJobPct ? 'tight' : 'healthy';
   const runtimeDelta = worstJob ? worstJob.sla_hrs - worstJob.peak_hrs : null;
   const gaugeOptions: Highcharts.Options = {
     chart: { type: 'gauge', height: 276, backgroundColor: 'transparent', spacing: [0, 0, 0, 0] },
@@ -826,9 +923,9 @@ export function BatchPanel() {
       minorTickInterval: null,
       labels: { distance: 12, style: { fontSize: '9px', color: '#6b7db3' } },
       plotBands: [
-        { from: 0, to: SLA_ATRISK_PCT, color: '#f43f5e' },
-        { from: SLA_ATRISK_PCT, to: SLA_LONGJOB_PCT, color: '#f59e0b' },
-        { from: SLA_LONGJOB_PCT, to: 100, color: '#10d96e' },
+        { from: 0, to: slaThresholds.atRiskPct, color: '#f43f5e' },
+        { from: slaThresholds.atRiskPct, to: slaThresholds.longJobPct, color: '#f59e0b' },
+        { from: slaThresholds.longJobPct, to: 100, color: '#10d96e' },
       ],
     },
     series: [{
@@ -1374,15 +1471,15 @@ export function BatchPanel() {
             </Box>
           )}
           {window.length > 0 && (
-            <Box className="chart-panel" style={{ padding: 16 }}>
+            <Box className="chart-panel pe-evidence-surface" style={{ padding: 16 }}>
               <Box display="flex" alignItems="flex-start" justifyContent="space-between" style={{ gap: 12, flexWrap: 'wrap' }}>
                 <Box>
                   <Typography variant="subtitle2">Daily Batch Window</Typography>
                   <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>
-                    {windowMetric.label} bars show the SLA-binding longest contiguous run when available. Bar labels show executions; hover any day for the run, busy-time, idle-gap, scope, and SLA evidence.
+                    <strong style={{ color: '#e6efff' }}>Verdict basis:</strong> {windowMetric.label} bars show the SLA-binding longest contiguous run when available. <strong style={{ color: '#e6efff' }}>Elapsed span:</strong> first start → last end, including idle gaps. Bar labels show executions.
                   </Typography>
                   <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#2dd4bf' }}>
-                    {hasBusyTime ? 'Teal line = active busy time (overlaps counted once)' : 'Busy-time breakdown is unavailable for this upload'}{windowChartCeilings.length > 1 ? ` · ${windowChartCeilings.length} contracted ceilings: ${windowChartCeilings[0]}–${windowChartCeilings[windowChartCeilings.length - 1]}h` : ` · contracted ceiling: ${windowChartCeilings[0]}h`}
+                    {hasBusyTime ? 'Teal line = active busy time (overlaps counted once)' : 'Busy-time breakdown is unavailable for this upload'}{windowChartCeilings.length > 1 ? ` · ${windowChartCeilings.length} contracted ceilings: ${windowChartCeilings[0]}–${windowChartCeilings[windowChartCeilings.length - 1]}h` : ` · contracted ceiling: ${windowChartCeilings[0]}h`} · ⚡ markers persist for statistical spikes; hover for trigger detail.
                   </Typography>
                 </Box>
                 <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
@@ -1400,7 +1497,7 @@ export function BatchPanel() {
                   <Box display="flex" alignItems="center" style={{ gap: 8, marginBottom: 6 }}>
                     <Typography variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#f59e0b' }}>Pattern Detection</Typography>
                     <span style={{ fontSize: 8, padding: '2px 6px', borderRadius: 4, color: '#f59e0b', background: 'rgba(245,158,11,.12)' }}>
-                      {patternDetection.length} anomalous day{patternDetection.length !== 1 ? 's' : ''}
+                      {patternDetection.length} anomalous day{patternDetection.length !== 1 ? 's' : ''} · {serverSpikeMetadataAvailable ? 'server baseline' : 'legacy fallback'}
                     </span>
                   </Box>
                   <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
@@ -1409,7 +1506,7 @@ export function BatchPanel() {
                       return (
                         <span
                           key={it.date}
-                          title={`${it.date}: ${it.val.toFixed(2)}h · ${it.count} jobs${it.top ? ' · ' + it.top : ''}`}
+                          title={`${it.date}: ${it.val.toFixed(2)}h · ${it.count} jobs${it.top ? ' · ' + it.top : ''}${it.reason ? ' · ' + it.reason : ''}`}
                           style={{ fontSize: 8, fontFamily: 'monospace', padding: '2px 6px', borderRadius: 4, color, background: `${color}1a`, border: `1px solid ${color}4d` }}
                         >
                           {it.type === 'breach' ? '⚠' : '⚡'} {it.date} {it.val.toFixed(1)}h
@@ -1445,7 +1542,7 @@ export function BatchPanel() {
         return (
           <Box className={classes.chart}>
             <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
-              <Typography variant="subtitle2">Long-Pole Job Consistency</Typography>
+              <Typography variant="subtitle2" className="batch-analysis-title">Long-Pole Job Consistency</Typography>
               <span className={`metric-badge ${longpoles > 0 ? 'metric-badge-amber' : 'metric-badge-green'}`}>
                 {longpoles > 0 ? `${longpoles} long-pole (\u2265${flagPct}% of window)` : 'No single dominating job'}
               </span>
@@ -1453,18 +1550,18 @@ export function BatchPanel() {
             <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>
               {rows.length} longest jobs · {dates.length} day(s) · typical busy window {busyRef.toFixed(1)}h · cell = longest run that day (min)
             </Typography>
-            <Typography variant="caption" style={{ display: 'block', marginTop: 4, color: '#f59e0b' }}>{critSentence}</Typography>
-            <Box className="pe-table-shell pe-heatmap-shell" style={{ marginTop: 8 }}>
-              <table className="pe-heatmap-table" aria-label="Long-pole job consistency table" style={{ borderCollapse: 'separate', borderSpacing: 3 }}>
+            <Typography variant="caption" className={`batch-longpole-callout ${longpoles > 0 ? 'batch-longpole-callout--attention' : 'batch-longpole-callout--stable'}`}>{critSentence}</Typography>
+            <Box className={`pe-table-shell pe-heatmap-shell batch-longpole-matrix ${longpoles > 0 ? 'batch-longpole-matrix--attention' : ''}`} style={{ marginTop: 8 }}>
+              <table className="pe-heatmap-table batch-heatmap-table batch-longpole-table" aria-label="Long-pole job consistency table" style={{ borderCollapse: 'separate', borderSpacing: 3 }}>
                 <thead>
                   <tr>
-                    <th style={{ position: 'sticky', left: 0, textAlign: 'left', fontSize: 10, color: '#6b7db3', paddingRight: 12, paddingBottom: 4, background: '#111d36' }}>Job</th>
+                    <th className="batch-heatmap-job-heading" style={{ position: 'sticky', left: 0, textAlign: 'left', paddingRight: 12, paddingBottom: 4, background: '#111d36' }}>Job</th>
                     {dates.map((d) => (
-                      <th key={d} title={d} style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7db3', minWidth: 30, textAlign: 'center', paddingBottom: 4 }}>{_shortDate(d)}</th>
+                      <th key={d} title={d} className="batch-heatmap-date-heading" style={{ fontFamily: 'monospace', minWidth: 30, textAlign: 'center', paddingBottom: 4 }}>{_shortDate(d)}</th>
                     ))}
-                    <th style={{ fontSize: 9, color: '#6b7db3', paddingLeft: 8, textAlign: 'center' }} title="Average single-run minutes">avg</th>
-                    <th style={{ fontSize: 9, color: '#6b7db3', paddingLeft: 4, textAlign: 'center' }} title="Longest single run">max</th>
-                    <th style={{ fontSize: 9, color: '#6b7db3', paddingLeft: 4, textAlign: 'center' }} title="Average runtime as % of the typical daily busy window">share</th>
+                    <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 8, textAlign: 'center' }} title="Average single-run minutes">avg</th>
+                    <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 4, textAlign: 'center' }} title="Longest single run">max</th>
+                    <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 4, textAlign: 'center' }} title="Average runtime as % of the typical daily busy window">share</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1472,10 +1569,11 @@ export function BatchPanel() {
                     const jobShort = row.job.length > 30 ? `${row.job.slice(0, 29)}\u2026` : row.job;
                     const shareColor = row.is_longpole ? '#f59e0b' : '#8899bb';
                     return (
-                      <tr key={row.job}>
+                      <tr key={row.job} className={row.is_longpole ? 'batch-longpole-row--attention' : undefined}>
                         <td
+                          className="batch-heatmap-job-cell batch-longpole-job"
                           title={`${row.job} — ${row.stability}, ${row.runs} run(s) over ${row.days_present}/${row.days_total} days`}
-                          style={{ position: 'sticky', left: 0, fontSize: 11, color: 'rgba(255,255,255,.9)', paddingRight: 12, whiteSpace: 'nowrap', background: '#111d36' }}
+                          style={{ position: 'sticky', left: 0, color: 'rgba(255,255,255,.9)', paddingRight: 12, whiteSpace: 'nowrap', background: '#111d36' }}
                         >
                           {row.is_longpole && <span style={{ color: '#f59e0b' }}>▲ </span>}
                           {jobShort}
@@ -1485,16 +1583,17 @@ export function BatchPanel() {
                           return (
                             <td
                               key={d}
+                              className={`batch-longpole-cell batch-longpole-cell--${_longpoleCellTone(mins, maxMin)}`}
                               title={mins ? `${row.job} — ${d}: longest run ${mins.toFixed(0)} min` : `${row.job} — ${d}: did not run`}
                               style={{ textAlign: 'center', width: 30, height: 24, borderRadius: 2, ..._longpoleCellStyle(mins, maxMin) }}
                             >
-                              <span style={{ fontSize: 9, fontWeight: 700, color: '#fff' }}>{mins ? Math.round(mins) : ''}</span>
+                              <span className="batch-longpole-cell-value">{mins ? Math.round(mins) : ''}</span>
                             </td>
                           );
                         })}
-                        <td style={{ textAlign: 'center', fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 8 }}>{row.avg_min.toFixed(0)}</td>
-                        <td style={{ textAlign: 'center', fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 4 }}>{row.max_min.toFixed(0)}</td>
-                        <td style={{ textAlign: 'center', fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: shareColor, paddingLeft: 4 }}>
+                        <td className="batch-longpole-stat" style={{ textAlign: 'center', fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 8 }}>{row.avg_min.toFixed(0)}</td>
+                        <td className="batch-longpole-stat" style={{ textAlign: 'center', fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 4 }}>{row.max_min.toFixed(0)}</td>
+                        <td className="batch-longpole-stat batch-longpole-share" style={{ textAlign: 'center', fontFamily: 'monospace', fontWeight: 700, color: shareColor, paddingLeft: 4 }}>
                           {row.window_share_pct ? `${row.window_share_pct.toFixed(0)}%` : '\u2014'}
                         </td>
                       </tr>
@@ -1503,7 +1602,7 @@ export function BatchPanel() {
                 </tbody>
               </table>
             </Box>
-            <Box display="flex" style={{ gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
+            <Box className="batch-heatmap-legend" display="flex" style={{ gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
               <Typography variant="caption" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ width: 12, height: 12, borderRadius: 2, background: 'rgba(45,212,191,.7)', display: 'inline-block' }} /> shorter run
               </Typography>
@@ -1536,9 +1635,9 @@ export function BatchPanel() {
             : `${shown} job(s) exceeded their SLA window`)
           : `No SLA breaches — showing ranked jobs by peak runtime · ${window.length} day(s)`;
         return (
-        <Box className={classes.chart}>
+        <Box className={`${classes.chart} batch-top-jobs`}>
           <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
-            <Typography variant="subtitle2">{title}</Typography>
+            <Typography variant="subtitle2" className="batch-analysis-title">{title}</Typography>
             {hasBreach && (
               <span className={`metric-badge ${isAdaptive ? 'metric-badge-amber' : 'metric-badge-red'}`}>
                 {shown} {isAdaptive ? `regression${shown !== 1 ? 's' : ''}` : `breach${shown !== 1 ? 'es' : ''}`}
@@ -1564,17 +1663,18 @@ export function BatchPanel() {
               {topBreaches.slice(0, 9).map((job, index) => {
                 const buffer = job.buffer_pct;
                 const color = STATUS_COLOR[job.buffer_status] || '#6b7db3';
+                const overlapTone = _overlapTone(job);
                 return (
                   <TableRow
                     key={`${job.Job_Name}-${index}`}
                     className={job.buffer_status === 'BREACH' ? 'pe-table-row-critical' : job.buffer_status === 'AT_RISK' ? 'pe-table-row-warning' : undefined}
                   >
-                    <TableCell>
+                    <TableCell className="batch-job-name">
                       {job.Job_Name}
                       {job.concurrent_job_count != null && job.concurrent_job_count > 0 && (
-                        <Typography variant="caption" style={{ display: 'block', color: '#6b7db3' }}>
-                          {job.concurrent_job_count} concurrent · {(job.concurrent_overlap_hrs || 0).toFixed(1)}h overlap
-                        </Typography>
+                        <span className={`batch-overlap-signal batch-overlap-signal--${overlapTone}`} title={`${job.concurrent_job_count} concurrent jobs for ${(job.concurrent_overlap_hrs || 0).toFixed(1)} hours`}>
+                          <span>{job.concurrent_job_count} concurrent</span> · {(job.concurrent_overlap_hrs || 0).toFixed(1)}h overlap
+                        </span>
                       )}
                     </TableCell>
                     <TableCell>{job.Sub_Application || '—'}</TableCell>
@@ -1610,26 +1710,26 @@ export function BatchPanel() {
           4-band status (same bands as the gauge/daily-window bars). ── */}
       {slaHeatmapRows && (
         <Box className={classes.chart}>
-          <Typography variant="subtitle2">SLA Compliance Heatmap</Typography>
+          <Typography variant="subtitle2" className="batch-analysis-title">SLA Compliance Heatmap</Typography>
           <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginBottom: 8 }}>
             Job × Date — colour = SLA buffer that run (green = healthy buffer · amber = within 15% of the SLA ceiling · red = breach)
           </Typography>
-          <Box display="flex" alignItems="center" style={{ gap: 16, marginBottom: 10, fontSize: 10, flexWrap: 'wrap' }}>
+          <Box className="batch-heatmap-legend" display="flex" alignItems="center" style={{ gap: 16, marginBottom: 10, flexWrap: 'wrap' }}>
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#0f3d24', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">No run</Typography></Box>
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#10d96e', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">Healthy (&gt;15% buffer)</Typography></Box>
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#f59e0b', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">Within 15% of SLA</Typography></Box>
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: '#f43f5e', display: 'inline-block' }} /><Typography variant="caption" color="textSecondary">BREACH</Typography></Box>
           </Box>
-          <Box className="pe-table-shell pe-heatmap-shell">
-            <table className="pe-heatmap-table" aria-label="SLA compliance heatmap table" style={{ fontSize: 10, borderCollapse: 'collapse', minWidth: 'max-content' }}>
+          <Box className="pe-table-shell pe-heatmap-shell batch-sla-heatmap">
+            <table className="pe-heatmap-table batch-heatmap-table" aria-label="SLA compliance heatmap table" style={{ borderCollapse: 'collapse', minWidth: 'max-content' }}>
               <thead>
                 <tr>
-                  <th style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', textAlign: 'left', paddingRight: 12, paddingBottom: 4, color: '#6b7db3', fontWeight: 700, whiteSpace: 'nowrap', minWidth: 150 }}>Job</th>
+                  <th className="batch-heatmap-job-heading" style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', textAlign: 'left', paddingRight: 12, paddingBottom: 4, whiteSpace: 'nowrap', minWidth: 150 }}>Job</th>
                   {slaHeatmap!.dates.map((d) => {
                     const isSpike = spikeDateSet.has(d);
                     return (
-                      <th key={d} title={`${d}${isSpike ? ' \u26a1 Spike day' : ''}`} style={{ paddingBottom: 4, paddingLeft: 2, paddingRight: 2, color: '#6b7db3', fontWeight: 400, textAlign: 'center', whiteSpace: 'nowrap', background: isSpike ? 'rgba(245,158,11,.18)' : undefined, borderBottom: isSpike ? '2px solid #f59e0b' : undefined }}>
-                        {shortDate(d)}{isSpike && <><br /><span style={{ color: '#f59e0b', fontSize: 8 }}>{'\u26a1'}</span></>}
+                      <th key={d} title={`${d}${isSpike ? ' \u26a1 Spike day' : ''}`} className={`batch-heatmap-date-heading ${isSpike ? 'batch-heatmap-date-heading--spike' : ''}`} style={{ paddingBottom: 4, paddingLeft: 2, paddingRight: 2, textAlign: 'center', whiteSpace: 'nowrap' }}>
+                        {shortDate(d)}{isSpike && <><br /><span className="batch-heatmap-spike">{'\u26a1'}</span></>}
                       </th>
                     );
                   })}
@@ -1642,8 +1742,8 @@ export function BatchPanel() {
                   const prColor = pr === 'critical' ? '#f43f5e' : pr === 'warning' ? '#f59e0b' : '#10d96e';
                   const prLabel = pr === 'critical' ? 'PRIORITY' : pr === 'warning' ? 'WATCH' : '';
                   return (
-                    <tr key={job} style={pr !== 'normal' ? { background: `${prColor}0f`, boxShadow: `inset 2px 0 0 ${prColor}` } : undefined}>
-                      <td title={`${job}${meta.reason ? ` \u00b7 ${meta.reason}` : ''}`} style={{ position: 'sticky', left: 0, background: '#111d36', paddingRight: 12, paddingTop: 2, paddingBottom: 2, color: '#f0f4ff', fontFamily: 'monospace', whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <tr key={job} className={`batch-heatmap-row batch-heatmap-row--${pr}`}>
+                      <td className="batch-heatmap-job-cell" title={`${job}${meta.reason ? ` \u00b7 ${meta.reason}` : ''}`} style={{ position: 'sticky', left: 0, background: '#111d36', paddingRight: 12, paddingTop: 2, paddingBottom: 2, color: '#f0f4ff', fontFamily: 'monospace', whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         <Box display="flex" alignItems="center" style={{ gap: 6 }}>
                           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{job}</span>
                           {prLabel && <span style={{ display: 'inline-flex', alignItems: 'center', padding: '1px 5px', borderRadius: 4, fontSize: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', color: prColor, background: `${prColor}24`, border: `1px solid ${prColor}59` }}>{prLabel}</span>}
@@ -1653,8 +1753,8 @@ export function BatchPanel() {
                         const cell = slaHeatmapRows.lookup.get(`${job}||${date}`);
                         const isSpike = spikeDateSet.has(date);
                         return (
-                          <td key={date} title={`${slaCellTitle(cell)}${isSpike ? ' \u26a1' : ''}`} style={{ padding: '2px 2px', textAlign: 'center', minWidth: 22, background: isSpike ? 'rgba(245,158,11,.06)' : undefined }}>
-                            <div style={{ width: 20, height: 15, background: slaCellColor(cell), borderRadius: 2, margin: 'auto', border: isSpike ? '1px solid rgba(245,158,11,.5)' : undefined }} />
+                          <td key={date} className={`batch-sla-cell batch-sla-cell--${!cell || cell.hrs == null ? 'idle' : cell.breach ? 'critical' : cell.hrs > (cell.sla_limit ?? slaHeatmap?.limit ?? 6) * 0.85 ? 'watch' : 'healthy'} ${isSpike ? 'batch-sla-cell--spike' : ''}`} title={`${slaCellTitle(cell)}${isSpike ? ' \u26a1' : ''}`} style={{ textAlign: 'center' }}>
+                            <div className="batch-sla-cell-swatch" style={{ background: slaCellColor(cell) }} />
                           </td>
                         );
                       })}

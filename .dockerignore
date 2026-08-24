@@ -1,8 +1,8 @@
 .git
 .venv
 node_modules
-pe-dashboard-mfe/node_modules
-pe-dashboard-mfe/build
+react-dashboard/node_modules
+react-dashboard/build
 __pycache__
 *.pyc
 .pe_config.json

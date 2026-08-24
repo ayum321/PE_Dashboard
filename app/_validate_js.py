@@ -16,7 +16,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-JS_FILES = ["static/app.js", "static/deep_dive.js"]
+LEGACY_UI_DIR = Path(__file__).resolve().parents[1] / "fastapi-dashboard" / "legacy-ui"
+JS_FILES = [
+    LEGACY_UI_DIR / "static" / "app.js",
+    LEGACY_UI_DIR / "static" / "deep_dive.js",
+]
 ERRORS = []
 
 
@@ -85,8 +89,8 @@ def main():
     print("  PE Dashboard — JavaScript Syntax Validator")
     print("=" * 60)
 
-    for js in JS_FILES:
-        fp = root / js
+    for fp in JS_FILES:
+        js = str(fp.relative_to(root.parent))
         if not fp.exists():
             print(f"\n[!] {js}: FILE NOT FOUND")
             continue

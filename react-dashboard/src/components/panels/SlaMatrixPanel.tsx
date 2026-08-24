@@ -1,5 +1,5 @@
-import React, { ChangeEvent, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { ChangeEvent, useMemo, useRef, useState } from 'react';
+import { Link, useHistory } from 'react-router-dom';
 import {
   Box,
   Button,
@@ -15,8 +15,19 @@ import {
 } from '@material-ui/core';
 import Highcharts from '../../theme/highchartsSetup';
 import HighchartsReact from 'highcharts-react-official';
-import { uploadSlaMatrix } from '../../api/dashboardApi';
-import { useAppData } from '../../context/AppDataContext';
+import {
+  DashboardPayload,
+  generateFindings,
+  getExecutiveDashboard,
+  getFinalJudgment,
+  getPeNarrative,
+  getRedFlags,
+  refreshBatch,
+  uploadBatchSlaXlsx,
+  workbookSlaSnapshotFromUpload,
+} from '../../api/dashboardApi';
+import { AppData, useAppData } from '../../context/AppDataContext';
+import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
 import { SectionBanner } from '../shared/SectionBanner';
 import { KpiStatCard } from '../shared/KpiStatCard';
 
@@ -84,6 +95,49 @@ interface WorkflowSummaryRow {
   start_delay_mins?: number | null;
   start_time_status?: string | null;
   contract_start_time?: string | null;
+  // Optional clock evidence from the canonical workflow result. Older API
+  // responses omit these fields, so the display must degrade explicitly.
+  actual_start_time?: string | null;
+  actual_end_time?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  workflow_start?: string | null;
+  workflow_end?: string | null;
+  elapsed_duration_h?: number | null;
+  elapsed_hrs?: number | null;
+  elapsed_duration_hrs?: number | null;
+  workflow_elapsed_hrs?: number | null;
+  measurement_reason_code?: string | null;
+  measurement_reason_detail?: string | null;
+  duration_headroom_mins?: number | null;
+  workbook_timing_source?: string | null;
+  workbook_start_time?: string | null;
+  workbook_expected_end?: string | null;
+  workbook_reported_end?: string | null;
+  workbook_clock_window_hours?: number | null;
+  workbook_contract_duration_hours?: number | null;
+  runtime_source_caveat?: string | null;
+  contract_conflict?: boolean;
+  contract_conflict_detail?: string | null;
+}
+
+interface BatchSlaMappingFieldState {
+  canonical_field?: string;
+  state?: 'mapped_populated' | 'mapped_empty_for_all_rows' | 'field_absent_in_source';
+  populated_rows?: number;
+  empty_rows?: number;
+}
+
+interface BatchSlaMappingReport {
+  schema_version?: string;
+  status?: 'accepted' | 'blocked';
+  sheets?: Array<{
+    sheet_name?: string;
+    included_in_ingestion?: boolean;
+    sheet_role?: string;
+    mapped?: Array<{ raw_header?: string; canonical_field?: string }>;
+    field_states?: BatchSlaMappingFieldState[];
+  }>;
 }
 
 interface JobBaseline {
@@ -120,7 +174,7 @@ const CONFIDENCE_LABEL: Record<string, string> = {
 };
 const DRILL_LABEL: Record<string, string> = { OK: 'OK', LONG_JOB: 'Long Job', AT_RISK: 'At Risk', BREACH: 'Breach', FAILED: 'Failed' };
 const DRILL_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#3b82f6', AT_RISK: '#f59e0b', BREACH: '#f43f5e', FAILED: '#6b7db3' };
-const WF_STATUS_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#2dd4bf', AT_RISK: '#f59e0b', BREACH: '#f43f5e', UNKNOWN: '#6b7db3' };
+const WF_STATUS_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#2dd4bf', AT_RISK: '#f59e0b', BREACH: '#f43f5e', NO_BUFFER: '#f59e0b', NOT_OBSERVED: '#6b7db3', SLA_MISSING: '#f59e0b', SLA_CONTRACT_CONFLICT: '#fb7185', UNKNOWN: '#6b7db3' };
 
 /** Tier bucket from a workflow row's sla_source, mirrors the real dashboard's
  * "Active SLA Commitments" Tier 1 (BatchSLA XLSX) / Tier 2 (SOW) / Tier 3 (default) split. */
@@ -136,14 +190,82 @@ function _finiteNumber(value: unknown): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
-function _workflowHeadroom(wf: WorkflowSummaryRow): { minutes: number; source: 'clock' | 'duration' } | null {
-  const clockMinutes = _finiteNumber(wf.clock_buffer_mins);
-  if (clockMinutes != null) return { minutes: Math.round(clockMinutes), source: 'clock' };
+function _clockAfterHours(start: unknown, hours: number | null): string | null {
+  if (hours == null || hours <= 0 || typeof start !== 'string') return null;
+  const match = start.trim().match(/(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(AM|PM)?/i);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  if (minute > 59 || hour > 23) return null;
+  const meridiem = match[3]?.toUpperCase();
+  if (meridiem) hour = (hour % 12) + (meridiem === 'PM' ? 12 : 0);
+  const total = hour * 60 + minute + Math.round(hours * 60);
+  const end = ((total % 1440) + 1440) % 1440;
+  const daySuffix = total >= 1440 ? ' next day' : '';
+  return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}${daySuffix}`;
+}
 
+function _workflowHeadroom(wf: WorkflowSummaryRow): number | null {
+  const supplied = _finiteNumber(wf.duration_headroom_mins);
+  if (supplied != null) return Math.round(supplied);
   const runtime = _finiteNumber(wf.runtime_h);
   const sla = _finiteNumber(wf.sla_h);
   if (runtime == null || sla == null || sla <= 0) return null;
-  return { minutes: Math.round((sla - runtime) * 60), source: 'duration' };
+  return Math.round((sla - runtime) * 60);
+}
+
+function _workbookTimingLabel(wf: WorkflowSummaryRow): string {
+  const start = wf.workbook_start_time || wf.workflow_start || wf.start_time;
+  const end = wf.workbook_reported_end || wf.workflow_end || wf.end_time;
+  const scheduledHours = _finiteNumber(wf.workbook_clock_window_hours) ?? _finiteNumber(wf.sla_h);
+  const expectedEnd = wf.workbook_expected_end || end || _clockAfterHours(start, scheduledHours);
+  switch (wf.workbook_timing_source) {
+    case 'WORKBOOK_REPORTED_TIMESTAMP_PAIR': return `${start || '?'} → ${end || '?'} · reported`;
+    case 'WORKBOOK_SCHEDULED_START_TO_REPORTED_END': return `${start || '?'} → ${end || '?'} · scheduled start`;
+    case 'WORKBOOK_REPORTED_CURRENT_END_EQUALS_TARGET': return `${start || '?'} → ${end || expectedEnd || '?'} · reported completion (equals target — verify source)`;
+    case 'PLACEHOLDER_CURRENT_END': return `Not observed — target copied to current end (${start || '?'} → ${expectedEnd || '?'}${scheduledHours != null ? ` · ${scheduledHours.toFixed(3)}h scheduled` : ''})`;
+    case 'WORKBOOK_COMPLETION_NOT_REPORTED': return 'Not observed — completion absent';
+    default: return start || end ? `${start || '?'} → ${end || '?'}` : 'Not supplied';
+  }
+}
+
+function _workbookDurationLabel(wf: WorkflowSummaryRow): string {
+  if (wf.status === 'SLA_CONTRACT_CONFLICT') {
+    const clock = _finiteNumber(wf.workbook_clock_window_hours);
+    const declared = _finiteNumber(wf.workbook_contract_duration_hours);
+    return `Contract conflict${clock != null && declared != null ? ` — clock ${clock.toFixed(3)}h / declared ${declared.toFixed(3)}h` : ''}`;
+  }
+  const runtime = _finiteNumber(wf.runtime_h);
+  return runtime == null ? 'Not observed' : `${runtime.toFixed(3)}h`;
+}
+
+function _workflowSlaLabel(wf: WorkflowSummaryRow): string {
+  return wf.status === 'SLA_CONTRACT_CONFLICT'
+    ? 'Contract conflict'
+    : wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '—';
+}
+
+const SOURCE_FIELD_LABEL: Record<string, string> = {
+  batch_name: 'Batch name', schedule: 'Schedule', timezone: 'Timezone', module: 'Module',
+  start_time: 'Start time', first_job_name: 'First job', expected_end_sla: 'Expected end / SLA', contract_duration: 'Declared duration',
+  last_job_name: 'Last job', current_end_time: 'Current end time', comments: 'Comments',
+};
+
+function MappingStateLabel({ field }: { field: BatchSlaMappingFieldState }) {
+  if (field.state === 'field_absent_in_source') {
+    return <span style={{ color: '#f59e0b', border: '1px dashed rgba(245,158,11,.55)', borderRadius: 4, padding: '2px 6px' }}>Not present in source</span>;
+  }
+  if (field.state === 'mapped_empty_for_all_rows') {
+    return <span style={{ color: '#fb7185' }}>Mapped · empty in every source row</span>;
+  }
+  return <span style={{ color: '#10d96e' }}>Mapped · {field.populated_rows || 0} populated{field.empty_rows ? ` · ${field.empty_rows} empty` : ''}</span>;
+}
+
+function _configuredAtRiskThreshold(payload: Record<string, unknown>): number {
+  const thresholds = payload.thresholds as Record<string, unknown> | undefined;
+  const supplied = thresholds?.sla_at_risk_pct ?? thresholds?.at_risk_pct ?? payload.sla_at_risk_pct;
+  const value = _finiteNumber(supplied);
+  return value != null && value >= 0 ? value : LOW_BUFFER_THRESHOLD;
 }
 
 const useStyles = makeStyles((theme) => ({
@@ -158,12 +280,66 @@ const useStyles = makeStyles((theme) => ({
 
 export function SlaMatrixPanel() {
   const classes = useStyles();
-  const { data, setSlaMatrix } = useAppData();
+  const history = useHistory();
+  const {
+    data, setBatch, setSlaMatrix, setFindings, setRedFlags, setPeNarrative,
+    setExecutive, setFinalJudgment,
+  } = useAppData();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [drillStatus, setDrillStatus] = useState<string | null>(null);
   const [breachExpanded, setBreachExpanded] = useState(false);
   const [resLinkExpanded, setResLinkExpanded] = useState(false);
+  const derivedRefreshId = useRef(0);
+
+  const clearDerivedEvidence = () => {
+    setFindings(null);
+    setRedFlags(null);
+    setPeNarrative(null);
+    setExecutive(null);
+    setFinalJudgment(null);
+  };
+
+  // Keep direct SLA Matrix uploads on the same evidence cascade as Upload &
+  // Intake. State setters are deliberately driven from the returned payload,
+  // not React's asynchronous state update, so no screen can see mixed old/new
+  // batch and SLA evidence during the refresh.
+  const refreshDerivedEvidence = async (nextData: AppData): Promise<string> => {
+    const refreshId = ++derivedRefreshId.current;
+    const stillCurrent = () => refreshId === derivedRefreshId.current;
+    const payload = buildAnalysisPayload(nextData);
+    let findings: DashboardPayload | null = null;
+    let redFlags: DashboardPayload | null = null;
+    let executive: DashboardPayload | null = null;
+    const unavailable: string[] = [];
+
+    try {
+      findings = await generateFindings(payload);
+      if (stillCurrent()) setFindings(findings);
+    } catch { unavailable.push('findings'); }
+    try {
+      redFlags = await getRedFlags(payload);
+      if (stillCurrent()) setRedFlags(redFlags);
+    } catch { unavailable.push('questions'); }
+    try {
+      executive = await getExecutiveDashboard({ ...payload, sla_data: nextData.slaMatrix, findings: findings?.findings });
+      if (stillCurrent()) setExecutive(executive);
+    } catch { unavailable.push('executive view'); }
+    try {
+      const narrative = await getPeNarrative(buildPeNarrativePayload(nextData, { findings, redFlags }));
+      if (stillCurrent()) setPeNarrative(narrative);
+    } catch { unavailable.push('PE review summary'); }
+    try {
+      const judgment = await getFinalJudgment(buildFinalJudgmentPayload(nextData, { findings, redFlags, executive }));
+      if (stillCurrent()) setFinalJudgment(judgment);
+    } catch { unavailable.push('final judgment'); }
+
+    if (!stillCurrent()) return 'A newer upload is reconciling the shared evidence.';
+    return unavailable.length
+      ? `Batch Review refreshed; ${unavailable.join(', ')} can be refreshed from PE Findings.`
+      : 'Batch Review, PE Findings, executive dashboard, and final judgment refreshed.';
+  };
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -171,9 +347,52 @@ export function SlaMatrixPanel() {
     if (!file) return;
     setBusy(true);
     setError(null);
+    setUploadNotice(null);
     try {
-      const result = await uploadSlaMatrix(file);
-      setSlaMatrix(result);
+      const result = await uploadBatchSlaXlsx(file);
+      if (result.file_role === 'batch_execution_history') {
+        const batchPayload = result.batch_payload;
+        if (!batchPayload || typeof batchPayload !== 'object' || Array.isArray(batchPayload)) {
+          throw new Error('Execution-history handoff returned no Batch Review payload.');
+        }
+        setBatch(batchPayload as Record<string, unknown>);
+        history.push('/batch');
+        return;
+      }
+      const workbookSlaMatrix = workbookSlaSnapshotFromUpload(result);
+      setSlaMatrix(workbookSlaMatrix);
+
+      // A contract upload is allowed before Ctrl-M. In that case the matrix is
+      // still useful on its own and nothing is cleared. Once Ctrl-M evidence
+      // exists, refresh it immediately so every dependent screen sees the same
+      // newly resolved Tier 1/2/3 SLA values.
+      let refreshedBatch: DashboardPayload;
+      try {
+        refreshedBatch = await refreshBatch();
+      } catch {
+        setUploadNotice('SLA contract loaded. Upload Ctrl-M evidence when available; Batch Review remains unchanged until then.');
+        return;
+      }
+
+      setBatch(refreshedBatch);
+      clearDerivedEvidence();
+      try {
+        const status = await refreshDerivedEvidence({
+          ...data,
+          batch: refreshedBatch,
+          slaMatrix: workbookSlaMatrix,
+          findings: null,
+          redFlags: null,
+          peNarrative: null,
+          executive: null,
+          finalJudgment: null,
+        });
+        setUploadNotice(status);
+      } catch {
+        // The batch refresh is already valid. Preserve it and make the only
+        // remaining retry explicit rather than pretending it was unchanged.
+        setUploadNotice('Batch Review refreshed. PE Findings can be refreshed from its page if needed.');
+      }
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'SLA matrix upload failed.');
     } finally {
@@ -181,16 +400,31 @@ export function SlaMatrixPanel() {
     }
   };
 
-  const slaMatrix = data.slaMatrix || {};
+  const slaMatrix = useMemo(() => data.slaMatrix || {}, [data.slaMatrix]);
   const breaches = (slaMatrix.breaches as SlaBreach[]) || [];
-  const jobSummary = (slaMatrix.job_summary as JobSummaryRow[]) || [];
+  const jobSummary = useMemo(() => (slaMatrix.job_summary as JobSummaryRow[]) || [], [slaMatrix]);
   const jobBaselines = (slaMatrix.job_baselines as Record<string, JobBaseline>) || {};
   const outliers = (slaMatrix.outliers as Outlier[]) || [];
   const resourceLinked = (slaMatrix.resource_linked as ResourceLinkedRun[]) || [];
   const workflowSummary = (slaMatrix.workflow_summary as WorkflowSummaryRow[]) || [];
+  // Timing provenance is evidence even when a workbook only records a target
+  // or a placeholder; the cell label makes incomplete timing explicit instead
+  // of hiding why a row was not measured.
+  const showWorkbookTiming = workflowSummary.some((wf) => Boolean(
+    wf.workbook_timing_source || (wf.workbook_start_time && wf.workbook_reported_end),
+  ));
+  const batchSlaMappingReport = slaMatrix.batch_sla_mapping_report as BatchSlaMappingReport | undefined;
+  // Auxiliary workbook tabs (lookup lists, cover sheets) are reported by
+  // ingestion but must not look like missing SLA fields in the contract view.
+  const batchSlaSourceSheets = (batchSlaMappingReport?.sheets || []).filter(
+    (sheet) => sheet.included_in_ingestion !== false,
+  );
+  const batchSlaFieldStates = batchSlaSourceSheets.flatMap((sheet) => sheet.field_states || []);
+  const batchSlaMappedHeaders = batchSlaSourceSheets.flatMap((sheet) => sheet.mapped || []);
   const compliancePct = Number(slaMatrix.compliance_pct) || 0;
   const windowDayPct = slaMatrix.window_day_compliance_pct != null ? Number(slaMatrix.window_day_compliance_pct) : compliancePct;
   const explicitSlaMatrix = slaMatrix.explicit_sla_matrix === true;
+  const atRiskThreshold = _configuredAtRiskThreshold(slaMatrix);
 
   // ── Tightest Buffer — the single job closest to its SLA ceiling, ported from
   // #slak-tightbuf (_renderSlaMatrix(), app.js). ──
@@ -212,13 +446,18 @@ export function SlaMatrixPanel() {
     });
     return groups;
   }, [data.slaMatrix]); // eslint-disable-line react-hooks/exhaustive-deps
+  const contractConflictWorkflows = workflowSummary.filter((wf) => wf.status === 'SLA_CONTRACT_CONFLICT');
+  const equalTargetCompletionWorkflows = workflowSummary.filter((wf) =>
+    wf.workbook_timing_source === 'WORKBOOK_REPORTED_CURRENT_END_EQUALS_TARGET'
+    || wf.runtime_source_caveat === 'REPORTED_END_EQUALS_TARGET',
+  );
 
   const lowBufferJobs = useMemo(
     () =>
       jobSummary
-        .filter((job) => Number(job.buffer_pct ?? 999) < LOW_BUFFER_THRESHOLD)
+        .filter((job) => Number(job.buffer_pct ?? 999) < atRiskThreshold)
         .sort((a, b) => Number(a.buffer_pct ?? 0) - Number(b.buffer_pct ?? 0)),
-    [data.slaMatrix], // eslint-disable-line react-hooks/exhaustive-deps
+    [jobSummary, atRiskThreshold],
   );
 
   const unexplainedBreaches = useMemo(() => {
@@ -343,22 +582,10 @@ export function SlaMatrixPanel() {
 
   const renderHeadroomCell = (wf: WorkflowSummaryRow) => {
     const headroom = _workflowHeadroom(wf);
-    if (!headroom) return <TableCell align="right" style={{ color: '#6b7db3' }}>—</TableCell>;
-    const color = headroom.minutes < 0 ? '#f43f5e' : headroom.minutes <= 15 ? '#f59e0b' : '#10d96e';
-    const text = headroom.minutes < 0 ? `${Math.abs(headroom.minutes)}m over` : `${headroom.minutes}m left`;
-    const title = headroom.source === 'clock'
-      ? 'Actual end time against the contracted clock deadline. Positive means the workflow finished before deadline.'
-      : 'SLA duration minus observed workflow runtime. Used because this contract has no fixed clock deadline.';
-    return <TableCell align="right" title={title} style={{ color, fontFamily: 'monospace', fontWeight: 700 }}>{text}</TableCell>;
-  };
-
-  const renderStartDelayCell = (wf: WorkflowSummaryRow) => {
-    const delay = _finiteNumber(wf.start_delay_mins);
-    if (delay == null) return <TableCell align="right" style={{ color: '#6b7db3' }}>—</TableCell>;
-    const status = wf.start_time_status || '';
-    const color = status === 'SEVERELY_LATE' ? '#f43f5e' : status === 'LATE_START' ? '#f59e0b' : '#10d96e';
-    const text = delay > 0 ? `+${Math.round(delay)}m late` : delay < 0 ? `${Math.abs(Math.round(delay))}m early` : 'On time';
-    const title = `Actual workflow start compared with the contracted start${wf.contract_start_time ? ` (${wf.contract_start_time})` : ''}.`;
+    if (headroom == null) return <TableCell align="right" style={{ color: '#6b7db3' }}>—</TableCell>;
+    const color = headroom < 0 ? '#f43f5e' : headroom <= 15 ? '#f59e0b' : '#10d96e';
+    const text = headroom < 0 ? `${Math.abs(headroom)}m over` : `${headroom}m left`;
+    const title = 'SLA duration minus the workbook-reported duration. This is the same arithmetic as Buffer %.';
     return <TableCell align="right" title={title} style={{ color, fontFamily: 'monospace', fontWeight: 700 }}>{text}</TableCell>;
   };
 
@@ -384,26 +611,29 @@ export function SlaMatrixPanel() {
         {busy && <CircularProgress size={22} aria-label="Uploading" />}
       </Box>
       {error && <Typography variant="body2" color="error">{error}</Typography>}
+      {uploadNotice && <Typography variant="body2" style={{ color: '#2dd4bf', marginTop: 8 }}>{uploadNotice}</Typography>}
 
       {!data.slaMatrix ? (
         <Typography className={classes.empty} variant="body2" color="textSecondary">
-          Upload a Ctrl-M file here, or an SLA matrix file in Upload &amp; Intake, to populate this view.
+          Upload a BatchSLA workbook here, or in Upload &amp; Intake, to populate this contract view. Ctrl-M data belongs to Batch Review.
         </Typography>
       ) : (
         <>
           {/* ── SLA Matrix intake/result card, ported from the upload confirmation card (app.js) ── */}
           <Box style={{ borderRadius: 12, border: '1px solid rgba(16,217,110,.3)', background: 'rgba(16,217,110,.05)', padding: 12, marginTop: 12 }}>
             <Typography variant="body2" style={{ color: '#10d96e', fontWeight: 700 }}>
-              SLA Matrix loaded — {Number(slaMatrix.total_jobs) || 0} jobs · {compliancePct.toFixed(1)}% compliance
+              Workbook SLA Matrix loaded — {Number(slaMatrix.total_jobs) || 0} workflows · {slaMatrix.compliance_pct == null ? 'not yet measurable' : `${compliancePct.toFixed(1)}% compliance`}
               · {Number(slaMatrix.breaching_runs) || 0} breach(es)
             </Typography>
             <Typography variant="caption" color="textSecondary">
-              {explicitSlaMatrix ? 'Per-job contract rows matched from an uploaded SLA file.' : 'No per-job contract file matched — using schedule-type / global ceilings.'}
+              {slaMatrix.workbook_only === true
+                ? `${Number(slaMatrix.observed_workflow_count) || 0} workbook-reported completion(s); ${Number(slaMatrix.not_observed_workflow_count) || 0} contract-only row(s) are not scored.`
+                : explicitSlaMatrix ? 'Per-job contract rows matched from an uploaded SLA file.' : 'No per-job contract file matched — using schedule-type / global ceilings.'}
             </Typography>
           </Box>
 
           {/* ── Assumed-SLA warning banner, ported from #sla-assumed-banner (app.js) ── */}
-          {!explicitSlaMatrix && (
+          {!explicitSlaMatrix && contractConflictWorkflows.length === 0 && (
             <Box style={{ borderRadius: 12, border: '1px solid rgba(245,158,11,.35)', background: 'rgba(245,158,11,.06)', padding: 12, marginTop: 12 }}>
               <Typography variant="body2" style={{ color: '#f59e0b', fontWeight: 700 }}>⚠ Assumed SLA ceiling in use</Typography>
               <Typography variant="caption" color="textSecondary">
@@ -413,16 +643,58 @@ export function SlaMatrixPanel() {
             </Box>
           )}
 
+          {contractConflictWorkflows.length > 0 && (
+            <Box style={{ borderRadius: 12, border: '1px solid rgba(251,113,133,.55)', background: 'linear-gradient(90deg, rgba(244,63,94,.12), rgba(251,113,133,.035))', boxShadow: '0 0 28px rgba(244,63,94,.10)', padding: 12, marginTop: 12 }}>
+              <Typography variant="body2" style={{ color: '#fb7185', fontWeight: 800 }}>Contract values conflict — SLA not applied</Typography>
+              <Typography variant="caption" color="textSecondary">
+                {contractConflictWorkflows.length} workflow{contractConflictWorkflows.length === 1 ? '' : 's'} has a Start Time → End Time window that disagrees with its declared Duration. The dashboard keeps both values visible, but does not choose a ceiling, compute buffer, or score compliance until the contract source is corrected.
+              </Typography>
+            </Box>
+          )}
+
+          {equalTargetCompletionWorkflows.length > 0 && (
+            <Box style={{ borderRadius: 8, border: '1px solid rgba(245,158,11,.45)', background: 'rgba(245,158,11,.07)', padding: 12, marginTop: 12 }}>
+              <Typography variant="body2" style={{ color: '#fbbf24', fontWeight: 800 }}>Source-reported completion equals the contract target</Typography>
+              <Typography variant="caption" color="textSecondary">
+                {equalTargetCompletionWorkflows.length} workflow{equalTargetCompletionWorkflows.length === 1 ? '' : 's'} has an explicit <code>Current end time</code> equal to its target. Duration, Headroom, Buffer, and Status are calculated from the supplied fields; verify that the source value is an actual completion rather than a template copy.
+              </Typography>
+            </Box>
+          )}
+
+          {batchSlaFieldStates.length > 0 && (
+            <Box style={{ border: '1px solid rgba(45,212,191,.28)', background: 'rgba(45,212,191,.035)', borderRadius: 8, padding: 12, marginTop: 12 }}>
+              <Typography variant="subtitle2" style={{ color: '#d9f7f1', fontWeight: 800 }}>BatchSLA source mapping</Typography>
+              <Typography variant="caption" style={{ display: 'block', color: '#8fa3d2', marginTop: 2 }}>
+                Schema v{batchSlaMappingReport?.schema_version || '2'} · accepted contract fields. Source absence is distinct from an empty source value and from an unreported workbook completion.
+              </Typography>
+              <Table size="small" className="pe-table" aria-label="BatchSLA source mapping" style={{ marginTop: 8 }}>
+                <TableHead><TableRow><TableCell>Canonical field</TableCell><TableCell>Raw source header</TableCell><TableCell>Source state</TableCell></TableRow></TableHead>
+                <TableBody>
+                  {batchSlaFieldStates.map((field, index) => {
+                    const mapped = batchSlaMappedHeaders.find((header) => header.canonical_field === field.canonical_field);
+                    return (
+                      <TableRow key={`${field.canonical_field || 'field'}-${index}`}>
+                        <TableCell style={{ fontFamily: 'monospace' }}>{SOURCE_FIELD_LABEL[field.canonical_field || ''] || field.canonical_field}</TableCell>
+                        <TableCell style={{ fontFamily: 'monospace', color: mapped?.raw_header ? '#dce7ff' : '#6b7db3' }}>{mapped?.raw_header || '—'}</TableCell>
+                        <TableCell><MappingStateLabel field={field} /></TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </Box>
+          )}
+
           {/* ── Active SLA Commitments — Tier 1/2/3 workflow table, ported from
               _renderSlaCommitmentsPanel() (app.js). Tier 2 renders even when empty
               (with an "Upload SOW" CTA) to match the real dashboard's always-visible
               two-tier layout with numbered circle badges. ── */}
-          <Box style={{ borderRadius: 12, border: '1px solid rgba(34,211,238,.25)', background: 'rgba(34,211,238,.03)', padding: 16, marginTop: 12 }}>
+          <Box className="pe-evidence-surface" style={{ borderRadius: 12, padding: 16, marginTop: 12 }}>
             <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
               <Box>
-                <Typography variant="subtitle2">Active SLA Commitments</Typography>
+                <Typography variant="subtitle2">Workbook SLA Commitments</Typography>
                 <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
-                <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#6b7db3' }}>Headroom is shown in minutes; start delay appears only where the contract defines a start time.</Typography>
+                <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#8fa3d2' }}>Only a distinct workbook Current end time produces a measured duration. Headroom is SLA minus that duration; Buffer and Status use the same calculation.</Typography>
               </Box>
               <Link to="/sow" style={{ fontSize: 10, fontWeight: 700, color: '#22d3ee', textDecoration: 'none' }}>View SOW Contract {'\u2192'}</Link>
             </Box>
@@ -444,9 +716,9 @@ export function SlaMatrixPanel() {
                       <TableCell>Workflow</TableCell>
                       <TableCell>Type</TableCell>
                       <TableCell align="right">SLA</TableCell>
-                      <TableCell align="right">Peak Window</TableCell>
-                      <TableCell align="right">Headroom min</TableCell>
-                      <TableCell align="right">Start delay</TableCell>
+                      {showWorkbookTiming && <TableCell>Contract window / source timing</TableCell>}
+                      <TableCell align="right">Measured duration</TableCell>
+                      <TableCell align="right">Duration headroom</TableCell>
                       <TableCell align="right">Buffer %</TableCell>
                       <TableCell>Status</TableCell>
                     </TableRow>
@@ -456,10 +728,10 @@ export function SlaMatrixPanel() {
                       <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
                         <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
-                        <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
-                        <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
+                        {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
+                        <TableCell align="right" title={wf.measurement_reason_detail || 'Workbook-reported duration used to calculate Buffer and Status.'}>{_workbookDurationLabel(wf)}</TableCell>
                         {renderHeadroomCell(wf)}
-                        {renderStartDelayCell(wf)}
                         <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
                           {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                         </TableCell>
@@ -486,9 +758,9 @@ export function SlaMatrixPanel() {
                       <TableCell>Workflow</TableCell>
                       <TableCell>Type</TableCell>
                       <TableCell align="right">SLA</TableCell>
-                      <TableCell align="right">Peak Window</TableCell>
-                      <TableCell align="right">Headroom min</TableCell>
-                      <TableCell align="right">Start delay</TableCell>
+                      {showWorkbookTiming && <TableCell>Contract window / source timing</TableCell>}
+                      <TableCell align="right">Measured duration</TableCell>
+                      <TableCell align="right">Duration headroom</TableCell>
                       <TableCell align="right">Buffer %</TableCell>
                       <TableCell>Status</TableCell>
                     </TableRow>
@@ -498,10 +770,10 @@ export function SlaMatrixPanel() {
                       <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
                         <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
-                        <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
-                        <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
+                        {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
+                        <TableCell align="right" title={wf.measurement_reason_detail || 'Workbook-reported duration used to calculate Buffer and Status.'}>{_workbookDurationLabel(wf)}</TableCell>
                         {renderHeadroomCell(wf)}
-                        {renderStartDelayCell(wf)}
                         <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
                           {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                         </TableCell>
@@ -526,9 +798,9 @@ export function SlaMatrixPanel() {
                       <TableCell>Workflow</TableCell>
                       <TableCell>Type</TableCell>
                       <TableCell align="right">SLA</TableCell>
-                      <TableCell align="right">Peak Window</TableCell>
-                      <TableCell align="right">Headroom min</TableCell>
-                      <TableCell align="right">Start delay</TableCell>
+                      {showWorkbookTiming && <TableCell>Contract window / source timing</TableCell>}
+                      <TableCell align="right">Measured duration</TableCell>
+                      <TableCell align="right">Duration headroom</TableCell>
                       <TableCell align="right">Buffer %</TableCell>
                       <TableCell>Status</TableCell>
                     </TableRow>
@@ -538,10 +810,10 @@ export function SlaMatrixPanel() {
                       <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
                         <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
-                        <TableCell align="right">{wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '\u2014'}</TableCell>
-                        <TableCell align="right">{wf.runtime_h != null ? `${Number(wf.runtime_h).toFixed(3)}h` : '\u2014'}</TableCell>
+                        <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
+                        {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
+                        <TableCell align="right" title={wf.measurement_reason_detail || 'Workbook-reported duration used to calculate Buffer and Status.'}>{_workbookDurationLabel(wf)}</TableCell>
                         {renderHeadroomCell(wf)}
-                        {renderStartDelayCell(wf)}
                         <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
                           {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                         </TableCell>
@@ -887,7 +1159,7 @@ export function SlaMatrixPanel() {
             {lowBufferJobs.length > 0 && (
                 <>
                   <Typography variant="caption" style={{ display: 'block', marginTop: 12, color: '#6b7db3' }}>
-                    {lowBufferJobs.length} job(s) with under {LOW_BUFFER_THRESHOLD}% buffer to the SLA ceiling
+                    {lowBufferJobs.length} job(s) with under {atRiskThreshold}% buffer to the SLA ceiling
                   </Typography>
                   <Table size="small" className="pe-table" aria-label="Low buffer jobs">
                     <TableHead>

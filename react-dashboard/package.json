@@ -33,6 +33,7 @@
     "setLocalEnv": "cross-env DOTENV_CONFIG_PATH=./.github/envs/.env node -r dotenv/config .github/scripts/setRuntimeEnv.js public/",
     "prepare:vendor": "node .github/scripts/prepareVendorSources.js",
     "start:standalone": "node .github/scripts/prepareVendorSources.js && npm run setLocalEnv --silent && cross-env HOST=localhost PORT=3000 react-scripts start",
+    "check:api-contract": "node scripts/check-api-contract.js",
     "test-no-coverage": "react-scripts test",
     "lint": "eslint src/**/*.ts src/**/*.tsx",
     "prettier": "prettier --check src/**/*.js src/**/*.jsx src/**/*.ts src/**/*.tsx",

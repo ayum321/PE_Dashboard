@@ -45,6 +45,11 @@ interface FleetKpis {
   cpu_reporting?: number;
   mem_reporting?: number;
   disk_reporting?: number;
+  cpu_coverage?: number;
+  mem_coverage?: number;
+  disk_coverage?: number;
+  total_vcpus?: number | null;
+  vcpus_reporting?: number;
   thresholds?: Record<string, number>;
 }
 
@@ -88,6 +93,8 @@ interface ServerRow {
   environment?: string;
   product_group?: string;
   vm_size?: string;
+  vcpus?: number | null;
+  vcpu_source?: string;
   location?: string;
   resource_id?: string;
   source?: string;
@@ -337,7 +344,6 @@ export function buildFleetHeatmapView(
     columns.push({ label: bucketSize === 1 ? first : `${first}–${last}`, title: bucketSize === 1 ? first : `${first} to ${last}` });
   }
 
-  let numericCells = 0;
   const rows = sourceRows.map((row) => {
     const values: (number | null)[] = [];
     for (let start = 0; start < timestamps.length; start += bucketSize) {
@@ -350,12 +356,13 @@ export function buildFleetHeatmapView(
       }
       const value = metric === 'memory' ? Math.min(...bucket) : Math.max(...bucket);
       values.push(value);
-      numericCells++;
     }
     return { name: row.name, values };
   });
 
-  return numericCells ? { columns, rows, bucketSize } : null;
+  // A completely un-emitted metric is still evidence: render its full grid so
+  // operators can distinguish missing Azure telemetry from an absent heatmap.
+  return { columns, rows, bucketSize };
 }
 
 function fleetHeatmapCellColor(value: number | null, metric: HeatmapMetric): string {
@@ -365,6 +372,15 @@ function fleetHeatmapCellColor(value: number | null, metric: HeatmapMetric): str
   // Memory is an *available* percentage, so low values are the risk state.
   if (metric === 'memory') return value <= 15 ? '#f43f5e' : value <= 40 ? '#f59e0b' : '#10b981';
   return value >= 85 ? '#f43f5e' : value >= 65 ? '#f59e0b' : '#10b981';
+}
+
+/** Keep the unit and risk direction visible at the point a reviewer hovers a
+ * heatmap cell. Memory is deliberately raw Azure "available %", not used %:
+ * lower availability is more pressure. */
+export function fleetHeatmapCellLabel(value: number | null, metric: HeatmapMetric): string {
+  if (value == null) return 'not emitted by Azure Monitor';
+  if (metric === 'memory') return `${value.toFixed(1)}% available — lower availability is higher risk`;
+  return `${value.toFixed(1)}% utilized — higher utilization is higher risk`;
 }
 
 export interface CrossServerCorrelationGroup {
@@ -1086,11 +1102,18 @@ export function ResourcePanel() {
         {isAzureSource && <KpiStatCard label="Source" value="Azure Monitor" valueColor="#22d3ee" sub={`Live \u00b7 last ${hoursBack}h`} accent="#22d3ee" />}
         {fleetKpis ? (
           <>
+            <KpiStatCard
+              label="Fleet vCPUs"
+              value={fleetKpis.total_vcpus != null ? fleetKpis.total_vcpus.toLocaleString() : '\u2014'}
+              valueColor={fleetKpis.total_vcpus != null ? '#4a9eff' : '#6b7db3'}
+              sub={fleetKpis.vcpus_reporting ? `${fleetKpis.vcpus_reporting}/${fleetKpis.known_servers || servers.length} VM capacities resolved` : 'Azure Compute capacity unavailable'}
+              accent="#4a9eff"
+            />
             <KpiStatCard label="Fleet Grade" value={fleetKpis.fleet_grade || '?'} sub={`Score ${(fleetKpis.fleet_score || 0).toFixed(1)}/100`} accent="#a855f7" />
             {fleetKpis.cpu_reporting === 0 ? (
               <KpiStatCard label="Avg CPU" value="—" valueColor="#6b7db3" sub="0 servers reporting CPU" accent="#6b7db3" />
             ) : (
-              <MiniGauge label="Avg CPU" value={fleetKpis.avg_cpu || 0} threshold={80} sub="Threshold 80%" />
+              <MiniGauge label="Avg CPU" value={fleetKpis.avg_cpu || 0} threshold={80} sub={`${fleetKpis.cpu_reporting}/${fleetKpis.known_servers || servers.length} reporting · threshold 80%`} />
             )}
             {fleetKpis.mem_reporting === 0 ? (
               <KpiStatCard label="Avg Memory" value="—" valueColor="#6b7db3" sub="0 servers reporting memory" accent="#6b7db3" />
@@ -1100,14 +1123,14 @@ export function ResourcePanel() {
                 value={fleetKpis.avg_mem || 0}
                 threshold={80}
                 overrideColor={memSeverity?.color}
-                sub={!memSeverity || memSeverity.dbCount === 0 ? 'Threshold 70/80%' : memSeverity.dbExpectedCount === memSeverity.dbCount ? `${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB expected (SGA/PGA)` : `${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB in expected band${memSeverity.dbHighCount ? `, ${memSeverity.dbHighCount} above 92%` : `, ${memSeverity.dbCount - memSeverity.dbExpectedCount} below 80%`}`}
-                tooltip={memSeverity ? `${memSeverity.dbCount} DB server(s): ${memSeverity.dbExpectedCount} in the expected 80\u201392% SGA/PGA band, ${memSeverity.dbHighCount} above it. ${memSeverity.total - memSeverity.dbCount} non-DB server(s): ${memSeverity.nonDbCritCount} \u2265 80%, ${memSeverity.nonDbWarnCount} \u2265 70%. Color reflects these tallies directly \u2014 same facts Fleet Diagnosis uses below.` : undefined}
+                sub={!memSeverity || memSeverity.dbCount === 0 ? `${fleetKpis.mem_reporting}/${fleetKpis.known_servers || servers.length} reporting · threshold 70/80%` : memSeverity.dbExpectedCount === memSeverity.dbCount ? `${fleetKpis.mem_reporting}/${fleetKpis.known_servers || servers.length} reporting · ${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB host profile` : `${fleetKpis.mem_reporting}/${fleetKpis.known_servers || servers.length} reporting · ${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB in expected band${memSeverity.dbHighCount ? `, ${memSeverity.dbHighCount} above 92%` : `, ${memSeverity.dbCount - memSeverity.dbExpectedCount} below 80%`}`}
+                tooltip={memSeverity ? `${memSeverity.dbCount} DB server(s): ${memSeverity.dbExpectedCount} in the configured 80\u201392% host-memory profile, ${memSeverity.dbHighCount} above it. Azure cannot verify SGA/PGA from this host metric alone. ${memSeverity.total - memSeverity.dbCount} non-DB server(s): ${memSeverity.nonDbCritCount} \u2265 80%, ${memSeverity.nonDbWarnCount} \u2265 70%. Color reflects these tallies directly \u2014 same facts Fleet Diagnosis uses below.` : undefined}
               />
             )}
             {fleetKpis.disk_reporting === 0 ? (
               <KpiStatCard label="Avg Disk" value="—" valueColor="#6b7db3" sub="0 servers reporting disk" accent="#6b7db3" />
             ) : (
-              <MiniGauge label="Avg Disk" value={fleetKpis.avg_disk || 0} threshold={85} sub="Threshold 85%" />
+              <MiniGauge label="Avg Disk" value={fleetKpis.avg_disk || 0} threshold={85} sub={`${fleetKpis.disk_reporting}/${fleetKpis.known_servers || servers.length} reporting · threshold 85%`} />
             )}
             <KpiStatCard label="Health" accent="#f43f5e" value={
               <Box display="flex" alignItems="flex-start" style={{ gap: 10 }}>
@@ -1133,7 +1156,7 @@ export function ResourcePanel() {
               value={fleetAvg.mem}
               threshold={80}
               overrideColor={memSeverity?.color}
-              sub={!memSeverity || memSeverity.dbCount === 0 ? 'Threshold 70/80%' : `${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB expected (SGA/PGA)`}
+              sub={!memSeverity || memSeverity.dbCount === 0 ? 'Threshold 70/80%' : `${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB host profile`}
             />
             <MiniGauge label="Avg Disk" value={fleetAvg.disk} threshold={85} sub="Threshold 85%" />
             <KpiStatCard label="Fleet Health" value={fleetAvg.health.toFixed(0)} sub="Score /100" accent="#a855f7" />
@@ -1252,7 +1275,7 @@ export function ResourcePanel() {
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: 'linear-gradient(135deg,#d97706,#fbbf24)', display: 'inline-block' }} /><Typography component="span" variant="caption" color="textSecondary">Warning</Typography></Box>
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: 'linear-gradient(135deg,#dc2626,#f87171)', display: 'inline-block' }} /><Typography component="span" variant="caption" color="textSecondary">Critical</Typography></Box>
             <Box display="flex" alignItems="center" style={{ gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: `linear-gradient(135deg,${DB_EXPECTED_GRAD[0]},${DB_EXPECTED_GRAD[1]})`, display: 'inline-block' }} /><Typography component="span" variant="caption" color="textSecondary">DB expected</Typography></Box>
-            <Typography component="span" variant="caption" color="textSecondary" style={{ fontSize: 8 }}>| Memory = Available % (Azure native, lower = more pressure) {'\u00b7'} Disk = I/O BW consumed % (not storage space) {'\u00b7'} DB servers 8{'\u2013'}20% mem available is expected SGA/PGA (shown purple)</Typography>
+            <Typography component="span" variant="caption" color="textSecondary" style={{ fontSize: 8 }}>| Memory = Available % (Azure native, lower = more pressure) {'\u00b7'} Disk = I/O BW consumed % (not storage space) {'\u00b7'} DB servers with 8{'\u2013'}20% memory available match the configured host profile (shown purple; SGA/PGA not verified)</Typography>
           </Box>
 
           {(() => {
@@ -1284,7 +1307,7 @@ export function ResourcePanel() {
               const cpuNote = aggNote(cpuVal, s.cpu_avg_pct ?? s.cpu_used);
               const bars = [
                 { label: 'CPU', val: cpuVal, color: cpuColor, note: cpuNote, title: cpuVal != null ? `${cpuVal.toFixed(1)}% (${utilAggMode}; threshold 80%)` : 'No data' },
-                { label: 'Mem avail', val: memAvailVal, color: memColor, note: null, title: dbExpected ? `${(memAvailVal ?? 0).toFixed(1)}% available (${utilAggMode}) \u2014 DB expected SGA/PGA band (\u224838\u201320% available is normal for DB)` : memAvailVal != null ? `${memAvailVal.toFixed(1)}% available (${utilAggMode}; threshold 20%)` : 'No data' },
+                { label: 'Mem avail', val: memAvailVal, color: memColor, note: null, title: dbExpected ? `${(memAvailVal ?? 0).toFixed(1)}% available (${utilAggMode}) \u2014 configured DB host profile (8\u201320% available; Azure does not verify SGA/PGA)` : memAvailVal != null ? `${memAvailVal.toFixed(1)}% available (${utilAggMode}; threshold 20%)` : 'No data' },
                 { label: 'Disk I/O', val: diskVal, color: diskColor, note: null, title: diskVal != null ? `${diskVal.toFixed(1)}% (${utilAggMode}; threshold 80%)` : 'Disk I/O metric not emitted by this VM SKU/agent.' },
               ];
               return (
@@ -1352,7 +1375,7 @@ export function ResourcePanel() {
             </TableCell>
             <TableCell align="right" title={'Period average CPU used % \u2014 the denominator for aggregation-artifact detection (Max high but Avg low = brief spike, not sustained pressure).'}>CPU Avg</TableCell>
             <TableCell align="center" title="30-day CPU trend from the Metrics Deep Dive timeseries (load it below to populate). Hover the sparkline for avg/peak detail.">Trend</TableCell>
-            <TableCell align="right" title={'Memory USED % (100 − Azure Available Memory %). DB servers normally run 80–92% used (SGA/PGA pre-allocation) and are tagged “DB expected” rather than flagged.'}>
+            <TableCell align="right" title={'Memory USED % (100 − Azure Available Memory %). DB servers in the configured 80–92% used host-memory profile are tagged “DB expected”; Azure cannot verify SGA/PGA from this host metric alone.'}>
               <TableSortLabel active={sortKey === 'mem_used'} direction={sortDesc ? 'desc' : 'asc'} onClick={() => handleSort('mem_used')}>Mem Used %</TableSortLabel>
             </TableCell>
             <TableCell align="right" title={'Total memory capacity (GB) reported by the source \u2014 not always available depending on collection method.'}>Mem GB</TableCell>
@@ -1361,6 +1384,7 @@ export function ResourcePanel() {
             </TableCell>
             <TableCell>Status</TableCell>
             <TableCell>Size</TableCell>
+            <TableCell align="right" title="Usable virtual CPUs from Azure Compute capacity metadata. Constrained VM sizes use vCPUsAvailable where Azure exposes it; regional VM-size metadata is the fallback.">vCPUs</TableCell>
             <TableCell>Source</TableCell>
           </TableRow>
         </TableHead>
@@ -1379,7 +1403,7 @@ export function ResourcePanel() {
             const statusReasons: string[] = [];
             if (cpuAvail && (server.cpu_used || 0) >= cpuWarn) statusReasons.push(`CPU ${(server.cpu_used || 0).toFixed(1)}% used \u2265 ${cpuWarn}% threshold`);
             if (memAvail && !dbExpected && (server.mem_used || 0) >= 80) statusReasons.push(`Memory ${(100 - (server.mem_used || 0)).toFixed(1)}% available \u2264 20% floor`);
-            if (memAvail && dbExpected) statusReasons.push('Memory within DB expected band (SGA/PGA)');
+            if (memAvail && dbExpected) statusReasons.push('Memory within configured DB host-memory profile (SGA/PGA not verified)');
             if (diskAvail && (server.disk_used_max || 0) >= 80) statusReasons.push(`Disk ${(server.disk_used_max || 0).toFixed(1)}% used \u2265 80% threshold`);
             if (server.dual_pressure) statusReasons.push('Dual pressure: CPU+Memory both critical');
             if (server.agg_trap) statusReasons.push(`Aggregation trap: peak=${(server.cpu_used || 0).toFixed(1)}%, avg=${(server.cpu_avg_pct || 0).toFixed(1)}%`);
@@ -1417,8 +1441,8 @@ export function ResourcePanel() {
               <TableCell align="right" style={{ color: memColor }} title={memAvail ? undefined : 'Data unavailable'}>
                 {memAvail ? `${(server.mem_used || 0).toFixed(1)}%` : 'N/A'}
                 {server.mem_status && (
-                  <Typography component="span" variant="caption" title={dbExpected ? 'DB expected allocation (SGA/PGA). 8\u201320% available is normal for DB servers.' : 'DB server below expected available (<8%). Check for memory pressure.'} style={{ display: 'block', fontSize: 8, color: server.mem_status === 'DB_HIGH' ? '#f43f5e' : DB_EXPECTED_COLOR, cursor: 'help' }}>
-                    {dbExpected ? 'DB expected' : 'DB high'}
+                  <Typography component="span" variant="caption" title={dbExpected ? 'Configured DB host-memory profile. 8\u201320% available is expected; Azure does not verify SGA/PGA.' : 'DB server below expected available (<8%). Check for memory pressure.'} style={{ display: 'block', fontSize: 8, color: server.mem_status === 'DB_HIGH' ? '#f43f5e' : DB_EXPECTED_COLOR, cursor: 'help' }}>
+                    {dbExpected ? 'DB host profile' : 'DB high'}
                   </Typography>
                 )}
               </TableCell>
@@ -1428,9 +1452,10 @@ export function ResourcePanel() {
                 <span className={`status-dot ${STATUS_DOT[status] || 'status-dot-muted'}`} style={{ marginRight: 6 }} />
                 <span className={`metric-badge ${STATUS_BADGE[status] || 'metric-badge-blue'}`} title={statusTooltip} style={{ cursor: 'help' }}>{status}</span>
                 {driverLine && <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8 }}>{driverLine}</Typography>}
-                {dbExpected && <Typography variant="caption" style={{ display: 'block', fontSize: 8, color: DB_EXPECTED_COLOR }}>{'SGA/PGA steady \u2014 high memory by design'}</Typography>}
+                {dbExpected && <Typography variant="caption" style={{ display: 'block', fontSize: 8, color: DB_EXPECTED_COLOR }}>{'Host profile expected \u2014 SGA/PGA not verified'}</Typography>}
               </TableCell>
               <TableCell style={{ fontSize: 11 }}>{server.vm_size || '\u2014'}</TableCell>
+              <TableCell align="right" title={server.vcpus != null ? (server.vcpu_source === 'regional_vm_size' ? 'Azure regional VM-size metadata: number_of_cores' : `Azure SKU capability: ${server.vcpu_source || 'vCPUs'}`) : 'Usable vCPU count was not returned by either Azure SKU capabilities or regional VM-size metadata'}>{server.vcpus != null ? server.vcpus : 'N/A'}</TableCell>
               <TableCell>
                 {server.source ? <span className={`metric-badge ${SOURCE_BADGE[server.source] || 'metric-badge-blue'}`} style={{ fontSize: 8 }}>{server.source}</span> : '\u2014'}
               </TableCell>
@@ -1592,7 +1617,7 @@ export function ResourcePanel() {
                     <>
                       <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, fontSize: 9 }}>
                         {heatmapMetric === 'memory'
-                          ? 'Each cell shows the lowest available-memory value in its time bucket; lower availability is higher risk.'
+                          ? 'Memory is Azure available % (not used %). Each cell shows the lowest available-memory value in its time bucket; lower availability is higher risk.'
                           : 'Each cell shows the highest observed value in its time bucket; higher utilization is higher risk.'}
                         {' Outlined hatched cells mean this metric was not emitted by Azure Monitor; they are not healthy samples.'}
                         {fleetHeatmapView.bucketSize > 1 ? ` ${fleetHeatmapView.bucketSize} Monitor samples are combined per visible cell for readability.` : ''}
@@ -1612,7 +1637,7 @@ export function ResourcePanel() {
                               <tr key={row.name}>
                                 <td style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', padding: '3px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{row.name}</td>
                                 {row.values.map((value, index) => {
-                                  const state = value == null ? 'not emitted' : `${value.toFixed(1)}%`;
+                                  const state = fleetHeatmapCellLabel(value, heatmapMetric);
                                   return (
                                     <td
                                       key={index}

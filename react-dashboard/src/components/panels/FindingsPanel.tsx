@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Box, Button, CircularProgress, Paper, Typography, makeStyles } from '@material-ui/core';
 import { generateFindings, getFinalJudgment, getPeNarrative, getRedFlags } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
@@ -27,19 +27,23 @@ interface DataCoverage {
   sow: boolean;
 }
 
+interface TopAction {
+  rank?: number;
+  severity?: string;
+  text?: string;
+  impact?: string;
+  recommendation?: string;
+  evidence?: string;
+  source?: string;
+  root_cause?: string;
+}
+
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
   row: { display: 'flex', gap: theme.spacing(2), alignItems: 'center', marginTop: theme.spacing(2) },
   finding: { padding: theme.spacing(1.5), marginTop: theme.spacing(1.5) },
   empty: { marginTop: theme.spacing(2) },
 }));
-
-const LEVEL_COLOR: Record<string, 'error' | 'textSecondary' | 'primary' | undefined> = {
-  critical: 'error',
-  warning: 'primary',
-  info: 'textSecondary',
-  ok: undefined,
-};
 
 export function FindingsPanel() {
   const classes = useStyles();
@@ -81,9 +85,43 @@ export function FindingsPanel() {
     }
   };
 
-  const findings = (data.findings?.findings as Finding[]) || [];
+  const findings = useMemo(() => (data.findings?.findings as Finding[]) || [], [data.findings]);
   const summary = data.findings?.summary as { critical?: number; warning?: number; total?: number } | undefined;
   const dataCoverage = data.findings?.data_coverage as DataCoverage | undefined;
+  // This is intentionally server-ranked: the hero must not change priority
+  // locally when a user refreshes, filters, or receives additional findings.
+  const topAction = data.findings?.top_action as TopAction | undefined;
+  const orderedFindings = useMemo(() => {
+    const severity = (level: string) => ({ critical: 0, warning: 1, info: 2, ok: 3 }[level.toLowerCase()] ?? 4);
+    return [...findings].sort((a, b) => severity(a.level) - severity(b.level));
+  }, [findings]);
+  const immediateAction = topAction?.text ? topAction : null;
+  const priorityFindings = orderedFindings.filter((finding) => ['critical', 'warning'].includes(finding.level.toLowerCase()));
+  const supportingFindings = orderedFindings.filter((finding) => !['critical', 'warning'].includes(finding.level.toLowerCase()));
+
+  const renderFinding = (finding: Finding, index: number) => {
+    const level = finding.level.toLowerCase();
+    return (
+      <Paper key={`${level}-${index}-${finding.text}`} className={`${classes.finding} insight-card ${level} pe-finding-card`} elevation={0}>
+        <Box className="pe-finding-card__header">
+          <span className={`pe-finding-card__severity ${level}`}>{level.toUpperCase()}</span>
+          <Typography component="span" className="pe-finding-card__title">{finding.text}</Typography>
+        </Box>
+        {finding.impact && <Typography component="p" className="pe-finding-card__impact">{finding.impact}</Typography>}
+        {finding.recommendation && finding.text !== immediateAction?.text && (
+          <Typography component="p" className="pe-finding-card__action"><strong>Recommended action:</strong> {finding.recommendation}</Typography>
+        )}
+        {(finding.evidence || finding.root_cause || finding.source || finding.confidence != null) && (
+          <details className="pe-finding-evidence">
+            <summary>View evidence and provenance</summary>
+            {finding.evidence && <Typography component="p">Evidence: {finding.evidence}</Typography>}
+            {finding.root_cause && <Typography component="p">Root cause: {finding.root_cause}</Typography>}
+            {(finding.source || finding.confidence != null) && <Typography component="p">{finding.source && `Source: ${finding.source}`}{finding.source && finding.confidence != null && ' · '}{finding.confidence != null && `Confidence: ${finding.confidence}%`}</Typography>}
+          </details>
+        )}
+      </Paper>
+    );
+  };
 
   return (
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
@@ -123,29 +161,27 @@ export function FindingsPanel() {
               ))}
             </Box>
           )}
-          {findings.map((finding, index) => (
-            <Paper key={index} className={`${classes.finding} insight-card ${finding.level}`} elevation={0}>
-              <Typography variant="subtitle2" color={LEVEL_COLOR[finding.level]}>
-                {finding.level.toUpperCase()}: {finding.text}
-              </Typography>
-              {finding.impact && <Typography variant="body2">Impact: {finding.impact}</Typography>}
-              {finding.recommendation && (
-                <Typography variant="body2" color="textSecondary">Action: {finding.recommendation}</Typography>
-              )}
-              {finding.evidence && (
-                <Typography variant="caption" style={{ display: 'block', color: '#6b7db3', marginTop: 4 }}>Evidence: {finding.evidence}</Typography>
-              )}
-              {finding.root_cause && (
-                <Typography variant="caption" style={{ display: 'block', color: '#6b7db3' }}>Root cause: {finding.root_cause}</Typography>
-              )}
-              {(finding.source || finding.confidence != null) && (
-                <Typography variant="caption" style={{ display: 'block', color: '#6b7db3', marginTop: 4 }}>
-                  {finding.source && `Source: ${finding.source}`}{finding.source && finding.confidence != null && ' · '}
-                  {finding.confidence != null && `Confidence: ${finding.confidence}%`}
-                </Typography>
-              )}
-            </Paper>
-          ))}
+          {immediateAction && (
+            <Box className="pe-immediate-action" style={{ marginTop: 16 }}>
+              <Typography variant="caption" className="pe-immediate-action__eyebrow">Immediate PE action</Typography>
+              <Typography variant="subtitle2">{immediateAction.recommendation || immediateAction.text}</Typography>
+              {immediateAction.impact && <Typography variant="body2" color="textSecondary">Why now: {immediateAction.impact}</Typography>}
+            </Box>
+          )}
+          <Box className="pe-findings-list" aria-label="Priority PE findings">
+            {priorityFindings.length > 0 ? (
+              <Typography className="pe-findings-list__heading">Priority findings — action required</Typography>
+            ) : (
+              <Typography className="pe-findings-list__heading">No critical or warning findings</Typography>
+            )}
+            {priorityFindings.map(renderFinding)}
+          </Box>
+          {supportingFindings.length > 0 && (
+            <details className="pe-supporting-findings">
+              <summary>{supportingFindings.length} supporting observation{supportingFindings.length === 1 ? '' : 's'} — informational and healthy evidence</summary>
+              <Box className="pe-findings-list">{supportingFindings.map(renderFinding)}</Box>
+            </details>
+          )}
           <FinalJudgmentCard />
         </>
       )}

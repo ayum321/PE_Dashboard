@@ -15,6 +15,10 @@ REM ================================================================
 
 setlocal ENABLEEXTENSIONS ENABLEDELAYEDEXPANSION
 
+REM This is the React Portal MFE launcher. For the original local FastAPI UI,
+REM use start-fastapi-dashboard.bat instead.
+set "PE_UI_MODE=api"
+
 set "HOST=127.0.0.1"
 set "APP=main:app"
 set "PORT="
@@ -24,7 +28,8 @@ cd /d "%~dp0"
 
 echo.
 echo  ================================================================
-echo   PE Audit Dashboard  ^|  Batch Performance Intelligence
+echo   PE Audit React Portal MFE  ^|  Batch Performance Intelligence
+echo   Legacy FastAPI UI: start-fastapi-dashboard.bat
 echo  ================================================================
 echo   Working dir : %CD%
 echo.
@@ -280,14 +285,14 @@ goto :ensure_node
 
 :ensure_mfe
 echo        Checking React dashboard dependencies...
-if not exist "pe-dashboard-mfe\package-lock.json" (
-    echo   [ERROR] Missing pe-dashboard-mfe\package-lock.json.
+if not exist "react-dashboard\package-lock.json" (
+echo   [ERROR] Missing react-dashboard\package-lock.json.
     pause
     exit /b 1
 )
 
-if exist "pe-dashboard-mfe\node_modules\react-scripts\bin\react-scripts.js" (
-    call npm --prefix pe-dashboard-mfe ls --depth=0 >nul 2>&1
+if exist "react-dashboard\node_modules\react-scripts\bin\react-scripts.js" (
+call npm --prefix react-dashboard ls --depth=0 >nul 2>&1
     if not errorlevel 1 (
         echo        React dependencies are ready.
         goto :eof
@@ -295,7 +300,7 @@ if exist "pe-dashboard-mfe\node_modules\react-scripts\bin\react-scripts.js" (
 )
 
 echo        Installing React dependencies from package-lock.json (first run may take a few minutes)...
-call npm --prefix pe-dashboard-mfe ci --no-audit --no-fund
+call npm --prefix react-dashboard ci --no-audit --no-fund
 if errorlevel 1 (
     echo   [ERROR] React dependency installation failed. Check network/proxy access, then re-run start.bat.
     pause
@@ -565,13 +570,7 @@ if errorlevel 1 (
 echo        All files and imports verified.
 
 echo.
-echo        Validating JavaScript...
-!PY! app\_validate_js.py
-if errorlevel 1 (
-    echo   [ERROR] Fix JavaScript errors above before shipping/starting.
-    pause
-    exit /b 1
-)
+echo        React MFE launch selected; legacy FastAPI UI validation skipped.
 
 echo        Validating pe_config references...
 !PY! app\_check_pe_config_refs.py
@@ -668,13 +667,13 @@ set "MFE_API_URL=http://%HOST%:!PORT!"
 set "API_BASE_URL=!MFE_API_URL!"
 set "appName=PE Audit Dashboard"
 set "frameUrlPath=/"
-call npm --prefix pe-dashboard-mfe run setLocalEnv >nul 2>&1
+call npm --prefix react-dashboard run setLocalEnv >nul 2>&1
 if errorlevel 1 (
     echo   [ERROR] React runtime configuration could not be generated.
     pause
     exit /b 1
 )
-start "PE MFE" cmd /c "set API_BASE_URL=!MFE_API_URL! ^& set appName=PE Audit Dashboard ^& set frameUrlPath=/ ^& cd /d %CD%\pe-dashboard-mfe ^& npm run start:standalone"
+start "PE MFE" cmd /c "set API_BASE_URL=!MFE_API_URL! ^& set appName=PE Audit Dashboard ^& set frameUrlPath=/ ^& cd /d %CD%\react-dashboard ^& npm run start:standalone"
 start "PE Browser" /B !PY! app\_open_browser.py 127.0.0.1 3000 mfe
 !PY! -m uvicorn %APP% --app-dir app --host %HOST% --port !PORT! --reload --reload-dir app\routers --reload-dir app\services --reload-dir app\templates --reload-dir app\static
 

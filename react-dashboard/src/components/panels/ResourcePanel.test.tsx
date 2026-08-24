@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, waitFor } from '@testing-library/react';
 import { AppDataProvider } from '../../context/AppDataContext';
-import { buildFleetHeatmapView, groupCrossServerCorrelations, preferredFleetHeatmapMetric, ResourcePanel } from './ResourcePanel';
+import { buildFleetHeatmapView, fleetHeatmapCellLabel, groupCrossServerCorrelations, preferredFleetHeatmapMetric, ResourcePanel } from './ResourcePanel';
 
 describe('ResourcePanel', () => {
   beforeEach(() => {
@@ -45,7 +45,9 @@ describe('ResourcePanel', () => {
     expect(cpu?.rows).toHaveLength(9);
     expect(cpu?.rows[0].values).toEqual([12, 83, 18]);
     expect(memory?.rows[0].values).toEqual([88, 39, 71]);
-    expect(disk).toBeNull();
+    expect(disk?.columns).toHaveLength(3);
+    expect(disk?.rows).toHaveLength(9);
+    expect(disk?.rows.every((row) => row.values.every((value) => value == null))).toBe(true);
   });
 
   it('keeps every observed healthy bucket visible and preserves only genuine telemetry gaps as null', () => {
@@ -62,6 +64,21 @@ describe('ResourcePanel', () => {
 
     expect(cpu?.rows[0].values).toEqual([11, 12, 10, 13]);
     expect(cpu?.rows[1].values).toEqual([null, null, null, null]);
+  });
+
+  it('uses the lowest available-memory sample and labels its inverted risk direction', () => {
+    const heatmap = {
+      timestamps: ['2026-08-01T00:00:00Z', '2026-08-01T01:00:00Z', '2026-08-01T02:00:00Z'],
+      grids: {
+        memory: [{ name: 'db-pressure', values: [94, 29, 80] }],
+        cpu: [{ name: 'cpu-peak', values: [12, 83, 18] }],
+      },
+    };
+
+    expect(buildFleetHeatmapView(heatmap, 'memory', 1)?.rows[0].values).toEqual([29]);
+    expect(buildFleetHeatmapView(heatmap, 'cpu', 1)?.rows[0].values).toEqual([83]);
+    expect(fleetHeatmapCellLabel(29, 'memory')).toMatch(/29\.0% available.*lower availability is higher risk/i);
+    expect(fleetHeatmapCellLabel(83, 'cpu')).toMatch(/83\.0% utilized.*higher utilization is higher risk/i);
   });
 
   it('groups cross-server correlation evidence by time and metric without inventing pairs', () => {

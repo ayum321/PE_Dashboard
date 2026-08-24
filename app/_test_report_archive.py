@@ -457,7 +457,13 @@ def test_exported_fleet_score_matches_the_frozen_archive_value() -> None:
 
 def test_registry_template_compacts_rows_and_filters_independent_facts() -> None:
     """Exercise the actual inline filter/chip functions without a browser."""
-    template = (Path(__file__).resolve().parent / "templates" / "report_archive.html").read_text(encoding="utf-8")
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "fastapi-dashboard"
+        / "legacy-ui"
+        / "templates"
+        / "report_archive.html"
+    ).read_text(encoding="utf-8")
     script = template.split("<script>", 1)[1].split("</script>", 1)[0]
     # The first DOM listener starts browser wiring. Everything before it is the
     # pure presentation/filter surface we want to execute against test records.

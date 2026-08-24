@@ -2,6 +2,10 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+rem Local development serves both browser views from one shared API process.
+rem Production Docker explicitly sets PE_UI_MODE=api and never ships legacy assets.
+if "%PE_UI_MODE%"=="" set "PE_UI_MODE=dual"
+
 rem Local API only. This does not open or serve the retired FastAPI dashboard UI.
 if exist ".venv\Scripts\python.exe" (
   set "PYTHON_CMD=.venv\Scripts\python.exe"
@@ -23,10 +27,25 @@ if not defined PYTHON_CMD (
 
 call %PYTHON_CMD% -c "import uvicorn" >nul 2>&1
 if errorlevel 1 (
-  echo ERROR: FastAPI dependencies are unavailable in this Python environment.
-  echo Run start.bat once to install local Python prerequisites, then run start-mfe.bat again.
-  pause
-  exit /b 1
+  echo Installing FastAPI API prerequisites from configuration\requirements.txt ...
+  if not exist "configuration\requirements.txt" (
+    echo ERROR: configuration\requirements.txt is missing.
+    pause
+    exit /b 1
+  )
+  call %PYTHON_CMD% -m pip install -r configuration\requirements.txt
+  if errorlevel 1 (
+    echo ERROR: FastAPI dependency installation failed.
+    echo Check your Python installation, network/proxy access, then run this file again.
+    pause
+    exit /b 1
+  )
+  call %PYTHON_CMD% -c "import uvicorn" >nul 2>&1
+  if errorlevel 1 (
+    echo ERROR: uvicorn is still unavailable after installation.
+    pause
+    exit /b 1
+  )
 )
 
 echo PE Audit API local mode

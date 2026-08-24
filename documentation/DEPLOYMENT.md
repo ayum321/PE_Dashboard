@@ -2,10 +2,10 @@
 
 ## Artifacts
 
-- **React MFE**: `pe-dashboard-mfe` builds to static files. Stratosphere must generate/replace its published `env.js` with the HTTPS FastAPI `API_BASE_URL`; no API URL is hard-coded in the React source. A blank API URL is valid only for the all-in-one image, where the MFE and API share one origin.
+- **React MFE**: `react-dashboard` builds to static files. Stratosphere must generate/replace its published `env.js` with the HTTPS FastAPI `API_BASE_URL`; no API URL is hard-coded in the React source. A blank API URL is valid only for the all-in-one image, where the MFE and API share one origin.
 - **API**: the root `Dockerfile` builds the React bundle and packages it with FastAPI. The same image can serve the MFE directly, or Stratosphere can serve the MFE while the API runs independently.
 
-The sample MFE workflow under `pe-dashboard-mfe/.github/workflows/` is a template, not an active root GitHub Actions workflow. DevOps owns the final workflow, registry, Stratosphere variables, and deployment approval.
+The sample MFE workflow under `react-dashboard/.github/workflows/` is a template, not an active root GitHub Actions workflow. DevOps owns the final workflow, registry, Stratosphere variables, and deployment approval.
 
 ## Build and health check
 
