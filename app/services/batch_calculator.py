@@ -593,6 +593,16 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
         logger.debug("load_ctrlm_bytes: Status column absent — defaulting all rows to 'ENDED OK'")
         df["Status"] = "ENDED OK"
 
+    # Capture presence from the source field before duration text is parsed or
+    # missing values are filled with zero. This preserves an explicit Ctrl-M
+    # zero while keeping a blank footer cell distinguishable from a runtime.
+    if "Run_Sec" in df.columns:
+        _runtime_reported = df["Run_Sec"].notna() & df["Run_Sec"].astype(str).str.strip().ne("")
+    elif "_duration_str" in df.columns:
+        _runtime_reported = df["_duration_str"].notna() & df["_duration_str"].astype(str).str.strip().ne("")
+    else:
+        _runtime_reported = pd.Series(False, index=df.index)
+
     if "Run_Sec" not in df.columns:
         # Prefer human-readable duration column if present
         if "_duration_str" in df.columns:
@@ -609,7 +619,6 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
 
     # An explicit zero differs from a blank runtime: Ctrl-M uses zero for
     # control/status records, which must not be expanded to End−Start later.
-    _runtime_reported = df["Run_Sec"].notna() & df["Run_Sec"].astype(str).str.strip().ne("")
     df["Run_Sec"] = pd.to_numeric(df["Run_Sec"], errors="coerce").fillna(0)
 
     # If Run_Sec is still all zeros and there's a human-readable duration column, parse it
@@ -698,6 +707,22 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
         df.loc[mask, "Run_Sec"] = diff_corrected.clip(lower=0, upper=168 * 3600)
     else:
         df["Start_Time"] = _parse_dt(df["Start_Time"])
+
+    # Exclude workbook notes/footers before judging timestamp quality.  Customer
+    # history sheets commonly finish with prose in the Batch/Comments column;
+    # that is not a failed execution row.  Keep genuine duration-only records,
+    # but drop only rows that contain neither start nor end evidence and no
+    # source-reported runtime.
+    if "Start_Time" in df.columns and "End_Time" in df.columns:
+        _start_blank = df["Start_Time"].isna() | df["Start_Time"].astype(str).str.strip().isin(("", "nan", "NaT", "None"))
+        _end_blank = df["End_Time"].isna() | df["End_Time"].astype(str).str.strip().isin(("", "nan", "NaT", "None"))
+        _non_execution_note = _start_blank & _end_blank & ~_runtime_reported.reindex(df.index, fill_value=False)
+        if _non_execution_note.any():
+            logger.info(
+                "load_ctrlm_bytes '%s': excluded %d non-execution note/footer row(s)",
+                filename, int(_non_execution_note.sum()),
+            )
+            df = df.loc[~_non_execution_note].copy()
 
     # Stage 1B: NaT > 5% warning — surface before rows are silently dropped
     _nat_total = len(df)
@@ -2838,8 +2863,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
                     (_daily_elapsed["last_end"] - _daily_elapsed["first_start"])
                     .dt.total_seconds() / 3600.0
                 ).clip(lower=0).fillna(0.0)
+                # Keep the actual bounds alongside the derived duration.  The
+                # React audit view must be able to show the evidence behind a
+                # duration/buffer verdict, not merely a rounded number.
                 window = window.merge(
-                    _daily_elapsed[["run_date", "elapsed_hrs"]],
+                    _daily_elapsed[["run_date", "first_start", "last_end", "elapsed_hrs"]],
                     on="run_date",
                     how="left",
                 )
@@ -3694,6 +3722,42 @@ def _build_worst_job(m: dict, top_jobs_df: "pd.DataFrame") -> dict:
     }
 
 
+def _annotate_window_spikes(window_records: list[dict]) -> None:
+    """Attach server-owned anomaly evidence to the canonical daily window series.
+
+    The chart and PE Findings must not independently decide what a runtime spike
+    is.  This uses the same SLA-measured duration exposed in ``effective_hrs``
+    (longest contiguous block, otherwise elapsed span) and only annotates a
+    point when a stable baseline can be calculated.  It is additive: legacy
+    consumers can continue to ignore ``spike``.
+    """
+    values = [float(r.get("effective_hrs") or 0.0) for r in window_records]
+    positive = [v for v in values if v > 0]
+    if len(positive) < 3:
+        for record in window_records:
+            record["spike"] = None
+        return
+    baseline_mean = float(np.mean(positive))
+    baseline_std = float(np.std(positive, ddof=0))
+    if baseline_std <= 0:
+        for record in window_records:
+            record["spike"] = None
+        return
+
+    threshold = float(pe_config.ANOMALY_Z_THRESHOLD)
+    for record, value in zip(window_records, values):
+        z_score = (value - baseline_mean) / baseline_std if value > 0 else 0.0
+        record["spike"] = ({
+            "is_spike": True,
+            "z_score": round(float(z_score), 2),
+            "baseline_mean_hrs": round(baseline_mean, 3),
+            "baseline_std_hrs": round(baseline_std, 3),
+            "threshold_z": threshold,
+            "trigger_reason": "runtime_above_statistical_baseline",
+            "metric": "effective_batch_window_hrs",
+        } if value > 0 and z_score >= threshold else None)
+
+
 def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     """Run compute_metrics and flatten all DataFrames → JSON-ready dicts.
 
@@ -3857,12 +3921,35 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             is_breach = elapsed_hrs > m["sla_ceiling"]
         else:
             is_breach = total_hrs   > m["sla_ceiling"]
+        # The resolved per-sub-app ceiling is preferred where available.  This
+        # remains display evidence only: canonical compliance still comes from
+        # the shared compliance engine above.
+        _record_ceiling = _n2(r.get("breach_sub_ceil")) or _n2(r.get("tight_ceil"))
+        if _record_ceiling is None or _record_ceiling <= 0:
+            _record_ceiling = _n2(r.get("sla_hrs")) or round(float(m["sla_ceiling"]), 3)
+        _basis = ("largest_contiguous_block" if largest_block_hrs > 0 else
+                  ("elapsed_span" if elapsed_hrs > 0 else "summed_runtime_fallback"))
+        _duration_for_sla = effective_hrs if effective_hrs > 0 else total_hrs
+        _duration_headroom = round(_record_ceiling - _duration_for_sla, 3) if _record_ceiling > 0 else None
+        _clock_headroom = round(_record_ceiling - elapsed_hrs, 3) if elapsed_hrs > 0 and _record_ceiling > 0 else None
+
+        def _iso(value):
+            return value.isoformat() if pd.notna(value) and hasattr(value, "isoformat") else None
         window_records.append({
             "run_date":     date_str,
             "total_hrs":    total_hrs,
             "raw_total_hrs": round(float(r.get("raw_total_hrs", total_hrs) or total_hrs), 3),
             "excluded_hrs":  round(float(r.get("excluded_hrs", 0) or 0), 3),
             "elapsed_hrs":  elapsed_hrs,
+            "actual_start": _iso(r.get("first_start")),
+            "actual_end":   _iso(r.get("last_end")),
+            "sla_measurement_basis": _basis,
+            "sla_duration_hrs": round(_duration_for_sla, 3),
+            "sla_ceiling_hrs": _record_ceiling,
+            "duration_headroom_hrs": _duration_headroom,
+            "duration_overrun_hrs": round(max(0.0, -_duration_headroom), 3) if _duration_headroom is not None else None,
+            "clock_headroom_hrs": _clock_headroom,
+            "clock_overrun_hrs": round(max(0.0, -_clock_headroom), 3) if _clock_headroom is not None else None,
             "active_busy_hrs": round(float(r.get("active_busy_hrs", 0) or 0), 3),
             "idle_gap_hrs":    round(float(r.get("idle_gap_hrs", 0) or 0), 3),
             "idle_pct":        round(float(r.get("idle_pct", 0) or 0), 1),
@@ -3889,6 +3976,8 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "has_failures": fail_by_date.get(date_str, 0) > 0,
             "fail_count":   fail_by_date.get(date_str, 0),
         })
+
+    _annotate_window_spikes(window_records)
 
     # RULE 6 — include Sub_Application so findings engine can use composite key
     # sla_hrs / sla_source must be included so the frontend can show per-job ceiling

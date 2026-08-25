@@ -175,6 +175,12 @@ class FindingsResponse(BaseModel):
     # heatmap card. Computed once in batch_calculator and read from the audit
     # context here so the frontend renders from the findings response directly.
     failure_grid:         Optional[Dict[str, Any]] = None
+    # Render this section only when the uploaded evidence actually supports a
+    # UAT/UI-performance discussion.  An absent object means no UAT section.
+    uat:                  Optional[Dict[str, Any]] = None
+    # The server-ranked first action gives the React hero a single, auditable
+    # priority without re-sorting or rewording findings client-side.
+    top_action:           Optional[Dict[str, Any]] = None
 
 
 def _fmt_hrs(v: float) -> str:
@@ -3574,6 +3580,85 @@ async def generate_findings(body: FindingsRequest) -> FindingsResponse:
         )
 
 
+def _uat_evidence(benchmark: dict | None, explicit_uat: dict | None = None) -> dict | None:
+    """Return UAT metadata only when relevant evidence was actually supplied.
+
+    UAT validation covers both user-journey/UI measurements and a controlled
+    batch runtime comparison.  Neither a generic batch upload nor missing
+    evidence may create an empty UAT section.
+    """
+    if isinstance(explicit_uat, dict) and explicit_uat:
+        return {
+            "available": True,
+            "evidence_type": "explicit_uat",
+            "severity": str(explicit_uat.get("severity") or "info").lower(),
+            "question": str(explicit_uat.get("question") or
+                            "Which UAT acceptance criteria remain open before sign-off?"),
+            "evidence": explicit_uat,
+        }
+    bench = benchmark if isinstance(benchmark, dict) else {}
+    if not bench:
+        return None
+    if str(bench.get("kind") or "ui").lower() == "batch":
+        batch_perf = bench.get("batch_perf_summary") or {}
+        comparable = _i(batch_perf.get("comparable", batch_perf.get("total_jobs", 0)))
+        if comparable <= 0:
+            return None
+        regressions = _i(batch_perf.get("regressions", 0))
+        return {
+            "available": True,
+            "evidence_type": "batch_performance_comparison",
+            "comparable_jobs": comparable,
+            "regressions": regressions,
+            "severity": "critical" if regressions > 0 else "ok",
+            "question": (
+                "Which regressed batch jobs require UAT remediation and re-test before release approval?"
+                if regressions else
+                "Does the supplied batch-performance comparison cover all release-critical workflows at representative load?"
+            ),
+        }
+    rows = bench.get("rows") or []
+    summary = bench.get("summary") if isinstance(bench.get("summary"), dict) else {}
+    total = _i(summary.get("total", bench.get("total_transactions", len(rows))))
+    if not rows and total <= 0:
+        return None
+    degraded = _i(summary.get("degraded", bench.get("degraded", 0)))
+    breaches = _i(bench.get("sla_breaches", bench.get("sla_breach_count", 0)))
+    level = "critical" if breaches > 0 else ("warning" if degraded > 0 else "ok")
+    question = (
+        "Which user journeys breached their agreed response-time target, and what is the remediation date?"
+        if breaches > 0 else
+        ("Which degraded user journeys need validation under production-equivalent load?" if degraded > 0 else
+         "Has the supplied UI benchmark covered all business-critical user journeys at representative load?")
+    )
+    return {
+        "available": True,
+        "evidence_type": "ui_benchmark",
+        "transactions": total,
+        "degraded": degraded,
+        "sla_breaches": breaches,
+        "severity": level,
+        "question": question,
+    }
+
+
+def _top_action(findings: list[Finding]) -> dict | None:
+    """Expose the deterministic priority order already applied to findings."""
+    actionable = next((f for f in findings if f.level in ("critical", "warning")), None)
+    if not actionable:
+        return None
+    return {
+        "rank": 1,
+        "severity": actionable.level,
+        "text": actionable.text,
+        "impact": actionable.impact,
+        "recommendation": actionable.recommendation,
+        "evidence": actionable.evidence or actionable.sub,
+        "source": actionable.source,
+        "root_cause": actionable.root_cause,
+    }
+
+
 async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
     findings, cov = _generate(body)
     summary = FindingsSummary(
@@ -3692,6 +3777,16 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
             _failure_grid = _fg_body
 
     # Patch J: include penalty_score fields in response
+    # Match the rule engine's session fallback: a regenerated findings report
+    # must retain a real UAT section after reload when the uploaded UI benchmark
+    # remains in the server session, but never invent one from batch evidence.
+    _uat_benchmark = body.benchmark
+    if not _uat_benchmark:
+        try:
+            _uat_benchmark = _session_cache.get("last_benchmark") if _session_cache else None
+        except Exception as _e:
+            log.debug("findings: UAT benchmark cache fallback failed: %s", _e)
+
     resp = FindingsResponse(
         findings             = findings,
         summary              = summary,
@@ -3701,6 +3796,8 @@ async def _generate_findings_impl(body: FindingsRequest) -> FindingsResponse:
         findings_grade       = _grade,
         findings_grade_label = _glabel,
         failure_grid         = _failure_grid,
+        uat                  = _uat_evidence(_uat_benchmark, getattr(body, "uat", None)),
+        top_action           = _top_action(findings),
     )
     # Cache so agent tools can list/read findings without recomputing.
     try:

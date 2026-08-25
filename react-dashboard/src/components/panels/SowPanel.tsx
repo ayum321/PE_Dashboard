@@ -5,11 +5,17 @@ import {
   Checkbox,
   CircularProgress,
   Dialog,
+  MenuItem,
+  Select,
   TextField,
   Typography,
 } from '@material-ui/core';
 import {
   compareSow,
+  generateFindings,
+  getPeNarrative,
+  getFinalJudgment,
+  getRedFlags,
   getReviewedProducts,
   getSowBaseline,
   getSowProductTaxonomy,
@@ -18,6 +24,7 @@ import {
   saveSowBaseline,
 } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
+import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
 
 interface SowMetric {
   key: string;
@@ -28,6 +35,8 @@ interface SowMetric {
   status: string;
   over_by?: number;
   over_by_pct?: number;
+  capacity_buffer?: number;
+  capacity_buffer_pct?: number;
 }
 
 interface Overconsumption {
@@ -51,6 +60,21 @@ const SOW_FIELDS: Array<{ key: string; label: string; sub: string; icon: string;
 ];
 
 const DEFAULT_BANDS = { under: 70, over: 110, crit: 120 };
+const MILLION_SCALE = 1_000_000;
+const MILLION_FIELDS = new Set(['daily_dfu', 'daily_sku']);
+type VolumeUnit = 'number' | 'millions';
+
+function toDisplayValue(value: unknown, unit: VolumeUnit): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric === 0) return '';
+  return unit === 'millions' ? String(numeric / MILLION_SCALE) : String(numeric);
+}
+
+function toCanonicalValue(value: string, unit: VolumeUnit): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return unit === 'millions' ? numeric * MILLION_SCALE : numeric;
+}
 
 interface Achievement { pct: number; color: string; label: string }
 
@@ -78,13 +102,26 @@ function fmt(n: number): string {
 }
 
 export function SowPanel() {
-  const { data, setSowBaseline, setSowCompare, setReviewedProducts } = useAppData();
+  const {
+    data,
+    setSowBaseline,
+    setSowCompare,
+    setReviewedProducts,
+    setFindings,
+    setRedFlags,
+    setPeNarrative,
+    setFinalJudgment,
+  } = useAppData();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   const [baseValues, setBaseValues] = useState<Record<string, string>>({});
   const [actualValues, setActualValues] = useState<Record<string, string>>({});
+  const [volumeUnits, setVolumeUnits] = useState<Record<string, VolumeUnit>>({
+    daily_dfu: 'number',
+    daily_sku: 'number',
+  });
 
   const [taxonomy, setTaxonomy] = useState<TaxonomyGroup[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -98,7 +135,7 @@ export function SowPanel() {
         setSowBaseline(baseline);
         const next: Record<string, string> = {};
         SOW_FIELDS.forEach(({ key }) => {
-          if (baseline[key] != null) next[key] = String(baseline[key]);
+          if (baseline[key] != null) next[key] = toDisplayValue(baseline[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
         });
         setBaseValues(next);
       })
@@ -109,6 +146,8 @@ export function SowPanel() {
     getReviewedProducts()
       .then((res) => setReviewedProducts((res.products as string[]) || []))
       .catch(() => undefined);
+    // Load persisted SOW values once; unit changes are handled locally so they
+    // never overwrite values the user is currently editing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -139,7 +178,7 @@ export function SowPanel() {
       setBaseValues((prev) => {
         const next = { ...prev };
         SOW_FIELDS.forEach(({ key }) => {
-          if (result[key] != null) next[key] = String(result[key]);
+          if (result[key] != null) next[key] = toDisplayValue(result[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
         });
         return next;
       });
@@ -154,8 +193,9 @@ export function SowPanel() {
     const baseline: Record<string, number> = {};
     const actuals: Record<string, number> = {};
     SOW_FIELDS.forEach(({ key }) => {
-      const b = Number(baseValues[key]);
-      const a = Number(actualValues[key]);
+      const unit = MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number';
+      const b = toCanonicalValue(baseValues[key] || '', unit);
+      const a = toCanonicalValue(actualValues[key] || '', unit);
       if (b > 0) baseline[key] = b;
       if (a > 0) actuals[key] = a;
     });
@@ -171,7 +211,34 @@ export function SowPanel() {
       setSowBaseline(savedBaseline);
       const result = await compareSow({ actuals });
       setSowCompare(result);
-      setSaveMsg('\u2705 Saved and compared');
+
+      // SOW is an evidence pillar for PE Findings, not a standalone screen.
+      // Use the freshly returned comparison in every downstream request rather
+      // than waiting for React state to update, so the saved values flow through
+      // immediately and the user never has to click Generate Findings again.
+      const analysisData = { ...data, sowBaseline: savedBaseline, sowCompare: result };
+      const analysisPayload = buildAnalysisPayload(analysisData);
+      const findings = await generateFindings(analysisPayload);
+      setFindings(findings);
+
+      let redFlags = data.redFlags;
+      try {
+        redFlags = await getRedFlags(analysisPayload);
+        setRedFlags(redFlags);
+      } catch {
+        // Findings remain usable if optional red-flag enrichment is unavailable.
+      }
+      try {
+        setPeNarrative(await getPeNarrative(buildPeNarrativePayload(analysisData, { findings, redFlags })));
+      } catch {
+        // The deterministic findings response remains available on its own.
+      }
+      try {
+        setFinalJudgment(await getFinalJudgment(buildFinalJudgmentPayload(analysisData, { findings, redFlags })));
+      } catch {
+        // Do not turn a successful SOW save into a failure if judgment is unavailable.
+      }
+      setSaveMsg('\u2705 Saved, compared, and PE Findings refreshed');
       setTimeout(() => setSaveMsg(null), 3000);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'SOW comparison failed.');
@@ -366,8 +433,9 @@ export function SowPanel() {
         }}
         >
           {SOW_FIELDS.map(({ key, label, sub, icon, placeholder }) => {
-            const base = Number(baseValues[key]) || 0;
-            const actual = Number(actualValues[key]) || 0;
+            const unit = MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number';
+            const base = toCanonicalValue(baseValues[key] || '', unit);
+            const actual = toCanonicalValue(actualValues[key] || '', unit);
             const ach = computeAchievement(base, actual, bands);
             const barPct = ach && ach !== 'awaiting' ? Math.min(ach.pct, 100) : 0;
             const barColor = ach && ach !== 'awaiting' ? ach.color : 'rgba(71,85,105,.45)';
@@ -400,23 +468,43 @@ export function SowPanel() {
                 </Box>
                 <Box style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
                   <Box>
-                    <Typography variant="caption" style={{ display: 'block', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', color: '#334155', marginBottom: 4 }}>SOW Target</Typography>
+                    <Box style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <Typography variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', color: '#334155' }}>SOW Target</Typography>
+                      {MILLION_FIELDS.has(key) && (
+                        <Select
+                          value={unit}
+                          onChange={(e) => {
+                            const nextUnit = e.target.value as VolumeUnit;
+                            const previousUnit = volumeUnits[key] || 'number';
+                            setVolumeUnits((prev) => ({ ...prev, [key]: nextUnit }));
+                                                setBaseValues((prev) => ({ ...prev, [key]: toDisplayValue(toCanonicalValue(prev[key] || '', previousUnit), nextUnit) }));
+                            setActualValues((prev) => ({ ...prev, [key]: toDisplayValue(toCanonicalValue(prev[key] || '', previousUnit), nextUnit) }));
+                          }}
+                          variant="outlined"
+                          inputProps={{ 'aria-label': `${label} input unit` }}
+                          style={{ minWidth: 112, fontSize: 11, color: '#94a3b8' }}
+                        >
+                          <MenuItem value="number">Number</MenuItem>
+                          <MenuItem value="millions">Millions</MenuItem>
+                        </Select>
+                      )}
+                    </Box>
                     <TextField
                       size="small" type="number" fullWidth placeholder={placeholder}
                       value={baseValues[key] || ''}
                       onChange={(e) => setBaseValues((prev) => ({ ...prev, [key]: e.target.value }))}
                       InputProps={{ style: { textAlign: 'right', fontWeight: 700, color: '#f1f5f9', background: 'rgba(30,41,59,.7)' } }}
-                      inputProps={{ 'aria-label': label, style: { textAlign: 'right' }, min: 0 }}
+                      inputProps={{ 'aria-label': label, style: { textAlign: 'right' }, min: 0, step: unit === 'millions' ? 0.01 : 1 }}
                     />
                   </Box>
                   <Box>
-                    <Typography variant="caption" style={{ display: 'block', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', color: '#334155', marginBottom: 4 }}>Actual</Typography>
+                    <Typography variant="caption" style={{ display: 'block', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', color: '#334155', marginBottom: 4 }}>Actual {MILLION_FIELDS.has(key) && unit === 'millions' ? '(millions)' : ''}</Typography>
                     <TextField
                       size="small" type="number" fullWidth placeholder="from upload"
                       value={actualValues[key] || ''}
                       onChange={(e) => setActualValues((prev) => ({ ...prev, [key]: e.target.value }))}
                       InputProps={{ style: { textAlign: 'right', fontWeight: 700, color: '#f1f5f9', background: 'rgba(30,41,59,.7)' } }}
-                      inputProps={{ 'aria-label': `${label} actual`, style: { textAlign: 'right' }, min: 0 }}
+                      inputProps={{ 'aria-label': `${label} actual`, style: { textAlign: 'right' }, min: 0, step: unit === 'millions' ? 0.01 : 1 }}
                     />
                   </Box>
                 </Box>
@@ -540,7 +628,7 @@ export function SowPanel() {
                   <Box style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
                     <Typography variant="body2" style={{ fontWeight: 700 }}>{m.label}</Typography>
                     <Box style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <span style={{ color: '#64748b', fontFamily: 'monospace', fontSize: 10 }}>{fmt(m.actual)} / {fmt(m.sow)}</span>
+                      <span style={{ color: '#f1f5f9', fontFamily: 'monospace', fontSize: 10 }}>Actual {fmt(m.actual)} / SOW {fmt(m.sow)}</span>
                       <span style={{ fontWeight: 700, color }}>{m.pct.toFixed(1)}%</span>
                       <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, textTransform: 'uppercase', background: statusBg, color: statusColor }}>
                         {STATUS_BADGE[m.status] ? m.status.replace('_', ' ') : m.status}
@@ -559,7 +647,9 @@ export function SowPanel() {
                     <span>0</span><span style={{ color: '#f59e0b' }}>{bands.under}%</span><span>100%</span><span style={{ color: '#f43f5e' }}>{bands.over}%</span><span style={{ color: '#f43f5e', fontWeight: 700 }}>{bands.crit}%</span><span>{AXIS}%+</span>
                   </Box>
                   <Box style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-                    <Typography variant="caption" style={{ fontWeight: 600, color: bufferColor }}>Buffer: {bufferLabel}</Typography>
+                    <Typography variant="caption" style={{ fontWeight: 600, color: bufferColor }}>
+                    Capacity buffer: {fmt(m.capacity_buffer ?? (m.sow - m.actual))} ({(m.capacity_buffer_pct ?? (100 - m.pct)).toFixed(1)}%) · {bufferLabel}
+                  </Typography>
                     <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: 999, textTransform: 'uppercase', background: findingTag.bg, border: `1px solid ${findingTag.border}`, color: findingTag.color }}>
                       {findingTag.text}
                     </span>

@@ -42,10 +42,20 @@ PE_Dashboard_Release*.zip
 
 # IDE / editor
 .vscode/
-.claude/
+.claude/*
 .codex/
 .mcp.json
 node_modules/
+
+# The repository's shared Claude operating model is source-controlled. Keep
+# machine-local settings, commands, and generated helpers under .claude ignored.
+!.claude/agents/
+!.claude/agents/*.md
+!.claude/skills/
+!.claude/skills/**/
+!.claude/skills/**/SKILL.md
+!.claude/workflows/
+!.claude/workflows/*.md
 
 # Old versions / release bundles
 0.0.9/
@@ -60,7 +70,6 @@ desktop.ini
 Thumbs.db
 
 # Machine-specific helpers
-CLAUDE.md
 _dev_server.py
 launch_server.bat
 start_debug.bat
@@ -69,6 +78,7 @@ start_debug.bat
 .cache/
 tests/*
 !tests/test_sla_header_variants.py
+!tests/test_batch_sla_schema_contract.py
 
 .pe_baseline.db
 .pe_baseline.db-wal

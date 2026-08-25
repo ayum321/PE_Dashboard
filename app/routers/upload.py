@@ -607,8 +607,48 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
     if len(raw) > MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="File exceeds 50 MB limit.")
 
-    from services.sla_merger import parse_batch_sla_xlsx
+    from services.sla_merger import build_workbook_sla_snapshot, parse_batch_sla_xlsx
     result = parse_batch_sla_xlsx(raw, file.filename)
+
+    # A dated run-history workbook is not a failed BatchSLA contract.  Its
+    # actual End Time and Total batch time belong to Batch Review, and it must
+    # never be coerced into a made-up SLA target. Return a successful explicit
+    # handoff payload so either SLA upload entry point can populate Batch Review.
+    if result.get("ingestion_status") == "reroute" and result.get("file_role") == "batch_execution_history":
+        from services.batch_calculator import build_batch_payload, load_ctrlm_bytes
+        from routers.batch import _payload_to_response
+        try:
+            history_df = load_ctrlm_bytes(raw, filename=file.filename)
+            history_payload = build_batch_payload(history_df)
+            batch_response = _payload_to_response(file.filename, history_payload, df=history_df).model_dump()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Execution-history workbook was detected but could not be loaded into Batch Review: " + str(exc),
+                    "mapping_report": result.get("mapping_report") or {},
+                },
+            ) from exc
+        return {
+            "filename": file.filename,
+            "file_role": "batch_execution_history",
+            "message": "Execution-history workbook detected and loaded into Batch Review. No SLA contract was inferred because the source has no SLA/expected-completion field.",
+            "batch_payload": batch_response,
+            "mapping_report": result.get("mapping_report") or {},
+            "warnings": result.get("warnings") or [],
+        }
+
+    # Validation is deliberately before every config-store mutation. A rejected
+    # schema leaves the last accepted BatchSLA contract active and the caller
+    # receives the complete raw-to-canonical mapping report.
+    if result.get("ingestion_status") != "accepted":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "BatchSLA upload rejected: " + " ".join(result.get("warnings") or ["schema validation failed."]),
+                "mapping_report": result.get("mapping_report") or {},
+            },
+        )
 
     # Persist workflow SLA rows for the 3-tier SLA resolver
     config_store.set("_batch_sla_xlsx", result)
@@ -676,8 +716,11 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
 
     # Summary for UI status badge
     workflows = result.get("workflows") or []
-    with_sla       = sum(1 for w in workflows if w.get("sla_hours"))
+    workbook_sla_matrix = build_workbook_sla_snapshot(result)
     with_explicit  = sum(1 for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX")
+    # Report only source-declared contracts to the UI. Resolver fallbacks can
+    # still help Batch Review but are not customer evidence in this upload.
+    with_sla       = with_explicit
     with_fallback  = sum(1 for w in workflows if w.get("sla_source") in ("SOW_EXTRACTED", "GLOBAL_DEFAULT"))
     types = list({w.get("batch_type", "?") for w in workflows})
 
@@ -690,6 +733,11 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
         "batch_types":         sorted(types),
         "warnings":            result.get("warnings") or [],
         "workflows":           workflows,
+        "mapping_report":      result.get("mapping_report") or {},
+        # The React SLA Matrix is populated from this workbook snapshot.  It is
+        # deliberately separate from Ctrl-M's Batch Review matrix so a Ctrl-M
+        # upload can never replace workbook contract/observation evidence.
+        "sla_matrix":          workbook_sla_matrix,
         # Recomputed batch KPIs using new per-job SLAs — present when Ctrl-M
         # was already uploaded; None when batch hasn't been processed yet.
         "updated_batch_kpis": _updated_batch_kpis,

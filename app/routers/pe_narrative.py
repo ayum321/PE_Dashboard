@@ -620,19 +620,19 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
     vol_by_year = sow_c.get("volume_by_year") or vvs.get("volume_by_year") or {}
     for yr, vol in sorted(vol_by_year.items()):
         if isinstance(vol, (int, float)) and vol > 0:
-            dv_rows.append([f"Item-Locations {yr}", str(int(vol)), "—", "Planned"])
+            dv_rows.append([f"Item-Locations {yr}", str(int(vol)), "—", "—", "Planned"])
     max_il = sow_c.get("max_item_locations") or vvs.get("max_item_locations")
     if max_il:
-        dv_rows.append(["Max Item-Locations (SOW)", str(int(max_il)), "—", "Contractual ceiling"])
+        dv_rows.append(["Max Item-Locations (SOW)", str(int(max_il)), "—", "—", "Contractual ceiling"])
 
     if sow_c.get("total_dfus"):
-        dv_rows.append(["Total DFUs (SOW)", f"{int(sow_c['total_dfus']):,}", "—", "Contractual"])
+        dv_rows.append(["Total DFUs (SOW)", f"{int(sow_c['total_dfus']):,}", "—", "—", "Contractual"])
     if sow_c.get("modelled_dfus"):
-        dv_rows.append(["Modelled DFUs", f"{int(sow_c['modelled_dfus']):,}", "—", "Contractual"])
+        dv_rows.append(["Modelled DFUs", f"{int(sow_c['modelled_dfus']):,}", "—", "—", "Contractual"])
     if sow_c.get("total_skus"):
-        dv_rows.append(["Total SKUs (SOW)", f"{int(sow_c['total_skus']):,}", "—", "Contractual"])
+        dv_rows.append(["Total SKUs (SOW)", f"{int(sow_c['total_skus']):,}", "—", "—", "Contractual"])
     if sow_c.get("planned_skus"):
-        dv_rows.append(["Planned SKUs", f"{int(sow_c['planned_skus']):,}", "—", "Contractual"])
+        dv_rows.append(["Planned SKUs", f"{int(sow_c['planned_skus']):,}", "—", "—", "Contractual"])
 
     if sw and isinstance(sw, dict):
         # Shape A (canonical): {"metrics": [{key,label,sow,actual,pct,status}, ...]}
@@ -663,17 +663,25 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                               else "OPTIMAL"    if pct >= _pec_sow.SOW_ACCEPTABLE_PCT
                               else "ACCEPTABLE" if pct >= _pec_sow.SOW_UNDER_PCT
                               else "LOW")
-                util_s = (f"{pct:.1f}% ({status})" if pct is not None and status
-                          else str(status) if status else "Target only — no actual")
                 _fmt_n = lambda v: f"{float(v):,.0f}" if isinstance(v, (int, float)) else str(v if v is not None else "NA")
-                dv_rows.append([str(label), _fmt_n(sow_v), _fmt_n(act_v) if act_v is not None else "—", util_s])
+                _buffer = None
+                try:
+                    if sow_v is not None and act_v is not None and float(sow_v) > 0:
+                        _buffer = float(sow_v) - float(act_v)
+                except (TypeError, ValueError):
+                    pass
+                util_s = (f"{pct:.1f}% ({status})" if pct is not None and status
+                           else str(status) if status else "Target only — no actual")
+                buffer_s = (f"{_fmt_n(_buffer)} ({(_buffer / float(sow_v) * 100):.1f}%)"
+                            if _buffer is not None else "—")
+                dv_rows.append([str(label), _fmt_n(sow_v), _fmt_n(act_v) if act_v is not None else "—", buffer_s, util_s])
         else:
             # Shape B (legacy): {dim: {sow, actual, ...}}
             for dim, vals in sw.items():
                 if not isinstance(vals, dict):
                     continue
-                sow_v = vals.get("sow") or vals.get("promised") or "NA"
-                act_v = vals.get("actual") or vals.get("measured") or "NA"
+                sow_v = vals.get("sow") if vals.get("sow") is not None else vals.get("promised", "NA")
+                act_v = vals.get("actual") if vals.get("actual") is not None else vals.get("measured", "NA")
                 # util_pct may come from the compare endpoint, or we compute it on-the-fly
                 util = vals.get("utilisation") or vals.get("utilization") or vals.get("util_pct") or vals.get("zone")
                 if util is None:
@@ -690,23 +698,36 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                             util = f"{_pct:.1f}% ({zone})"
                     except (TypeError, ValueError):
                         pass
+                _buffer_s = "—"
+                try:
+                    if sow_v not in ("NA", None) and act_v not in ("NA", None) and float(sow_v) > 0:
+                        _buffer = float(sow_v) - float(act_v)
+                        _buffer_s = f"{_buffer:,.0f} ({(_buffer / float(sow_v) * 100):.1f}%)"
+                except (TypeError, ValueError):
+                    pass
                 util_s = util if isinstance(util, str) else (f"{util:.1f}%" if isinstance(util, (int, float)) else "NA")
-                dv_rows.append([str(dim), str(sow_v), str(act_v), util_s])
+                dv_rows.append([str(dim), str(sow_v), str(act_v), _buffer_s, util_s])
 
     if not dv_rows and sf:
         sf_vol = sf.get("volume") or sf.get("data_volume") or {}
         if isinstance(sf_vol, dict):
             for dim, vals in sf_vol.items():
                 if isinstance(vals, dict):
+                    _sow_value = vals.get("sow", "NA")
+                    _actual_value = vals.get("actual", "NA")
+                    _buffer_value = "—"
+                    try:
+                        if float(_sow_value) > 0 and _actual_value not in ("NA", None):
+                            _buffer_value = f"{float(_sow_value) - float(_actual_value):,.0} ({((float(_sow_value) - float(_actual_value)) / float(_sow_value) * 100):.1f}%)"
+                    except (TypeError, ValueError):
+                        pass
                     dv_rows.append([
-                        str(dim),
-                        str(vals.get("sow", "NA")),
-                        str(vals.get("actual", "NA")),
+                        str(dim), str(_sow_value), str(_actual_value), _buffer_value,
                         str(vals.get("status", "NA")),
                     ])
 
     if not dv_rows:
-        dv_rows = [["NA — upload SOW PDF or enter DFU/SKU to populate", "NA", "NA", "NA"]]
+        dv_rows = [["NA — upload SOW PDF or enter DFU/SKU to populate", "NA", "NA", "NA", "NA"]]
 
     try:
         _fee_str = f"{float(sow_c.get('annual_fee')):,.0f}" if sow_c.get("annual_fee") else "?"
@@ -797,7 +818,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         "id": "data_volume", "title": "Data Volume Analysis",
         "prose": dv_prose,
         "provenance": _dv_prov,
-        "table": {"headers": ["Dimension", "SOW Target", "Actual", "Status"], "rows": dv_rows},
+        "table": {"headers": ["Dimension", "SOW Target", "Actual", "Capacity Buffer", "Status"], "rows": dv_rows},
     })
 
     # -- 2. Batch & SLA ----------------------------------------------------

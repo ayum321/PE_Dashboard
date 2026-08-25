@@ -316,21 +316,23 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         
         <div class="prod-chips">
           
-          <span class="prod-chip">ESP – Manufacturing &amp;amp; Sequencing</span>
-          
-          <span class="prod-chip">Sequencing</span>
-          
-          <span class="prod-chip">Supply Chain Planning Foundation</span>
+          <span class="prod-chip">Demand Classification</span>
           
           <span class="prod-chip">Demand</span>
           
           <span class="prod-chip">Demand 360</span>
           
+          <span class="prod-chip">ESP – Manufacturing &amp;amp; Sequencing</span>
+          
+          <span class="prod-chip">ESP – LP Optimization</span>
+          
+          <span class="prod-chip">Platform</span>
+          
         </div>
         
         <div class="chips">
-          <span class="chip"><span class="dot"></span>TEST</span>
-          <span class="chip">Generated <b>23 Aug 2026, 02:18 PM</b></span>
+          <span class="chip"><span class="dot"></span>Mixed (PROD + TEST)</span>
+          <span class="chip">Generated <b>24 Aug 2026, 06:42 PM</b></span>
         </div>
       </div>
     </div>
@@ -345,8 +347,8 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     </div>
     <div class="banner__date">
       <div><b>Customer:</b> Harry</div>
-      <div><b>Environment:</b> TEST</div>
-      <div><b>Report date:</b> 23 Aug 2026, 02:18 PM</div>
+      <div><b>Environment:</b> Mixed (PROD + TEST)</div>
+      <div><b>Report date:</b> 24 Aug 2026, 06:42 PM</div>
     </div>
   </section>
 
@@ -392,7 +394,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
           </div>
         </div>
         <div>
-          <div class="stat__sub"><span class="num">4</span> servers</div>
+          <div class="stat__sub"><span class="num">8</span> servers</div>
           <div class="stat__sub">over 15-day window</div>
         </div>
       </div>
@@ -417,7 +419,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">🩺</div>
       <div>
         <div class="panel__t">Fleet Severity Distribution</div>
-        <div class="panel__s">4 server(s) graded over the last 15 days</div>
+        <div class="panel__s">8 server(s) graded over the last 15 days</div>
       </div>
       <div class="panel__count">Grade ? · 0.0/100</div>
     </div>
@@ -425,12 +427,12 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="hbar">
         
         
-        <div class="hbar__seg seg-ok" style="width:100.0%;">4</div>
+        <div class="hbar__seg seg-ok" style="width:100.0%;">8</div>
       </div>
       <div class="legend">
         <span class="legend__i"><span class="dot dot-crit"></span>Critical <b>0</b></span>
         <span class="legend__i"><span class="dot dot-warn"></span>Warning <b>0</b></span>
-        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>4</b></span>
+        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>8</b></span>
       </div>
     </div>
   </section>
@@ -441,7 +443,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">⚙️</div>
       <div>
         <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
-        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the 7.0h configured default · buffer = (SLA − runtime) ÷ SLA</div>
+        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the 14.0h configured default · buffer = (SLA − runtime) ÷ SLA</div>
       </div>
       <div class="panel__count">227 jobs</div>
     </div>
@@ -606,7 +608,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <div class="panel__t">Infrastructure Utilisation</div>
         <div class="panel__s">Role-aware grading — CPU ceilings APP 60/80 · DB 85/95 · SRE 90/100 (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band 80–92% &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
       </div>
-      <div class="panel__count">4 servers</div>
+      <div class="panel__count">8 servers</div>
     </div>
     <div class="panel__body" style="padding:0;">
       <table>
@@ -614,24 +616,44 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
           <th>Host</th><th>Role</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Health</th>
         </tr></thead>
         <tbody><tr>
-          <td class="host-cell"><b>tsbc631530001</b><br><span class="dim">tsbc631530001 &middot; 32 GB RAM</span></td>
-          <td><span class="tag tag-blue">SRE</span></td>
-          <td><span class="tag tag-green">2.1%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">63.5%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
-          <td><span class="tag tag-amber">WARNING</span></td>
-        </tr><tr>
-          <td class="host-cell"><b>tsbc631502001</b><br><span class="dim">tsbc631502001 &middot; 32 GB RAM</span></td>
-          <td><span class="tag tag-blue">APP</span></td>
-          <td><span class="tag tag-green">1.5%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">19.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
-          <td><span class="tag tag-green">HEALTHY</span></td>
-        </tr><tr>
-          <td class="host-cell"><b>tsbc631503001</b><br><span class="dim">tsbc631503001 &middot; 34 GB RAM</span></td>
+          <td class="host-cell"><b>prbc631503031</b><br><span class="dim">prbc631503031 &middot; 34 GB RAM</span></td>
           <td><span class="tag tag-blue">DB</span></td>
-          <td><span class="tag tag-green">4.6%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">90.2%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-green">0.1%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/85</div></td>
+          <td><span class="tag tag-green">5.6%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">89.7%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
           <td><span class="tag tag-green">HEALTHY</span></td>
         </tr><tr>
-          <td class="host-cell"><b>tsbc631502002</b><br><span class="dim">tsbc631502002 &middot; 32 GB RAM</span></td>
+          <td class="host-cell"><b>prbc631530031</b><br><span class="dim">prbc631530031 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">3.8%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">30.9%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631503011</b><br><span class="dim">tsbc631503011 &middot; 33 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">3.4%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">81.4%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502031</b><br><span class="dim">tsbc631502031 &middot; 32 GB RAM</span></td>
           <td><span class="tag tag-blue">APP</span></td>
-          <td><span class="tag tag-green">1.8%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">18.6%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">11.7%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">19.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502012</b><br><span class="dim">tsbc631502012 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">2.5%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">23.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631503031</b><br><span class="dim">tsbc631503031 &middot; 34 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">6.2%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">89.9%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502032</b><br><span class="dim">tsbc631502032 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">6.9%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">19.0%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502011</b><br><span class="dim">tsbc631502011 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">2.3%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">23.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
           <td><span class="tag tag-green">HEALTHY</span></td>
         </tr></tbody>
       </table>
@@ -654,15 +676,15 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
         <tbody><tr>
           <td><b>Daily DFU</b></td>
-          <td class="num">7,000,000</td>
-          <td class="num">4,555,555</td>
-          <td >65.1%</td>
+          <td class="num">888,888</td>
+          <td class="num">455,555</td>
+          <td >51.2%</td>
           <td><span class="tag tag-blue">UNDER-UTILISED</span></td>
         </tr><tr>
           <td><b>Daily SKU Count</b></td>
-          <td class="num">855,555</td>
-          <td class="num">555,555</td>
-          <td >64.9%</td>
+          <td class="num">4,444,444</td>
+          <td class="num">2,255,999</td>
+          <td >50.8%</td>
           <td><span class="tag tag-blue">UNDER-UTILISED</span></td>
         </tr></tbody>
       </table>
@@ -733,20 +755,20 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="appr-grid">
         <div class="appr">
           <div class="appr__role">Performance Engineer</div>
-          <div class="appr__name">Ayush</div>
+          <div class="appr__name">Ayush </div>
           <div class="appr__status" style="color:#10d96e;">
             ✅ Approved
           </div>
-          <div class="appr__line">Signed: 2026-08-23</div>
+          <div class="appr__line">Signed: 2026-08-24</div>
           
         </div>
         <div class="appr">
           <div class="appr__role">Customer</div>
-          <div class="appr__name">john</div>
+          <div class="appr__name">—</div>
           <div class="appr__status" style="color:#10d96e;">
             ✅ Approved
           </div>
-          <div class="appr__line">Signed: 2026-08-23</div>
+          <div class="appr__line">Signed: 2026-08-24</div>
         </div>
       </div>
       
@@ -755,7 +777,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
 
   <!-- ── Footer ─────────────────────────────────────────── -->
   <footer class="foot">
-    <div>PE Audit Dashboard · self-contained report · generated 23 Aug 2026, 02:18 PM</div>
+    <div>PE Audit Dashboard · self-contained report · generated 24 Aug 2026, 06:42 PM</div>
     <div>
       Thresholds —
       CPU <code>APP 60/80 · DB 85/95 · SRE 90/100</code> (role ok/crit)

@@ -26,6 +26,12 @@ from services.resource_parser import (
     _infer_environment,
     get_health_score,
 )
+from services.resource_severity import (
+    metric_profile,
+    resolve_server_severity,
+    resolve_severity,
+    safe_avg,
+)
 
 # ── Threshold constants (verbatim from app_v2.py L25-31) ───────
 CPU_OK    = 75.0
@@ -126,7 +132,11 @@ def detect_dual_pressure(cpu: float, mem: float) -> bool:
 
 def role_cpu_thresholds(server_type: str) -> Dict[str, float]:
     """Return the (ok, warn) CPU thresholds for a given server role."""
-    return _ROLE_CPU.get(server_type.upper(), _ROLE_CPU["APP"])
+    profile = metric_profile("cpu", server_type)
+    # Existing callers label "ok" as the first attention boundary and "warn"
+    # as the critical boundary. Keep that response contract while sourcing both
+    # values from the shared severity profile.
+    return {"ok": float(profile["warn"]), "warn": float(profile["crit"])}
 
 
 def mem_threshold(server_type: str) -> float:
@@ -136,8 +146,7 @@ def mem_threshold(server_type: str) -> float:
     role uses the global MEM_CRIT threshold (single-sourced from pe_config). The
     narrative layer reads this so the threshold it prints next to a peak is the
     exact one the fleet grader applied — no flat invented number."""
-    from services.pe_config import MEM_CRIT
-    return DB_MEM_EXPECTED_HI if (server_type or "").upper() == "DB" else MEM_CRIT
+    return float(metric_profile("memory", server_type)["warn"])
 
 
 # ── F8 — Fleet Health (verbatim port) ───────────────────────────
@@ -165,9 +174,22 @@ def calculate_fleet_health(servers: List[dict]) -> Dict[str, Any]:
             unknown += 1
             continue
         scores.append(score)
-        if   score >= 80:  healthy  += 1
-        elif score >= 60:  warning  += 1
-        else:              critical += 1
+        # Fleet counts use the same metric resolver as the row and anomaly
+        # panels. The continuous score remains only the grade input.
+        resolved = resolve_server_severity(
+            {
+                "cpu": s.get("cpu_used"),
+                "memory": s.get("mem_used"),
+                "disk": s.get("disk_used_max"),
+            },
+            server_type,
+        )
+        if resolved["status"] == "Critical":
+            critical += 1
+        elif resolved["status"] == "Warning":
+            warning += 1
+        else:
+            healthy += 1
 
     total = len(servers)
     known_pct = (len(scores) / total * 100) if total > 0 else 0.0
@@ -207,7 +229,10 @@ def fleet_intelligence_engine(server_data: List[dict]) -> Optional[Dict[str, Any
                 ("Disk",   "disk_used_max"),
                 ("Memory", "mem_used"),
             ]:
-                vals = [_f(s.get(key)) for s in known]
+                samples = [(s, s.get(key)) for s in known if _opt_round(s.get(key)) is not None]
+                if len(samples) < 3:
+                    continue
+                vals = [float(value) for _, value in samples]
                 mu  = float(np.mean(vals))
                 # Use sample std (ddof=1) for small fleets — more statistically
                 # appropriate when N < 30.  Falls back to ddof=0 if N < 3.
@@ -215,15 +240,25 @@ def fleet_intelligence_engine(server_data: List[dict]) -> Optional[Dict[str, Any
                 std = float(np.std(vals, ddof=ddof))
                 if std < 1e-6:
                     continue
-                for s, v in zip(known, vals):
+                for s, v in samples:
+                    v = float(v)
                     z = (v - mu) / std
                     if abs(z) >= 2.0:
-                        anomalies.append({
-                            "host":   s.get("host", "?"),
-                            "metric": metric,
-                            "value":  round(float(v), 1),
-                            "z":      round(z, 2),
-                        })
+                        resolved = resolve_severity(
+                            metric, v, s.get("type") or "APP",
+                            anomaly_result={"z": abs(z), "z_critical": 2.0},
+                        )
+                        # A statistical outlier is rendered only when the same
+                        # resolver judges it operationally material. This avoids
+                        # a DB memory value in its expected SGA/PGA range being
+                        # shown as a critical anomaly beside a healthy card.
+                        if resolved["status"] != "Healthy":
+                            anomalies.append({
+                                "host": s.get("host", "?"), "metric": metric,
+                                "value": round(v, 1), "z": round(z, 2),
+                                "severity": resolved["severity"],
+                                "reason_code": resolved["reason_code"],
+                            })
             anomalies.sort(key=lambda x: abs(x["z"]), reverse=True)
             anomalies = anomalies[:10]  # cap at 10 to bound payload size
     except Exception:
@@ -254,11 +289,18 @@ def normalize_server(s: dict) -> Dict[str, Any]:
       - role_cpu_ok:    Role-specific CPU OK threshold
       - role_cpu_warn:  Role-specific CPU warning threshold
     """
-    cpu     = _f(s.get("cpu_used"))
-    mem     = _f(s.get("mem_used"))
-    disk    = _f(s.get("disk_used_max"))
-    cpu_avg = _f(s.get("cpu_avg"))
-    mem_gb  = _f(s.get("mem_total_gb"))
+    raw_cpu = _opt_round(s.get("cpu_used"))
+    raw_mem = _opt_round(s.get("mem_used"))
+    raw_disk = _opt_round(s.get("disk_used_max"))
+    raw_cpu_avg = _opt_round(s.get("cpu_avg"))
+    raw_mem_gb = _opt_round(s.get("mem_total_gb"))
+    raw_vcpus = _opt_round(s.get("vcpus"), 0)
+    cpu     = raw_cpu if raw_cpu is not None else 0.0
+    mem     = raw_mem if raw_mem is not None else 0.0
+    disk    = raw_disk if raw_disk is not None else 0.0
+    cpu_avg = raw_cpu_avg if raw_cpu_avg is not None else 0.0
+    mem_gb  = raw_mem_gb if raw_mem_gb is not None else 0.0
+    vcpus = int(raw_vcpus) if raw_vcpus is not None and raw_vcpus > 0 else None
     server_type = (s.get("type") or "APP").upper()
     image_only  = is_unknown_server(s)
 
@@ -276,7 +318,6 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     role_thresh = role_cpu_thresholds(server_type)
 
     score  = get_health_score(effective_cpu, mem, disk, server_type)
-    status = "Unknown" if image_only else status_band(effective_cpu, mem, disk, server_type)
 
     host = s.get("host") or "?"
 
@@ -287,9 +328,19 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     # Don't show 0.0% for memory/disk unless we truly have source metrics.
     # If both the percentage and the absolute value are zero, mark as None
     # so the frontend shows "data unavailable" instead of fake precision.
-    mem_available  = not image_only and (mem > 0 or mem_gb > 0)
-    disk_available = not image_only and disk > 0
-    cpu_available  = not image_only and (cpu > 0 or cpu_avg > 0)
+    mem_available  = not image_only and (raw_mem is not None or raw_mem_gb is not None)
+    disk_available = not image_only and raw_disk is not None
+    cpu_available  = not image_only and (raw_cpu is not None or raw_cpu_avg is not None)
+
+    resolved = resolve_server_severity(
+        {
+            "cpu": effective_cpu if cpu_available else None,
+            "memory": mem if mem_available else None,
+            "disk": disk if disk_available else None,
+        },
+        server_type,
+    )
+    status = resolved["status"]
 
     # ── DB memory expected band — role-specific status override ─────────────
     # Oracle/SQL DB servers pre-allocate 80–92% of RAM to SGA/PGA by design.
@@ -297,17 +348,7 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     # but does not always push the score above the 80-pt Healthy boundary when
     # CPU or disk metrics also contribute. Explicitly override Warning → Healthy
     # when the DB server's ONLY issue is memory inside the expected band.
-    _db_mem_expected = (
-        server_type == "DB"
-        and mem_available
-        and DB_MEM_EXPECTED_LO <= mem <= DB_MEM_EXPECTED_HI
-        and not image_only
-    )
-    if _db_mem_expected and status == "Warning":
-        _cpu_ok   = effective_cpu < role_thresh["ok"]
-        _disk_ok  = not disk_available or disk < DISK_OK
-        if _cpu_ok and _disk_ok:
-            status = "Healthy"
+    _db_mem_expected = bool(resolved["metrics"].get("memory", {}).get("is_expected"))
 
     # mem_status: memory-specific classification for frontend tooltip/colour
     # "DB_NORMAL"  — DB in expected SGA/PGA band (8–20% available); do not alarm
@@ -316,7 +357,7 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     if server_type == "DB" and mem_available and not image_only:
         if DB_MEM_EXPECTED_LO <= mem <= DB_MEM_EXPECTED_HI:
             mem_status: Optional[str] = "DB_NORMAL"
-        elif mem > DB_MEM_EXPECTED_HI:
+        elif resolved["metrics"].get("memory", {}).get("status") in ("Warning", "Critical"):
             mem_status = "DB_HIGH"
         else:
             mem_status = None
@@ -349,6 +390,10 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         "image_only":     image_only,
         "health_score":   round(float(score), 1) if score >= 0 else None,
         "status":         status,
+        "severity":       resolved["severity"],
+        "severity_reasons": {
+            metric: result.get("reason_code") for metric, result in resolved["metrics"].items()
+        },
         "mem_status":     mem_status,
         "source_env":     s.get("_source_file") or s.get("source_env") or "",
         # Intelligence flags
@@ -374,6 +419,8 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         # via a customer's own tag convention, not a hardcoded value here)
         "vm_size":       s.get("vm_size") or "",
         "vm_size_desc":  s.get("vm_size_desc") or "",
+        "vcpus":         vcpus,
+        "vcpu_source":   s.get("vcpu_source") or "",
         "tags":          s.get("tags") or {},
         "product_group": s.get("product_group") or "",
     }
@@ -398,7 +445,12 @@ def compute_dynamic_thresholds(servers: List[dict]) -> Dict[str, Dict[str, float
 
     result = {"source": "dynamic"}
     for metric, key in [("cpu", "cpu_used"), ("mem", "mem_used"), ("disk", "disk_used_max")]:
-        vals = np.array([_f(s.get(key)) for s in known])
+        vals = np.array([value for s in known if (value := _opt_round(s.get(key))) is not None])
+        if len(vals) < 3:
+            # Missing telemetry cannot become a synthetic zero baseline.
+            result[metric] = {"warn": CPU_OK if metric == "cpu" else MEM_OK if metric == "mem" else DISK_OK,
+                              "crit": CPU_WARN if metric == "cpu" else MEM_WARN if metric == "mem" else DISK_WARN}
+            continue
         mu = float(np.mean(vals))
         sigma = float(np.std(vals))
         warn = max(_FLOOR_WARN[metric], round(mu + sigma, 1))
@@ -422,19 +474,19 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
     n_known = len(known)
 
     if n_known:
-        cpu_vals  = [r["cpu_pct"]  for r in known if r["cpu_pct"]  is not None]
-        mem_vals  = [r["mem_pct"]  for r in known if r["mem_pct"]  is not None]
-        disk_vals = [r["disk_pct"] for r in known if r["disk_pct"] is not None]
-        # Average ONLY over servers that actually reported the metric. A pillar
-        # with zero reporting servers is None (→ "—" in the UI), never a fake 0.0
-        # that would misrepresent a non-reporting fleet as healthy/idle.
-        avg_cpu  = round(sum(cpu_vals)  / len(cpu_vals),  1) if cpu_vals  else None
-        avg_mem  = round(sum(mem_vals)  / len(mem_vals),  1) if mem_vals  else None
-        avg_disk = round(sum(disk_vals) / len(disk_vals), 1) if disk_vals else None
-        cpu_reporting, mem_reporting, disk_reporting = len(cpu_vals), len(mem_vals), len(disk_vals)
+        # The shared aggregation utility preserves a legitimate 0% reading but
+        # excludes absent values. Every consumer also receives coverage, so a
+        # dash / partial metric can never masquerade as fleet-wide 0%.
+        avg_cpu, cpu_coverage, cpu_reporting, _ = safe_avg([r["cpu_pct"] for r in known])
+        avg_mem, mem_coverage, mem_reporting, _ = safe_avg([r["mem_pct"] for r in known])
+        avg_disk, disk_coverage, disk_reporting, _ = safe_avg([r["disk_pct"] for r in known])
+        avg_cpu = round(avg_cpu, 1) if avg_cpu is not None else None
+        avg_mem = round(avg_mem, 1) if avg_mem is not None else None
+        avg_disk = round(avg_disk, 1) if avg_disk is not None else None
     else:
         avg_cpu = avg_mem = avg_disk = None
         cpu_reporting = mem_reporting = disk_reporting = 0
+        cpu_coverage = mem_coverage = disk_coverage = 0.0
 
     n_crit = sum(1 for r in known if r["status"] == "Critical")
     n_warn = sum(1 for r in known if r["status"] == "Warning")
@@ -443,6 +495,7 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
     n_app = sum(1 for r in rows if r["type"] == "APP")
     n_db  = sum(1 for r in rows if r["type"] == "DB")
     n_sre = sum(1 for r in rows if r["type"] == "SRE")
+    vcpu_rows = [r["vcpus"] for r in known if r.get("vcpus") is not None]
 
     n_prod = sum(1 for r in rows if r["environment"] == "PROD")
     n_test = sum(1 for r in rows if r["environment"] == "TEST")
@@ -481,12 +534,17 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
             "cpu_reporting":  cpu_reporting,
             "mem_reporting":  mem_reporting,
             "disk_reporting": disk_reporting,
+            "cpu_coverage": round(cpu_coverage, 3),
+            "mem_coverage": round(mem_coverage, 3),
+            "disk_coverage": round(disk_coverage, 3),
             "n_critical":    n_crit,
             "n_warning":     n_warn,
             "n_healthy":     n_ok,
             "n_app":         n_app,
             "n_db":          n_db,
             "n_sre":         n_sre,
+            "total_vcpus":   sum(vcpu_rows) if vcpu_rows else None,
+            "vcpus_reporting": len(vcpu_rows),
             "n_prod":        n_prod,
             "n_test":        n_test,
             "n_dev":         n_dev,
@@ -500,6 +558,12 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
             },
             "dynamic_thresholds": dyn_thresholds,
             "score_decomposition": score_decomp,
+            # Renderers and exports receive the same direction/profile metadata
+            # used by server and anomaly classification; no widget needs to
+            # infer "higher/lower is worse" from a display label.
+            "metric_profiles": {
+                metric: metric_profile(metric) for metric in ("cpu", "memory", "disk")
+            },
         },
         "anomalies": (fie or {}).get("anomalies", []),
         "servers":   rows,
@@ -690,6 +754,10 @@ def _build_executive_summary(
         _ecpu = s["effective_cpu"] or 0.0
         _cpu  = s["cpu_pct"] or 0.0
         _mem  = s["mem_pct"] or 0.0
+        cpu_issue = _ecpu >= role_t["ok"]
+        disk_issue = s.get("disk_pct") is not None and s["disk_pct"] >= 85.0
+        dual_issue = bool(s.get("dual_pressure"))
+        expected_db_memory = s.get("mem_status") == "DB_NORMAL"
         if _ecpu >= role_t["warn"]:
             issues.append(f"CPU {_cpu:.1f}% (critical for {s['type']}) — check for runaway queries or batch overlap")
         elif _ecpu >= role_t["ok"]:
@@ -698,14 +766,14 @@ def _build_executive_summary(
             is_db = s["type"].upper() == "DB"
             if is_db and _mem <= 92.0:
                 # DB servers: 85-92% memory is expected behavior (SGA/PGA allocation)
-                issues.append(f"Memory {_mem:.1f}% — expected range for DB (SGA/PGA allocation uses 80-92% by design). Monitor for growth above 93%.")
+                issues.append(f"Host memory {_mem:.1f}% used — consistent with the configured DB host-memory profile (80–92% used); Azure does not verify SGA/PGA. Monitor for growth above 93%.")
             elif is_db and _mem > 92.0:
                 issues.append(f"Memory {_mem:.1f}% — exceeds expected DB range (>92%). Possible memory leak, PGA over-allocation, or VM needs more RAM.")
             else:
                 issues.append(f"Memory {_mem:.1f}% — high for {s['type']} server. Check for memory leaks, large heap allocation, or undersized VM.")
-        if s.get("disk_pct") is not None and s["disk_pct"] >= 85.0:
+        if disk_issue:
             issues.append(f"Disk {s['disk_pct']:.1f}% — check archive logs, temp tablespace, or log rotation policy")
-        if s.get("dual_pressure"):
+        if dual_issue:
             issues.append("DUAL PRESSURE — CPU + Memory both saturated; likely swapping, check OOM killer logs")
         if issues:
             item = {
@@ -715,9 +783,11 @@ def _build_executive_summary(
                 "status": s["status"],
                 "issues": issues,
             }
-            is_expected_db_memory_only = all(
-                "expected range for DB" in issue for issue in issues
-            )
+            # This classification must depend on the resolver's structured
+            # result, never on wording shown to a customer. A DB host profile
+            # is a monitoring note only when no CPU/disk/dual condition also
+            # needs action.
+            is_expected_db_memory_only = expected_db_memory and not cpu_issue and not disk_issue and not dual_issue
             if is_expected_db_memory_only:
                 monitoring_notes.append(item)
             else:
@@ -748,14 +818,7 @@ def _build_executive_summary(
         if dual_issues:
             rca_hint = "Dual CPU+Memory saturation points to resource exhaustion under load."
         elif mem_issues > cpu_issues:
-            # Check if ALL memory-flagged servers are DBs within expected range
-            db_expected = sum(1 for b in bottlenecks
-                             for iss in b["issues"]
-                             if "Memory" in iss and "expected range for DB" in iss)
-            if db_expected == mem_issues and db_expected > 0:
-                rca_hint = "Memory usage is within expected DB range (SGA/PGA allocation). No action needed unless growth trend detected."
-            else:
-                rca_hint = "Memory is the primary constraint. Check for leaks or right-size VMs."
+            rca_hint = "Memory is the primary constraint. Check for leaks or right-size VMs."
         elif cpu_issues > 0:
             rca_hint = "CPU pressure is the lead indicator. Review batch concurrency and query plans."
         else:
@@ -770,8 +833,8 @@ def _build_executive_summary(
         top_hosts = ", ".join(note["host"].split(".")[0] for note in monitoring_notes[:3])
         line2 = (
             f"No capacity action required. {len(monitoring_notes)} DB server(s) "
-            f"are within the expected 80–92% SGA/PGA allocation range: {top_hosts}"
-            f"{'...' if len(monitoring_notes) > 3 else ''}. Monitor only for growth above 92% used."
+            f"are within the configured 80–92% host-memory profile: {top_hosts}"
+            f"{'...' if len(monitoring_notes) > 3 else ''}. Azure does not verify SGA/PGA; monitor for growth above 92% used."
         )
     elif n_agg and real_crit == 0 and real_warn == 0:
         line2 = (

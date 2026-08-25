@@ -117,6 +117,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from services.spike_schema import make_spike_record
+from services.resource_severity import metric_profile, resolve_severity
 
 logger = logging.getLogger("pe_dashboard.azure_monitor")
 
@@ -727,27 +728,16 @@ def _metric_elevation(metric_label: str, is_db: bool = False) -> dict:
     whose RAW samples are 'available %' (memory) — callers working in that space
     convert via ``100 - used``.
     """
-    from services import pe_config
-    name = (metric_label or "").lower()
-    if "cpu" in name:
-        return {"metric": "cpu", "warn": float(pe_config.CPU_WARN),
-                "crit": float(pe_config.CPU_CRIT), "invert": False}
-    if "mem" in name:
-        # DB servers legitimately hold 80-92% memory (Oracle SGA/PGA is
-        # pre-allocated) — judging them against the generic 70/80 app bands
-        # marks every Oracle VM permanently critical, which directly
-        # contradicts the "DB expected band" legend rendered on the same
-        # screen. Use the canonical DB bands from pe_config for DB roles.
-        if is_db:
-            return {"metric": "mem", "warn": float(pe_config.DB_MEM_WARN),
-                    "crit": float(pe_config.DB_MEM_CRIT), "invert": True,
-                    "role": "db"}
-        return {"metric": "mem", "warn": float(pe_config.MEM_WARN),
-                "crit": float(pe_config.MEM_CRIT), "invert": True, "role": "app"}
-    if "disk" in name:
-        return {"metric": "disk", "warn": float(pe_config.DISK_WARN),
-                "crit": float(pe_config.DISK_CRIT), "invert": False}
-    return {"metric": "other", "warn": 80.0, "crit": 90.0, "invert": False}
+    # Compatibility adapter for existing time-series code. The actual bands,
+    # direction and DB expected-range suppression are owned by the shared
+    # resolver used by Resource Review rows and fleet cards.
+    profile = metric_profile(metric_label, "DB" if is_db else "APP")
+    return {
+        "metric": profile["metric"], "warn": profile["warn"], "crit": profile["crit"],
+        "invert": profile["invert"], "role": profile["server_role"].lower(),
+        "direction": profile["direction"], "raw_direction": profile["raw_direction"],
+        "expected_min": profile.get("expected_min"), "expected_max": profile.get("expected_max"),
+    }
 
 
 def _abs_breach_cfg(metric_name: str, is_db: bool = False) -> dict | None:
@@ -783,33 +773,31 @@ def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
       severity, reason_code (typed enum), severity_reason (human text),
       confidence, threshold (the band crossed), peak_pct, duration_min, z_score.
     """
-    warn, crit = band["warn"], band["crit"]
-    conf = "high" if z >= z_crit else "medium" if z >= 2.0 else "low"
-    pk, du, zr = round(used_peak, 1), int(dur_min), round(z, 1)
-    if used_peak >= crit:
-        if dur_min > 30:
-            return {"severity": "critical_sustained", "reason_code": "abs_crit_sustained",
-                    "severity_reason": f"{pk:.0f}% ≥ {crit:.0f}% crit for {du}min",
-                    "confidence": "high", "threshold": crit, "peak_pct": pk,
-                    "duration_min": du, "z_score": zr}
-        if dur_min < 5:
-            return {"severity": "warning", "reason_code": "abs_crit_brief",
-                    "severity_reason": f"{pk:.0f}% ≥ {crit:.0f}% crit but only {du}min — possible artifact",
-                    "confidence": conf, "threshold": crit, "peak_pct": pk,
-                    "duration_min": du, "z_score": zr}
-        return {"severity": "critical", "reason_code": "abs_crit",
-                "severity_reason": f"{pk:.0f}% ≥ {crit:.0f}% crit for {du}min",
-                "confidence": "high", "threshold": crit, "peak_pct": pk,
-                "duration_min": du, "z_score": zr}
-    if used_peak >= warn:
-        return {"severity": "warning", "reason_code": "abs_warn",
-                "severity_reason": f"{pk:.0f}% ≥ {warn:.0f}% warn band",
-                "confidence": conf, "threshold": warn, "peak_pct": pk,
-                "duration_min": du, "z_score": zr}
-    return {"severity": "notable", "reason_code": "stat_anomaly_immaterial",
-            "severity_reason": f"statistical anomaly (z={zr}) but {pk:.0f}% < {warn:.0f}% warn — not operationally material",
-            "confidence": conf, "threshold": warn, "peak_pct": pk,
-            "duration_min": du, "z_score": zr}
+    role = str(band.get("role") or "app").upper()
+    result = resolve_severity(
+        band.get("metric") or "other", used_peak, role,
+        anomaly_result={"z": z, "z_critical": z_crit}, duration_min=dur_min,
+    )
+    confidence = "high" if result["severity"] in ("critical", "critical_sustained") else (
+        "medium" if z >= 2.0 else "low"
+    )
+    pk, du, zr = round(float(used_peak), 1), int(dur_min), round(float(z), 1)
+    threshold = result.get("threshold", band["warn"])
+    if result["reason_code"] == "expected_range":
+        reason = f"{pk:.0f}% is within the expected {result['expected_min']:.0f}–{result['expected_max']:.0f}% {role} range"
+    elif result["reason_code"] == "stat_anomaly_immaterial":
+        reason = f"statistical anomaly (z={zr}) but {pk:.0f}% < {threshold:.0f}% warn — not operationally material"
+    elif result["severity"] == "critical_sustained":
+        reason = f"{pk:.0f}% ≥ {threshold:.0f}% crit for {du}min"
+    elif result["reason_code"] == "abs_crit_brief":
+        reason = f"{pk:.0f}% ≥ {threshold:.0f}% crit but only {du}min — possible artifact"
+    else:
+        reason = f"{pk:.0f}% {'≥' if result['severity'] != 'notable' else '<'} {threshold:.0f}% {'crit' if result['severity'].startswith('critical') else 'warn'} band"
+    return {
+        "severity": result["severity"], "reason_code": result["reason_code"],
+        "severity_reason": reason, "confidence": confidence, "threshold": threshold,
+        "peak_pct": pk, "duration_min": du, "z_score": zr,
+    }
 
 
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
@@ -1072,7 +1060,11 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         peak_pct=round(used_pk, 1),
                     ))
 
-    return spikes
+    # Expected-range events can be statistically unusual, but they are not
+    # actionable anomalies. Filtering them here keeps the detector output in
+    # lockstep with the fleet cards rather than relying on every renderer to
+    # remember that special case.
+    return [spike for spike in spikes if spike.get("severity") != "healthy"]
 
 
 def detect_regime_change(recent_baseline: dict, prior_baseline: dict,
@@ -2181,31 +2173,131 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
     return analysis
 
 
-def _vm_total_memory_bytes(credential, subscription_id: str, vm_size: str) -> Optional[float]:
-    """
-    Look up total RAM for a VM size from the Azure Compute SKUs list.
-    Returns bytes, or None if unavailable.
-    Cached in-process to avoid repeated API calls for the same size.
-    """
-    if not vm_size:
+def _positive_whole_number(value: Any) -> Optional[int]:
+    """Return an Azure capability count only when it is a real positive integer."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
         return None
-    cache = _vm_total_memory_bytes.__dict__.setdefault("_cache", {})
-    if vm_size in cache:
-        return cache[vm_size]
+    return int(numeric) if numeric > 0 and numeric.is_integer() else None
+
+
+def _sku_capacity_profile(capabilities: Any) -> Dict[str, Any]:
+    """Extract auditable capacity facts from one Azure SKU capability list."""
+    profile = {"memory_bytes": None, "vcpus": None, "vcpu_source": ""}
+    values = {
+        str(cap.name or "").strip().casefold(): cap.value
+        for cap in (capabilities or [])
+    }
+    memory_gb = values.get("memorygb")
+    try:
+        if memory_gb is not None and float(memory_gb) > 0:
+            profile["memory_bytes"] = float(memory_gb) * _BYTES_PER_GB
+    except (TypeError, ValueError):
+        pass
+    usable_vcpus = _positive_whole_number(values.get("vcpusavailable"))
+    total_vcpus = _positive_whole_number(values.get("vcpus"))
+    if usable_vcpus is not None:
+        profile["vcpus"] = usable_vcpus
+        profile["vcpu_source"] = "vCPUsAvailable"
+    elif total_vcpus is not None:
+        profile["vcpus"] = total_vcpus
+        profile["vcpu_source"] = "vCPUs"
+    return profile
+
+
+def _regional_vm_size_profile(vm_sizes: Any, vm_size: str) -> Dict[str, Any]:
+    """Read core and RAM capacity from Azure's regional VM-size metadata.
+
+    This is an authoritative Azure fallback when subscription-wide ResourceSkus
+    capability enumeration is unavailable to the signed-in principal.  It does
+    not try to decode capacity from a SKU name.
+    """
+    profile = {"memory_bytes": None, "vcpus": None, "vcpu_source": ""}
+    expected_name = str(vm_size or "").strip().casefold()
+    if not expected_name:
+        return profile
+    for size in vm_sizes or []:
+        if str(getattr(size, "name", "") or "").strip().casefold() != expected_name:
+            continue
+        cores = _positive_whole_number(getattr(size, "number_of_cores", None))
+        memory_mb = getattr(size, "memory_in_mb", None)
+        if cores is not None:
+            profile["vcpus"] = cores
+            profile["vcpu_source"] = "regional_vm_size"
+        try:
+            if memory_mb is not None and float(memory_mb) > 0:
+                profile["memory_bytes"] = float(memory_mb) * 1024 * 1024
+        except (TypeError, ValueError):
+            pass
+        break
+    return profile
+
+
+def _vm_sku_profile(credential, subscription_id: str, vm_size: str,
+                    location: str = "") -> Dict[str, Any]:
+    """Return capacity facts for one Azure VM SKU, cached per subscription/SKU.
+
+    ``vCPUsAvailable`` takes precedence over ``vCPUs``. Azure reports both on
+    constrained-vCPU sizes, but the available value is the usable/licensed CPU
+    count. This is intentionally distinct from CPU utilisation percentage.
+    A missing SKU capability remains ``None``; it is never guessed from a SKU
+    name or from a customer-specific lookup table.
+    """
+    empty = {"memory_bytes": None, "vcpus": None, "vcpu_source": ""}
+    if not subscription_id or not vm_size:
+        return dict(empty)
+    cache = _vm_sku_profile.__dict__.setdefault("_cache", {})
+    cache_key = (subscription_id.lower(), vm_size.lower(), location.strip().lower())
+    if cache_key in cache:
+        return dict(cache[cache_key])
+    profile = dict(empty)
     try:
         from azure.mgmt.compute import ComputeManagementClient
         compute = ComputeManagementClient(credential, subscription_id)
-        # list_skus is subscription-scoped; we just need any location result
-        for sku in compute.resource_skus.list(filter=f"name eq '{vm_size}'"):
-            for cap in (sku.capabilities or []):
-                if cap.name == "MemoryGB":
-                    val = float(cap.value) * _BYTES_PER_GB
-                    cache[vm_size] = val
-                    return val
-    except Exception:
-        pass
-    cache[vm_size] = None
-    return None
+        try:
+            # ResourceSkus is subscription-scoped. Capability names are Azure's
+            # contract, so match them case-insensitively but do not infer aliases.
+            for sku in compute.resource_skus.list(filter=f"name eq '{vm_size}'"):
+                candidate = _sku_capacity_profile(sku.capabilities)
+                if profile["memory_bytes"] is None:
+                    profile["memory_bytes"] = candidate["memory_bytes"]
+                if profile["vcpus"] is None:
+                    profile["vcpus"] = candidate["vcpus"]
+                    profile["vcpu_source"] = candidate["vcpu_source"]
+                # There can be more than one regional SKU record. The first record
+                # with both capacity facts is sufficient because the requested size
+                # is exact; incomplete rows may be followed by a complete one.
+                if profile["memory_bytes"] is not None and profile["vcpus"] is not None:
+                    break
+        except Exception as exc:
+            logger.info("Resource SKU capacity unavailable for %s; trying regional VM-size metadata: %s", vm_size, exc)
+
+        # Reader-like access can expose regional VM-size metadata even where
+        # ResourceSkus enumeration is denied. It is still Azure metadata and
+        # returns number_of_cores directly, rather than a guessed SKU mapping.
+        if location and (profile["memory_bytes"] is None or profile["vcpus"] is None):
+            try:
+                regional = _regional_vm_size_profile(
+                    compute.virtual_machine_sizes.list(location), vm_size
+                )
+                if profile["memory_bytes"] is None:
+                    profile["memory_bytes"] = regional["memory_bytes"]
+                if profile["vcpus"] is None:
+                    profile["vcpus"] = regional["vcpus"]
+                    profile["vcpu_source"] = regional["vcpu_source"]
+            except Exception as exc:
+                logger.info("Regional VM-size capacity unavailable for %s in %s: %s", vm_size, location, exc)
+    except Exception as exc:
+        logger.debug("SKU capacity lookup failed for %s: %s", vm_size, exc)
+    cache[cache_key] = dict(profile)
+    return dict(profile)
+
+
+def _vm_total_memory_bytes(credential, subscription_id: str, vm_size: str,
+                           location: str = "") -> Optional[float]:
+    """Backward-compatible RAM accessor backed by the shared SKU profile."""
+    return _vm_sku_profile(credential, subscription_id, vm_size, location).get("memory_bytes")
 
 
 def _extract_product_group(tags: dict) -> str:
@@ -2580,8 +2672,9 @@ def _build_server_records(credential, vms: List[dict],
     """Shared helper: query metrics for a list of VMs and build server records.
     
     Computes total memory from Available Memory Bytes + Available Memory
-    Percentage to avoid slow SKU API calls.  Falls back to SKU lookup only
-    when both metrics are missing.
+    Percentage to avoid slow SKU API calls. A bounded, cached SKU lookup also
+    supplies usable vCPU capacity for the audit, and fills RAM only where live
+    memory metrics cannot establish it.
     """
     import re as _re
     import time as _time
@@ -2595,7 +2688,7 @@ def _build_server_records(credential, vms: List[dict],
     logger.info("Metrics query took %.1fs for %d VMs", t_metrics, len(vms))
 
     servers: List[Dict[str, Any]] = []
-    sku_needed: list = []  # VMs that need SKU fallback (no metrics for memory)
+    sku_metadata_needed: list = []  # (server index, subscription, size, needs RAM fallback)
 
     for vm in vms:
         rid  = vm["resource_id"]
@@ -2618,6 +2711,7 @@ def _build_server_records(credential, vms: List[dict],
         avail_bytes = m.get("Available Memory Bytes")
         mem_pct = 0.0
         mem_total_gb = 0.0
+        needs_memory_sku = False
 
         # FAST PATH: compute total memory from the two metrics (no API call)
         # Guard: avail_pct must be ≥1% to derive reliable total_bytes.
@@ -2631,14 +2725,10 @@ def _build_server_records(credential, vms: List[dict],
             # Have percentage but not bytes — still know used %
             mem_pct = round(max(0.0, min(100.0, 100.0 - avail_pct)), 2)
             # Mark for SKU lookup to get total GB
-            sub_match = _re.match(r"/subscriptions/([^/]+)/", rid, _re.IGNORECASE)
-            if sub_match and vm.get("vm_size"):
-                sku_needed.append((len(servers), sub_match.group(1), vm["vm_size"]))
+            needs_memory_sku = True
         elif avail_bytes is not None:
             # Have bytes but not percentage — need SKU for total
-            sub_match = _re.match(r"/subscriptions/([^/]+)/", rid, _re.IGNORECASE)
-            if sub_match and vm.get("vm_size"):
-                sku_needed.append((len(servers), sub_match.group(1), vm["vm_size"]))
+            needs_memory_sku = True
 
         # Memory MAX/MIN — the raw Azure metric is "Available %" (lower = worse),
         # so the USED-% max (worst pressure point) comes from the AVAILABLE MIN,
@@ -2665,6 +2755,12 @@ def _build_server_records(credential, vms: List[dict],
         disk_min_pct = round(_disk_min, 2) if _disk_min is not None else None
 
         _tags = vm.get("tags") or {}
+        sub_match = _re.match(r"/subscriptions/([^/]+)/", rid, _re.IGNORECASE)
+        if sub_match and vm.get("vm_size"):
+            sku_metadata_needed.append((
+                len(servers), sub_match.group(1), vm["vm_size"],
+                vm.get("location", ""), needs_memory_sku,
+            ))
         servers.append({
             "host":          name.lower(),
             "server":        name.lower(),
@@ -2686,10 +2782,9 @@ def _build_server_records(credential, vms: List[dict],
             "resource_id":   rid,
             "location":      vm["location"],
             "vm_size":       vm["vm_size"],
-            # The ARM size name is already known. Do not block this critical
-            # collection path on a subscription-wide Compute SKU catalogue
-            # scan merely to decorate it with vCPU metadata.
             "vm_size_desc":  (vm["vm_size"] or "").replace("_", " "),
+            "vcpus":         None,
+            "vcpu_source":   "",
             "resource_group":vm["rg"],
             "tags":          _tags,
             "product_group": _extract_product_group(_tags),
@@ -2697,29 +2792,36 @@ def _build_server_records(credential, vms: List[dict],
             "hours_back":    hours_back,
         })
 
-    # SKU fallback: only for VMs missing both memory metrics (rare)
-    if sku_needed:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        logger.info("SKU fallback needed for %d VMs (missing memory metrics)", len(sku_needed))
+    # Capacity metadata: one bounded lookup per unique subscription/SKU. This
+    # never blocks a metric result: unavailable capacity stays explicitly empty.
+    if sku_metadata_needed:
+        from concurrent.futures import ThreadPoolExecutor
+        memory_fallbacks = sum(1 for *_, needs_memory_sku in sku_metadata_needed if needs_memory_sku)
+        logger.info("SKU capacity lookup for %d VMs (%d need RAM fallback)", len(sku_metadata_needed), memory_fallbacks)
         t1 = _time.perf_counter()
-        unique_sizes = {(s, sz) for _, s, sz in sku_needed}
-
-        def _lookup(pair):
-            return pair, _vm_total_memory_bytes(credential, pair[0], pair[1])
+        unique_sizes = {(sub_id, vm_size, location) for _, sub_id, vm_size, location, _ in sku_metadata_needed}
 
         with ThreadPoolExecutor(max_workers=min(5, len(unique_sizes))) as pool:
-            results = {pair: val for pair, val in pool.map(lambda p: (p, _vm_total_memory_bytes(credential, p[0], p[1])), unique_sizes)}
+            results = {
+                pair: profile
+                for pair, profile in pool.map(
+                    lambda p: (p, _vm_sku_profile(credential, p[0], p[1], p[2])), unique_sizes
+                )
+            }
 
-        for idx, sub_id, vm_size in sku_needed:
-            total_bytes = results.get((sub_id, vm_size))
-            if total_bytes and total_bytes > 0:
+        for idx, sub_id, vm_size, location, needs_memory_sku in sku_metadata_needed:
+            profile = results.get((sub_id, vm_size, location), {})
+            servers[idx]["vcpus"] = profile.get("vcpus")
+            servers[idx]["vcpu_source"] = profile.get("vcpu_source") or ""
+            total_bytes = profile.get("memory_bytes")
+            if needs_memory_sku and total_bytes and total_bytes > 0:
                 servers[idx]["mem_total_gb"] = round(total_bytes / _BYTES_PER_GB, 2)
                 avail_bytes = metrics_map.get(servers[idx]["resource_id"], {}).get("Available Memory Bytes")
                 if avail_bytes is not None and servers[idx]["mem_pct"] == 0.0:
                     servers[idx]["mem_pct"] = round(max(0.0, min(100.0, (1.0 - avail_bytes / total_bytes) * 100.0)), 2)
                     servers[idx]["mem_used"] = servers[idx]["mem_pct"]
 
-        logger.info("SKU fallback took %.1fs", _time.perf_counter() - t1)
+        logger.info("SKU capacity lookup took %.1fs", _time.perf_counter() - t1)
 
     total_time = _time.perf_counter() - t0
     logger.info("Azure fetch complete — %d servers in %.1fs (metrics: %.1fs)", len(servers), total_time, t_metrics)

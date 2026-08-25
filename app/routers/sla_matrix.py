@@ -140,6 +140,9 @@ class SlaMatrixResponse(BaseModel):
     #          workflow_start, workflow_end, runtime_h, sla_h, sla_source,
     #          buffer_pct, status, job_count, + debug_* columns.
     workflow_summary:  Optional[List[Dict[str, Any]]] = None
+    # Strict BatchSLA schema evidence, passed through from the accepted upload.
+    # React renders this as source-state information; it never recalculates SLA.
+    batch_sla_mapping_report: Optional[Dict[str, Any]] = None
 
 
 class JsonSlaRequest(BaseModel):
@@ -210,11 +213,13 @@ def _compute_sla_matrix(
 
     # Load the 3-tier SLA merger sources (BatchSLA_info.xlsx + SOW windows)
     _batch_sla_rows: list[dict] = []
+    _batch_sla_mapping_report: dict[str, Any] | None = None
     _sow_windows: dict = {}
     try:
         from services import config_store as _cs2
         _bsla = _cs2.get("_batch_sla_xlsx") or {}
         _batch_sla_rows = _bsla.get("workflows") or []
+        _batch_sla_mapping_report = _bsla.get("mapping_report") or None
         _sow_windows = _cs2.get("_sow_sla_windows") or {}
     except Exception:
         pass
@@ -1213,6 +1218,44 @@ def _compute_sla_matrix(
                     else:
                         status_wf = "OK"
 
+                # Stable audit-evidence aliases for portal consumers.  Keep
+                # runtime_h/status untouched: runtime_h is the canonical
+                # representative (worst per-run) elapsed runtime.  The aliases
+                # simply state that fact explicitly and make timing/headroom
+                # fields discoverable without UI-specific guessing.
+                elapsed_duration_h = runtime_h if runtime_src.startswith("per_run_max_elapsed") else None
+                sla_basis = (
+                    "per_run_elapsed_span"
+                    if elapsed_duration_h is not None else
+                    ("max_reported_run_runtime" if runtime_h > 0 else "runtime_unavailable")
+                )
+                if elapsed_duration_h is not None and "all_jobs_anchor_unmatched" in runtime_src:
+                    measurement_reason_code = "JOB_NAME_UNMATCHED"
+                    measurement_reason_detail = (
+                        "No Ctrl-M first/last-job anchor matched this BatchSLA row; "
+                        "the displayed duration is an unanchored Ctrl-M window."
+                    )
+                elif elapsed_duration_h is not None:
+                    measurement_reason_code = "MATCHED_CTRL_M_WINDOW"
+                    measurement_reason_detail = "Matched Ctrl-M start/end timestamps for the representative workflow run."
+                elif runtime_src == "max_run_hrs":
+                    measurement_reason_code = "RUNTIME_FIELDS_MISSING"
+                    measurement_reason_detail = "Ctrl-M supplied a runtime value but no valid start/end timestamp pair."
+                elif (_first_anchor or _last_anchor) and "Job_Name" in grp.columns:
+                    measurement_reason_code = "JOB_NAME_UNMATCHED"
+                    measurement_reason_detail = "Configured BatchSLA first/last job anchor was not found in the Ctrl-M workflow rows."
+                else:
+                    measurement_reason_code = "RUNTIME_FIELDS_MISSING"
+                    measurement_reason_detail = "No valid Ctrl-M start/end timestamp pair was available for this workflow."
+                duration_headroom_h = (
+                    round(float(sla_h_wf) - runtime_h, 4)
+                    if sla_h_wf and sla_h_wf > 0 and runtime_h > 0 else None
+                )
+                duration_overrun_h = (
+                    round(max(0.0, -duration_headroom_h), 4)
+                    if duration_headroom_h is not None else None
+                )
+
                 # ── Per-run breach dates (matches reference script runs[] list) ──
                 # Identify which run dates individually exceeded the SLA window.
                 breach_run_dates: list[str] = []
@@ -1342,6 +1385,15 @@ def _compute_sla_matrix(
                     "batch_type":      batch_type_wf or "UNKNOWN",
                     "workflow_start":  wf_start_s,
                     "workflow_end":    wf_end_s,
+                    # Public, stable aliases for the React audit table.
+                    "actual_start_time": wf_start_s,
+                    "actual_end_time":   wf_end_s,
+                    "elapsed_duration_h": elapsed_duration_h,
+                    "measurement_reason_code": measurement_reason_code,
+                    "measurement_reason_detail": measurement_reason_detail,
+                    "sla_measurement_basis": sla_basis,
+                    "duration_headroom_h": duration_headroom_h,
+                    "duration_overrun_h":  duration_overrun_h,
                     "runtime_h":       runtime_h,
                     "sla_h":           round(float(sla_h_wf), 4) if sla_h_wf else None,
                     "sla_source":      sla_src_wf,
@@ -1670,6 +1722,7 @@ def _compute_sla_matrix(
         explicit_sla_matrix=explicit_sla_matrix,
         data_format=data_format,
         workflow_summary=workflow_summary or None,
+        batch_sla_mapping_report=_batch_sla_mapping_report,
     )
 
     # ── Adaptive per-job baselines + resource correlation ──────────
@@ -1920,6 +1973,22 @@ async def sla_commitments_interpret() -> Dict[str, Any]:
             bsla = _cs.get("_batch_sla_xlsx") or {}
             raw_wfs = bsla.get("workflows") or []
             for w in raw_wfs:
+                if w.get("contract_conflict") or w.get("sla_source") == "CONTRACT_CONFLICT":
+                    # A workbook contract conflict is evidence to resolve, not
+                    # a candidate for a default/fabricated compliance verdict.
+                    wf_rows.append({
+                        "workflow_name": w.get("workflow", "?"),
+                        "batch_type": w.get("batch_type", "?"),
+                        "runtime_h": None,
+                        "sla_h": None,
+                        "buffer_pct": None,
+                        "status": "SLA_CONTRACT_CONFLICT",
+                        "sla_source": "batch_sla_xlsx_conflict",
+                        "debug_runtime_source": "workbook_contract_conflict",
+                        "measurement_reason_code": "CLOCK_DURATION_CONFLICT",
+                        "measurement_reason_detail": w.get("contract_conflict_detail"),
+                    })
+                    continue
                 rt = w.get("last_run_hours_xlsx")
                 sla_h = w.get("sla_hours")
                 buf = round((sla_h - rt) / sla_h * 100, 2) if rt and sla_h and sla_h > 0 else None

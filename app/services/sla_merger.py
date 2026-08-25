@@ -623,75 +623,193 @@ def parse_start_time(value: Any) -> Any:
 
 # ── Parse BatchSLA_info.xlsx ──────────────────────────────────────────────────
 
-_COL_ALIASES = {
-    # canonical_name: [accepted column name variants (lower-stripped)]
-    # Batch / workflow name — accept any reasonable naming customers use
-    "Batch_Name":       ["batch_name", "workflow", "workflow_name", "batch name",
-                         "batch", "batch type", "sub_application", "sub application",
-                         "sub_app", "sub app", "process", "task",
-                         "job", "job name", "batch_type"],
-    "Schedule":         ["schedule", "cadence", "frequency"],
-    "TimeZone":         ["timezone", "time_zone", "tz"],
-    # Expected_SLA: numeric duration/SLA column — e.g. "1.5", "4h", "90 min"
-    # NOTE: "expected end time/sla" is intentionally NOT here — when a column
-    # holds a CLOCK TIME ("6 am EST", "8:30 pm EST") it belongs in Expected_End_Time,
-    # not Expected_SLA. Including it here caused parse_sla_hours() to get a time
-    # string → return None → fall back to GLOBAL_DEFAULT.
-    "Expected_SLA":     ["expected sla",
-                         "sla_hours", "sla hrs", "expected_sla", "sla_limit",
-                         "expected run time", "expected runtime",
-                         "expected run time (hrs)", "expected run time(hrs)",
-                         "sla (hrs)", "sla(hrs)", "run time sla",
-                         "sla duration", "batch sla"],
-    # Expected_End_Time: time-of-day DEADLINE — sla_h computed as (deadline - start_time)
-    # Accepts "Expected End Time/SLA" — when this column has clock times (not durations),
-    # sla_merger will compute sla_h = _overnight_delta_hours(start, end).
-    "Expected_End_Time": ["expected end time/sla", "expected end timesla",
-                          "expected end time sla", "expected end time",
-                          "expected_end_time", "sla deadline",
-                          "batch end time", "target end time", "end time target",
-                          "sla", "sla time"],
-    # First_Job / Last_Job: sentinel job names — handle underscore vs space variants
-    # MUST appear before any generic job_name alias so "First Job_name" maps here,
-    # not to Batch_Name via "job name".
-    "First_Job":        ["first job_name", "first job name", "first_job_name",
-                         "first_job", "first jobname", "start job", "start_job",
-                         "start job name", "first job"],
-    "Last_Job":         ["last job_name", "last job name", "last_job_name",
-                         "last_job", "last jobname", "end job", "end_job",
-                         "end job name", "last job"],
-    # Accept standalone "Start" / "End" (common in summary sheets)
-    "Start_Time":       ["start time", "start_time", "start", "window start",
-                         "batch start", "start date", "start time (ist)",
-                         "start time (aest)", "start time (cet)"],
-    # Current end time: "Current run time(PHT)" (Dole) — same column, different name
-    "End_Time":         ["current end time", "end time", "end_time",
-                         "current_end_time", "current run time", "end", "window end",
-                         "batch end", "end date", "current run time (pht)",
-                         "current end time (pht)", "current runtime"],
-    # Actual observed duration column (for last_run_hours_xlsx fallback)
-    "Actual_Duration":  ["duration", "total batch time", "total_batch_time",
-                         "elapsed", "elapsed time", "actual duration",
-                         "live gmp run time", "gmp live", "drp gmp run time",
-                         "gmp drp", "pipo lp run time",
-                         "concurrent batch run time", "concurrent batch"],
+_BATCH_SLA_SCHEMA_VERSION = "2"
+
+# Strict v1 registry.  Each entry is an observed header form backed by either
+# the supplied BatchSLA sheet or a direct regression fixture.  Do not add
+# "reasonable" synonyms here: an unverified schema must be rejected with a
+# mapping report, never guessed into a contract calculation.
+_BATCH_SLA_FIELDS: dict[str, dict[str, Any]] = {
+    "batch_name": {
+        "required": True, "internal": "Batch_Name", "aliases": {
+            "batch name": "provided BatchSLA header",
+        },
+    },
+    "schedule": {
+        "required": False, "internal": "Schedule", "aliases": {
+            "schedule": "provided BatchSLA header",
+            "frequency": "Batch_SLA.xlsx",
+        },
+    },
+    "timezone": {
+        "required": False, "internal": "TimeZone", "aliases": {
+            "timezone": "provided BatchSLA header",
+        },
+    },
+    "module": {
+        "required": False, "internal": None, "aliases": {
+            "module": "provided BatchSLA header",
+        },
+    },
+    "start_time": {
+        "required": True, "internal": "Start_Time", "aliases": {
+            "start time": "provided BatchSLA header",
+        },
+    },
+    "first_job_name": {
+        "required": False, "internal": "First_Job", "aliases": {
+            "first job name": "provided BatchSLA header",
+        },
+    },
+    # This is one contract fact with two supported value shapes: an elapsed
+    # duration (Expected SLA / SLA Hours) or a clock deadline (Expected End
+    # Time/SLA).  The existing parser keeps that value distinction intact.
+    "expected_end_sla": {
+        "required": True, "internal": None, "aliases": {
+            "expected end time/sla": "provided BatchSLA header",
+            "expected sla (hrs)": "tests/test_sla_header_variants.py",
+            "sla(in hrs)": "tests/test_sla_header_variants.py",
+            "sla (in hours)": "tests/test_sla_header_variants.py",
+            "sla (minutes)": "tests/test_sla_header_variants.py",
+            "sla hours": "tests/test_sla_header_variants.py",
+            "sla": "tests/test_sla_header_variants.py",
+            "end time": "Batch_SLA.xlsx",
+        },
+    },
+    # A declared schedule duration is contract evidence, not an observed run.
+    # Keep it separately from Current End Time so the UI cannot accidentally
+    # present a planned six-hour window as a six-hour measured execution.
+    "contract_duration": {
+        "required": False, "internal": "Contract_Duration", "aliases": {
+            "duration": "Batch_SLA.xlsx",
+        },
+    },
+    "last_job_name": {
+        "required": False, "internal": "Last_Job", "aliases": {
+            "last job name": "provided BatchSLA header",
+        },
+    },
+    "current_end_time": {
+        "required": False, "internal": "End_Time", "aliases": {
+            "current end time": "provided BatchSLA header",
+        },
+    },
+    "comments": {
+        "required": False, "internal": None, "aliases": {
+            "comments": "provided BatchSLA header",
+            "comment": "Batch_SLA.xlsx",
+        },
+    },
 }
 
 
 def _normalize_col_header(col: str) -> str:
-    """Normalize a raw column header for alias matching.
+    """Normalize only case, whitespace, and underscores for schema matching."""
+    return re.sub(r"[\s_]+", " ", str(col or "").strip().casefold()).strip()
 
-    Strips:
-      - parenthetical suffixes: "Expected End Time/SLA (2019)" → "expected end time/sla"
-      - embedded timezone labels: "(IST)", "(PHT)", "(AEST)", "(CET)"
-      - leading/trailing whitespace
-    Lowercases the result.
+
+def _batch_sla_mapping_report(df_columns: list[str], sheet_name: str | None = None) -> dict[str, Any]:
+    """Build a deterministic BatchSLA schema report without choosing aliases."""
+    raw_headers = [str(col) for col in df_columns]
+    normalized: dict[str, list[str]] = {}
+    for raw in raw_headers:
+        normalized.setdefault(_normalize_col_header(raw), []).append(raw)
+
+    mapped: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    used_headers: set[str] = set()
+    canonical_to_raw: dict[str, str] = {}
+    for canonical, definition in _BATCH_SLA_FIELDS.items():
+        matches: list[str] = []
+        for alias in definition["aliases"]:
+            matches.extend(normalized.get(_normalize_col_header(alias), []))
+        # Same raw header cannot appear twice in aliases, but an Excel sheet can
+        # contain duplicated raw headers or two aliases for one canonical field.
+        matches = list(dict.fromkeys(matches))
+        if len(matches) > 1:
+            duplicates.append({"canonical_field": canonical, "raw_headers": matches})
+            continue
+        if matches:
+            raw = matches[0]
+            canonical_to_raw[canonical] = raw
+            used_headers.add(raw)
+            mapped.append({
+                "raw_header": raw,
+                "canonical_field": canonical,
+                "required": bool(definition["required"]),
+                "provenance": definition["aliases"][_normalize_col_header(raw)],
+            })
+
+    missing_required = [
+        canonical for canonical, definition in _BATCH_SLA_FIELDS.items()
+        if definition["required"] and canonical not in canonical_to_raw
+    ]
+    absent_optional = [
+        canonical for canonical, definition in _BATCH_SLA_FIELDS.items()
+        if not definition["required"] and canonical not in canonical_to_raw
+    ]
+    return {
+        "sheet_name": sheet_name,
+        "raw_headers": raw_headers,
+        "mapped": mapped,
+        "missing_required": missing_required,
+        "absent_optional": absent_optional,
+        "duplicates": duplicates,
+        "unmapped_headers": [raw for raw in raw_headers if raw not in used_headers],
+        "canonical_to_raw": canonical_to_raw,
+        "status": "blocked" if missing_required or duplicates else "accepted",
+    }
+
+
+def _with_field_population(report: dict[str, Any], df: Any) -> dict[str, Any]:
+    """Attach file-wide populated/empty state without changing source values."""
+    field_states: list[dict[str, Any]] = []
+    for canonical, definition in _BATCH_SLA_FIELDS.items():
+        raw = report["canonical_to_raw"].get(canonical)
+        if not raw:
+            field_states.append({"canonical_field": canonical, "state": "field_absent_in_source"})
+            continue
+        series = df[raw]
+        populated = int((series.notna() & series.astype(str).str.strip().ne("")).sum())
+        empty = int(len(series) - populated)
+        field_states.append({
+            "canonical_field": canonical,
+            "state": "mapped_populated" if populated else "mapped_empty_for_all_rows",
+            "populated_rows": populated,
+            "empty_rows": empty,
+        })
+    report["field_states"] = field_states
+    return report
+
+
+def _execution_history_profile(df_columns: list[str]) -> dict[str, str] | None:
+    """Recognise a dated batch-runtime history without mistaking it for SLA.
+
+    This is deliberately a deterministic *profile*, not fuzzy matching.  A
+    history workbook has a batch/workflow label, actual Start and End columns,
+    and an explicitly named total runtime, but no expected/SLA/deadline field.
+    Such a file belongs to Batch Review.  It cannot establish a customer SLA
+    contract merely because its actual End Time looks like an SLA end time.
     """
-    # Strip parenthetical suffixes like "(2019)", "(PHT)", "(IST)"
-    s = re.sub(r'\s*\([^)]*\)\s*$', '', col.strip())
-    # Also strip any remaining trailing parentheticals (e.g. multiple)
-    s = re.sub(r'\s*\([^)]*\)', '', s)
-    return s.lower().strip()
+    normalized = {_normalize_col_header(raw): str(raw) for raw in df_columns}
+    batch = next((normalized[key] for key in ("batch", "workflow", "workflow name", "batch type") if key in normalized), None)
+    start = next((normalized[key] for key in ("start time", "start date", "start") if key in normalized), None)
+    end = next((normalized[key] for key in ("end time", "end date", "end") if key in normalized), None)
+    total_runtime = next((normalized[key] for key in (
+        "total batch time", "total batch runtime", "total runtime", "batch runtime", "batch elapsed",
+    ) if key in normalized), None)
+    has_contract_target = any(
+        "sla" in header or "expected" in header or "deadline" in header or "target" in header
+        for header in normalized
+    )
+    if batch and start and end and total_runtime and not has_contract_target:
+        return {
+            "batch_field": batch,
+            "start_field": start,
+            "end_field": end,
+            "runtime_field": total_runtime,
+        }
+    return None
 
 
 def _header_declares_sla_duration(col: str) -> bool:
@@ -736,45 +854,31 @@ def _value_declares_sla_duration(value: Any) -> bool:
 
 
 def _map_columns(df_columns: list[str]) -> dict[str, str]:
-    """Return {canonical → actual_col} for columns found in df.
+    """Return legacy parser keys from the accepted strict schema mapping.
 
-    Uses normalized column names (parenthetical suffixes stripped, lowercased)
-    before matching against _COL_ALIASES, enabling Haleon-style columns like
-    'Expected End Time/SLA (2019)' and 'Current run time(PHT)' to match correctly.
-
-    Collision guard: once a raw column is claimed by a canonical key, it cannot
-    be claimed again. This prevents "First Job_name" from being swallowed by
-    Batch_Name's "job name" alias after it was already matched by First_Job.
-    Process order respects _COL_ALIASES insertion order (Python 3.7+).
+    ``_parse_sheet_workflows`` still consumes the historical internal key names
+    so the SLA/Buffer/Status calculation path stays unchanged.  All header
+    ambiguity is decided before this adapter is called.
     """
+    report = _batch_sla_mapping_report(df_columns)
     mapping: dict[str, str] = {}
-    claimed: set[str] = set()  # raw column names already assigned to a canonical key
+    for canonical, raw in report["canonical_to_raw"].items():
+        internal = _BATCH_SLA_FIELDS[canonical]["internal"]
+        if internal:
+            mapping[internal] = raw
 
-    # Preserve explicit unit evidence before _normalize_col_header() removes
-    # parenthetical suffixes. Without this, "SLA(in Hrs)" normalizes to bare
-    # "sla" and is incorrectly claimed by Expected_End_Time; values such as
-    # "8Hrs" then fail clock-time parsing and silently fall through to defaults.
-    duration_sla_cols = [c for c in df_columns if _header_declares_sla_duration(c)]
-    if duration_sla_cols:
-        mapping["Expected_SLA"] = duration_sla_cols[0]
-        # Do not let a second duration-SLA column masquerade as an end-time
-        # column after normalization. The first column is deterministic; any
-        # additional synonymous duration columns are ignored.
-        claimed.update(duration_sla_cols)
-
-    lower = {
-        _normalize_col_header(c): c
-        for c in df_columns
-        if c not in claimed
-    }
-    for canon, aliases in _COL_ALIASES.items():
-        if canon in mapping:
-            continue
-        for alias in aliases:
-            if alias in lower and lower[alias] not in claimed:
-                mapping[canon] = lower[alias]
-                claimed.add(lower[alias])
-                break
+    target = report["canonical_to_raw"].get("expected_end_sla")
+    if target:
+        # A known duration header remains a duration.  The bare "SLA" form is
+        # intentionally routed through the existing deadline/value logic so a
+        # value such as "8Hrs" still works while "07:00" stays a deadline.
+        target_norm = _normalize_col_header(target)
+        if target_norm != "sla" and _header_declares_sla_duration(target):
+            mapping["Expected_SLA"] = target
+        elif target_norm.startswith("expected sla"):
+            mapping["Expected_SLA"] = target
+        else:
+            mapping["Expected_End_Time"] = target
     return mapping
 
 
@@ -908,9 +1012,11 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
     last_series         = _col(df, "Last_Job",          optional=True)
     start_series        = _col(df, "Start_Time",        optional=True)
     end_series          = _col(df, "End_Time",          optional=True)
-    # Actual_Duration: fallback when the file has a pre-computed duration column
-    # instead of separate Start + End timestamps (e.g. summary sheets).
-    actual_dur_series   = _col(df, "Actual_Duration",   optional=True)
+    # Contract_Duration is a declared schedule window from a workbook such as
+    # Batch_SLA.xlsx.  It is deliberately *not* an actual runtime: only a
+    # source column explicitly mapped as Current End Time can establish an
+    # observed completion for this workbook-only SLA matrix.
+    contract_dur_series = _col(df, "Contract_Duration", optional=True)
 
     workflows: list[dict] = []
     _consecutive_nan_rows = 0   # track section boundary (reset per sheet)
@@ -1062,15 +1168,12 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         except Exception:
             contract_start_time = None
 
-        # ── Separate the TWO distinct runtime-ish signals a file can carry ──────
-        # window_h   = Start Time → End Time wall-clock span = the allowed
-        #              completion WINDOW (a deadline / SLA candidate).
-        # duration_h = the explicit "Duration"/"Total batch time" column = how
-        #              long the batch actually/typically RUNS (a runtime figure).
-        # These are DIFFERENT facts: a batch may be allowed a 6h window
-        # (7pm→1am) yet run only 4h — that 2h (33%) is the real buffer. Keeping
-        # them apart lets the SLA panel show SLA-vs-runtime like Batch Review,
-        # instead of collapsing both into one number.
+        # ── Workbook timing evidence ──────────────────────────────────────────
+        # `End_Time` is mapped only from a customer column explicitly named
+        # "Current end time". Its difference from Start_Time is therefore a
+        # workbook-reported completion window. A separately named `Duration`
+        # column is a declared schedule duration, so it is kept as contract
+        # evidence and must never be promoted to a measured runtime.
         window_h: Optional[float] = None
         _win_dated = False
         try:
@@ -1085,29 +1188,51 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         except Exception:
             pass
 
-        duration_h: Optional[float] = None
-        if actual_dur_series is not None:
+        contract_duration_h: Optional[float] = None
+        if contract_dur_series is not None:
             try:
-                dur_val = actual_dur_series.iloc[idx]
+                dur_val = contract_dur_series.iloc[idx]
                 if dur_val is not None:
                     _dh = parse_sla_hours(dur_val)
                     if _dh is not None and _dh > 0:
-                        duration_h = _dh
+                        contract_duration_h = _dh
             except Exception:
                 pass
 
-        # ── Placeholder-data guard: Expected End Time == Current end time ──────
-        # Some customer files (e.g. USF, per their own comment column: "Expected
-        # end & Current end time is mentioned as same due to UAT... anticipating
-        # that... the current end time can then be updated to reflect the recent
-        # timestamps") copy the contracted deadline into the "actual" column as
-        # a placeholder before real observations exist. Because sla_h and
-        # window_h are BOTH derived from Start_Time, an identical Expected/
-        # Current cell value makes window_h mathematically equal to sla_h by
-        # construction — not a real "runs to the exact edge every time"
-        # measurement. Treating it as real would show a fabricated 0%-buffer
-        # NO_BUFFER on every row instead of "no runtime observed yet".
-        _placeholder_end_time = False
+        # A workbook can provide a clock window (Start time -> End time) and a
+        # separately declared Duration. They are two statements about the same
+        # contract, so silently selecting one when they disagree would invent a
+        # customer SLA. One minute only absorbs source precision/rounding; it
+        # never guesses which value is authoritative.
+        clock_contract_h: Optional[float] = None
+        contract_conflict = False
+        contract_conflict_detail: Optional[str] = None
+        if not _has_sla_col and expected_end_series is not None and start_series is not None:
+            try:
+                _expected_clock = expected_end_series.iloc[idx]
+                _contract_start = start_series.iloc[idx]
+                if _expected_clock and _contract_start:
+                    clock_contract_h = _overnight_delta_hours(_contract_start, _expected_clock)
+            except Exception:
+                pass
+        if (
+            clock_contract_h is not None
+            and contract_duration_h is not None
+            and abs(clock_contract_h - contract_duration_h) > (1 / 60)
+        ):
+            contract_conflict = True
+            contract_conflict_detail = (
+                f"End Time implies {clock_contract_h:.3f}h from Start Time, but "
+                f"Duration declares {contract_duration_h:.3f}h. No SLA was selected."
+            )
+            warnings.append(f"Row {idx} '{batch_name}': {contract_conflict_detail}")
+
+        # A workbook explicitly names `Current end time` as a completion field.
+        # It remains an input to the workbook-only calculation even when it
+        # matches Expected End Time/SLA.  Equality is a source-quality caveat,
+        # not a reason to discard a supplied end time: the reviewer can see the
+        # zero headroom result and decide whether the source is a template copy.
+        _reported_end_equals_target = False
         if (
             sla_h is not None and window_h is not None
             and end_series is not None and expected_end_series is not None
@@ -1115,31 +1240,13 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             _end_cmp = str(end_series.iloc[idx] or "").strip().lower()
             _exp_cmp = str(expected_end_series.iloc[idx] or "").strip().lower()
             if _end_cmp and _exp_cmp and _end_cmp == _exp_cmp:
-                _placeholder_end_time = True
+                _reported_end_equals_target = True
 
-        # actual_h = the RUNTIME figure carried into last_run_hours_xlsx and the
-        # buffer/status comparison. Two distinct file shapes:
-        #   • sla_h ALREADY resolved above (explicit "Expected SLA"/"Expected End
-        #     Time" column exists, e.g. USF) → End_Time is a SEPARATE, unambiguous
-        #     canonical column (aliases include "current end time" — literally
-        #     the observed value). window_h (Start→End_Time) IS the runtime,
-        #     regardless of whether it's dated — the contract/observation split
-        #     was already made by the file's own column naming, not by dates —
-        #     UNLESS the placeholder guard above fired, in which case there is
-        #     no real observation and duration_h (if any) is used instead.
-        #   • sla_h still None (no explicit "Expected" column anywhere — CCBA and
-        #     Wella both land here) → whatever window/duration signal exists is
-        #     OBSERVATIONAL ONLY. It is never promoted to be the SLA target
-        #     (see below) — a bare Start/End window or a Duration column tells
-        #     you how long something took or is scheduled to run, NOT what the
-        #     customer contracted as acceptable. Prefer the window as the
-        #     observed/typical runtime figure, falling back to Duration.
-        if sla_h is not None:
-            actual_h: Optional[float] = (
-                window_h if window_h is not None else duration_h
-            )
-        else:
-            actual_h = window_h if window_h is not None else duration_h
+        # `actual_h` is the only number eligible for Buffer/Headroom/Status.
+        # It comes solely from workbook Start Time -> explicitly named Current
+        # End Time. Contract fields are never substituted when Current end time
+        # is absent; an explicitly supplied Current end time is always measured.
+        actual_h: Optional[float] = window_h
 
         # True only when sla_h below came from a bare Start/End window (or a
         # Duration-only column) with NO explicit "Expected"/"SLA"-named column
@@ -1164,14 +1271,17 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         # being shown a manufactured number. `sla_schema` records WHY — the
         # dashboard's own diagnostic of "what kind of file is this", exposed per
         # row (traceable) and aggregated file-wide below in parse_batch_sla_xlsx.
-        if sla_h is not None:
+        if contract_conflict:
+            _sla_schema = "CLOCK_DURATION_CONFLICT"
+            sla_h = None
+        elif sla_h is not None:
             _sla_schema = "EXPLICIT_COLUMN"
         elif window_h is not None and not _win_dated:
             # Bare, undated Start/End window with no "Expected" column anywhere
             # — e.g. CCBA. This is a schedule window or an observed sample, NOT
             # a stated target. Left unresolved (falls to GLOBAL_DEFAULT below).
             _sla_schema = "WINDOW_NO_EXPECTED_COLUMN"
-        elif duration_h is not None and window_h is None:
+        elif contract_duration_h is not None and window_h is None:
             # Duration-only file, no "Expected" column anywhere — Duration is
             # how long the batch runs, not what was contracted. Left unresolved.
             _sla_schema = "DURATION_NO_EXPECTED_COLUMN"
@@ -1209,7 +1319,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         # ── SLA sanity bounds ─────────────────────────────────────────
         # SLA < 0.1h (6 min) or > 48h is almost certainly a parse error
         # Determine sla_source early so bounds check can reference it
-        sla_source = "BATCH_SLA_XLSX" if sla_h is not None else None
+        sla_source = "CONTRACT_CONFLICT" if contract_conflict else ("BATCH_SLA_XLSX" if sla_h is not None else None)
         if sla_h is not None and sla_source == "BATCH_SLA_XLSX":
             if sla_h < 0.1:
                 warnings.append(
@@ -1228,7 +1338,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
         # If the XLSX provides only runtime data (no SLA/Expected End Time),
         # sla_h is None and buffer% would show "—".  Apply the 3-tier resolver
         # so every workflow gets at least a default SLA for compliance scoring.
-        if sla_h is None:
+        if sla_h is None and not contract_conflict:
             try:
                 from services import config_store as _cs
                 _sow_w = _cs.get("_sow_sla_windows") or {}
@@ -1240,7 +1350,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
                         sla_source = "SOW_EXTRACTED"
             except Exception:
                 pass
-        if sla_h is None:
+        if sla_h is None and not contract_conflict:
             sla_h = _default_sla_for(btype)
             sla_source = "GLOBAL_DEFAULT"
 
@@ -1267,6 +1377,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             #              status compares an observed sample against the
             #              generic PE default, not a confirmed customer target.
             "sla_confidence": (
+                "CONFLICT" if contract_conflict else
                 "VERIFIED" if sla_source in ("BATCH_SLA_XLSX", "SOW_EXTRACTED") else "UNVERIFIED"
             ),
             # Which file-shape case this row was classified as — the dashboard's
@@ -1276,14 +1387,29 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             # Aggregated file-wide in parse_batch_sla_xlsx to decide whether to
             # raise a critical "this file has no usable SLA data" warning.
             "sla_schema":         _sla_schema,
-            # True when this row's "Current end time" was found to be a literal
-            # copy of "Expected End Time/SLA" — placeholder data, not a real
-            # observed run (see the guard above). Exposed so a reviewer/UI can
-            # tell "no runtime shown" apart from "runtime happens to equal SLA".
-            "runtime_is_placeholder": _placeholder_end_time,
+            # Retained for compatibility with older consumers.  Current end is
+            # now an explicit measured source field, never suppressed solely
+            # because it equals the contract target.
+            "runtime_is_placeholder": False,
+            "runtime_source_caveat": "REPORTED_END_EQUALS_TARGET" if _reported_end_equals_target else None,
             "sla_end_time":       sla_end_time_raw,   # clock-time deadline ("07:00") or None
             "sla_start_time":     contract_start_time, # contracted start-of-window clock time ("14:00:00") or None
             "last_run_hours_xlsx": actual_h,
+            # Workbook-only provenance contract for the React SLA Matrix.
+            # Never infer an actual run from a declared schedule duration.
+            "workbook_start_time": _v(start_series) or None,
+            "workbook_expected_end": _v(expected_end_series) or _v(sla_series) or None,
+            "workbook_reported_end": _v(end_series) or None,
+            "workbook_clock_window_hours": clock_contract_h,
+            "workbook_contract_duration_hours": contract_duration_h,
+            "contract_conflict": contract_conflict,
+            "contract_conflict_detail": contract_conflict_detail,
+            "workbook_timing_source": (
+                "WORKBOOK_REPORTED_CURRENT_END_EQUALS_TARGET" if actual_h is not None and _reported_end_equals_target else
+                "WORKBOOK_REPORTED_TIMESTAMP_PAIR" if actual_h is not None and _win_dated else
+                "WORKBOOK_SCHEDULED_START_TO_REPORTED_END" if actual_h is not None else
+                "WORKBOOK_COMPLETION_NOT_REPORTED"
+            ),
             "compliance":         compliance_label(actual_h, sla_h),
             # Human-readable margin of the runtime against the SLA window, in
             # plain time units — e.g. "2h 0m early" / "15m over" / "on the edge".
@@ -1337,37 +1463,127 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
     warnings: list[str] = []
     ext = filename.rsplit(".", 1)[-1].lower()
 
-    # ── Collect all DataFrames to process ──────────────────────────────────────
-    # For XLSX: parse every sheet that has a recognizable Batch_Name column.
-    # Different customers place SLA definitions on different sheets (Sheet1, C&A,
-    # "Batch SLA", etc.).  Reading all recognized sheets and merging gives maximum
-    # coverage without requiring the file to follow a specific tab layout.
-    _dfs_to_process: list[tuple] = []   # (df, sheet_name)
+    # ── Validate every candidate schema before parsing or cache commit ─────────
+    # A workbook may have cover/readme sheets. Only sheets that declare a
+    # BatchSLA field are candidates; every candidate must satisfy the required
+    # contract and have no canonical-field ambiguity.
+    _dfs_to_process: list[tuple] = []   # (df, sheet_name, mapping_report)
+    _mapping_sheets: list[dict[str, Any]] = []
+    _execution_history_sheets: list[dict[str, Any]] = []
     try:
         if ext in ("xlsx", "xls"):
             xl = pd.ExcelFile(io.BytesIO(raw_bytes))
             for _sn in xl.sheet_names:
                 try:
                     _df = xl.parse(_sn)
-                    _df.columns = _df.columns.astype(str).str.strip()
-                    _cm = _map_columns(list(_df.columns))
-                    if "Batch_Name" in _cm:
-                        _dfs_to_process.append((_df, _sn))
+                    _df.columns = _df.columns.astype(str)
+                    _report = _with_field_population(
+                        _batch_sla_mapping_report(list(_df.columns), _sn), _df,
+                    )
+                    _history_profile = _execution_history_profile(list(_df.columns))
+                    if _history_profile:
+                        _report["execution_history_profile"] = _history_profile
+                        _execution_history_sheets.append({"sheet_name": _sn, **_history_profile})
+                    # An execution-history sheet also has a batch name, so it
+                    # can superficially look like a BatchSLA candidate.  Its
+                    # dated Start/End and Total Runtime fields, *without* an
+                    # explicit target, prove a different file role.  Keep it
+                    # out of the SLA-contract candidate set so it reaches the
+                    # explicit Batch Review handoff below rather than being
+                    # scored against a fabricated global default.
+                    _report["included_in_ingestion"] = bool(
+                        _report["canonical_to_raw"].get("batch_name")
+                    ) and not _history_profile
+                    _report["sheet_role"] = (
+                        "execution_history" if _history_profile else
+                        "sla_candidate" if _report["included_in_ingestion"] else "ignored_auxiliary"
+                    )
+                    _mapping_sheets.append(_report)
+                    if _report["included_in_ingestion"]:
+                        _dfs_to_process.append((_df, _sn, _report))
                 except Exception as _se:
                     warnings.append(f"Sheet '{_sn}': read error ({_se})")
-            # Fallback: if no sheet had a recognised Batch_Name, use sheet 0 anyway
-            if not _dfs_to_process and xl.sheet_names:
-                _df0 = xl.parse(xl.sheet_names[0])
-                _df0.columns = _df0.columns.astype(str).str.strip()
-                _dfs_to_process.append((_df0, xl.sheet_names[0]))
         else:
             _df = pd.read_csv(io.BytesIO(raw_bytes))
-            _df.columns = _df.columns.astype(str).str.strip()
-            _dfs_to_process.append((_df, filename))
+            _df.columns = _df.columns.astype(str)
+            _report = _with_field_population(
+                _batch_sla_mapping_report(list(_df.columns), filename), _df,
+            )
+            _history_profile = _execution_history_profile(list(_df.columns))
+            if _history_profile:
+                _report["execution_history_profile"] = _history_profile
+                _execution_history_sheets.append({"sheet_name": filename, **_history_profile})
+            _report["included_in_ingestion"] = bool(
+                _report["canonical_to_raw"].get("batch_name")
+            ) and not _history_profile
+            _report["sheet_role"] = (
+                "execution_history" if _history_profile else
+                "sla_candidate" if _report["included_in_ingestion"] else "ignored_auxiliary"
+            )
+            _mapping_sheets.append(_report)
+            if _report["included_in_ingestion"]:
+                _dfs_to_process.append((_df, filename, _report))
     except Exception as exc:
         return {"workflows": [], "row_count": 0, "filename": filename,
                 "columns_found": [], "source_sheet": None,
-                "warnings": [f"Cannot read file: {exc}"]}
+                "warnings": [f"Cannot read file: {exc}"],
+                "ingestion_status": "blocked",
+                "mapping_report": {"schema_version": _BATCH_SLA_SCHEMA_VERSION, "sheets": _mapping_sheets}}
+
+    _candidate_reports = [
+        report for report in _mapping_sheets
+        if report.get("included_in_ingestion")
+    ]
+    _blocked_reports = [report for report in _candidate_reports if report["status"] == "blocked"]
+    if not _candidate_reports:
+        if _execution_history_sheets:
+            return {
+                "workflows": [], "row_count": 0, "filename": filename,
+                "columns_found": [], "source_sheet": None,
+                "warnings": [
+                    "Execution-history workbook detected: it contains dated batch runs and a total runtime, "
+                    "but no customer SLA/expected-completion field. Routed to Batch Review; no SLA contract was inferred."
+                ],
+                "ingestion_status": "reroute",
+                "file_role": "batch_execution_history",
+                "execution_history_sheets": _execution_history_sheets,
+                "mapping_report": {
+                    "schema_version": _BATCH_SLA_SCHEMA_VERSION,
+                    "status": "reroute",
+                    "sheets": _mapping_sheets,
+                },
+            }
+        # Do not fall back to sheet 0: it made a non-BatchSLA document appear
+        # accepted while producing an empty configuration.
+        _blocked_reports = _mapping_sheets or [{
+            "sheet_name": filename, "missing_required": ["batch_name", "start_time", "expected_end_sla"],
+            "duplicates": [], "unmapped_headers": [],
+        }]
+    if _blocked_reports:
+        missing = sorted({field for report in _blocked_reports for field in report.get("missing_required", [])})
+        duplicates = [duplicate for report in _blocked_reports for duplicate in report.get("duplicates", [])]
+        messages: list[str] = []
+        if missing:
+            messages.append(f"Missing required BatchSLA field(s): {', '.join(missing)}.")
+        for duplicate in duplicates:
+            messages.append(
+                f"Ambiguous mapping for {duplicate['canonical_field']}: "
+                f"{', '.join(duplicate['raw_headers'])}."
+            )
+        return {
+            "workflows": [], "row_count": 0, "filename": filename,
+            "columns_found": [], "source_sheet": None,
+            "warnings": messages or ["BatchSLA schema validation failed."],
+            "ingestion_status": "blocked",
+            "mapping_report": {
+                "schema_version": _BATCH_SLA_SCHEMA_VERSION,
+                "status": "blocked",
+                "sheets": _mapping_sheets,
+            },
+        }
+
+    # Candidate sheets have been accepted. Ignore non-schema cover sheets.
+    _dfs_to_process = [item for item in _dfs_to_process if item[2]["status"] == "accepted"]
 
     # ── Parse each sheet, deduplicate across sheets ────────────────────────────
     # Primary-normalized workflow name (strip env prefix → UPPER) is the dedup key.
@@ -1383,9 +1599,8 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
     _collapsed_counts: dict[str, int] = {}
     workflows: list[dict] = []
 
-    for _df, _sheet_name in _dfs_to_process:
-        _col_map = _map_columns(list(_df.columns))
-        _all_col_found.update(_col_map.keys())
+    for _df, _sheet_name, _sheet_report in _dfs_to_process:
+        _all_col_found.update(_sheet_report["canonical_to_raw"].keys())
         _sh_wfs = _parse_sheet_workflows(_df, warnings, _sheet_name)
         _added = 0
         for wf in _sh_wfs:
@@ -1448,6 +1663,7 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
     _no_signal = _schema_counts.get("NO_SIGNAL", 0)
     _window_only = _schema_counts.get("WINDOW_NO_EXPECTED_COLUMN", 0)
     _duration_only = _schema_counts.get("DURATION_NO_EXPECTED_COLUMN", 0)
+    _contract_conflicts = _schema_counts.get("CLOCK_DURATION_CONFLICT", 0)
     if workflows and _no_signal == len(workflows):
         warnings.append(
             f"CRITICAL: none of the {len(workflows)} workflow(s) in this file have "
@@ -1478,16 +1694,20 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
             f"the generic PE default, clearly flagged, until the correct file "
             f"(with an explicit target column) is provided."
         )
-
-    _placeholder_count = sum(1 for w in workflows if w.get("runtime_is_placeholder"))
-    if _placeholder_count > 0:
+    if _contract_conflicts:
         warnings.append(
-            f"{_placeholder_count} workflow(s) have a 'Current end time' that is "
-            f"a literal copy of 'Expected End Time/SLA' — this is placeholder "
-            f"data, not a real observed run (matching by construction always "
-            f"produces a fabricated 0% buffer). RUNTIME is shown as unavailable "
-            f"for these rows until a real observed timestamp is provided or "
-            f"Ctrl-M data is uploaded."
+            f"CRITICAL: {_contract_conflicts} workflow(s) contain conflicting Start Time/End Time "
+            "and Duration contract values. No SLA was propagated for those rows; resolve the "
+            "source contract before using them for compliance."
+        )
+
+    _equal_target_count = sum(1 for w in workflows if w.get("runtime_source_caveat") == "REPORTED_END_EQUALS_TARGET")
+    if _equal_target_count > 0:
+        warnings.append(
+            f"{_equal_target_count} workflow(s) have a 'Current end time' equal to "
+            f"'Expected End Time/SLA'. Runtime, headroom, buffer, and status use the "
+            f"supplied Current end time; verify that it is an actual completion rather "
+            f"than a template target copied into the source field."
         )
 
     return {
@@ -1497,10 +1717,128 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
         "columns_found": list(_all_col_found),
         "source_sheet": ", ".join(_sheets_used) if _sheets_used else None,
         "warnings":  warnings,
+        "ingestion_status": "accepted",
+        "mapping_report": {
+            "schema_version": _BATCH_SLA_SCHEMA_VERSION,
+            "status": "accepted",
+            "sheets": _mapping_sheets,
+        },
         # Counts per sla_schema classification — lets a caller (or future UI)
         # show "14 explicit, 6 inferred-from-window, 0 no-signal" at a glance
         # instead of re-deriving it from the workflow list.
         "schema_summary": _schema_counts,
+    }
+
+
+def build_workbook_sla_snapshot(parsed: dict) -> dict:
+    """Build the SLA Matrix payload directly from a BatchSLA workbook.
+
+    This intentionally does not read Ctrl-M data.  A BatchSLA workbook can
+    prove a contract and, when it has a distinct ``Current end time``, can
+    also prove a workbook-reported completion.  It cannot prove an execution
+    where that field is absent or copied from the contractual deadline, so
+    those rows remain explicitly ``NOT_OBSERVED`` rather than being marked OK.
+    """
+    workflows = parsed.get("workflows") or []
+    summary: list[dict] = []
+    observed = 0
+    counts = {"OK": 0, "LONG_JOB": 0, "AT_RISK": 0, "NO_BUFFER": 0, "BREACH": 0}
+
+    for workflow in workflows:
+        # The workbook screen must never present Tier-3/default resolver data
+        # as if it came from the uploaded source. Keep such rows visible, but
+        # explicitly mark the contract as absent from this workbook.
+        contract_conflict = bool(workflow.get("contract_conflict")) or workflow.get("sla_source") == "CONTRACT_CONFLICT"
+        declared_in_workbook = workflow.get("sla_source") == "BATCH_SLA_XLSX"
+        sla_h = workflow.get("sla_hours") if declared_in_workbook else None
+        runtime_h = workflow.get("last_run_hours_xlsx")
+        measured = isinstance(runtime_h, Number) and isinstance(sla_h, Number) and float(sla_h) > 0
+        if measured:
+            observed += 1
+            runtime_h = float(runtime_h)
+            sla_h = float(sla_h)
+            buffer_pct = round((sla_h - runtime_h) / sla_h * 100, 3)
+            duration_headroom_mins = round((sla_h - runtime_h) * 60)
+            status = workflow.get("compliance") or compliance_label(runtime_h, sla_h)
+            if status in counts:
+                counts[status] += 1
+        else:
+            runtime_h = None
+            buffer_pct = None
+            duration_headroom_mins = None
+            if contract_conflict:
+                status = "SLA_CONTRACT_CONFLICT"
+                reason_code = "CLOCK_DURATION_CONFLICT"
+                reason_detail = workflow.get("contract_conflict_detail") or (
+                    "Workbook clock-window and declared Duration values conflict; no SLA was selected."
+                )
+            elif not declared_in_workbook:
+                status = "SLA_MISSING"
+                reason_code = "SLA_NOT_DECLARED_IN_WORKBOOK"
+                reason_detail = "This workbook does not declare an SLA target for this row, so no default ceiling is shown as customer evidence."
+            else:
+                status = "NOT_OBSERVED"
+                reason_code = "COMPLETION_NOT_REPORTED"
+                reason_detail = "This workbook supplies the SLA contract but no distinct reported completion time."
+
+        if measured:
+            if workflow.get("runtime_source_caveat") == "REPORTED_END_EQUALS_TARGET":
+                reason_code = "REPORTED_END_EQUALS_TARGET"
+                reason_detail = "Duration is calculated from the supplied Start Time and Current end time. Current end equals Expected End; verify this is an actual completion, not a copied target."
+            else:
+                reason_code = "WORKBOOK_REPORTED_COMPLETION"
+                reason_detail = "Duration is calculated only from this workbook's Start Time and Current end time."
+
+        summary.append({
+            "workflow_name": workflow.get("workflow"),
+            "workflow_key": workflow.get("workflow"),
+            "batch_type": workflow.get("batch_type"),
+            "sla_h": sla_h,
+            "sla_source": "batch_sla_xlsx_conflict" if contract_conflict else ("batch_sla_xlsx" if declared_in_workbook else "global"),
+            "runtime_h": runtime_h,
+            "buffer_pct": buffer_pct,
+            "duration_headroom_mins": duration_headroom_mins,
+            "status": status,
+            "workbook_timing_source": workflow.get("workbook_timing_source"),
+            "workbook_start_time": workflow.get("workbook_start_time"),
+            "workbook_expected_end": workflow.get("workbook_expected_end"),
+            "workbook_reported_end": workflow.get("workbook_reported_end"),
+            "workbook_clock_window_hours": workflow.get("workbook_clock_window_hours"),
+            "workbook_contract_duration_hours": workflow.get("workbook_contract_duration_hours"),
+            "runtime_source_caveat": workflow.get("runtime_source_caveat"),
+            "contract_conflict": contract_conflict,
+            "contract_conflict_detail": workflow.get("contract_conflict_detail"),
+            "measurement_reason_code": reason_code,
+            "measurement_reason_detail": reason_detail,
+        })
+
+    compliance_pct = round(100 * (counts["OK"] + counts["LONG_JOB"] + counts["AT_RISK"] + counts["NO_BUFFER"]) / observed, 1) if observed else None
+    declared = [float(w["sla_hours"]) for w in workflows if w.get("sla_source") == "BATCH_SLA_XLSX" and isinstance(w.get("sla_hours"), Number) and w.get("sla_hours") > 0]
+    return {
+        "workbook_only": True,
+        "source": "batch_sla_xlsx",
+        "filename": parsed.get("filename"),
+        "total_jobs": len(workflows),
+        "total_runs": observed,
+        "observed_workflow_count": observed,
+        "not_observed_workflow_count": len(workflows) - observed,
+        "compliance_pct": compliance_pct,
+        "window_day_compliance_pct": compliance_pct,
+        "ok_runs": counts["OK"],
+        "long_job_runs": counts["LONG_JOB"],
+        "at_risk_runs": counts["AT_RISK"],
+        "no_buffer_runs": counts["NO_BUFFER"],
+        "breaching_runs": counts["BREACH"],
+        "failed_runs": 0,
+        "explicit_sla_matrix": bool(declared),
+        "sla_limit_hrs": max(declared) if declared else None,
+        "sla_label": "Workbook-declared SLA",
+        "workflow_summary": summary,
+        "job_summary": [],
+        "breaches": [],
+        "outliers": [],
+        "resource_linked": [],
+        "batch_sla_mapping_report": parsed.get("mapping_report") or {},
     }
 
 

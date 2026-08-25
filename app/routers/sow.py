@@ -42,6 +42,9 @@ class SowMetric(BaseModel):
     # ceiling, so every consumer states the same overage without recomputing it.
     over_by:     float = 0.0   # absolute units above contracted volume
     over_by_pct: float = 0.0   # percentage points above 100% of contract
+    # Remaining contracted capacity. Negative means the actual exceeded SOW.
+    capacity_buffer: float = 0.0
+    capacity_buffer_pct: float = 0.0
 
 class SowCompareRequest(BaseModel):
     actuals: Dict[str, float] = {}
@@ -296,9 +299,12 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
         if key == "daily_dfu" and _dfu_is_ilc:
             _label = _LABELS.get("item_location_customer", label)
         _ov, _ovp = _overage(sow_f, act_f)
+        _capacity = round(sow_f - act_f, 2)
         metrics.append(SowMetric(key=key, label=_label, sow=sow_f,
                                  actual=act_f, pct=pct, status=_status(pct),
-                                 over_by=_ov, over_by_pct=_ovp))
+                                 over_by=_ov, over_by_pct=_ovp,
+                                 capacity_buffer=_capacity,
+                                 capacity_buffer_pct=round(_capacity / sow_f * 100, 1)))
 
     # Custom metrics
     for cm in (baseline.get("custom") or []):
@@ -310,9 +316,12 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
         act_f = float(actuals.get(key, 0))
         pct   = round((act_f / sow_f) * 100, 1)
         _ov, _ovp = _overage(sow_f, act_f)
+        _capacity = round(sow_f - act_f, 2)
         metrics.append(SowMetric(key=key, label=label, sow=sow_f,
                                  actual=act_f, pct=pct, status=_status(pct),
-                                 over_by=_ov, over_by_pct=_ovp))
+                                 over_by=_ov, over_by_pct=_ovp,
+                                 capacity_buffer=_capacity,
+                                 capacity_buffer_pct=round(_capacity / sow_f * 100, 1)))
 
     if not metrics:
         return SowCompareResponse(metrics=[], overall_status="N/A",
