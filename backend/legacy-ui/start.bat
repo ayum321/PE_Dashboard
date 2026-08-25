@@ -1,7 +1,8 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0.."
+set "REPO_ROOT=%~dp0..\.."
+cd /d "%REPO_ROOT%"
 
 rem Local-only legacy FastAPI browser dashboard for parity comparison.
-call start-fastapi-dashboard.bat %*
+call "%REPO_ROOT%\devops\local\windows\start-fastapi-dashboard.bat" %*
 exit /b %ERRORLEVEL%

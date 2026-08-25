@@ -1,12 +1,14 @@
 @echo off
 setlocal EnableExtensions
 
+set "LAUNCHER_DIR=%~dp0"
+
 rem Local dual mode keeps the React MFE and comparison UI on one shared API.
 rem Production Docker remains API-only through PE_UI_MODE=api.
 set "PE_UI_MODE=dual"
 
 rem React MFE local launcher. It deliberately does not start the legacy FastAPI dashboard.
-cd /d "%~dp0"
+cd /d "%~dp0..\..\.."
 set "MFE_DIR=%CD%\frontend\PE_Dashboard_MFE\source"
 
 if not exist "%MFE_DIR%\package.json" (
@@ -118,7 +120,7 @@ if /i not "%LOCAL_API_URL%"=="http://127.0.0.1:8765" (
 )
 
 echo Starting local audit API on http://127.0.0.1:8765 ...
-start "PE Audit API (local)" /d "%CD%" cmd /k call start-api-local.bat
+start "PE Audit API (local)" /d "%CD%" cmd /k call "%LAUNCHER_DIR%start-api-local.bat"
 
 for /l %%R in (1,1,20) do (
   timeout /t 1 /nobreak >nul

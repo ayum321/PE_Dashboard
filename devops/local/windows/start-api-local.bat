@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+cd /d "%~dp0..\..\.."
 
 rem Local development serves both browser views from one shared API process.
 rem Production Docker explicitly sets PE_UI_MODE=api and never ships legacy assets.
@@ -54,7 +54,7 @@ echo   This window supplies upload, SLA, findings, and Azure API calls for the R
 echo   Press Ctrl+C to stop the local API.
 echo.
 
-call %PYTHON_CMD% -m uvicorn main:app --app-dir app --host 127.0.0.1 --port 8765
+call %PYTHON_CMD% -m uvicorn main:app --app-dir backend\PE_Dashboard_API\app --host 127.0.0.1 --port 8765
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo API stopped with exit code %EXIT_CODE%.
