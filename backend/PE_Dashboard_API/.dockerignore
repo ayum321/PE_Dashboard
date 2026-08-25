@@ -3,7 +3,7 @@ __pycache__
 *.log
 .pe_*
 data/
-app/data/
+backend/PE_Dashboard_API/app/data/
 app/_test_*.py
 app/_check_*.py
 .env*

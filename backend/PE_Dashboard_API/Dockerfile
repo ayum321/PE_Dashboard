@@ -3,14 +3,14 @@
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PE_STATE_DIR=/data PE_UI_MODE=api PE_COOKIE_SECURE=true HOME=/tmp XDG_CACHE_HOME=/tmp
-COPY configuration/requirements.txt /app/configuration/requirements.txt
+COPY backend/PE_Dashboard_API/configuration/requirements.txt /app/configuration/requirements.txt
 RUN pip install --no-cache-dir -r /app/configuration/requirements.txt \
     && groupadd --system peapp \
     && useradd --system --gid peapp --home-dir /app --no-create-home peapp \
     && mkdir /data \
     && chown peapp:peapp /data
-COPY --chown=peapp:peapp app/ /app/app/
-COPY --chown=peapp:peapp configuration/ /app/configuration/
+COPY --chown=peapp:peapp backend/PE_Dashboard_API/app/ /app/app/
+COPY --chown=peapp:peapp backend/PE_Dashboard_API/configuration/ /app/configuration/
 
 USER peapp
 EXPOSE 8765

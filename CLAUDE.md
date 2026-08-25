@@ -2,8 +2,8 @@
 
 ## Product boundary
 
-The React/Luminate MFE in `react-dashboard/` is the deployed user interface.
-FastAPI in `app/` remains the processing and decision engine for uploads, SLA
+The React/Luminate MFE in `frontend/PE_Dashboard_MFE/source/` is the deployed user interface.
+FastAPI in `backend/PE_Dashboard_API/app/` remains the processing and decision engine for uploads, SLA
 resolution, Azure data, findings, exports, and the report archive. Do not port
 calculation rules into React and do not treat the retired FastAPI-rendered UI as
 the deploy target.
@@ -17,14 +17,14 @@ not sufficient—exercise the changed API or React screen with representative
 evidence before calling behaviour verified.
 
 ```powershell
-# react-dashboard/
+# frontend/PE_Dashboard_MFE/source/
 npm run check:api-contract
 npm run lint
 npx tsc --noEmit --pretty false
 npm test -- --watchAll=false --runInBand
 npm run build
 
-# app/
+# backend/PE_Dashboard_API/app/
 py -3.14 _check_pe_config_refs.py
 py -3.14 _test_<relevant_area>.py
 ```

@@ -73,12 +73,11 @@ Thumbs.db
 _dev_server.py
 launch_server.bat
 start_debug.bat
-
 # Test output / scratch
 .cache/
-tests/*
-!tests/test_sla_header_variants.py
-!tests/test_batch_sla_schema_contract.py
+backend/PE_Dashboard_API/tests/*
+!backend/PE_Dashboard_API/tests/test_sla_header_variants.py
+!backend/PE_Dashboard_API/tests/test_batch_sla_schema_contract.py
 
 .pe_baseline.db
 .pe_baseline.db-wal
@@ -87,6 +86,7 @@ tests/*
 .pe_report_archive.db-wal
 .pe_report_archive.db-shm
 data/report_archive/
+backend/PE_Dashboard_API/app/data/report_archive/
 
 # Impeccable local runtime artifacts (critique reports remain trackable)
 .impeccable/config.local.json

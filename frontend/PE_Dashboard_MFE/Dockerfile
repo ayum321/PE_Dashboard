@@ -2,9 +2,9 @@
 # Build from repository root: docker build -f frontend/PE_Dashboard_MFE/Dockerfile .
 FROM node:18-alpine AS build
 WORKDIR /workspace/react-dashboard
-COPY react-dashboard/package*.json ./
+COPY frontend/PE_Dashboard_MFE/source/package*.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
-COPY react-dashboard/ ./
+COPY frontend/PE_Dashboard_MFE/source/ ./
 RUN npm run build
 FROM nginx:1.27-alpine
 COPY --from=build /workspace/react-dashboard/build /usr/share/nginx/html

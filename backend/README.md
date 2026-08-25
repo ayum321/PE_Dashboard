@@ -1,6 +1,6 @@
 # PE Dashboard backend
 
-The FastAPI service source remains in `../app/`. The deployable API Dockerfile is `PE_Dashboard_API/Dockerfile`.
+The FastAPI service source is in `PE_Dashboard_API/app/`. The deployable API Dockerfile is `PE_Dashboard_API/Dockerfile`.
 
 Build from the repository root:
 

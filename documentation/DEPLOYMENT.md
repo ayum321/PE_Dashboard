@@ -2,8 +2,8 @@
 ## Deployable artifacts
 The repository now exposes explicit deployment definitions for DevOps:
 
-- API: `backend/PE_Dashboard_API/Dockerfile` (source: `app/` and `configuration/`).
-- Standalone MFE: `frontend/PE_Dashboard_MFE/Dockerfile` (source: `react-dashboard/`, served by Nginx on port `8080`).
+- API: `backend/PE_Dashboard_API/Dockerfile` (source: `backend/PE_Dashboard_API/app/` and `backend/PE_Dashboard_API/configuration/`).
+- Standalone MFE: `frontend/PE_Dashboard_MFE/Dockerfile` (source: `frontend\PE_Dashboard_MFE\source/`, served by Nginx on port `8080`).
 - Split local topology: `devops/docker-compose.split.yml`.
 - All-in-one image: root `Dockerfile` remains supported.
 
@@ -16,10 +16,10 @@ docker build -f frontend/PE_Dashboard_MFE/Dockerfile -t pe-dashboard-mfe:VERSION
 
 ## Artifacts
 
-- **React MFE**: `react-dashboard` builds to static files. Stratosphere must generate/replace its published `env.js` with the HTTPS FastAPI `API_BASE_URL`; no API URL is hard-coded in the React source. A blank API URL is valid only for the all-in-one image, where the MFE and API share one origin.
+- **React MFE**: `frontend\PE_Dashboard_MFE\source` builds to static files. Stratosphere must generate/replace its published `env.js` with the HTTPS FastAPI `API_BASE_URL`; no API URL is hard-coded in the React source. A blank API URL is valid only for the all-in-one image, where the MFE and API share one origin.
 - **API**: the root `Dockerfile` builds the React bundle and packages it with FastAPI. The same image can serve the MFE directly, or Stratosphere can serve the MFE while the API runs independently.
 
-The sample MFE workflow under `react-dashboard/.github/workflows/` is a template, not an active root GitHub Actions workflow. DevOps owns the final workflow, registry, Stratosphere variables, and deployment approval.
+The sample MFE workflow under `frontend\PE_Dashboard_MFE\source/.github/workflows/` is a template, not an active root GitHub Actions workflow. DevOps owns the final workflow, registry, Stratosphere variables, and deployment approval.
 
 ## Build and health check
 
@@ -33,10 +33,10 @@ The image health check calls `GET /api/health`. The image runs as an unprivilege
 Before publishing an image, run:
 
 ```sh
-python app/_test_config_deployment_safety.py
-python app/_test_mfe_spa_fallback.py
-python app/_test_report_archive.py
-python app/_check_pe_config_refs.py
+python backend/PE_Dashboard_API/app/_test_config_deployment_safety.py
+python backend/PE_Dashboard_API/app/_test_mfe_spa_fallback.py
+python backend/PE_Dashboard_API/app/_test_report_archive.py
+python backend/PE_Dashboard_API/app/_check_pe_config_refs.py
 docker build -t pe-dashboard:VERSION .
 ```
 
