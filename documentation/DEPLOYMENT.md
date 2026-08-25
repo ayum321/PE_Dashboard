@@ -1,4 +1,18 @@
 # Docker and Stratosphere handoff
+## Deployable artifacts
+The repository now exposes explicit deployment definitions for DevOps:
+
+- API: `backend/PE_Dashboard_API/Dockerfile` (source: `app/` and `configuration/`).
+- Standalone MFE: `frontend/PE_Dashboard_MFE/Dockerfile` (source: `react-dashboard/`, served by Nginx on port `8080`).
+- Split local topology: `devops/docker-compose.split.yml`.
+- All-in-one image: root `Dockerfile` remains supported.
+
+Build the split images from the repository root:
+
+```powershell
+docker build -f backend/PE_Dashboard_API/Dockerfile -t pe-dashboard-api:VERSION .
+docker build -f frontend/PE_Dashboard_MFE/Dockerfile -t pe-dashboard-mfe:VERSION .
+```
 
 ## Artifacts
 
