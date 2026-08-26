@@ -17,7 +17,7 @@ import {
   getFinalJudgment,
   getRedFlags,
   getReviewedProducts,
-  getSowBaseline,
+  getSowState,
   getSowProductTaxonomy,
   parseSow,
   saveReviewedProducts,
@@ -62,7 +62,23 @@ const SOW_FIELDS: Array<{ key: string; label: string; sub: string; icon: string;
 const DEFAULT_BANDS = { under: 70, over: 110, crit: 120 };
 const MILLION_SCALE = 1_000_000;
 const MILLION_FIELDS = new Set(['daily_dfu', 'daily_sku']);
+const SOW_ACTUAL_DRAFT_KEY = 'pe-dashboard:sow-actual-draft';
 type VolumeUnit = 'number' | 'millions';
+
+function readActualDraft(): Record<string, string> {
+  try {
+    const raw = window.sessionStorage.getItem(SOW_ACTUAL_DRAFT_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
+        .map(([key, value]) => [key, String(value)]),
+    );
+  } catch {
+    return {};
+  }
+}
 
 function toDisplayValue(value: unknown, unit: VolumeUnit): string {
   const numeric = Number(value);
@@ -117,7 +133,7 @@ export function SowPanel() {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   const [baseValues, setBaseValues] = useState<Record<string, string>>({});
-  const [actualValues, setActualValues] = useState<Record<string, string>>({});
+  const [actualValues, setActualValues] = useState<Record<string, string>>(readActualDraft);
   const [volumeUnits, setVolumeUnits] = useState<Record<string, VolumeUnit>>({
     daily_dfu: 'number',
     daily_sku: 'number',
@@ -130,14 +146,26 @@ export function SowPanel() {
   const [activeFamily, setActiveFamily] = useState<string>('ALL');
 
   useEffect(() => {
-    getSowBaseline()
-      .then((baseline) => {
+    getSowState()
+      .then((state) => {
+        const baseline = (state.baseline && typeof state.baseline === 'object'
+          ? state.baseline : state) as Record<string, unknown>;
         setSowBaseline(baseline);
         const next: Record<string, string> = {};
         SOW_FIELDS.forEach(({ key }) => {
           if (baseline[key] != null) next[key] = toDisplayValue(baseline[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
         });
         setBaseValues(next);
+        const savedActuals = state.actuals && typeof state.actuals === 'object'
+          ? state.actuals as Record<string, unknown> : {};
+        if (Object.keys(savedActuals).length > 0) {
+          const nextActuals: Record<string, string> = {};
+          SOW_FIELDS.forEach(({ key }) => {
+            if (savedActuals[key] != null) nextActuals[key] = toDisplayValue(savedActuals[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
+          });
+          setActualValues(nextActuals);
+        }
+        if (state.compare && typeof state.compare === 'object') setSowCompare(state.compare as Record<string, unknown>);
       })
       .catch(() => undefined);
     getSowProductTaxonomy()
@@ -150,6 +178,24 @@ export function SowPanel() {
     // never overwrite values the user is currently editing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A tab change must not erase values still being entered.  This is draft
+  // storage only: Findings continues to read the saved server comparison, so
+  // an unfinished input can never masquerade as a measured actual.
+  useEffect(() => {
+    const canonical: Record<string, string> = {};
+    SOW_FIELDS.forEach(({ key }) => {
+      const unit = MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number';
+      const actual = toCanonicalValue(actualValues[key] || '', unit);
+      if (actual > 0) canonical[key] = String(actual);
+    });
+    try {
+      if (Object.keys(canonical).length) window.sessionStorage.setItem(SOW_ACTUAL_DRAFT_KEY, JSON.stringify(canonical));
+      else window.sessionStorage.removeItem(SOW_ACTUAL_DRAFT_KEY);
+    } catch {
+      // Session storage is optional in embedded Portal contexts.
+    }
+  }, [actualValues, volumeUnits]);
 
   // Pre-fill batch_jobs actual from Batch Review once it's loaded, same wiring as vanilla.
   useEffect(() => {
@@ -251,6 +297,7 @@ export function SowPanel() {
     setBaseValues({});
     setActualValues({});
     setSowCompare(null);
+    try { window.sessionStorage.removeItem(SOW_ACTUAL_DRAFT_KEY); } catch { /* optional browser storage */ }
   };
 
   const openPicker = () => {

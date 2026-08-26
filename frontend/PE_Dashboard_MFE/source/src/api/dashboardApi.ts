@@ -329,6 +329,9 @@ export const getReportArchive = (): Promise<DashboardPayload> => request<Dashboa
 
 export const getSowBaseline = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/sow/baseline');
 
+/** Current engagement SOW state.  Used to rehydrate routes after navigation. */
+export const getSowState = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/sow/state');
+
 export const saveSowBaseline = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/sow/baseline', payload);
 

@@ -2,6 +2,7 @@
 SOW Volume Baseline router.
 
 GET  /api/sow/baseline          → stored SOW baseline values
+GET  /api/sow/state             → current-engagement baseline, actuals and comparison
 POST /api/sow/baseline          → save SOW baseline values
 POST /api/sow/parse             → upload SOW doc and extract values
 POST /api/sow/compare           → compare actuals against baseline
@@ -11,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 from services import config_store
+from services import session_cache
 from services import pe_config as _pc
 
 router = APIRouter()
@@ -115,9 +117,32 @@ def get_baseline() -> dict:
 
 @router.post("/sow/baseline")
 def save_baseline(body: SowBaseline) -> dict:
-    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    data = {
+        k: v for k, v in body.model_dump().items()
+        if v is not None and not (k == "custom" and not v)
+    }
     config_store.set(_SOW_KEY, data)
-    return {"ok": True, "saved": len(data)}
+    # Return the saved canonical baseline.  The MFE uses this response as its
+    # shared state, so a status envelope here loses the actual target values.
+    return data
+
+
+@router.get("/sow/state")
+def get_sow_state() -> dict:
+    """Return the current engagement's SOW evidence without inventing actuals.
+
+    Baseline targets are configuration; actuals and their comparison are
+    session evidence.  Keeping both together lets every React route hydrate the
+    same saved comparison after navigation or a browser refresh.
+    """
+    cached = session_cache.ac_get("volume_vs_sow") or {}
+    comparison = cached.get("comparison") if isinstance(cached, dict) else None
+    actuals = cached.get("actuals") if isinstance(cached, dict) else {}
+    return {
+        "baseline": config_store.get(_SOW_KEY) or {},
+        "actuals": actuals if isinstance(actuals, dict) else {},
+        "compare": comparison if isinstance(comparison, dict) else None,
+    }
 
 @router.delete("/sow/baseline")
 def clear_baseline() -> dict:
@@ -292,7 +317,12 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
         if sow is None or float(sow) <= 0:
             continue
         sow_f = float(sow)
-        act_f = float(actuals.get(key, 0))
+        # An absent actual is unknown evidence, not a measured value of zero.
+        # Do not emit a LOW metric for it: that false finding was the source of
+        # the cross-page "0 of SOW" contradiction in PE Findings.
+        if key not in actuals:
+            continue
+        act_f = float(actuals[key])
         pct   = round((act_f / sow_f) * 100, 1) if sow_f else 0.0
         # Use the ILC proxy label when the DFU figure came from item-location count
         _label = label
@@ -313,7 +343,9 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
             continue
         key   = cm.get("key", "custom")
         label = cm.get("label", key)
-        act_f = float(actuals.get(key, 0))
+        if key not in actuals:
+            continue
+        act_f = float(actuals[key])
         pct   = round((act_f / sow_f) * 100, 1)
         _ov, _ovp = _overage(sow_f, act_f)
         _capacity = round(sow_f - act_f, 2)
@@ -324,8 +356,19 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
                                  capacity_buffer_pct=round(_capacity / sow_f * 100, 1)))
 
     if not metrics:
-        return SowCompareResponse(metrics=[], overall_status="N/A",
-                                  summary="No SOW baseline values set. Enter targets in the form above.")
+        baseline_count = sum(1 for key in _LABELS if float(baseline.get(key) or 0) > 0)
+        baseline_count += sum(1 for cm in (baseline.get("custom") or []) if float(cm.get("baseline", 0) or 0) > 0)
+        if baseline_count:
+            response = SowCompareResponse(
+                metrics=[], overall_status="AWAITING_ACTUALS",
+                summary=f"{baseline_count} SOW target(s) loaded; enter actual values before volume compliance can be assessed.",
+                bands={"under": _pc.SOW_UNDER_PCT, "over": _pc.SOW_OVER_PCT, "crit": _pc.SOW_OVER_CRIT_PCT},
+            )
+        else:
+            response = SowCompareResponse(metrics=[], overall_status="N/A",
+                                          summary="No SOW baseline values set. Enter targets in the form above.")
+        _persist_sow_comparison(actuals, response)
+        return response
 
     crit_over   = [m for m in metrics if m.status == "CRITICAL_OVER"]
     over        = [m for m in metrics if m.status == "OVER"]
@@ -427,4 +470,28 @@ def compare_sow(body: SowCompareRequest) -> SowCompareResponse:
             resp.ai_model     = model
     except Exception:
         pass
+    _persist_sow_comparison(actuals, resp)
     return resp
+
+
+def _persist_sow_comparison(actuals: Dict[str, float], response: SowCompareResponse) -> None:
+    """Make a saved SOW comparison available to Findings, Narrative and React.
+
+    Preserve SOW-parser fields already in ``volume_vs_sow`` while adding the
+    exact response shape that downstream consumers expect.  This is deliberately
+    current-session evidence; New Engagement / Hard Reset clears the cache.
+    """
+    existing = session_cache.ac_get("volume_vs_sow") or {}
+    existing = existing if isinstance(existing, dict) else {}
+    comparison = response.model_dump()
+    session_cache.ac_set("volume_vs_sow", {
+        **existing,
+        "actuals": {key: float(value) for key, value in actuals.items()},
+        "comparison": comparison,
+        # Findings' existing cache fallback reads these top-level fields.
+        "metrics": comparison["metrics"],
+        "overall_status": comparison["overall_status"],
+        "summary": comparison["summary"],
+        "bands": comparison.get("bands"),
+        "overconsumption": comparison.get("overconsumption"),
+    })

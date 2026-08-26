@@ -1,5 +1,5 @@
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import { clearSession, DashboardPayload, ResourceServer } from '../api/dashboardApi';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { clearSession, DashboardPayload, getSowState, ResourceServer } from '../api/dashboardApi';
 
 export interface IssueRecord {
   ID: string;
@@ -88,6 +88,26 @@ const AppDataContext = createContext<AppDataContextValue | undefined>(undefined)
 export const AppDataProvider = ({ children }: { children: React.ReactNode }) => {
   const [data, setData] = useState<AppData>(EMPTY_APP_DATA);
 
+  // The provider is recreated by a browser refresh and can be bypassed by a
+  // direct route. Restore saved SOW evidence once so Findings never receives a
+  // blank client snapshot and substitutes zero actuals.
+  useEffect(() => {
+    let active = true;
+    getSowState()
+      .then((state) => {
+        if (!active) return;
+        const baseline = state.baseline;
+        const comparison = state.compare;
+        setData((prev) => ({
+          ...prev,
+          sowBaseline: baseline && typeof baseline === 'object' ? baseline as DashboardPayload : prev.sowBaseline,
+          sowCompare: comparison && typeof comparison === 'object' ? comparison as DashboardPayload : prev.sowCompare,
+        }));
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
   const setBatch = useCallback((value: DashboardPayload | null) => setData((prev) => ({ ...prev, batch: value })), []);
   const setResource = useCallback(
     (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => setData((prev) => ({ ...prev, resource: value })),
@@ -150,6 +170,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     try {
       await clearSession();
     } finally {
+      try { window.sessionStorage.removeItem('pe-dashboard:sow-actual-draft'); } catch { /* optional browser storage */ }
       setData(EMPTY_APP_DATA);
     }
   }, []);

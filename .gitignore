@@ -19,6 +19,7 @@ server_stdout.txt
 _test_*.py
 !_test_report_archive.py
 !app/_test_config_deployment_safety.py
+!backend/PE_Dashboard_API/app/_test_sow_state_persistence.py
 _check_*.py
 _diag_*.py
 _audit_*.py
