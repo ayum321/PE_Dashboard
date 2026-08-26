@@ -12,8 +12,7 @@ __pycache__
 test_exp.txt
 data/
 graphify-out/
-docs/
-documentation/
+other/
 .claude/
 .codex/
 .agents/

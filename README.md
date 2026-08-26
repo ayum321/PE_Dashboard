@@ -15,4 +15,4 @@ There are no duplicate application source trees and no all-in-one Docker image: 
 - React Portal dashboard: [`frontend/start.bat`](frontend/start.bat)
 - Original FastAPI dashboard, local comparison only: [`backend\legacy-ui/start.bat`](backend\legacy-ui/start.bat)
 
-See [`RUN-LOCAL-DASHBOARDS.md`](RUN-LOCAL-DASHBOARDS.md) for source ownership and deployment boundaries.
+See [`other/RUN-LOCAL-DASHBOARDS.md`](other/RUN-LOCAL-DASHBOARDS.md) for source ownership and deployment boundaries.
