@@ -5,7 +5,7 @@ import {
   DashboardPayload,
   discoverAzureVms,
   disconnectAzure,
-  fetchAzureResources,
+  fetchAzureResourcesWithProgress,
   getAzureAuthStatus,
   getAzureResourceGroups,
   getAzureSubscriptions,
@@ -430,7 +430,13 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setFetchStatus(`Pulling last ${hoursBack}h of CPU / Memory / Disk metrics for ${selectedVmIds.size} VM(s)\u2026`);
     try {
       const selectedVms = discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
-      const result = await fetchAzureResources({ hours_back: hoursBack, vm_ids: Array.from(selectedVmIds), vm_meta: selectedVms });
+      const result = await fetchAzureResourcesWithProgress(
+        { hours_back: hoursBack, vm_ids: Array.from(selectedVmIds), vm_meta: selectedVms },
+        ({ phase, done, total }) => {
+          const count = total && total > 0 ? ` ${done || 0}/${total}` : '';
+          setFetchStatus(`${phase || 'Querying Azure Monitor'}${count}\u2026`);
+        },
+      );
       // Same customer grouping key the discovery table already uses (customerOf) —
       // reuse it rather than re-deriving a second guess of "who is this for".
       const custCounts = new Map<string, number>();

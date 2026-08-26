@@ -407,6 +407,83 @@ export const searchAzureVms = (payload: DashboardPayload): Promise<DashboardPayl
 export const fetchAzureResources = (payload: DashboardPayload = {}): Promise<DashboardPayload> =>
   postDashboardPayload('/api/azure/fetch-resources', payload);
 
+export interface AzureFetchProgress {
+  phase?: string;
+  done?: number;
+  total?: number;
+}
+
+/**
+ * Fetch Azure metrics with server-sent progress.  A 15/30-day selection is a
+ * real remote Azure Monitor operation, not a local calculation; using the
+ * streaming route keeps the reviewer informed instead of displaying a frozen
+ * spinner until every VM has returned.
+ */
+export const fetchAzureResourcesWithProgress = async (
+  payload: DashboardPayload = {},
+  onProgress?: (progress: AzureFetchProgress) => void,
+): Promise<DashboardPayload> => {
+  const response = await fetch(`${getApiBaseUrl()}/api/azure/fetch-resources-stream`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    let detail = `Azure fetch failed (${response.status}).`;
+    try {
+      const error = await response.json();
+      detail = String(error?.detail || detail);
+    } catch { /* retain the HTTP status message */ }
+    throw new Error(detail);
+  }
+  if (!response.body) {
+    // Defensive fallback for an older browser/runtime that does not expose a
+    // readable response stream.  The calculation path remains unchanged.
+    return fetchAzureResources(payload);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: DashboardPayload | null = null;
+
+  const processEvent = (rawEvent: string) => {
+    const event = rawEvent.match(/^event:\s*(.+)$/m)?.[1]?.trim();
+    const rawData = rawEvent.match(/^data:\s*(.+)$/m)?.[1];
+    if (!event || !rawData) return;
+    let data: DashboardPayload;
+    try {
+      data = JSON.parse(rawData) as DashboardPayload;
+    } catch {
+      return;
+    }
+    if (event === 'progress') {
+      onProgress?.(data as AzureFetchProgress);
+    } else if (event === 'result') {
+      result = data;
+    } else if (event === 'error') {
+      throw new Error(String(data.detail || 'Azure fetch failed.'));
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    let separator = buffer.indexOf('\n\n');
+    while (separator >= 0) {
+      processEvent(buffer.slice(0, separator));
+      buffer = buffer.slice(separator + 2);
+      separator = buffer.indexOf('\n\n');
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) processEvent(buffer);
+  if (!result) throw new Error('Azure Monitor finished without a result payload.');
+  return result;
+};
+
 export const fetchAzureTimeseries = (payload: DashboardPayload): Promise<DashboardPayload> =>
   postDashboardPayload('/api/azure/timeseries', payload);
 
