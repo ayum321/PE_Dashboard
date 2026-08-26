@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import { AppDataProvider } from '../../context/AppDataContext';
 import { SowPanel } from './SowPanel';
 
@@ -52,5 +52,37 @@ describe('SowPanel', () => {
 
     await waitFor(() => expect((getByLabelText('Daily DFU actual') as HTMLInputElement).value).toBe('7968993'));
     expect((getByLabelText('Daily DFU') as HTMLInputElement).value).toBe('9000000');
+  });
+
+  it('keeps unsaved targets and actuals when the SOW tab is unmounted and reopened', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        baseline: { daily_dfu: 9_000_000 },
+        actuals: { daily_dfu: 7_000_000 },
+        compare: null,
+      }),
+    } as Response);
+
+    const first = render(
+      <AppDataProvider>
+        <SowPanel />
+      </AppDataProvider>,
+    );
+    await waitFor(() => expect((first.getByLabelText('Daily DFU') as HTMLInputElement).value).toBe('9000000'));
+
+    fireEvent.change(first.getByLabelText('Daily DFU'), { target: { value: '8999996' } });
+    fireEvent.change(first.getByLabelText('Daily DFU actual'), { target: { value: '444444' } });
+    first.unmount();
+
+    const reopened = render(
+      <AppDataProvider>
+        <SowPanel />
+      </AppDataProvider>,
+    );
+    await waitFor(() => {
+      expect((reopened.getByLabelText('Daily DFU') as HTMLInputElement).value).toBe('8999996');
+      expect((reopened.getByLabelText('Daily DFU actual') as HTMLInputElement).value).toBe('444444');
+    });
   });
 });

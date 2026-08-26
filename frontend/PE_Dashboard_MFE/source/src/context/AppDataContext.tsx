@@ -170,7 +170,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     try {
       await clearSession();
     } finally {
-      try { window.sessionStorage.removeItem('pe-dashboard:sow-actual-draft'); } catch { /* optional browser storage */ }
+      try {
+        window.sessionStorage.removeItem('pe-dashboard:sow-form-draft-v2');
+        window.sessionStorage.removeItem('pe-dashboard:sow-actual-draft');
+      } catch { /* optional browser storage */ }
       setData(EMPTY_APP_DATA);
     }
   }, []);

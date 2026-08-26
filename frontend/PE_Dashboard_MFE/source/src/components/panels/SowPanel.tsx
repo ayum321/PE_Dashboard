@@ -62,21 +62,69 @@ const SOW_FIELDS: Array<{ key: string; label: string; sub: string; icon: string;
 const DEFAULT_BANDS = { under: 70, over: 110, crit: 120 };
 const MILLION_SCALE = 1_000_000;
 const MILLION_FIELDS = new Set(['daily_dfu', 'daily_sku']);
-const SOW_ACTUAL_DRAFT_KEY = 'pe-dashboard:sow-actual-draft';
+/**
+ * Route navigation unmounts this panel.  Keep an explicit local draft of the
+ * whole form so a tab switch cannot turn an in-progress SOW entry into a blank
+ * form.  The draft is deliberately separate from the server-side comparison:
+ * PE Findings only reads values after Save & Compare has committed them.
+ */
+const SOW_FORM_DRAFT_KEY = 'pe-dashboard:sow-form-draft-v2';
+const LEGACY_SOW_ACTUAL_DRAFT_KEY = 'pe-dashboard:sow-actual-draft';
 type VolumeUnit = 'number' | 'millions';
 
-function readActualDraft(): Record<string, string> {
+interface SowFormDraft {
+  baseValues: Record<string, string>;
+  actualValues: Record<string, string>;
+  volumeUnits: Record<string, VolumeUnit>;
+}
+
+const EMPTY_SOW_DRAFT: SowFormDraft = { baseValues: {}, actualValues: {}, volumeUnits: {} };
+
+function asStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => typeof entry === 'string' || typeof entry === 'number')
+      .map(([key, entry]) => [key, String(entry)]),
+  );
+}
+
+function asUnitRecord(value: unknown): Record<string, VolumeUnit> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry === 'number' || entry === 'millions') as Array<[string, VolumeUnit]>,
+  );
+}
+
+function readSowDraft(): SowFormDraft {
   try {
-    const raw = window.sessionStorage.getItem(SOW_ACTUAL_DRAFT_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed)
-        .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
-        .map(([key, value]) => [key, String(value)]),
-    );
+    const raw = window.sessionStorage.getItem(SOW_FORM_DRAFT_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return {
+        baseValues: asStringRecord((parsed as Record<string, unknown>).baseValues),
+        actualValues: asStringRecord((parsed as Record<string, unknown>).actualValues),
+        volumeUnits: asUnitRecord((parsed as Record<string, unknown>).volumeUnits),
+      };
+    }
+
+    // Retain the one-version migration path for anyone who entered actuals
+    // before the full-form draft existed.
+    return { ...EMPTY_SOW_DRAFT, actualValues: asStringRecord(JSON.parse(window.sessionStorage.getItem(LEGACY_SOW_ACTUAL_DRAFT_KEY) || '{}')) };
   } catch {
-    return {};
+    return EMPTY_SOW_DRAFT;
+  }
+}
+
+function writeSowDraft(draft: SowFormDraft): void {
+  try {
+    const hasValues = Object.keys(draft.baseValues).length > 0 || Object.keys(draft.actualValues).length > 0;
+    if (hasValues) window.sessionStorage.setItem(SOW_FORM_DRAFT_KEY, JSON.stringify(draft));
+    else window.sessionStorage.removeItem(SOW_FORM_DRAFT_KEY);
+    window.sessionStorage.removeItem(LEGACY_SOW_ACTUAL_DRAFT_KEY);
+  } catch {
+    // Session storage is optional in embedded Portal contexts.
   }
 }
 
@@ -131,12 +179,14 @@ export function SowPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [initialDraft] = useState<SowFormDraft>(readSowDraft);
 
-  const [baseValues, setBaseValues] = useState<Record<string, string>>({});
-  const [actualValues, setActualValues] = useState<Record<string, string>>(readActualDraft);
+  const [baseValues, setBaseValues] = useState<Record<string, string>>(initialDraft.baseValues);
+  const [actualValues, setActualValues] = useState<Record<string, string>>(initialDraft.actualValues);
   const [volumeUnits, setVolumeUnits] = useState<Record<string, VolumeUnit>>({
     daily_dfu: 'number',
     daily_sku: 'number',
+    ...initialDraft.volumeUnits,
   });
 
   const [taxonomy, setTaxonomy] = useState<TaxonomyGroup[]>([]);
@@ -151,20 +201,25 @@ export function SowPanel() {
         const baseline = (state.baseline && typeof state.baseline === 'object'
           ? state.baseline : state) as Record<string, unknown>;
         setSowBaseline(baseline);
-        const next: Record<string, string> = {};
+        const serverBase: Record<string, string> = {};
         SOW_FIELDS.forEach(({ key }) => {
-          if (baseline[key] != null) next[key] = toDisplayValue(baseline[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
+          if (baseline[key] != null) serverBase[key] = toDisplayValue(baseline[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
         });
-        setBaseValues(next);
+        // The server contains last saved evidence.  A newer local form draft
+        // is intentionally overlaid so an in-progress edit survives a route
+        // remount rather than being replaced by the last saved value.
+        const localDraft = readSowDraft();
+        setVolumeUnits((prev) => ({ ...prev, ...localDraft.volumeUnits }));
+        setBaseValues({ ...serverBase, ...localDraft.baseValues });
         const savedActuals = state.actuals && typeof state.actuals === 'object'
           ? state.actuals as Record<string, unknown> : {};
+        const serverActuals: Record<string, string> = {};
         if (Object.keys(savedActuals).length > 0) {
-          const nextActuals: Record<string, string> = {};
           SOW_FIELDS.forEach(({ key }) => {
-            if (savedActuals[key] != null) nextActuals[key] = toDisplayValue(savedActuals[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
+            if (savedActuals[key] != null) serverActuals[key] = toDisplayValue(savedActuals[key], MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number');
           });
-          setActualValues(nextActuals);
         }
+        setActualValues({ ...serverActuals, ...localDraft.actualValues });
         if (state.compare && typeof state.compare === 'object') setSowCompare(state.compare as Record<string, unknown>);
       })
       .catch(() => undefined);
@@ -183,19 +238,33 @@ export function SowPanel() {
   // storage only: Findings continues to read the saved server comparison, so
   // an unfinished input can never masquerade as a measured actual.
   useEffect(() => {
-    const canonical: Record<string, string> = {};
-    SOW_FIELDS.forEach(({ key }) => {
-      const unit = MILLION_FIELDS.has(key) ? volumeUnits[key] || 'number' : 'number';
-      const actual = toCanonicalValue(actualValues[key] || '', unit);
-      if (actual > 0) canonical[key] = String(actual);
-    });
-    try {
-      if (Object.keys(canonical).length) window.sessionStorage.setItem(SOW_ACTUAL_DRAFT_KEY, JSON.stringify(canonical));
-      else window.sessionStorage.removeItem(SOW_ACTUAL_DRAFT_KEY);
-    } catch {
-      // Session storage is optional in embedded Portal contexts.
-    }
-  }, [actualValues, volumeUnits]);
+    writeSowDraft({ baseValues, actualValues, volumeUnits });
+  }, [baseValues, actualValues, volumeUnits]);
+
+  const updateBaseValue = (key: string, value: string) => {
+    const next = { ...baseValues, [key]: value };
+    setBaseValues(next);
+    // Persist synchronously as well as through the effect so an immediate tab
+    // click cannot race the post-render effect.
+    writeSowDraft({ baseValues: next, actualValues, volumeUnits });
+  };
+
+  const updateActualValue = (key: string, value: string) => {
+    const next = { ...actualValues, [key]: value };
+    setActualValues(next);
+    writeSowDraft({ baseValues, actualValues: next, volumeUnits });
+  };
+
+  const updateVolumeUnit = (key: string, nextUnit: VolumeUnit) => {
+    const previousUnit = volumeUnits[key] || 'number';
+    const nextUnits = { ...volumeUnits, [key]: nextUnit };
+    const nextBase = { ...baseValues, [key]: toDisplayValue(toCanonicalValue(baseValues[key] || '', previousUnit), nextUnit) };
+    const nextActuals = { ...actualValues, [key]: toDisplayValue(toCanonicalValue(actualValues[key] || '', previousUnit), nextUnit) };
+    setVolumeUnits(nextUnits);
+    setBaseValues(nextBase);
+    setActualValues(nextActuals);
+    writeSowDraft({ baseValues: nextBase, actualValues: nextActuals, volumeUnits: nextUnits });
+  };
 
   // Pre-fill batch_jobs actual from Batch Review once it's loaded, same wiring as vanilla.
   useEffect(() => {
@@ -257,6 +326,12 @@ export function SowPanel() {
       setSowBaseline(savedBaseline);
       const result = await compareSow({ actuals });
       setSowCompare(result);
+      // The server is now authoritative.  Keeping an old draft would allow it
+      // to mask the newly saved comparison on the next route mount.
+      try {
+        window.sessionStorage.removeItem(SOW_FORM_DRAFT_KEY);
+        window.sessionStorage.removeItem(LEGACY_SOW_ACTUAL_DRAFT_KEY);
+      } catch { /* optional browser storage */ }
 
       // SOW is an evidence pillar for PE Findings, not a standalone screen.
       // Use the freshly returned comparison in every downstream request rather
@@ -297,7 +372,10 @@ export function SowPanel() {
     setBaseValues({});
     setActualValues({});
     setSowCompare(null);
-    try { window.sessionStorage.removeItem(SOW_ACTUAL_DRAFT_KEY); } catch { /* optional browser storage */ }
+    try {
+      window.sessionStorage.removeItem(SOW_FORM_DRAFT_KEY);
+      window.sessionStorage.removeItem(LEGACY_SOW_ACTUAL_DRAFT_KEY);
+    } catch { /* optional browser storage */ }
   };
 
   const openPicker = () => {
@@ -521,11 +599,7 @@ export function SowPanel() {
                         <Select
                           value={unit}
                           onChange={(e) => {
-                            const nextUnit = e.target.value as VolumeUnit;
-                            const previousUnit = volumeUnits[key] || 'number';
-                            setVolumeUnits((prev) => ({ ...prev, [key]: nextUnit }));
-                                                setBaseValues((prev) => ({ ...prev, [key]: toDisplayValue(toCanonicalValue(prev[key] || '', previousUnit), nextUnit) }));
-                            setActualValues((prev) => ({ ...prev, [key]: toDisplayValue(toCanonicalValue(prev[key] || '', previousUnit), nextUnit) }));
+                            updateVolumeUnit(key, e.target.value as VolumeUnit);
                           }}
                           variant="outlined"
                           inputProps={{ 'aria-label': `${label} input unit` }}
@@ -539,7 +613,7 @@ export function SowPanel() {
                     <TextField
                       size="small" type="number" fullWidth placeholder={placeholder}
                       value={baseValues[key] || ''}
-                      onChange={(e) => setBaseValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                      onChange={(e) => updateBaseValue(key, e.target.value)}
                       InputProps={{ style: { textAlign: 'right', fontWeight: 700, color: '#f1f5f9', background: 'rgba(30,41,59,.7)' } }}
                       inputProps={{ 'aria-label': label, style: { textAlign: 'right' }, min: 0, step: unit === 'millions' ? 0.01 : 1 }}
                     />
@@ -549,7 +623,7 @@ export function SowPanel() {
                     <TextField
                       size="small" type="number" fullWidth placeholder="from upload"
                       value={actualValues[key] || ''}
-                      onChange={(e) => setActualValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                      onChange={(e) => updateActualValue(key, e.target.value)}
                       InputProps={{ style: { textAlign: 'right', fontWeight: 700, color: '#f1f5f9', background: 'rgba(30,41,59,.7)' } }}
                       inputProps={{ 'aria-label': `${label} actual`, style: { textAlign: 'right' }, min: 0, step: unit === 'millions' ? 0.01 : 1 }}
                     />
