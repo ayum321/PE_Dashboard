@@ -3,18 +3,16 @@
 The project has one source tree with explicit deployable boundaries:
 
 ```text
-backend/PE_Dashboard_API/   API image definition; source is backend/PE_Dashboard_API/app/
-frontend/PE_Dashboard_MFE/  standalone MFE image definition; source is frontend\PE_Dashboard_MFE\source/
-devops/                     split-service compose and deployment handoff
-backend/PE_Dashboard_API/app/                        FastAPI processing engine
-frontend\PE_Dashboard_MFE\source/            React/Luminate MFE source and portal build
-backend\legacy-ui/          retired legacy UI for local comparison only
+backend/PE_Dashboard_API/   FastAPI API source, configuration, and Dockerfile
+frontend/PE_Dashboard_MFE/  React/Luminate MFE source, Nginx image, and Dockerfile
+backend/legacy-ui/          local-only FastAPI comparison UI
+docker-compose.yml          optional two-container local smoke deployment
 ```
 
-See [`devops/README.md`](devops/README.md) for the DevOps deployment topology. The root [`Dockerfile`](Dockerfile) remains the all-in-one image option.
+There are no duplicate application source trees and no all-in-one Docker image: Docker builds the API and React MFE from their owners above.
 
 ## Local dashboards
-- React Portal dashboard: [`frontend\PE_Dashboard_MFE\source/start.bat`](frontend\PE_Dashboard_MFE\source/start.bat)
+- React Portal dashboard: [`frontend/start.bat`](frontend/start.bat)
 - Original FastAPI dashboard, local comparison only: [`backend\legacy-ui/start.bat`](backend\legacy-ui/start.bat)
 
 See [`RUN-LOCAL-DASHBOARDS.md`](RUN-LOCAL-DASHBOARDS.md) for source ownership and deployment boundaries.

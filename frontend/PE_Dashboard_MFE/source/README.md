@@ -54,7 +54,7 @@ You don’t have to ever use `eject`. The curated feature set is suitable for sm
 
 This command runs the React dashboard in standalone mode on [http://localhost:3000](http://localhost:3000), without the portal shell, and opens the default browser after the first successful compile.
 
-For Windows, run `start-mfe.bat [API_BASE_URL]` from the repository root. It installs locked MFE dependencies when needed, starts the local audit API when the default `http://127.0.0.1:8765` endpoint is absent, verifies its health, and then starts the React dashboard. The optional API URL is for an already-running remote or local API.
+For Windows, run `frontend\\start.bat [API_BASE_URL]` from the repository root. It installs locked MFE dependencies when needed, starts the local audit API when the default `http://127.0.0.1:8765` endpoint is absent, verifies its health, and then starts the React dashboard. The optional API URL is for an already-running remote or local API.
 
 ### `test-no-coverage`
 

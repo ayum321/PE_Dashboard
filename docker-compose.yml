@@ -1,7 +1,7 @@
 services:
   pe-dashboard-api:
     build:
-      context: ../..
+      context: .
       dockerfile: backend/PE_Dashboard_API/Dockerfile
     ports:
       - "${API_BIND_ADDRESS:-127.0.0.1}:8765:8765"
@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
   pe-dashboard-mfe:
     build:
-      context: ../..
+      context: .
       dockerfile: frontend/PE_Dashboard_MFE/Dockerfile
     ports:
       - "${MFE_BIND_ADDRESS:-127.0.0.1}:8080:8080"

@@ -2,13 +2,13 @@
 
 This folder is the company-portal deployment artifact. Build and publish the React MFE only; do not package the retired FastAPI UI with this artifact.
 
-`start-mfe.bat` is for local React development only. It is never used by the company portal or by the deployment pipeline.
+`frontend\\start.bat` is for local React development only. It is never used by the company portal or by the deployment pipeline.
 
 `localhost:3000` is also local-only. The deployed MFE has no fixed port: the company portal serves the static files through its approved HTTPS frame URL.
 
 ## Build
 
-Run the following with `react-dashboard` as the working directory:
+Run the following from `frontend/PE_Dashboard_MFE/source`:
 
 ```sh
 npm ci
@@ -17,7 +17,7 @@ npx tsc --noEmit --pretty false
 npm run build
 ```
 
-Publish the contents of `react-dashboard/build/` to the approved Stratosphere static-content location.
+Publish the contents of `frontend/PE_Dashboard_MFE/source/build/` to the approved Stratosphere static-content location.
 
 ## Runtime configuration
 
@@ -45,7 +45,7 @@ For deployment, the static MFE is independent of the local `.bat` files: DevOps 
 
 ## Pipeline ownership
 
-The workflow files under `react-dashboard/.github/workflows/` are reference templates. Because this repository's Git root is one level above `react-dashboard`, GitHub will not discover them automatically. The DevOps-owned pipeline must target this folder for its Node version, dependency cache, build, runtime-env generation, and static-content upload.
+The workflow files under `frontend/PE_Dashboard_MFE/source/.github/workflows/` are reference templates. Because this repository's Git root is above the MFE source folder, GitHub will not discover them automatically. The DevOps-owned pipeline must target this folder for its Node version, dependency cache, build, runtime-env generation, and static-content upload.
 
 ## Deployment completion boundary
 

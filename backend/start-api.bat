@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0..\..\.."
+cd /d "%~dp0.."
 
 rem Local development serves both browser views from one shared API process.
 rem Production Docker explicitly sets PE_UI_MODE=api and never ships legacy assets.

@@ -1,14 +1,14 @@
 @echo off
 setlocal EnableExtensions
 
-set "LAUNCHER_DIR=%~dp0"
+set "REPO_ROOT=%~dp0.."
 
 rem Local dual mode keeps the React MFE and comparison UI on one shared API.
 rem Production Docker remains API-only through PE_UI_MODE=api.
 set "PE_UI_MODE=dual"
 
 rem React MFE local launcher. It deliberately does not start the legacy FastAPI dashboard.
-cd /d "%~dp0..\..\.."
+cd /d "%REPO_ROOT%"
 set "MFE_DIR=%CD%\frontend\PE_Dashboard_MFE\source"
 
 if not exist "%MFE_DIR%\package.json" (
@@ -72,7 +72,7 @@ if errorlevel 1 exit /b 1
 rem Never start a second development server on the same port. Two React
 rem servers can bind different loopback address families and make the browser
 rem appear to serve stale code.  Check this only after the API is healthy, so
-rem start-mfe.bat also repairs an API that was stopped under an existing UI.
+rem frontend\start.bat also repairs an API that was stopped under an existing UI.
 call :ui_is_ready
 if not errorlevel 1 (
   echo React MFE is already running at http://127.0.0.1:3000
@@ -115,12 +115,12 @@ if not errorlevel 1 goto :eof
 
 if /i not "%LOCAL_API_URL%"=="http://127.0.0.1:8765" (
   echo ERROR: The configured API is not reachable: %LOCAL_API_URL%
-  echo Start that API service or run start-mfe.bat with a reachable API URL.
+  echo Start that API service or run frontend\start.bat with a reachable API URL.
   exit /b 1
 )
 
 echo Starting local audit API on http://127.0.0.1:8765 ...
-start "PE Audit API (local)" /d "%CD%" cmd /k call "%LAUNCHER_DIR%start-api-local.bat"
+start "PE Audit API (local)" /d "%CD%" cmd /k call "%REPO_ROOT%\backend\start-api.bat"
 
 for /l %%R in (1,1,20) do (
   timeout /t 1 /nobreak >nul
