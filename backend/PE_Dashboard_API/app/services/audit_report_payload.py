@@ -269,6 +269,7 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
         "resource_review": {
             "fleet_summary": resource_summary, "exception_rule": "status != HEALTHY, with z-score >= 2.0 included as additional anomaly evidence", "exception_table": exceptions,
             "fleet_heatmap_series": _as_dict(deep_dive.get("heatmap")), "timeseries_by_host": _as_dict(deep_dive.get("vms")),
+            "all_servers_table": servers,
             "unit_semantics": {"cpu": "CPU utilisation % (higher = more pressure)", "memory": "available memory % (lower = more pressure)", "disk": "disk bandwidth consumed % (higher = more pressure)"},
         },
         "correlation_rca": correlation_events,
