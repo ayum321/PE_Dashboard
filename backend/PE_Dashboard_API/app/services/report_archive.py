@@ -5,16 +5,15 @@ module-level connection, threading.Lock around writes, single-worker uvicorn
 only) so this follows an established, already-reviewed idiom rather than
 introducing a second local-persistence convention.
 
-Storage model — REPLACE, not version, per explicit product decision: one row
-per customer (customer_slug is the primary key). Re-generating a report for
-a customer already in the archive overwrites the previous file and row; the
-prior version is not retained. This trades away audit history for a simple,
-always-current "who's been reviewed and what's their latest state" view.
+Storage model — two intentionally separate stores:
 
-Files live under data/report_archive/{slug}.html — a flat, one-file-per-
-customer layout (no timestamp in the filename, since only the latest is ever
-kept). Writes are atomic (temp file + os.replace) so a crash mid-write can
-never leave a half-written report on disk.
+* ``reports`` remains the latest-only Review Registry index used by legacy UI.
+* ``report_payload_snapshots`` is immutable and versioned by customer + audit
+  ID.  It stores the frozen JSON payload and rendered HTML required for export
+  evidence and prior-audit comparisons.
+
+Writes are atomic (temp file + os.replace) so a crash mid-write can never
+leave a half-written report, payload, or archive index entry.
 
 Nothing in this module re-derives compliance numbers (breach counts,
 checklist mismatches, etc.) — callers must pass in values already computed
@@ -26,6 +25,7 @@ archive exists to help catch, not reintroduce.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -103,6 +103,7 @@ def _connect() -> sqlite3.Connection:
     if _conn is not None:
         return _conn
     _FILES_DIR.mkdir(parents=True, exist_ok=True)
+    _snapshots_dir().mkdir(parents=True, exist_ok=True)
     _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
@@ -154,6 +155,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         file_size_bytes       INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS ix_reports_generated_at ON reports(generated_at);
+
+    CREATE TABLE IF NOT EXISTS report_payload_snapshots (
+        customer_slug      TEXT NOT NULL,
+        audit_id           TEXT NOT NULL,
+        customer           TEXT NOT NULL,
+        audit_window_start TEXT,
+        audit_window_end   TEXT,
+        generated_at       TEXT NOT NULL,
+        payload_path       TEXT NOT NULL,
+        html_path          TEXT,
+        PRIMARY KEY (customer_slug, audit_id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_report_payload_snapshots_customer_generated
+        ON report_payload_snapshots(customer_slug, generated_at DESC);
     """)
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(reports)")}
     for name, definition in _SNAPSHOT_COLUMN_DEFINITIONS:
@@ -165,6 +180,123 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def _slugify(customer: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (customer or "unknown").strip().lower()).strip("-")
     return slug or "unknown"
+
+
+def _snapshots_dir() -> Path:
+    """Resolve dynamically so test suites can redirect ``_ROOT`` safely."""
+    return _ROOT / "data" / "report_snapshots"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _snapshot_paths(customer_slug: str, audit_id: str) -> tuple[Path, Path]:
+    safe_audit_id = _slugify(audit_id)
+    folder = _snapshots_dir() / customer_slug
+    return folder / f"{safe_audit_id}.json", folder / f"{safe_audit_id}.html"
+
+
+def save_payload_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist an immutable, versioned report payload before HTML rendering.
+
+    A snapshot is keyed by customer + audit ID.  The former latest-only archive
+    remains for the Review Registry; it is not used as the source for report
+    change history.  Duplicate audit IDs are rejected rather than overwritten.
+    """
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    customer = str(meta.get("customer") or "").strip()
+    audit_id = str(meta.get("audit_id") or "").strip()
+    if not customer or customer.lower() == "customer not specified":
+        return {"ok": False, "error": "A customer is required to archive an immutable audit payload."}
+    if not audit_id:
+        return {"ok": False, "error": "An audit ID is required to archive an immutable audit payload."}
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": f"Report payload is not JSON serializable: {exc}"}
+
+    slug = _slugify(customer)
+    payload_path, _ = _snapshot_paths(slug, audit_id)
+    audit_window = meta.get("audit_window") if isinstance(meta.get("audit_window"), dict) else {}
+    row = (slug, audit_id, customer, audit_window.get("start"), audit_window.get("end"),
+           str(meta.get("generated_at") or datetime.now(timezone.utc).isoformat()),
+           str(payload_path.relative_to(_ROOT)))
+    try:
+        with _lock:
+            conn = _connect()
+            existing = conn.execute(
+                "SELECT 1 FROM report_payload_snapshots WHERE customer_slug = ? AND audit_id = ?",
+                (slug, audit_id),
+            ).fetchone()
+            if existing or payload_path.exists():
+                return {"ok": False, "error": f"Audit ID {audit_id!r} already exists for {customer}; immutable snapshots cannot be overwritten."}
+            _atomic_write_text(payload_path, encoded)
+            try:
+                conn.execute(
+                    """INSERT INTO report_payload_snapshots
+                       (customer_slug, audit_id, customer, audit_window_start, audit_window_end, generated_at, payload_path)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    row,
+                )
+                conn.commit()
+            except Exception:
+                payload_path.unlink(missing_ok=True)
+                raise
+        return {"ok": True, "customer_slug": slug, "audit_id": audit_id, "payload_path": str(payload_path)}
+    except Exception as exc:
+        logger.warning("report_archive.save_payload_snapshot failed for customer=%r audit=%r: %s", customer, audit_id, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def attach_snapshot_html(customer: str, audit_id: str, html: str) -> dict[str, Any]:
+    """Attach a rendered report to an existing immutable JSON payload."""
+    slug = _slugify(customer)
+    _, html_path = _snapshot_paths(slug, audit_id)
+    try:
+        with _lock:
+            conn = _connect()
+            row = conn.execute(
+                "SELECT 1 FROM report_payload_snapshots WHERE customer_slug = ? AND audit_id = ?",
+                (slug, audit_id),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "Payload snapshot must be stored before attaching HTML."}
+            _atomic_write_text(html_path, html)
+            conn.execute(
+                "UPDATE report_payload_snapshots SET html_path = ? WHERE customer_slug = ? AND audit_id = ?",
+                (str(html_path.relative_to(_ROOT)), slug, audit_id),
+            )
+            conn.commit()
+        return {"ok": True, "html_path": str(html_path)}
+    except Exception as exc:
+        logger.warning("report_archive.attach_snapshot_html failed for customer=%r audit=%r: %s", customer, audit_id, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def get_previous_payload(customer: str, audit_id: str) -> Optional[dict[str, Any]]:
+    """Get the preceding immutable audit for this customer by generated time."""
+    slug = _slugify(customer)
+    with _lock:
+        conn = _connect()
+        row = conn.execute(
+            """SELECT payload_path FROM report_payload_snapshots
+               WHERE customer_slug = ? AND audit_id != ?
+               ORDER BY generated_at DESC LIMIT 1""",
+            (slug, audit_id),
+        ).fetchone()
+    if not row:
+        return None
+    path = _ROOT / row[0]
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("report_archive: cannot load prior payload at %s: %s", path, exc)
+        return None
 
 
 def download_filename(customer_slug: str) -> str:

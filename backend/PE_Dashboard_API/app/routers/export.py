@@ -21,11 +21,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 from pydantic import BaseModel, ConfigDict
 
 from services import pe_config
 from services import report_archive
+from services.audit_report_payload import attach_prior_audit, build_audit_report_payload
 from services.pe_utils import coerce_float as _f
+from services.report_svg import render_report_charts
 from services.resource_calculator import (
     role_cpu_thresholds as _role_cpu_thr,
     DB_MEM_EXPECTED_LO as _DB_MEM_LO,
@@ -466,6 +469,52 @@ def _checklist_rows(checklist: dict, evidence: dict) -> tuple[str, int]:
 )
 async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
     try:
+        # Export v2 intentionally freezes the exact output from the dashboard
+        # engines before any Jinja rendering.  The renderer has no SLA/severity
+        # calculation path, so it cannot silently disagree with the live UI.
+        export_body = body.model_dump(exclude_none=True)
+        report = build_audit_report_payload(export_body)
+        customer = report["meta"]["customer"]
+        audit_id = report["meta"]["audit_id"]
+        if customer and customer != "Customer not specified":
+            attach_prior_audit(report, report_archive.get_previous_payload(customer, audit_id))
+        else:
+            attach_prior_audit(report, None)
+
+        charts, chart_errors, chart_warnings = render_report_charts(report)
+        report["validation"]["errors"].extend(chart_errors)
+        report["validation"]["warnings"].extend(chart_warnings)
+        if chart_errors:
+            raise HTTPException(status_code=422, detail="; ".join(chart_errors))
+
+        archive_status = "skipped"
+        if customer and customer != "Customer not specified":
+            # Immutable JSON exists before HTML rendering so a revisited audit
+            # can always explain the exact evidence behind the document.
+            snapshot = report_archive.save_payload_snapshot(report)
+            if not snapshot.get("ok"):
+                raise HTTPException(status_code=409, detail=snapshot.get("error", "Unable to archive immutable audit payload."))
+            archive_status = "payload_saved"
+
+        safe_charts = {name: Markup(svg) for name, svg in charts.items()}
+        rendered_html = templates.get_template("report/report_v2.html").render(report=report, charts=safe_charts)
+        if archive_status == "payload_saved":
+            attached = report_archive.attach_snapshot_html(customer, audit_id, rendered_html)
+            archive_status = "saved" if attached.get("ok") else "payload_saved_html_failed"
+
+        filename = report_archive.download_filename(audit_id).replace("_archived", "")
+        return HTMLResponse(
+            content=rendered_html,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "text/html; charset=utf-8",
+                "X-Archive-Status": archive_status,
+                "X-Audit-Id": audit_id,
+            },
+        )
+
+        # Legacy v1 renderer remains below temporarily to keep its historical
+        # helper functions available during the migration; it is unreachable.
         # ── Extract sub-trees ──────────────────────────────────
         batch     = body.batch     or {}
         resource  = body.resource  or {}
@@ -763,5 +812,7 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
                 "X-Archive-Status": archive_status,
             },
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc

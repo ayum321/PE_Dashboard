@@ -657,8 +657,22 @@ export function ResourcePanel() {
     }
   };
 
-  const handleFetched = (fetchedServers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => {
-    setResource({ servers: fetchedServers });
+  const handleFetched = async (fetchedServers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => {
+    // Persist the exact resource-engine verdict alongside the raw Azure rows.
+    // Export/Findings consume this same object; storing only `servers` caused
+    // them to recreate counts independently (and occasionally report a
+    // healthy fleet beside warning hosts).
+    const resolved = await processResource(fetchedServers);
+    setResource({
+      servers: fetchedServers,
+      kpis: resolved.kpis,
+      anomalies: resolved.anomalies,
+      executive_summary: resolved.executive_summary,
+    });
+    setFleetKpis((resolved.kpis as FleetKpis) || null);
+    setAnomalies((resolved.anomalies as ResourceAnomaly[]) || []);
+    const exec = resolved.executive_summary as ExecutiveSummary | undefined;
+    setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
     setHoursBack(meta.hoursBack);
     setDdCustomActive(false);
     // Only set when not already known \u2014 an engagement that starts from Resource
@@ -693,6 +707,13 @@ export function ResourcePanel() {
       const result = await fetchAzureTimeseries(payload);
       const dd = result as unknown as DeepDiveResponse;
       setDeepDive(dd);
+      // Deep-dive charts/correlation are already produced by the same Azure
+      // response that powers this screen. Keep that evidence in the shared
+      // session payload so the standalone report can render it without a
+      // second query or a different calculation path.
+      if (data.resource) {
+        setResource({ ...data.resource, deep_dive: dd });
+      }
       setHeatmapMetric(preferredFleetHeatmapMetric(dd));
       // Prefer auto-opening a VM with detected spikes (matches vanilla's
       // "auto-open one card so the highest-priority evidence is visible").

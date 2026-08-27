@@ -34,7 +34,10 @@ interface Props {
   /** Start browser sign-in from an explicit parent "Connect Azure" action. */
   autoStartAuth?: boolean;
   onClose: () => void;
-  onFetched: (servers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => void;
+  /** Complete only after the parent has stored the resolved fleet evidence.
+   * This prevents a reviewer from closing the modal and exporting a transient
+   * "servers only" snapshot before the shared severity engine returns. */
+  onFetched: (servers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => void | Promise<void>;
   onAuthChanged?: (auth: DashboardPayload) => void;
 }
 
@@ -445,7 +448,8 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         if (c !== UNTAGGED) custCounts.set(c, (custCounts.get(c) || 0) + 1);
       }
       const topCustomer = Array.from(custCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
-      onFetched((result.servers as ResourceServer[]) || [], { hoursBack, customer: topCustomer });
+      setFetchStatus('Resolving fleet health and saving evidence…');
+      await onFetched((result.servers as ResourceServer[]) || [], { hoursBack, customer: topCustomer });
       onClose();
     } catch (error) {
       setFetchStatus(error instanceof Error ? error.message : 'Azure fetch failed.');

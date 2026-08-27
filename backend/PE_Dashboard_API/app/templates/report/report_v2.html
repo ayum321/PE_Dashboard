@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PE Audit — {{ report.meta.customer }} — {{ report.meta.audit_id }}</title>
+  <style>{% include 'report/style.css.j2' %}</style>
+</head>
+<body>
+  <main class="report">
+    {% include 'report/cover.html.j2' %}
+    {% include 'report/executive.html.j2' %}
+    {% include 'report/actions.html.j2' %}
+    {% include 'report/batch.html.j2' %}
+    {% include 'report/resource.html.j2' %}
+    {% include 'report/rca.html.j2' %}
+    {% include 'report/sow.html.j2' %}
+    {% include 'report/methodology.html.j2' %}
+    {% include 'report/changes.html.j2' %}
+    {% include 'report/appendix.html.j2' %}
+  </main>
+</body>
+</html>

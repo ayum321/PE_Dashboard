@@ -49,8 +49,14 @@ export function buildExportPayload(data: AppData): DashboardPayload {
     resource: data.resource,
     servers: data.resource?.servers,
     sow: data.sowCompare,
+    sow_contract: data.sowBaseline,
     benchmark: data.benchmark,
     issues: data.issues,
+    approvals: data.approvals,
+    findings: data.findings,
+    red_flags: data.redFlags,
+    executive: data.executive,
+    final_judgment: data.finalJudgment,
     customer_name: data.customerName,
     env_type: environments.length === 1
       ? environments[0]
