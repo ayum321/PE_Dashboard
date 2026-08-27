@@ -1486,6 +1486,25 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
             metrics_hit = list({c["metric"] for c in cluster})
             worst = max(cluster, key=lambda c: c["spike"]["z_score"])
             time_str = cluster[0]["ts"].strftime("%H:%M")
+            span_minutes = max(
+                0.0,
+                (cluster[-1]["ts"] - cluster[0]["ts"]).total_seconds() / 60.0,
+            )
+            # This is evidence strength for a time-overlap observation, never
+            # a probability of causation. The score remains portable because it
+            # depends only on observed cluster density, metric diversity,
+            # synchrony, and the anomaly's own z-score.
+            confidence_pct = min(
+                95,
+                round(
+                    40
+                    + min(30, max(0, len(vms_hit) - 2) * 10)
+                    + min(10, max(0, len(metrics_hit) - 1) * 5)
+                    + min(10, max(0, len(cluster) - 2) * 3)
+                    + (5 if span_minutes <= 5 else 0)
+                    + min(10, max(0.0, float(worst["spike"]["z_score"])) * 2),
+                ),
+            )
             patterns.append({
                 "type": "cross_vm_correlation",
                 "severity": "critical",
@@ -1505,6 +1524,9 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
                 "metrics": metrics_hit,
                 "worst_vm": worst["vm"],
                 "worst_peak": worst["spike"]["peak"],
+                "cluster_span_minutes": round(span_minutes, 1),
+                "confidence_pct": confidence_pct,
+                "confidence_basis": "temporal overlap evidence strength; not proof of causation",
             })
 
     # ── 3. Sustained high utilization (mean above threshold) ──
