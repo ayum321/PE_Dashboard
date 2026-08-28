@@ -222,10 +222,181 @@ type SortKey = 'host' | 'cpu_used' | 'mem_used' | 'disk_used_max' | 'health_scor
 function shortMetric(k: string): string {
   k = k || '';
   if (k.includes('CPU')) return 'CPU';
+  if (/Available Memory Bytes/i.test(k)) return 'Memory Bytes';
   if (k.includes('Memory')) return 'Memory';
   if (k.includes('OS Disk')) return 'OS Disk';
   if (k.includes('Data Disk')) return 'Data Disk';
   return k.replace(' Percentage', '').replace(' Consumed', '');
+}
+
+type DeepDiveMetricFamily = 'cpu' | 'memory-percent' | 'memory-bytes' | 'os-disk' | 'data-disk' | 'other';
+
+/** Canonical family used for joins between stats, spikes, waveforms and UI text.
+ * Azure has emitted both canonical and shortened metric names over time; exact
+ * string comparison made an anomalous memory series look normal. */
+export function metricFamily(metric: string): DeepDiveMetricFamily {
+  const key = (metric || '').toLowerCase();
+  if (key.includes('cpu')) return 'cpu';
+  if (key.includes('memory') || key.includes('mem')) {
+    return key.includes('byte') ? 'memory-bytes' : 'memory-percent';
+  }
+  if (key.includes('os disk') && key.includes('bandwidth') && key.includes('percentage')) return 'os-disk';
+  if (key.includes('data disk') && key.includes('bandwidth') && key.includes('percentage')) return 'data-disk';
+  return 'other';
+}
+
+const GRADED_METRIC_FAMILIES = new Set<DeepDiveMetricFamily>(['cpu', 'memory-percent', 'os-disk', 'data-disk']);
+
+/** List only graded metric families that have no anomaly event. Chart-only
+ * telemetry is deliberately excluded: it has no warning/critical band. */
+export function normalMetricLabels(stats: Record<string, DeepDiveStat>, spikes: Record<string, DeepDiveSpike[]>): string[] {
+  const spikeFamilies = new Set(Object.keys(spikes || {}).map(metricFamily));
+  return Array.from(new Set(
+    Object.keys(stats || {})
+      .filter((metric) => GRADED_METRIC_FAMILIES.has(metricFamily(metric)))
+      .filter((metric) => !spikeFamilies.has(metricFamily(metric)))
+      .map(shortMetric),
+  ));
+}
+
+const SEVERITY_RANK: Record<string, number> = {
+  critical_sustained: 4,
+  critical: 3,
+  warning: 2,
+  notable: 1,
+};
+
+function highestMetricSeverity(events: DeepDiveSpike[]): { rank: number; label: string } {
+  const top = events.reduce<DeepDiveSpike | null>((best, event) => {
+    if (!best || (SEVERITY_RANK[event.severity || ''] || 0) > (SEVERITY_RANK[best.severity || ''] || 0)) return event;
+    return best;
+  }, null);
+  const severity = top?.severity || '';
+  const label = severity === 'critical_sustained' ? 'CRITICAL SUSTAINED'
+    : severity === 'critical' ? 'CRITICAL'
+      : severity === 'notable' ? 'ELEVATED' : 'WARNING';
+  return { rank: SEVERITY_RANK[severity] ?? -1, label };
+}
+
+interface DominantMetric {
+  key: string;
+  family: DeepDiveMetricFamily;
+  label: 'CPU' | 'MEM' | 'DISK';
+  value: number;
+  pressure: number;
+  statType: 'P95' | 'min avail';
+  events: DeepDiveSpike[];
+  severityRank: number;
+  severityLabel: string;
+  color: string;
+}
+
+/** Select one metric as the card's complete story. Severity evidence is the
+ * primary key; pressure is only a tie-breaker. This keeps a CPU critical badge
+ * from sitting beside an unrelated memory headline. */
+export function selectDominantMetric(
+  stats: Record<string, DeepDiveStat>,
+  spikes: Record<string, DeepDiveSpike[]>,
+): DominantMetric | null {
+  const entries = Object.entries(stats || {});
+  const eventsFor = (family: DeepDiveMetricFamily) => Object.entries(spikes || {})
+    .filter(([metric]) => metricFamily(metric) === family)
+    .flatMap(([, values]) => values || []);
+  const statFor = (families: DeepDiveMetricFamily[]) => entries
+    .filter(([metric]) => families.includes(metricFamily(metric)))
+    .sort(([, a], [, b]) => (b.p95 ?? b.max ?? 0) - (a.p95 ?? a.max ?? 0))[0];
+  const candidates: DominantMetric[] = [];
+
+  const cpuEvents = eventsFor('cpu');
+  const cpuEntry = statFor(['cpu']);
+  if (cpuEntry || cpuEvents.length) {
+    const stat = cpuEntry?.[1];
+    const value = stat?.p95 ?? stat?.max ?? Math.max(...cpuEvents.map((event) => event.peak || 0), 0);
+    const sev = highestMetricSeverity(cpuEvents);
+    candidates.push({
+      key: cpuEntry?.[0] || 'Percentage CPU',
+      family: 'cpu',
+      label: 'CPU',
+      value,
+      pressure: value,
+      statType: 'P95',
+      events: cpuEvents,
+      severityRank: sev.rank,
+      severityLabel: sev.label,
+      color: '#3b82f6',
+    });
+  }
+
+  const memEvents = eventsFor('memory-percent');
+  const memEntry = statFor(['memory-percent']);
+  if (memEntry || memEvents.length) {
+    const stat = memEntry?.[1];
+    const value = stat?.min ?? Math.min(...memEvents.map((event) => event.peak ?? 100), 100);
+    const sev = highestMetricSeverity(memEvents);
+    candidates.push({
+      key: memEntry?.[0] || 'Available Memory Percentage',
+      family: 'memory-percent',
+      label: 'MEM',
+      value,
+      pressure: 100 - value,
+      statType: 'min avail',
+      events: memEvents,
+      severityRank: sev.rank,
+      severityLabel: sev.label,
+      color: '#22d3ee',
+    });
+  }
+
+  const diskEvents = [...eventsFor('os-disk'), ...eventsFor('data-disk')];
+  const diskEntry = statFor(['os-disk', 'data-disk']);
+  if (diskEntry || diskEvents.length) {
+    const stat = diskEntry?.[1];
+    const value = stat?.p95 ?? stat?.max ?? Math.max(...diskEvents.map((event) => event.peak || 0), 0);
+    const sev = highestMetricSeverity(diskEvents);
+    const diskMetricKey = diskEntry?.[0] || 'OS Disk Bandwidth Consumed Percentage';
+    candidates.push({
+      key: diskMetricKey,
+      family: metricFamily(diskMetricKey),
+      label: 'DISK',
+      value,
+      pressure: value,
+      statType: 'P95',
+      events: diskEvents,
+      severityRank: sev.rank,
+      severityLabel: sev.label,
+      color: '#f59e0b',
+    });
+  }
+
+  candidates.sort((a, b) => b.severityRank - a.severityRank || b.events.length - a.events.length || b.pressure - a.pressure);
+  return candidates[0] || null;
+}
+
+export function formatUtcDateTime(value?: string): string {
+  const date = new Date(value || '');
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+}
+
+export function durationMinutesFromBounds(start?: string, end?: string): number | null {
+  const startMs = new Date(start || '').getTime();
+  const endMs = new Date(end || '').getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null;
+  return Math.max(1, Math.round((endMs - startMs) / 60000));
+}
+
+export function formatSpikeWindow(start?: string, end?: string): string {
+  const startText = formatUtcDateTime(start);
+  const endText = formatUtcDateTime(end);
+  return startText === '—' || endText === '—' ? '—' : `${startText} → ${endText} UTC`;
+}
+
+export function formatRecurringDurations(durations: number[]): string {
+  const values = durations.filter((value) => Number.isFinite(value) && value >= 0).map((value) => Math.max(1, Math.round(value)));
+  if (!values.length) return '—';
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return min === max ? `${humanizeDurationMin(min)} each` : `${humanizeDurationMin(min)}–${humanizeDurationMin(max)} per event`;
 }
 
 /** Green/amber/red band by threshold, higher-is-worse unless inverted. */
@@ -1023,7 +1194,7 @@ export function ResourcePanel() {
     const critical: Array<{
       vmName: string; vmData: DeepDiveVm; role: string; env: string;
       spikeCount: number; thresholdCrossCount: number; hasSustained: boolean; latestSpike: number;
-      memAvail: number; memPressure: number; domLabel: string; domVal: number; domColor: string;
+      memAvail: number; memPressure: number; domLabel: string; domVal: number; domColor: string; domKey: string;
       severityLabel: string; severityColor: string; trendArrow: string; trendDelta: string;
       breachLabel: string; waveformLabel: string; waveformIcon: string; waveformRisk: string;
     }> = [];
@@ -1038,50 +1209,39 @@ export function ResourcePanel() {
       const role = matchedServer?.type || inferRole(vmName);
       const env = matchedServer?.environment || inferEnv(vmName);
 
-      let spikeCount = 0, thresholdCrossCount = 0, latestSpike = 0, maxZ = 0;
-      let hasSustained = false;
+      let spikeCount = 0, thresholdCrossCount = 0, latestSpike = 0;
       for (const arr of Object.values(spikes)) {
         spikeCount += arr.length;
         for (const s of arr) {
-          maxZ = Math.max(maxZ, s.z_score || 0);
-          if ((s.severity || '').includes('sustained')) hasSustained = true;
           if ((s.severity || '').startsWith('critical') || s.detection === 'absolute_threshold') thresholdCrossCount++;
           if (s.peak_time) latestSpike = Math.max(latestSpike, new Date(s.peak_time).getTime());
         }
       }
 
       const stats = vmData.stats || {};
-      const cpuStat = stats['Percentage CPU'];
-      const cpuP95 = cpuStat?.p95 ?? cpuStat?.max ?? 0;
-      const memStat = stats['Available Memory Percentage'];
-      const memAvail = memStat ? (memStat.min_anomalous && memStat.p5 != null ? memStat.p5 : memStat.min ?? 100) : 100;
+      const dominant = selectDominantMetric(stats, spikes);
+      if (!dominant) continue;
+      const memStat = Object.entries(stats).find(([metric]) => metricFamily(metric) === 'memory-percent')?.[1];
+      // MIN AVAIL must be the observed minimum. P5 is a separate statistic.
+      const memAvail = memStat?.min ?? (dominant.family === 'memory-percent' ? dominant.value : 100);
       const memPressure = 100 - memAvail;
-      const diskStat = stats['OS Disk Bandwidth Consumed Percentage'];
-      const diskP95 = diskStat?.p95 ?? diskStat?.max ?? 0;
 
-      let domLabel: string, domVal: number, domColor: string;
-      if (memPressure >= cpuP95 && memPressure >= diskP95) {
-        domLabel = 'MEM'; domVal = memAvail; domColor = '#22d3ee';
-      } else if (cpuP95 >= diskP95) {
-        domLabel = 'CPU'; domVal = cpuP95; domColor = '#3b82f6';
-      } else {
-        domLabel = 'DISK'; domVal = diskP95; domColor = '#f59e0b';
-      }
+      const domLabel = dominant.label;
+      const domVal = dominant.value;
+      const domColor = dominant.color;
+      const domKey = dominant.key;
+      const hasSustained = dominant.severityRank >= SEVERITY_RANK.critical_sustained;
+      const maxZ = Math.max(0, ...Object.values(spikes).flat().map((event) => Number(event.z_score) || 0));
 
-      const absMeaningful = domLabel === 'MEM' ? domVal <= 30 : domVal >= 50;
       // Single-sourced from the SAME mem_status flag Fleet Diagnosis and the
       // Server Detail Table already use (7a) \u2014 a DB server's memory sitting in
       // its expected 80\u201392% SGA/PGA band is not a pressure signal, so it must
       // not out-rank a non-sustained z-score breach into CRITICAL here either.
-      const isDbMemExpected = domLabel === 'MEM' && matchedServer?.mem_status === 'DB_NORMAL';
-      let severityLabel: string, severityColor: string;
-      if (isDbMemExpected && !hasSustained) { severityLabel = 'EXPECTED DB LOAD'; severityColor = DB_EXPECTED_COLOR; }
-      else if (hasSustained && absMeaningful) { severityLabel = 'CRITICAL SUSTAINED'; severityColor = SEVERITY_COLOR['CRITICAL SUSTAINED']; }
-      else if (maxZ >= 3 && absMeaningful) { severityLabel = 'CRITICAL'; severityColor = SEVERITY_COLOR.CRITICAL; }
-      else if (maxZ >= 3 && !absMeaningful) { severityLabel = 'ELEVATED'; severityColor = SEVERITY_COLOR.ELEVATED; }
-      else { severityLabel = 'WARNING'; severityColor = SEVERITY_COLOR.WARNING; }
+      const absMeaningful = dominant.family === 'memory-percent' ? domVal <= 30 : domVal >= 50;
+      const isDbMemExpected = dominant.family === 'memory-percent' && matchedServer?.mem_status === 'DB_NORMAL' && dominant.severityRank < SEVERITY_RANK.critical;
+      const severityLabel = isDbMemExpected ? 'EXPECTED DB LOAD' : dominant.severityLabel;
+      const severityColor = isDbMemExpected ? DB_EXPECTED_COLOR : (SEVERITY_COLOR[severityLabel] || SEVERITY_COLOR.WARNING);
 
-      const domKey = domLabel === 'MEM' ? 'Available Memory Percentage' : domLabel === 'DISK' ? 'OS Disk Bandwidth Consumed Percentage' : 'Percentage CPU';
       const domSeries = vmData.series?.[domKey] || [];
       const recentSeries = domSeries.filter((p) => Date.now() - new Date(p.t).getTime() <= 6 * 60 * 60 * 1000);
       const trendSeries = recentSeries.length > 4 ? recentSeries : domSeries;
@@ -1111,7 +1271,7 @@ export function ResourcePanel() {
       const waveformLabel = waveform?.label || '';
       const waveformIcon = waveform?.icon || '';
       const waveformRisk = waveform?.risk || '';
-      critical.push({ vmName, vmData, role, env, spikeCount, thresholdCrossCount, hasSustained, latestSpike, memAvail, memPressure, domLabel, domVal, domColor, severityLabel, severityColor, trendArrow, trendDelta, breachLabel, waveformLabel, waveformIcon, waveformRisk });
+      critical.push({ vmName, vmData, role, env, spikeCount, thresholdCrossCount, hasSustained, latestSpike, memAvail, memPressure, domLabel, domVal, domColor, domKey, severityLabel, severityColor, trendArrow, trendDelta, breachLabel, waveformLabel, waveformIcon, waveformRisk });
     }
 
     const filtered = critical.filter((c) => {
