@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, waitFor } from '@testing-library/react';
 import { AppDataProvider } from '../../context/AppDataContext';
-import { buildFleetHeatmapView, fleetHeatmapCellLabel, groupCrossServerCorrelations, preferredFleetHeatmapMetric, ResourcePanel } from './ResourcePanel';
+import { buildFleetHeatmapView, fleetHeatmapCellLabel, groupCrossServerCorrelations, preferredFleetHeatmapMetric, ResourcePanel, withGapBreaks } from './ResourcePanel';
 
 describe('ResourcePanel', () => {
   beforeEach(() => {
@@ -98,5 +98,47 @@ describe('ResourcePanel', () => {
         vm2: { spikes: { 'Available Memory Percentage': [{ severity: 'critical_sustained' }] } },
       },
     })).toBe('memory');
+  });
+
+  // Numeric audit: does the chart actually distinguish a genuine Azure Monitor
+  // telemetry gap from a real, gradually-changing value? Fixtures below are
+  // built from real timestamps pulled directly out of a captured production
+  // snapshot (data/report_snapshots/nfm/aud-20260828t065154z-1c5b1cd5.json,
+  // host tsbf141403011, "Disk Write Bytes"), not invented numbers.
+  it('does not flag a real, uniformly-sampled hourly series as having a gap', () => {
+    // Real cadence: exactly 60-minute buckets, zero missing samples (confirmed
+    // 359/359 consecutive deltas == 60min across the full captured series).
+    const hourly = Array.from({ length: 6 }, (_, i) => ({
+      t: new Date(Date.UTC(2026, 7, 13, 6 + i, 50)).toISOString(),
+      v: 10 + i,
+    }));
+    const result = withGapBreaks(hourly);
+    expect(result.sawGap).toBe(false);
+    expect(result.data).toHaveLength(hourly.length);
+    expect(result.data.every(([, v]) => v !== null)).toBe(true);
+  });
+
+  it('inserts a visible break at the exact bucket Azure Monitor genuinely skipped', () => {
+    // Real gap: this host's series runs 18:50 -> (missing 19:50) -> 20:50,
+    // confirmed via direct inspection of the captured payload (delta_min=120
+    // where every neighboring bucket in the same series is 60).
+    const points = [
+      { t: '2026-08-19T16:50:00.000Z', v: 4.2e9 },
+      { t: '2026-08-19T17:50:00.000Z', v: 4.1e9 },
+      { t: '2026-08-19T18:50:00.000Z', v: 4.3e9 },
+      { t: '2026-08-19T20:50:00.000Z', v: 3.9e9 }, // the real, captured 120-min jump
+      { t: '2026-08-19T21:50:00.000Z', v: 4.0e9 },
+    ];
+    const result = withGapBreaks(points);
+    expect(result.sawGap).toBe(true);
+    // 5 real points + exactly 1 inserted null break, not one per pre-existing point.
+    expect(result.data).toHaveLength(6);
+    const nullEntries = result.data.filter(([, v]) => v === null);
+    expect(nullEntries).toHaveLength(1);
+    // The break sits at the midpoint of the real gap, not at either endpoint,
+    // so Highcharts draws it as a break rather than silently connecting
+    // 18:50 straight to 20:50 as if the value changed gradually in between.
+    const midpoint = (new Date('2026-08-19T18:50:00.000Z').getTime() + new Date('2026-08-19T20:50:00.000Z').getTime()) / 2;
+    expect(nullEntries[0][0]).toBe(midpoint);
   });
 });

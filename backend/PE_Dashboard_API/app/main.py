@@ -121,6 +121,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
+    # The React MFE reads these response headers after an HTML export.  CORS
+    # hides non-safelisted headers unless they are explicitly exposed, which
+    # previously made a successful archive save look "unknown" in Governance.
+    expose_headers=["Content-Disposition", "X-Archive-Status", "X-Audit-Id"],
 )
 
 

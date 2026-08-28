@@ -1,0 +1,243 @@
+{
+  "schema_version": "2.0",
+  "meta": {
+    "customer": "Example Customer",
+    "audit_id": "AUD-20260828T125324Z-0FB62364",
+    "audit_window": {
+      "start": "2026-07-26",
+      "end": "2026-08-24"
+    },
+    "generated_at": "2026-08-28T12:53:24+00:00",
+    "engine_version": "PE Dashboard export 2.0",
+    "sources": [
+      {
+        "name": "Ctrl-M batch",
+        "loaded": true,
+        "timestamp": null
+      },
+      {
+        "name": "Azure Monitor",
+        "loaded": true,
+        "timestamp": null
+      },
+      {
+        "name": "SOW volume",
+        "loaded": true,
+        "timestamp": null
+      },
+      {
+        "name": "Benchmark",
+        "loaded": false,
+        "timestamp": null
+      }
+    ],
+    "data_coverage_pct": null,
+    "missing_metrics": [],
+    "sign_off_status": "customer_approved",
+    "issues_logged_count": 0
+  },
+  "executive_verdict": {
+    "headline": "Evidence has been frozen from the loaded dashboard panels; see the section-level findings and data-quality flags.",
+    "confidence_pct": null,
+    "data_quality_flags": []
+  },
+  "priority_actions": [
+    {
+      "id": "batch-breach",
+      "priority": "P1",
+      "source_type": "generated",
+      "observation": "1 batch SLA breach(es) were reported.",
+      "likely_cause": "Batch schedule, dependency, or runtime regression.",
+      "recommended_action": "Investigate the breached day and its longest contributing jobs.",
+      "status": "open"
+    },
+    {
+      "id": "resource-db-a",
+      "priority": "P2",
+      "source_type": "generated",
+      "observation": "db-a is WARNING (health status is not HEALTHY).",
+      "likely_cause": "Validate capacity, workload, and concurrent batch activity.",
+      "recommended_action": "Review db-a time-series and owning workload.",
+      "status": "open"
+    }
+  ],
+  "batch_sla": {
+    "window_chart_series": [],
+    "breach_days": [],
+    "tight_days": [],
+    "buffer_summary": {
+      "compliance_pct": 96.6,
+      "jobs_breach": 1,
+      "jobs_ok": 28,
+      "total_jobs": 29,
+      "total_runs": 1804,
+      "total_hrs": 146.3
+    },
+    "long_pole_trend_series": {},
+    "top_jobs_table": [
+      {
+        "job_name": "JDA_PROCESSING_JOB_WKLY_2",
+        "sub_app": "TEST_WEEKLY",
+        "schedule_type": "WEEKLY",
+        "peak_hrs": 8.13,
+        "avg_hrs": 6.12,
+        "sla_hrs": 13.0,
+        "buffer_pct": 37.4,
+        "sla_used_pct": null,
+        "status": "LONG_JOB",
+        "sla_source": "batch_sla_xlsx"
+      }
+    ],
+    "excluded_jobs": []
+  },
+  "resource_review": {
+    "fleet_summary": {
+      "grade": "B",
+      "score": 84.9,
+      "servers_total": 1,
+      "critical": 0,
+      "warning": 1,
+      "ok": 0,
+      "no_data": 0,
+      "source": "resource.kpis"
+    },
+    "exception_rule": "status != HEALTHY, with z-score >= 2.0 included as additional anomaly evidence",
+    "exception_table": [
+      {
+        "host": "db-a",
+        "role": "DB",
+        "environment": "Unknown",
+        "status": "WARNING",
+        "cpu_pct": 92.0,
+        "memory_pct": 91.0,
+        "disk_pct": 10.0,
+        "max_anomaly_z": null,
+        "exception_reason": "health status is not HEALTHY"
+      }
+    ],
+    "fleet_heatmap_series": {},
+    "timeseries_by_host": {
+      "db-a": {
+        "series": {
+          "Percentage CPU": [
+            {
+              "t": "2026-08-24T00:00:00Z",
+              "v": 16
+            },
+            {
+              "t": "2026-08-24T01:00:00Z",
+              "v": 92
+            }
+          ],
+          "Available Memory Percentage": [
+            {
+              "t": "2026-08-24T00:00:00Z",
+              "v": 21
+            },
+            {
+              "t": "2026-08-24T01:00:00Z",
+              "v": 9
+            }
+          ],
+          "OS Disk Bandwidth Consumed Percentage": [
+            {
+              "t": "2026-08-24T00:00:00Z",
+              "v": 1
+            },
+            {
+              "t": "2026-08-24T01:00:00Z",
+              "v": 10
+            }
+          ]
+        },
+        "spikes": {
+          "Percentage CPU": [
+            {
+              "severity": "critical",
+              "peak": 92.0
+            }
+          ]
+        }
+      }
+    },
+    "all_servers_table": [
+      {
+        "host": "db-a",
+        "type": "DB",
+        "cpu_used": 92.0,
+        "mem_used": 91.0,
+        "disk_pct": 10.0,
+        "mem_gb": 64.0,
+        "status": "WARNING"
+      }
+    ],
+    "server_evidence": [
+      {
+        "host": "db-a",
+        "role": "DB",
+        "environment": "UNKNOWN",
+        "status": "WARNING",
+        "cpu_pct": 92.0,
+        "memory_pct": 91.0,
+        "disk_pct": 10.0,
+        "has_timeseries": true,
+        "spike_note": "critical — Percentage CPU; peak 92.0.",
+        "correlation_note": "No Ctrl-M time-overlap evidence was supplied for this host."
+      }
+    ],
+    "unit_semantics": {
+      "cpu": "CPU utilisation % (higher = more pressure)",
+      "memory": "available memory % (lower = more pressure)",
+      "disk": "disk bandwidth consumed % (higher = more pressure)"
+    }
+  },
+  "correlation_rca": [],
+  "sow_capacity": {
+    "metrics": [
+      {
+        "name": "Daily DFU",
+        "commitment": 9000000.0,
+        "actual": 7968993.0,
+        "pct_of_contract": 88.5,
+        "capacity_buffer": null,
+        "status": "ACCEPTABLE"
+      }
+    ],
+    "interpretation": "none",
+    "reported_status": ""
+  },
+  "benchmark": {
+    "loaded": false,
+    "total_transactions": null,
+    "sla_breach_count": null,
+    "degraded_count": null,
+    "batch_perf_regression_count": null,
+    "batch_perf_total_jobs": null
+  },
+  "methodology": {
+    "job_sla_def": "Job SLA measures each job run against its resolved ceiling.",
+    "window_sla_def": "Window SLA measures each daily effective batch window against its resolved ceiling.",
+    "buffer_formula": "buffer_pct = (SLA hours - runtime hours) / SLA hours * 100",
+    "status_bands": {
+      "OK": ">40% buffer",
+      "LONG_JOB": "15-40% buffer",
+      "AT_RISK": "0-15% buffer",
+      "BREACH": "<=0% buffer"
+    },
+    "exclusion_rules": [],
+    "source_badges": [
+      "Ctrl-M batch",
+      "Azure Monitor",
+      "SOW volume"
+    ]
+  },
+  "prior_audit_ref": null,
+  "deltas": {
+    "state": "first_audit",
+    "message": "First archived audit for this customer; no prior baseline is available."
+  },
+  "validation": {
+    "errors": [],
+    "warnings": []
+  }
+}

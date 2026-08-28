@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PE Audit Report — NFM</title>
+<style>
+/* ============================================================
+   PE Audit Report — Grafana / Prometheus observability styling
+   100% self-contained (no CDN, no JS frameworks). Pure CSS +
+   inline SVG so it can be emailed, archived, and printed.
+   ============================================================ */
+:root[data-theme="dark"]{
+  --bg-page:#070b18; --bg-deep:#04060f;
+  --panel:#0e1627; --panel-2:#101a2e; --panel-top:#13203a;
+  --border:#1e2c4f; --border-soft:#16223d;
+  --ink:#eef3ff; --ink-2:#aab8d4; --ink-3:#6b7a9c;
+  --grid:#16213b;
+  --green:#10d96e; --amber:#f59e0b; --red:#f43f5e;
+  --blue:#3b82f6; --purple:#a855f7; --cyan:#22d3ee;
+  --track:rgba(255,255,255,.06);
+  --shadow:0 18px 48px -22px rgba(0,0,0,.85);
+  --glow:0 0 0 1px rgba(59,130,246,.12), 0 8px 30px -12px rgba(7,11,24,.9);
+}
+:root[data-theme="light"]{
+  --bg-page:#eef2f9; --bg-deep:#e3e9f4;
+  --panel:#ffffff; --panel-2:#f7f9fd; --panel-top:#eef3fb;
+  --border:#d4ddee; --border-soft:#e3e9f4;
+  --ink:#0d1730; --ink-2:#41506e; --ink-3:#7888a6;
+  --grid:#e7ecf6;
+  --green:#0a9b54; --amber:#c2790a; --red:#d4304b;
+  --blue:#2563eb; --purple:#8b3fd6; --cyan:#0e9cb8;
+  --track:rgba(13,23,48,.07);
+  --shadow:0 14px 38px -20px rgba(60,80,120,.35);
+  --glow:0 0 0 1px rgba(37,99,235,.10), 0 10px 28px -14px rgba(120,140,180,.4);
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg-page); color:var(--ink);
+  font-size:15px; line-height:1.5; letter-spacing:.1px;
+  -webkit-font-smoothing:antialiased; position:relative;
+}
+/* Ambient observability glow field */
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(59,130,246,.18), transparent 60%),
+    radial-gradient(820px 520px at 96% 4%, rgba(168,85,247,.14), transparent 58%),
+    radial-gradient(1000px 700px at 50% 118%, rgba(34,211,238,.10), transparent 60%),
+    linear-gradient(180deg,var(--bg-page),var(--bg-deep));
+}
+.tabnum{font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1;}
+.page{position:relative; z-index:1; max-width:1180px; margin:0 auto; padding:30px 30px 60px;}
+
+/* ── Toolbar (screen only) ───────────────────────────────── */
+.toolbar{display:flex; gap:10px; justify-content:flex-end; margin-bottom:18px;}
+.tbtn{
+  appearance:none; cursor:pointer; font-size:12.5px; font-weight:600;
+  color:var(--ink-2); background:var(--panel); border:1px solid var(--border);
+  border-radius:9px; padding:8px 14px; letter-spacing:.3px;
+  transition:.15s; display:inline-flex; align-items:center; gap:7px;
+}
+.tbtn:hover{color:var(--ink); border-color:var(--blue); box-shadow:0 0 0 3px rgba(59,130,246,.12);}
+
+/* ── Header ──────────────────────────────────────────────── */
+.rhead{
+  position:relative; overflow:hidden; border:1px solid var(--border);
+  border-radius:18px; padding:26px 28px;
+  background:
+    radial-gradient(540px 220px at 88% -40%, rgba(59,130,246,.28), transparent 62%),
+    linear-gradient(135deg,var(--panel-top),var(--panel));
+  box-shadow:var(--shadow); margin-bottom:18px;
+}
+.rhead::after{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:5px;
+  background:linear-gradient(180deg,var(--blue),var(--purple),var(--cyan));
+  box-shadow:0 0 22px 2px rgba(59,130,246,.55);
+}
+.rhead__row{display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap;}
+.brand{display:flex; align-items:center; gap:13px;}
+.brand__mark{
+  width:46px; height:46px; border-radius:12px; flex:0 0 auto;
+  display:grid; place-items:center; font-size:22px;
+  background:linear-gradient(140deg,rgba(59,130,246,.25),rgba(168,85,247,.22));
+  border:1px solid rgba(99,140,230,.45); box-shadow:inset 0 0 18px rgba(59,130,246,.25);
+}
+.brand__eyebrow{font-size:11px; font-weight:700; letter-spacing:2.4px; color:var(--cyan); text-transform:uppercase;}
+.brand__title{font-size:25px; font-weight:800; letter-spacing:.2px; margin-top:2px; line-height:1.15;}
+.rhead__meta{text-align:right; display:flex; flex-direction:column; gap:9px; align-items:flex-end;}
+.cust-eyebrow{font-size:10px; font-weight:700; letter-spacing:2px; color:var(--ink-3); text-transform:uppercase;}
+.cust-name{
+  font-size:26px; font-weight:800; letter-spacing:-.2px; line-height:1.15;
+  background:linear-gradient(120deg,var(--ink),var(--cyan));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.cust-source{font-size:10.5px; color:var(--ink-3); font-weight:600;}
+.chips{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;}
+.chip{
+  font-size:12px; font-weight:600; letter-spacing:.4px; padding:5px 11px; border-radius:999px;
+  background:var(--panel-2); border:1px solid var(--border); color:var(--ink-2);
+  display:inline-flex; align-items:center; gap:6px;
+}
+.chip b{color:var(--ink); font-weight:700;}
+.chip .dot{width:7px; height:7px; border-radius:50%; background:var(--cyan); box-shadow:0 0 8px 1px currentColor;}
+.prod-chips{display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-start; margin-top:2px;}
+.prod-chip{
+  font-size:10.5px; font-weight:600; padding:3px 9px; border-radius:999px;
+  background:rgba(168,85,247,.12); border:1px solid rgba(168,85,247,.4); color:#c084fc;
+}
+
+/* ── Verdict banner ──────────────────────────────────────── */
+.banner{
+  position:relative; overflow:hidden; margin-bottom:20px;
+  border:1px solid var(--border); border-radius:16px; padding:20px 24px;
+  background:linear-gradient(135deg, color-mix(in srgb, #22c55e 16%, var(--panel)) 0%, var(--panel) 60%);
+  box-shadow:var(--shadow); display:flex; align-items:center; gap:20px; flex-wrap:wrap;
+}
+.banner::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:6px;
+  background:#22c55e; box-shadow:0 0 26px 2px #22c55e;
+}
+.banner__badge{
+  width:58px; height:58px; border-radius:14px; flex:0 0 auto; display:grid; place-items:center;
+  font-size:26px; color:#22c55e;
+  background:color-mix(in srgb, #22c55e 18%, transparent);
+  border:1.5px solid color-mix(in srgb, #22c55e 55%, transparent);
+  box-shadow:inset 0 0 20px color-mix(in srgb, #22c55e 30%, transparent);
+}
+.banner__txt{flex:1 1 280px;}
+.banner__k{font-size:11px; font-weight:700; letter-spacing:2px; color:var(--ink-3); text-transform:uppercase;}
+.banner__v{font-size:23px; font-weight:800; color:#22c55e; margin-top:1px; letter-spacing:.3px;}
+.banner__date{text-align:right; color:var(--ink-3); font-size:12.5px; line-height:1.7;}
+.banner__date b{color:var(--ink-2); font-weight:600;}
+
+/* ── Stat grid (KPI panels) ──────────────────────────────── */
+.grid{display:grid; gap:16px;}
+.stat-grid{grid-template-columns:repeat(4,1fr); margin-bottom:18px;}
+.stat{
+  position:relative; overflow:hidden; border:1px solid var(--border); border-radius:15px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel)); box-shadow:var(--glow);
+  padding:18px 18px 16px; min-height:148px; display:flex; flex-direction:column;
+}
+.stat__top{height:3px; position:absolute; left:0; right:0; top:0; opacity:.95;}
+.stat__label{font-size:11.5px; font-weight:700; letter-spacing:1.4px; color:var(--ink-3); text-transform:uppercase;}
+.stat__body{display:flex; align-items:center; gap:16px; margin-top:auto; padding-top:10px;}
+.stat__value{font-size:42px; font-weight:800; line-height:1; letter-spacing:-.5px;}
+.stat__unit{font-size:18px; font-weight:700; color:var(--ink-3); margin-left:2px;}
+.stat__sub{font-size:12.5px; color:var(--ink-2); margin-top:8px; line-height:1.5;}
+.stat__sub .sep{color:var(--ink-3); margin:0 6px;}
+
+/* Conic-gradient gauge ring (pure CSS) */
+.gauge{
+  --deg:0; --gc:var(--blue);
+  width:108px; height:108px; flex:0 0 auto; border-radius:50%; position:relative;
+  background:conic-gradient(var(--gc) calc(var(--deg)*1deg), var(--track) 0);
+  display:grid; place-items:center;
+  box-shadow:0 0 26px -6px var(--gc), inset 0 0 0 1px rgba(255,255,255,.04);
+}
+.gauge::after{
+  content:""; position:absolute; inset:11px; border-radius:50%;
+  background:radial-gradient(circle at 50% 38%, var(--panel-2), var(--panel));
+  border:1px solid var(--border-soft);
+}
+.gauge__in{position:relative; z-index:1; text-align:center;}
+.gauge__big{font-size:27px; font-weight:800; line-height:1;}
+.gauge__cap{font-size:10.5px; font-weight:700; letter-spacing:.8px; color:var(--ink-3); margin-top:3px; text-transform:uppercase;}
+
+/* ── Section panel ───────────────────────────────────────── */
+.panel{
+  position:relative; border:1px solid var(--border); border-radius:16px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));
+  box-shadow:var(--shadow); margin-bottom:18px; overflow:hidden;
+}
+.panel__head{
+  display:flex; align-items:center; gap:13px; padding:16px 20px;
+  border-bottom:1px solid var(--border-soft);
+  background:linear-gradient(90deg, color-mix(in srgb,var(--accent,#3b82f6) 10%, transparent), transparent 55%);
+}
+.panel__icon{
+  width:38px; height:38px; border-radius:11px; flex:0 0 auto; display:grid; place-items:center; font-size:19px;
+  background:color-mix(in srgb,var(--accent,#3b82f6) 16%, transparent);
+  border:1px solid color-mix(in srgb,var(--accent,#3b82f6) 45%, transparent);
+  color:var(--accent,#3b82f6); box-shadow:inset 0 0 16px color-mix(in srgb,var(--accent,#3b82f6) 22%, transparent);
+}
+.panel__t{font-size:16.5px; font-weight:700; letter-spacing:.2px;}
+.panel__s{font-size:12px; color:var(--ink-3); margin-top:2px;}
+.panel__count{margin-left:auto; font-size:12px; font-weight:700; color:var(--ink-2);
+  background:var(--panel); border:1px solid var(--border); border-radius:999px; padding:5px 12px;}
+.panel__body{padding:18px 20px;}
+
+/* ── Health distribution bar ─────────────────────────────── */
+.hbar{height:30px; border-radius:9px; overflow:hidden; display:flex; background:var(--track);
+  border:1px solid var(--border-soft); box-shadow:inset 0 1px 4px rgba(0,0,0,.3);}
+.hbar__seg{height:100%; display:flex; align-items:center; justify-content:center;
+  font-size:12px; font-weight:800; color:#04060f; letter-spacing:.3px; transition:width .3s; min-width:0;}
+.seg-crit{background:linear-gradient(180deg,#ff5c78,var(--red)); box-shadow:0 0 18px -2px var(--red);}
+.seg-warn{background:linear-gradient(180deg,#ffc34d,var(--amber)); box-shadow:0 0 18px -2px var(--amber);}
+.seg-ok{background:linear-gradient(180deg,#3df59a,var(--green)); box-shadow:0 0 18px -2px var(--green);}
+.legend{display:flex; gap:20px; flex-wrap:wrap; margin-top:14px;}
+.legend__i{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--ink-2);}
+.legend__i b{color:var(--ink); font-weight:800; font-size:15px;}
+.legend .dot{width:11px; height:11px; border-radius:3px; box-shadow:0 0 9px 1px currentColor;}
+.dot-crit{background:var(--red); color:var(--red);}
+.dot-warn{background:var(--amber); color:var(--amber);}
+.dot-ok{background:var(--green); color:var(--green);}
+
+/* ── Tables ──────────────────────────────────────────────── */
+table{width:100%; border-collapse:separate; border-spacing:0; font-size:13.5px;}
+thead th{
+  text-align:left; font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+  color:var(--ink-3); padding:11px 14px; border-bottom:1px solid var(--border);
+  background:var(--panel-top); position:sticky; top:0;
+}
+tbody td{padding:12px 14px; border-bottom:1px solid var(--border-soft); color:var(--ink-2); vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr{transition:background .12s;}
+tbody tr:hover td{background:color-mix(in srgb,var(--blue) 7%, transparent);}
+td b, .host-cell b{color:var(--ink); font-weight:700;}
+.host-cell{line-height:1.35;}
+.dim{color:var(--ink-3); font-size:11.5px;}
+.num{font-variant-numeric:tabular-nums; font-weight:700; color:var(--ink);}
+
+/* Tags / severity pills */
+.tag{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:700;
+  letter-spacing:.3px; padding:4px 10px; border-radius:999px; white-space:nowrap;
+  border:1px solid transparent;}
+.tag::before{content:""; width:6px; height:6px; border-radius:50%; background:currentColor; box-shadow:0 0 7px 1px currentColor;}
+.tag-green{color:var(--green); background:color-mix(in srgb,var(--green) 15%, transparent); border-color:color-mix(in srgb,var(--green) 40%, transparent);}
+.tag-amber{color:var(--amber); background:color-mix(in srgb,var(--amber) 15%, transparent); border-color:color-mix(in srgb,var(--amber) 40%, transparent);}
+.tag-red{color:var(--red); background:color-mix(in srgb,var(--red) 16%, transparent); border-color:color-mix(in srgb,var(--red) 42%, transparent);}
+.tag-blue{color:var(--blue); background:color-mix(in srgb,var(--blue) 15%, transparent); border-color:color-mix(in srgb,var(--blue) 40%, transparent);}
+.tag-cyan{color:var(--cyan); background:color-mix(in srgb,var(--cyan) 15%, transparent); border-color:color-mix(in srgb,var(--cyan) 40%, transparent);}
+.tag-gray{color:var(--ink-3); background:var(--track); border-color:var(--border);}
+.tag::before{display:inline-block;}
+.tag-gray::before{box-shadow:none;}
+
+.empty{padding:26px; text-align:center; color:var(--ink-3); font-size:13.5px;}
+
+/* ── Checklist ───────────────────────────────────────────── */
+.check-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:11px;}
+.check{display:flex; align-items:center; gap:11px; padding:12px 15px; border-radius:11px;
+  background:var(--panel); border:1px solid var(--border-soft); font-size:13.5px; color:var(--ink-2);}
+.check__mark{width:22px; height:22px; border-radius:50%; flex:0 0 auto; display:grid; place-items:center;
+  font-size:12px; font-weight:800;}
+.check--on .check__mark{color:var(--green); background:color-mix(in srgb,var(--green) 18%, transparent);
+  border:1px solid color-mix(in srgb,var(--green) 45%, transparent); box-shadow:0 0 10px -2px var(--green);}
+.check--off .check__mark{color:var(--ink-3); background:var(--track); border:1px solid var(--border);}
+.check--on{color:var(--ink);}
+.check--mismatch{border-color:color-mix(in srgb,var(--amber) 45%, var(--border-soft));}
+.check--mismatch .check__mark{color:var(--amber); background:color-mix(in srgb,var(--amber) 18%, transparent);
+  border:1px solid color-mix(in srgb,var(--amber) 55%, transparent); box-shadow:0 0 10px -2px var(--amber);}
+
+/* ── Approval ────────────────────────────────────────────── */
+.appr-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+.appr{border:1px solid var(--border); border-radius:14px; padding:18px 20px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));}
+.appr__role{font-size:11px; font-weight:700; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink-3);}
+.appr__name{font-size:18px; font-weight:700; margin-top:7px; color:var(--ink);}
+.appr__status{margin-top:14px; display:flex; align-items:center; gap:9px; font-size:13.5px; font-weight:700;}
+.appr__line{margin-top:16px; border-top:1px dashed var(--border); padding-top:9px;
+  font-size:12px; color:var(--ink-3);}
+.notes{margin-top:16px; border:1px solid var(--border); border-radius:12px; padding:15px 18px;
+  background:var(--panel); font-size:13.5px; color:var(--ink-2); line-height:1.6;}
+.notes b{color:var(--cyan); font-weight:700; letter-spacing:.4px;}
+
+/* ── Footer ──────────────────────────────────────────────── */
+.foot{margin-top:26px; padding-top:18px; border-top:1px solid var(--border);
+  display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap;
+  font-size:11.5px; color:var(--ink-3);}
+.foot code{color:var(--ink-2); background:var(--panel); border:1px solid var(--border-soft);
+  border-radius:5px; padding:2px 7px; font-size:11px;}
+
+@media (max-width:880px){
+  .stat-grid{grid-template-columns:repeat(2,1fr);}
+  .check-grid,.appr-grid{grid-template-columns:1fr;}
+}
+/* ── Print / PDF ─────────────────────────────────────────── */
+@page{size:A4; margin:14mm;}
+@media print{
+  body{background:#fff; color:#0d1730; font-size:11.5px;}
+  body::before{display:none;}
+  .toolbar{display:none !important;}
+  .page{max-width:none; padding:0;}
+  .rhead,.banner,.stat,.panel,.appr{box-shadow:none; break-inside:avoid;}
+  .panel,.stat-grid,.appr-grid{break-inside:avoid;}
+  thead th{position:static;}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="toolbar">
+    <button class="tbtn" onclick="toggleTheme()">◐ Theme</button>
+    <button class="tbtn" onclick="window.print()">⎙ Print / PDF</button>
+  </div>
+
+  <!-- Additive evidence record. The original header immediately below is locked. -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">▣</div>
+      <div>
+        <div class="panel__t">Audit Evidence Record</div>
+        <div class="panel__s">Frozen from the loaded dashboard evidence; the report does not fetch Azure again.</div>
+      </div>
+      <div class="panel__count">Reviewed</div>
+    </div>
+    <div class="panel__body" style="display:flex;gap:10px 22px;flex-wrap:wrap;padding:13px 20px;font-size:12.5px;">
+      <span><b>Customer:</b> NFM</span>
+      <span><b>Audit ID:</b> <span class="num">AUD-20260828T130120Z-8FEA41B6</span></span>
+      <span><b>Window:</b> 2026-07-26 → 2026-08-24</span>
+      <span><b>Generated:</b> 28 Aug 2026, 06:31 PM</span>
+      <span><b>Sources:</b> <span class="tag tag-cyan" style="font-size:9.5px;padding:2px 7px;margin-left:4px;">Ctrl-M batch</span><span class="tag tag-cyan" style="font-size:9.5px;padding:2px 7px;margin-left:4px;">Azure Monitor</span><span class="tag tag-cyan" style="font-size:9.5px;padding:2px 7px;margin-left:4px;">SOW volume</span></span>
+    </div>
+  </section>
+
+  <section class="panel" style="--accent:#f59e0b;">
+    <div class="panel__body" style="padding:13px 20px;">
+      <div class="panel__t" style="font-size:14px;color:var(--amber);">Executive evidence summary</div>
+      <div style="margin-top:4px;color:var(--ink-2);">Batch SLA 100.0% (0 breach(es)); resource fleet Grade ?; SOW UNDER-UTILISED.</div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-soft);">
+        <div class="dim" style="font-weight:700;letter-spacing:1px;text-transform:uppercase;">Priority action plan</div>
+        <div style="margin-top:4px;color:var(--ink-2);"><div style='display:flex;gap:10px;align-items:flex-start;margin:7px 0'><span class='tag tag-amber'>P3</span><span>Review SOW volume status: LOW.</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header class="rhead">
+    <div class="rhead__row">
+      <div class="brand">
+        <div class="brand__mark">📊</div>
+        <div>
+          <div class="brand__eyebrow">Performance Engineering</div>
+          <div class="brand__title">Audit &amp; Sign-off Report</div>
+        </div>
+      </div>
+      <div class="rhead__meta">
+        <div class="cust-eyebrow">Customer</div>
+        <div class="cust-name">NFM</div>
+        
+        <div class="cust-source">Sourced from Ctrl-M filename</div>
+        
+        
+        <div class="chips">
+          <span class="chip"><span class="dot"></span>TEST</span>
+          <span class="chip">Generated <b>28 Aug 2026, 06:31 PM</b></span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Verdict banner ─────────────────────────────────── -->
+  <section class="banner">
+    <div class="banner__badge">✓</div>
+    <div class="banner__txt">
+      <div class="banner__k">Overall Sign-off Verdict</div>
+      <div class="banner__v">APPROVED</div>
+    </div>
+    <div class="banner__date">
+      <div><b>Customer:</b> NFM</div>
+      <div><b>Environment:</b> TEST</div>
+      <div><b>Report date:</b> 28 Aug 2026, 06:31 PM</div>
+    </div>
+  </section>
+
+  <!-- ── KPI stat panels ────────────────────────────────── -->
+  <div class="grid stat-grid">
+
+    <div class="stat">
+      <div class="stat__top" style="background:#22c55e;box-shadow:0 0 16px #22c55e;"></div>
+      <div class="stat__label">Batch SLA Compliance</div>
+      <div class="stat__body">
+        <div class="gauge" style="--deg:360.0;--gc:#22c55e;">
+          <div class="gauge__in">
+            <div class="gauge__big tabnum" style="color:#22c55e;">100.0%</div>
+            <div class="gauge__cap">Window</div>
+          </div>
+        </div>
+        <div>
+          <div class="stat__sub"><span class="num">17</span> jobs on-time</div>
+          <div class="stat__sub"><span class="num" style="color:#10d96e;">0</span> breaching</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:var(--blue);box-shadow:0 0 16px var(--blue);"></div>
+      <div class="stat__label">Batch Workload</div>
+      <div class="stat__body">
+        <div>
+          <span class="stat__value tabnum">17</span><span class="stat__unit">jobs</span>
+          <div class="stat__sub"><span class="num">1804</span> runs<span class="sep">•</span><span class="num">146.31</span> h runtime</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:#6b7a99;box-shadow:0 0 16px #6b7a99;"></div>
+      <div class="stat__label">Fleet Health</div>
+      <div class="stat__body">
+        <div class="gauge" style="--deg:0.0;--gc:#6b7a99;">
+          <div class="gauge__in">
+            <div class="gauge__big" style="color:#6b7a99;">?</div>
+            <div class="gauge__cap tabnum">0.0/100</div>
+          </div>
+        </div>
+        <div>
+          <div class="stat__sub"><span class="num">11</span> servers</div>
+          <div class="stat__sub">over 15-day window</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:#10d96e;box-shadow:0 0 16px #10d96e;"></div>
+      <div class="stat__label">Open Issues</div>
+      <div class="stat__body">
+        <div>
+          <span class="stat__value tabnum" style="color:#10d96e;">0</span>
+          <div class="stat__sub">none outstanding</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Fleet severity distribution ────────────────────── -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">🩺</div>
+      <div>
+        <div class="panel__t">Fleet Severity Distribution</div>
+        <div class="panel__s">11 server(s) graded over the last 15 days</div>
+      </div>
+      <div class="panel__count">Grade ? · 0.0/100</div>
+    </div>
+    <div class="panel__body">
+      <div class="hbar">
+        
+        
+        <div class="hbar__seg seg-ok" style="width:100.0%;">11</div>
+      </div>
+      <div class="legend">
+        <span class="legend__i"><span class="dot dot-crit"></span>Critical <b>0</b></span>
+        <span class="legend__i"><span class="dot dot-warn"></span>Warning <b>0</b></span>
+        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>11</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Batch performance ──────────────────────────────── -->
+  <section class="panel" style="--accent:#3b82f6;">
+    <div class="panel__head">
+      <div class="panel__icon">⚙️</div>
+      <div>
+        <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
+        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the 11.0h configured default · buffer = (SLA − runtime) ÷ SLA</div>
+      </div>
+      <div class="panel__count">17 jobs</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <div style="padding:13px 20px 4px;border-bottom:1px solid var(--border-soft);">
+        <div class="dim" style="font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;">Job cadence &amp; runtime profile</div>
+        <svg viewBox='0 0 760 262' width='100%' height='262' role='img' aria-label='Job cadence and peak runtime profile'><text x='8' y='14' fill='var(--ink-3)' font-size='10'>Job cadence and peak runtime (hours)</text><text x='8' y='39' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_JOB_WKLY_2</text><rect x='260' y='28' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='28' width='360.0' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='38' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 8.13h</text><text x='8' y='58' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_JOB_QTRLY_2</text><rect x='260' y='47' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='47' width='223.8' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='57' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 5.06h</text><text x='8' y='77' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_DLY_2</text><rect x='260' y='66' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='66' width='115.7' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='76' fill='#10d96e' font-size='10' font-weight='700'>Daily · 2.61h</text><text x='8' y='96' fill='var(--ink-2)' font-size='10'>DB_Backup_D</text><rect x='260' y='85' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='85' width='61.3' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='95' fill='#10d96e' font-size='10' font-weight='700'>Daily · 1.38h</text><text x='8' y='115' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_DLY_1</text><rect x='260' y='104' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='104' width='44.8' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='114' fill='#10d96e' font-size='10' font-weight='700'>Daily · 1.01h</text><text x='8' y='134' fill='var(--ink-2)' font-size='10'>DB_Backup_W</text><rect x='260' y='123' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='123' width='42.9' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='133' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.97h</text><text x='8' y='153' fill='var(--ink-2)' font-size='10'>DB_Backup_M</text><rect x='260' y='142' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='142' width='42.9' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='152' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.97h</text><text x='8' y='172' fill='var(--ink-2)' font-size='10'>JDA_MAINTENANCE_WKLY</text><rect x='260' y='161' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='161' width='20.5' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='171' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.46h</text><text x='8' y='191' fill='var(--ink-2)' font-size='10'>JDA_MAINTENANCE_QTRLY</text><rect x='260' y='180' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='180' width='19.7' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='190' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.45h</text><text x='8' y='210' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_JOB_WKLY_1</text><rect x='260' y='199' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='199' width='19.7' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='209' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.44h</text><text x='8' y='229' fill='var(--ink-2)' font-size='10'>JDA_MAINTENANCE_DLY</text><rect x='260' y='218' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='218' width='17.8' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='228' fill='#10d96e' font-size='10' font-weight='700'>Daily · 0.40h</text><text x='8' y='248' fill='var(--ink-2)' font-size='10'>JDA_DATA_JOB_LOAD_WKLY</text><rect x='260' y='237' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='237' width='16.4' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='247' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.37h</text></svg>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th>
+        </tr></thead>
+        <tbody><tr>
+          <td><b>JDA_PROCESSING_JOB_WKLY_2</b></td>
+          <td >8.133h</td>
+          <td class="dim">6.118h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>37.4%</td>
+          <td><span class="tag tag-amber">LONG JOB</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_JOB_QTRLY_2</b></td>
+          <td >5.057h</td>
+          <td class="dim">5.057h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>61.1%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_DLY_2</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >2.613h</td>
+          <td class="dim">2.220h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>76.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>DB_Backup_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >1.384h</td>
+          <td class="dim">0.896h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>87.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_DLY_1</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >1.013h</td>
+          <td class="dim">0.239h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>90.8%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>DB_Backup_W</b></td>
+          <td >0.969h</td>
+          <td class="dim">0.879h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>92.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>DB_Backup_M</b></td>
+          <td >0.969h</td>
+          <td class="dim">0.969h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>92.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_MAINTENANCE_WKLY</b></td>
+          <td >0.464h</td>
+          <td class="dim">0.450h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_MAINTENANCE_QTRLY</b></td>
+          <td >0.445h</td>
+          <td class="dim">0.445h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_JOB_WKLY_1</b></td>
+          <td >0.444h</td>
+          <td class="dim">0.217h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_MAINTENANCE_DLY</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.402h</td>
+          <td class="dim">0.206h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.3%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_DATA_JOB_LOAD_WKLY</b></td>
+          <td >0.371h</td>
+          <td class="dim">0.354h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.1%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_DATA_LOAD_DLY</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.277h</td>
+          <td class="dim">0.215h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_DATA_LOAD_JOB_QTRLY</b></td>
+          <td >0.213h</td>
+          <td class="dim">0.213h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PO_EXTRACT_DAILY</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.004h</td>
+          <td class="dim">0.001h</td>
+          <td class="dim">16.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>100.0%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Daily_Filewatcher</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >2.321h</td>
+          <td class="dim">1.080h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>78.9%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Weekly_Filewatcher</b></td>
+          <td >2.164h</td>
+          <td class="dim">0.742h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>83.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Monthly_Filewatcher</b></td>
+          <td >1.499h</td>
+          <td class="dim">1.499h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>88.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Backup_Zip</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.000h</td>
+          <td class="dim">0.000h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>100.0%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Backup_Zip</b></td>
+          <td >0.000h</td>
+          <td class="dim">0.000h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>100.0%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr></tbody>
+      </table>
+      
+    </div>
+  </section>
+
+  <!-- ── Infrastructure ─────────────────────────────────── -->
+  <section class="panel" style="--accent:#a855f7;">
+    <div class="panel__head">
+      <div class="panel__icon">🖥️</div>
+      <div>
+        <div class="panel__t">Infrastructure Utilisation</div>
+        <div class="panel__s">Role-aware grading — CPU ceilings APP 60/80 · DB 85/95 · SRE 90/100 (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band 80–92% &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
+      </div>
+      <div class="panel__count">11 servers</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <table>
+        <thead><tr>
+          <th>Host</th><th>Role</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Health</th>
+        </tr></thead>
+        <tbody><tr>
+          <td class="host-cell"><b>tsbf141403001</b><br><span class="dim">tsbf141403001 &middot; 132 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">78.6%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">86.1%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141403011</b><br><span class="dim">tsbf141403011 &middot; 68 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">18.3%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">92.0%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141403021</b><br><span class="dim">tsbf141403021</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="dim">—</span></td><td><span class="dim">—</span></td><td><span class="dim">—</span></td>
+          <td><span class="tag tag-gray">IMAGE ONLY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141425011</b><br><span class="dim">tsbf141425011 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">6.7%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">27.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141430001</b><br><span class="dim">tsbf141430001 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">3.5%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">36.5%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141430011</b><br><span class="dim">tsbf141430011 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">3.8%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">21.2%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141431001</b><br><span class="dim">tsbf141431001 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">5.6%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">42.6%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-green">0.3%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/85</div></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141402001</b><br><span class="dim">tsbf141402001 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">3.0%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">30.4%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141402002</b><br><span class="dim">tsbf141402002 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">2.6%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">28.0%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141402011</b><br><span class="dim">tsbf141402011 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">3.7%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">40.2%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141402012</b><br><span class="dim">tsbf141402012 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">3.7%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">39.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr></tbody>
+      </table>
+      <div style="border-top:1px solid var(--border);padding:14px 20px 0;">
+        <div class="panel__t" style="font-size:14px;">Per-host trend &amp; Ctrl-M overlap evidence</div>
+        <div class="panel__s" style="margin-bottom:10px;">Inline CPU, available-memory, and disk trend snippets from the loaded deep-dive window. Ctrl-M overlap is time coincidence only; it is not proof of cause.</div>
+      </div>
+      <table>
+        <thead><tr><th>Host</th><th>Trend snippet</th><th>Spike / Ctrl-M evidence</th></tr></thead>
+        <tbody><tr><td colspan='3' style='padding:9px 14px;background:var(--panel-top);color:var(--cyan);font-size:11px;font-weight:700;letter-spacing:1px;'>ROLE · DB</td></tr><tr><td class='host-cell'><b>tsbf141403001</b><br><span class='dim'>tsbf141403001</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,11.3 7.7,33.0 12.4,29.9 17.1,32.9 21.7,31.5 26.4,34.0 31.1,33.5 35.8,15.2 40.5,33.0 45.2,29.2 49.9,33.0 54.5,31.7 59.2,24.9 63.9,33.3 68.6,12.6 73.3,32.9 78.0,29.0 82.7,33.2 87.3,31.0 92.0,28.9 96.7,30.8 101.4,29.7 106.1,30.9 110.8,28.8 115.5,4.0 120.1,32.2 124.8,33.6 129.5,33.6 134.2,6.5 138.9,33.2 143.6,29.1 148.3,33.3 152.9,33.1 157.6,31.0 162.3,33.1 167.0,8.1" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,17.8 7.7,14.1 12.4,14.1 17.1,13.5 21.7,4.0 26.4,14.1 31.1,14.1 35.8,14.2 40.5,26.8 45.2,34.0 49.9,23.7 54.5,12.6 59.2,14.7 63.9,14.1 68.6,17.9 73.3,14.2 78.0,16.3 82.7,14.1 87.3,11.6 92.0,13.4 96.7,14.1 101.4,14.3 106.1,14.2 110.8,14.2 115.5,14.1 120.1,14.1 124.8,14.1 129.5,14.1 134.2,14.5 138.9,14.1 143.6,14.3 148.3,14.1 152.9,14.1 157.6,14.6 162.3,14.1 167.0,17.2" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,34.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,4.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>WARNING peak 92.0%. Ctrl-M overlap: 2 — time overlap only, not proof of cause.</td></tr><tr><td class='host-cell'><b>tsbf141403011</b><br><span class='dim'>tsbf141403011</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,4.0 7.7,32.2 12.4,30.5 17.1,32.4 21.7,28.0 26.4,32.3 31.1,34.0 35.8,11.2 40.5,33.7 45.2,33.2 49.9,33.7 54.5,29.5 59.2,33.7 63.9,33.7 68.6,7.3 73.3,33.5 78.0,33.2 82.7,33.8 87.3,30.6 92.0,10.5 96.7,31.2 101.4,28.3 106.1,33.5 110.8,33.3 115.5,33.8 120.1,33.7 124.8,31.1 129.5,33.7 134.2,28.4 138.9,33.7 143.6,33.3 148.3,33.8 152.9,33.6 157.6,28.6 162.3,33.7 167.0,29.5" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,32.6 7.7,28.7 12.4,20.4 17.1,20.5 21.7,26.5 26.4,12.4 31.1,4.0 35.8,29.4 40.5,28.6 45.2,28.6 49.9,28.6 54.5,34.0 59.2,20.4 63.9,20.4 68.6,25.0 73.3,20.4 78.0,20.4 82.7,12.2 87.3,11.4 92.0,24.6 96.7,20.4 101.4,12.3 106.1,20.4 110.8,20.4 115.5,20.9 120.1,28.3 124.8,15.5 129.5,20.4 134.2,12.2 138.9,20.4 143.6,20.4 148.3,20.4 152.9,20.4 157.6,21.3 162.3,20.4 167.0,12.2" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,4.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,27.9 59.2,34.0 63.9,34.0 68.6,34.0 73.3,34.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>CRITICAL SUSTAINED peak 98.5%. Ctrl-M overlap: 1 — time overlap only, not proof of cause.</td></tr><tr><td class='host-cell'><b>tsbf141403021</b><br><span class='dim'>tsbf141403021</span></td><td><span class='dim'>No CPU, memory, or disk samples supplied</span><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>Time-series evidence unavailable for tsbf141403021 in this export. No Ctrl-M overlap was recorded for the loaded spike windows.</td></tr><tr><td colspan='3' style='padding:9px 14px;background:var(--panel-top);color:var(--cyan);font-size:11px;font-weight:700;letter-spacing:1px;'>ROLE · APP</td></tr><tr><td class='host-cell'><b>tsbf141402001</b><br><span class='dim'>tsbf141402001</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,33.8 7.7,33.9 12.4,33.8 17.1,32.3 21.7,32.2 26.4,33.9 31.1,34.0 35.8,34.0 40.5,34.0 45.2,33.9 49.9,33.9 54.5,32.4 59.2,32.7 63.9,34.0 68.6,34.0 73.3,33.9 78.0,33.9 82.7,33.9 87.3,32.5 92.0,33.4 96.7,34.0 101.4,33.9 106.1,34.0 110.8,34.0 115.5,30.4 120.1,34.0 124.8,33.9 129.5,34.0 134.2,33.9 138.9,4.0 143.6,34.0 148.3,33.9 152.9,34.0 157.6,33.4 162.3,33.9 167.0,33.7" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,22.3 7.7,30.7 12.4,22.3 17.1,10.0 21.7,9.4 26.4,27.3 31.1,17.3 35.8,4.0 40.5,29.0 45.2,5.7 49.9,27.3 54.5,14.9 59.2,27.3 63.9,29.0 68.6,15.7 73.3,29.0 78.0,4.0 82.7,27.3 87.3,26.0 92.0,29.0 96.7,30.7 101.4,4.0 106.1,29.0 110.8,4.0 115.5,31.8 120.1,34.0 124.8,17.3 129.5,17.3 134.2,15.7 138.9,29.0 143.6,4.0 148.3,30.7 152.9,30.7 157.6,30.7 162.3,30.7 167.0,8.9" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,34.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,4.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>No detected spike in the loaded deep-dive window. No Ctrl-M overlap was recorded for the loaded spike windows.</td></tr><tr><td class='host-cell'><b>tsbf141402002</b><br><span class='dim'>tsbf141402002</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,33.5 21.7,33.6 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,33.6 59.2,33.5 63.9,34.0 68.6,34.0 73.3,4.0 78.0,34.0 82.7,34.0 87.3,33.6 92.0,33.8 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,33.7 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,33.8 162.3,33.9 167.0,34.0" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,19.0 7.7,12.3 12.4,12.7 17.1,12.9 21.7,10.1 26.4,30.7 31.1,4.0 35.8,4.0 40.5,29.0 45.2,5.7 49.9,30.7 54.5,14.4 59.2,29.8 63.9,30.7 68.6,5.7 73.3,32.3 78.0,5.7 82.7,32.3 87.3,14.6 92.0,30.7 96.7,32.3 101.4,7.3 106.1,32.3 110.8,7.3 115.5,30.7 120.1,32.3 124.8,12.3 129.5,12.3 134.2,9.0 138.9,34.0 143.6,12.3 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,9.7" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,4.0 21.7,29.7 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,29.7 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,21.1 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>WARNING peak 76.9%. Ctrl-M overlap: 25 — time overlap only, not proof of cause.</td></tr><tr><td class='host-cell'><b>tsbf141402011</b><br><span class='dim'>tsbf141402011</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,4.0 7.7,5.2 12.4,6.7 17.1,10.1 21.7,9.2 26.4,19.9 31.1,16.7 35.8,34.0 40.5,28.0 45.2,16.4 49.9,18.1 54.5,16.2 59.2,17.2 63.9,26.0 68.6,31.0 73.3,18.0 78.0,18.2 82.7,20.3 87.3,17.4 92.0,18.1 96.7,18.6 101.4,23.1 106.1,17.1 110.8,23.3 115.5,20.1 120.1,19.8 124.8,22.3 129.5,17.5 134.2,18.1 138.9,17.7 143.6,18.4 148.3,19.2 152.9,16.9 157.6,12.6 162.3,15.3 167.0,16.0" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,5.9 7.7,22.6 12.4,5.9 17.1,21.7 21.7,22.1 26.4,5.9 31.1,4.4 35.8,4.0 40.5,22.1 45.2,4.6 49.9,21.7 54.5,21.7 59.2,21.6 63.9,21.7 68.6,5.4 73.3,21.7 78.0,5.1 82.7,20.0 87.3,34.0 92.0,4.5 96.7,22.1 101.4,4.9 106.1,21.7 110.8,5.2 115.5,22.6 120.1,22.6 124.8,5.4 129.5,22.1 134.2,5.4 138.9,22.1 143.6,5.1 148.3,22.1 152.9,22.6 157.6,20.7 162.3,7.8 167.0,7.8" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,4.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,34.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>No detected spike in the loaded deep-dive window. No Ctrl-M overlap was recorded for the loaded spike windows.</td></tr><tr><td class='host-cell'><b>tsbf141402012</b><br><span class='dim'>tsbf141402012</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,32.7 7.7,32.7 12.4,32.8 17.1,33.0 21.7,33.0 26.4,33.5 31.1,33.4 35.8,34.0 40.5,33.7 45.2,33.3 49.9,33.3 54.5,33.3 59.2,33.3 63.9,33.7 68.6,33.9 73.3,33.4 78.0,33.4 82.7,33.5 87.3,33.4 92.0,33.4 96.7,33.4 101.4,33.6 106.1,33.4 110.8,33.7 115.5,33.5 120.1,33.5 124.8,33.7 129.5,33.4 134.2,33.4 138.9,4.0 143.6,33.4 148.3,33.4 152.9,33.3 157.6,33.1 162.3,33.3 167.0,33.3" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,6.2 7.7,25.3 12.4,5.7 17.1,24.8 21.7,24.9 26.4,5.7 31.1,4.5 35.8,4.0 40.5,24.2 45.2,4.8 49.9,24.2 54.5,24.7 59.2,24.7 63.9,24.7 68.6,5.1 73.3,24.7 78.0,4.5 82.7,24.7 87.3,24.7 92.0,4.7 96.7,24.7 101.4,4.5 106.1,24.7 110.8,4.9 115.5,24.6 120.1,24.7 124.8,5.2 129.5,24.7 134.2,5.7 138.9,34.0 143.6,5.0 148.3,24.8 152.9,24.8 157.6,24.7 162.3,5.7 167.0,6.2" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,34.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,34.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>No detected spike in the loaded deep-dive window. No Ctrl-M overlap was recorded for the loaded spike windows.</td></tr><tr><td colspan='3' style='padding:9px 14px;background:var(--panel-top);color:var(--cyan);font-size:11px;font-weight:700;letter-spacing:1px;'>ROLE · SRE</td></tr><tr><td class='host-cell'><b>tsbf141425011</b><br><span class='dim'>tsbf141425011</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,16.9 7.7,30.7 12.4,30.9 17.1,32.3 21.7,31.5 26.4,34.0 31.1,19.1 35.8,14.3 40.5,21.8 45.2,16.8 49.9,17.3 54.5,16.5 59.2,18.0 63.9,20.6 68.6,14.6 73.3,17.8 78.0,17.3 82.7,18.5 87.3,17.6 92.0,12.5 96.7,17.7 101.4,18.9 106.1,17.5 110.8,20.2 115.5,18.9 120.1,18.1 124.8,19.8 129.5,17.2 134.2,18.0 138.9,17.7 143.6,17.8 148.3,18.2 152.9,17.0 157.6,4.0 162.3,16.4 167.0,16.3" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,21.7 12.4,28.9 17.1,20.6 21.7,24.3 26.4,29.8 31.1,4.0 35.8,25.9 40.5,19.7 45.2,27.1 49.9,20.3 54.5,22.5 59.2,19.6 63.9,23.4 68.6,32.0 73.3,21.5 78.0,25.2 82.7,20.4 87.3,30.8 92.0,28.7 96.7,23.4 101.4,24.3 106.1,21.5 110.8,28.9 115.5,19.8 120.1,22.5 124.8,29.9 129.5,21.5 134.2,24.3 138.9,21.5 143.6,25.3 148.3,20.6 152.9,22.5 157.6,23.0 162.3,22.5 167.0,23.4" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,34.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,34.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>No detected spike in the loaded deep-dive window. No Ctrl-M overlap was recorded for the loaded spike windows.</td></tr><tr><td class='host-cell'><b>tsbf141430001</b><br><span class='dim'>tsbf141430001</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,31.0 7.7,33.8 12.4,33.7 17.1,33.2 21.7,32.6 26.4,33.8 31.1,33.8 35.8,33.0 40.5,34.0 45.2,33.7 49.9,33.8 54.5,32.5 59.2,32.9 63.9,33.9 68.6,32.7 73.3,33.8 78.0,33.7 82.7,33.8 87.3,24.0 92.0,23.1 96.7,4.0 101.4,33.8 106.1,33.8 110.8,33.8 115.5,33.4 120.1,33.7 124.8,33.8 129.5,33.8 134.2,33.7 138.9,33.8 143.6,33.8 148.3,33.8 152.9,33.8 157.6,33.0 162.3,33.8 167.0,33.7" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,23.7 7.7,11.6 12.4,16.0 17.1,9.6 21.7,11.0 26.4,24.0 31.1,10.8 35.8,18.0 40.5,4.0 45.2,14.4 49.9,8.4 54.5,8.7 59.2,23.3 63.9,8.4 68.6,22.7 73.3,10.8 78.0,15.8 82.7,10.8 87.3,9.3 92.0,16.6 96.7,9.3 101.4,17.6 106.1,11.2 110.8,18.1 115.5,32.6 120.1,34.0 124.8,11.2 129.5,12.0 134.2,23.6 138.9,11.2 143.6,18.4 148.3,10.8 152.9,11.6 157.6,14.9 162.3,11.6 167.0,22.4" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,4.0 21.7,29.7 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,29.7 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>CRITICAL SUSTAINED peak 98.3%. Ctrl-M overlap: 39 — time overlap only, not proof of cause.</td></tr><tr><td class='host-cell'><b>tsbf141430011</b><br><span class='dim'>tsbf141430011</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,13.7 7.7,30.8 12.4,31.3 17.1,32.0 21.7,31.9 26.4,33.4 31.1,33.8 35.8,29.2 40.5,34.0 45.2,32.6 49.9,32.8 54.5,32.6 59.2,33.0 63.9,33.9 68.6,8.6 73.3,32.8 78.0,32.5 82.7,33.3 87.3,32.8 92.0,4.0 96.7,33.0 101.4,33.3 106.1,33.0 110.8,33.5 115.5,33.1 120.1,33.2 124.8,33.3 129.5,32.8 134.2,32.9 138.9,33.0 143.6,32.8 148.3,33.0 152.9,32.8 157.6,28.0 162.3,32.6 167.0,32.7" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,24.2 7.7,12.8 12.4,22.4 17.1,11.9 21.7,15.8 26.4,18.4 31.1,4.0 35.8,24.7 40.5,11.0 45.2,19.0 49.9,11.3 54.5,13.7 59.2,11.0 63.9,13.7 68.6,26.1 73.3,12.3 78.0,24.2 82.7,11.0 87.3,26.9 92.0,34.0 96.7,14.5 101.4,18.1 106.1,12.2 110.8,22.5 115.5,11.0 120.1,12.8 124.8,19.8 129.5,12.0 134.2,19.8 138.9,12.0 143.6,20.7 148.3,11.9 152.9,13.7 157.6,20.2 162.3,12.8 167.0,14.5" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,34.0 7.7,34.0 12.4,34.0 17.1,4.0 21.7,34.0 26.4,34.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,34.0 63.9,34.0 68.6,34.0 73.3,34.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>No detected spike in the loaded deep-dive window. No Ctrl-M overlap was recorded for the loaded spike windows.</td></tr><tr><td class='host-cell'><b>tsbf141431001</b><br><span class='dim'>tsbf141431001</span></td><td><svg viewBox='0 0 170 38' width='170' height='38' role='img' aria-label='CPU blue, memory purple, disk green time-series'><path d='M2 34H168' stroke='var(--border-soft)' stroke-width='1'/><polyline points="3.0,30.3 7.7,33.7 12.4,33.7 17.1,33.1 21.7,33.0 26.4,4.0 31.1,34.0 35.8,32.4 40.5,34.0 45.2,33.7 49.9,34.0 54.5,33.1 59.2,22.3 63.9,34.0 68.6,32.5 73.3,33.7 78.0,33.7 82.7,33.7 87.3,33.0 92.0,33.1 96.7,33.7 101.4,33.7 106.1,31.8 110.8,33.7 115.5,31.8 120.1,33.7 124.8,33.7 129.5,33.7 134.2,32.8 138.9,33.7 143.6,33.7 148.3,33.7 152.9,33.7 157.6,33.3 162.3,33.7 167.0,32.9" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,25.0 7.7,13.6 12.4,19.0 17.1,9.4 21.7,11.5 26.4,34.0 31.1,4.0 35.8,23.0 40.5,4.0 45.2,18.4 49.9,4.0 54.5,7.4 59.2,30.1 63.9,4.0 68.6,26.2 73.3,13.9 78.0,16.4 82.7,13.6 87.3,11.3 92.0,18.3 96.7,13.9 101.4,19.0 106.1,10.5 110.8,13.6 115.5,32.0 120.1,21.2 124.8,14.5 129.5,14.6 134.2,25.7 138.9,13.9 143.6,18.4 148.3,13.9 152.9,14.2 157.6,17.7 162.3,14.2 167.0,29.9" fill="none" stroke="#a855f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.0,32.5 7.7,34.0 12.4,34.0 17.1,34.0 21.7,34.0 26.4,4.0 31.1,34.0 35.8,34.0 40.5,34.0 45.2,34.0 49.9,34.0 54.5,34.0 59.2,26.8 63.9,34.0 68.6,34.0 73.3,34.0 78.0,34.0 82.7,34.0 87.3,34.0 92.0,34.0 96.7,34.0 101.4,34.0 106.1,34.0 110.8,34.0 115.5,34.0 120.1,34.0 124.8,34.0 129.5,34.0 134.2,34.0 138.9,34.0 143.6,34.0 148.3,34.0 152.9,34.0 157.6,34.0 162.3,34.0 167.0,34.0" fill="none" stroke="#10d96e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><div class='dim' style='margin-top:3px'>CPU <span style='color:var(--blue)'>●</span> · Memory <span style='color:var(--purple)'>●</span> · Disk <span style='color:var(--green)'>●</span></div></td><td style='max-width:440px'>CRITICAL SUSTAINED peak 98.4%. Ctrl-M overlap: 12 — time overlap only, not proof of cause.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── SOW volume compliance ───────────────────────────── -->
+  <section class="panel" style="--accent:#f97316;">
+    <div class="panel__head">
+      <div class="panel__icon">📄</div>
+      <div>
+        <div class="panel__t">SOW Contract &amp; Volume Compliance</div>
+        <div class="panel__s">🟡 Mixed results — 1 within the standard window, 1 below 70%, 0 above 110%. Deviations require formal review and acknowledgment.</div>
+      </div>
+      <div class="panel__count" style="color:#3b82f6;">UNDER-UTILISED</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      
+      <table>
+        <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
+        <tbody><tr>
+          <td><b>Daily DFU</b></td>
+          <td class="num">9,000,000</td>
+          <td class="num">7,968,993</td>
+          <td >88.5%</td>
+          <td><span class="tag tag-green">ACCEPTABLE</span></td>
+        </tr><tr>
+          <td><b>Daily SKU Count</b></td>
+          <td class="num">9,000,000</td>
+          <td class="num">5,043,361</td>
+          <td >56.0%</td>
+          <td><span class="tag tag-blue">UNDER-UTILISED</span></td>
+        </tr></tbody>
+      </table>
+      <div style="padding:12px 20px;font-size:12.5px;line-height:1.5;border-top:1px solid var(--border-soft);color:#3b82f6;background:color-mix(in srgb,#3b82f6 8%, transparent);">ℹ Actual volume is below 70% of the contracted SOW ceiling — under-utilised relative to contract.</div>
+      <div class="dim" style="padding:8px 20px 14px;font-size:11px;">Status bands — <b style="color:#3b82f6">UNDER-UTILISED</b> &lt;70% &middot; <b style="color:#22c55e">ACCEPTABLE / OPTIMAL</b> 70–110% &middot; <b style="color:#f59e0b">OVER CONTRACT</b> &gt;110% &middot; <b style="color:#ef4444">CRITICAL OVER</b> &gt;120%</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Performance benchmark ──────────────────────────── -->
+  <section class="panel" style="--accent:#eab308;">
+    <div class="panel__head">
+      <div class="panel__icon">📊</div>
+      <div>
+        <div class="panel__t">Performance Benchmark Results</div>
+        <div class="panel__s">Baseline vs. current transaction/runtime comparison</div>
+      </div>
+      <div class="panel__count" style="color:#6b7a99;">NOT ASSESSED</div>
+    </div>
+    <div class="panel__body" style="padding:18px 20px;">
+      
+      <div class="empty">No benchmark data uploaded for this engagement — performance benchmarking not assessed.</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Issues register ────────────────────────────────── -->
+  <section class="panel" style="--accent:#f43f5e;">
+    <div class="panel__head">
+      <div class="panel__icon">🚩</div>
+      <div>
+        <div class="panel__t">Issues Register</div>
+        <div class="panel__s">Open items raised during the audit window</div>
+      </div>
+      <div class="panel__count">0 open</div>
+    </div>
+    <div class="panel__body" style="padding:18px 20px;">
+      
+      <div class="empty">✓ No open issues recorded for this engagement.</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Audit checklist ────────────────────────────────── -->
+  <section class="panel" style="--accent:#10d96e;">
+    <div class="panel__head">
+      <div class="panel__icon">✓</div>
+      <div>
+        <div class="panel__t">PE Audit Coverage Checklist</div>
+        <div class="panel__s">Verification steps completed for this sign-off</div>
+      </div>
+    </div>
+    <div class="panel__body">
+      <div class="check-grid"><div class="check check--on"><span class="check__mark">✓</span><span>Batch SLA validated (daily/weekly/monthly)</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Resource utilization within thresholds — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Data volume (DFU/SKU) vs SOW verified</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Issues &amp; waivers acknowledged</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Batch performance-test report reviewed — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Ctrl-M 30-day execution history reviewed</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>UI performance benchmarking approved — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>SOW service IDs &amp; scenarios confirmed</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Resource utilization (last 15 days) reviewed — no supporting data in this export</span></div></div>
+    </div>
+  </section>
+
+  <!-- ── Approval / sign-off ────────────────────────────── -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">✍️</div>
+      <div>
+        <div class="panel__t">Approval &amp; Sign-off</div>
+        <div class="panel__s">Performance Engineering and customer acceptance</div>
+      </div>
+    </div>
+    <div class="panel__body">
+      <div class="appr-grid">
+        <div class="appr">
+          <div class="appr__role">Performance Engineer</div>
+          <div class="appr__name">Ayush</div>
+          <div class="appr__status" style="color:#10d96e;">
+            ✅ Approved
+          </div>
+          <div class="appr__line">Signed: 2026-08-28</div>
+          
+        </div>
+        <div class="appr">
+          <div class="appr__role">Customer</div>
+          <div class="appr__name">—</div>
+          <div class="appr__status" style="color:#10d96e;">
+            ✅ Approved
+          </div>
+          <div class="appr__line">Signed: 2026-08-28</div>
+        </div>
+      </div>
+      
+    </div>
+  </section>
+
+  <!-- Additive methodology; all original labels and threshold text remain unchanged. -->
+  <section class="panel" style="--accent:#6b7a9c;">
+    <div class="panel__head">
+      <div class="panel__icon">i</div>
+      <div>
+        <div class="panel__t">Methodology &amp; Lineage</div>
+        <div class="panel__s">Definitions used by the dashboard evidence shown above</div>
+      </div>
+    </div>
+    <div class="panel__body" style="font-size:12.5px;color:var(--ink-2);line-height:1.7;">
+      <div><b style="color:var(--ink);">Job SLA:</b> each job peak runtime compared with its resolved SLA ceiling. <b style="color:var(--ink);">Window SLA:</b> each daily effective batch window compared with its resolved ceiling.</div>
+      <div><b style="color:var(--ink);">Buffer:</b> <code>buffer_pct = (SLA hours - runtime hours) / SLA hours * 100</code>.</div>
+      <div><b style="color:var(--ink);">Status bands:</b> OK &gt;40% buffer · LONG JOB 15–40% · AT RISK 0–15% · BREACH ≤0%. Memory is shown as available % (lower availability means more pressure).</div>
+    </div>
+  </section>
+
+  <!-- ── Footer ─────────────────────────────────────────── -->
+  <footer class="foot">
+    <div>PE Audit Dashboard · self-contained report · generated 28 Aug 2026, 06:31 PM</div>
+    <div>
+      Thresholds —
+      CPU <code>APP 60/80 · DB 85/95 · SRE 90/100</code> (role ok/crit)
+      Mem <code>≤70% warn · ≤80% crit · DB SGA 80–92%</code>
+      Disk <code>OK ≤70% · Warn ≤85%</code>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+function toggleTheme(){
+  var r = document.documentElement;
+  r.setAttribute('data-theme', r.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+}
+</script>
+</body>
+</html>

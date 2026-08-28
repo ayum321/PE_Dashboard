@@ -67,7 +67,7 @@ def attribute_spikes(vms: Dict[str, Any], job_runs: List[dict], top_n: int = 5) 
                     continue
                 spikes_total += 1
                 ws, we = _naive(sp.get("start")), _naive(sp.get("end"))
-                if ws is None or we is None:
+                if ws is None or we is None or we <= ws:
                     continue
                 # overlap: run started before window end AND ended after window start
                 # HOST-PIN UPGRADE: this is the single join site. When the customer
@@ -78,10 +78,15 @@ def attribute_spikes(vms: Dict[str, Any], job_runs: List[dict], top_n: int = 5) 
                 hits = [r for r in runs if r["start"] < we and r["end"] > ws]
                 hits.sort(key=lambda r: r["hrs"], reverse=True)
                 top = hits[:top_n]
+                # The spike schema owns the interval. Derive this value from
+                # the bounds instead of copying a stale/legacy duration field;
+                # attribution is a join, not a second duration calculator.
+                duration_min = max(1, round((we - ws).total_seconds() / 60))
                 rows.append({
                     "vm": vm_name, "metric": metric,
+                    "start": sp.get("start"), "end": sp.get("end"),
                     "peak": sp.get("peak"), "peak_time": sp.get("peak_time"),
-                    "severity": sp.get("severity"), "duration_min": sp.get("duration_min"),
+                    "severity": sp.get("severity"), "duration_min": duration_min,
                     "concurrent_jobs": len(hits),
                     "heaviest": top[0]["job"] if top else None,
                     "heaviest_hrs": top[0]["hrs"] if top else None,

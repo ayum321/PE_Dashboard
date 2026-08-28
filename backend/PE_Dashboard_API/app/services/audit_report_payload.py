@@ -41,6 +41,52 @@ def _status(value: Any) -> str:
     return _text(value).lower().replace(" ", "_")
 
 
+def _first_present(*values: Any) -> Any:
+    """Return the first supplied value while preserving legitimate zeroes."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalise_job_row(value: Any) -> dict[str, Any]:
+    """Freeze legacy and current batch fields into one display contract.
+
+    The batch engine has already calculated buffer and status.  This function
+    only carries those values forward; it must never derive a replacement
+    status in the export layer.
+    """
+    row = _as_dict(value)
+    return {
+        "job_name": _text(_first_present(row.get("job_name"), row.get("job"), row.get("Job_Name")), "Unknown job"),
+        "sub_app": _text(_first_present(row.get("sub_app"), row.get("sub_application"), row.get("Sub_Application"), row.get("Sub_App")), "—"),
+        "schedule_type": _text(_first_present(row.get("schedule_type"), row.get("schedule"), row.get("Schedule")), "Unclassified"),
+        "peak_hrs": _number(_first_present(row.get("peak_hrs"), row.get("peak_runtime"), row.get("peak"))),
+        "avg_hrs": _number(_first_present(row.get("avg_hrs"), row.get("average_hrs"), row.get("avg_runtime"), row.get("average"))),
+        "sla_hrs": _number(_first_present(row.get("sla_hrs"), row.get("sla"), row.get("SLA"))),
+        "buffer_pct": _number(_first_present(row.get("buffer_pct"), row.get("buffer"))),
+        "sla_used_pct": _number(_first_present(row.get("sla_used_pct"), row.get("sla_used"))),
+        "status": _text(_first_present(row.get("buffer_status"), row.get("status"), row.get("Status")), "NOT_ASSESSED").upper(),
+        "sla_source": _text(_first_present(row.get("sla_source"), row.get("source")), "Not supplied"),
+    }
+
+
+def _normalise_sow_metric(value: Any) -> dict[str, Any]:
+    """Freeze source fields such as ``sow``/``pct`` into report field names."""
+    row = _as_dict(value)
+    return {
+        "name": _text(_first_present(row.get("name"), row.get("label"), row.get("key")), "Metric"),
+        "commitment": _number(_first_present(row.get("commitment"), row.get("target"), row.get("sow_target"), row.get("sow"))),
+        "actual": _number(_first_present(row.get("actual"), row.get("observed"), row.get("value"))),
+        "pct_of_contract": _number(_first_present(row.get("pct_of_contract"), row.get("achievement_pct"), row.get("pct"))),
+        "capacity_buffer": _number(_first_present(row.get("capacity_buffer"), row.get("headroom"))),
+        "status": _text(_first_present(row.get("status"), row.get("Status")), "NOT_ASSESSED").upper(),
+    }
+
+
 def _server_name(server: dict[str, Any]) -> str:
     return _text(server.get("host") or server.get("hostname") or server.get("server") or server.get("name"), "Unknown host")
 
@@ -130,6 +176,66 @@ def _exception_table(servers: list[dict[str, Any]], resource: dict[str, Any]) ->
             "exception_reason": reason,
         })
     return sorted(rows, key=lambda row: (-SEVERITY_ORDER.get(row["status"].lower(), 0), row["host"]))
+
+
+def _detail_for_host(timeseries: dict[str, Any], host: str) -> dict[str, Any]:
+    """Resolve Azure host keys case-insensitively without altering evidence."""
+    for source_host, detail in timeseries.items():
+        if str(source_host).lower() == host.lower():
+            return _as_dict(detail)
+    return {}
+
+
+def _server_evidence(servers: list[dict[str, Any]], resource: dict[str, Any], correlations: list[Any]) -> list[dict[str, Any]]:
+    """Create compact, source-backed host records for the report.
+
+    Spike labels and correlation notes are copied from the deep-dive payload.
+    A host with no series is retained and explicitly marked rather than being
+    silently omitted from its DB/APP/SRE group.
+    """
+    deep = _as_dict(resource.get("deep_dive"))
+    timeseries = _as_dict(deep.get("vms"))
+    result: list[dict[str, Any]] = []
+    for server in servers:
+        host = _server_name(server)
+        detail = _detail_for_host(timeseries, host)
+        spike_entries: list[tuple[str, dict[str, Any]]] = []
+        for metric, events in _as_dict(detail.get("spikes")).items():
+            for event in _as_list(events):
+                if isinstance(event, dict):
+                    spike_entries.append((str(metric), event))
+        spike_entries.sort(key=lambda item: abs(_number(item[1].get("z_score") or item[1].get("z")) or 0), reverse=True)
+        spike_note = "No detected spike was supplied for this host."
+        if spike_entries:
+            metric, event = spike_entries[0]
+            severity = _text(_first_present(event.get("severity"), event.get("status"), event.get("pattern")), "detected spike")
+            peak = _first_present(event.get("peak"), event.get("value"), event.get("v"))
+            suffix = f"; peak {peak}" if peak is not None else ""
+            spike_note = f"{severity} — {metric}{suffix}."
+        correlation_note = "No Ctrl-M time-overlap evidence was supplied for this host."
+        for raw_event in correlations:
+            event = _as_dict(raw_event)
+            event_hosts = _as_list(event.get("hosts") or event.get("servers") or event.get("vms"))
+            if not any(str(candidate).lower() == host.lower() for candidate in event_hosts):
+                continue
+            jobs = _as_list(event.get("correlated_jobs") or event.get("jobs"))
+            job_names = [str(_as_dict(job).get("job") or _as_dict(job).get("name") or job) for job in jobs][:3]
+            evidence = ", ".join(job_names) or _text(event.get("title") or event.get("insight"), "concurrent batch activity")
+            correlation_note = f"Ctrl-M overlap: {evidence} — time overlap only, not proof of cause."
+            break
+        result.append({
+            "host": host,
+            "role": _text(server.get("type") or server.get("role"), "Other").upper(),
+            "environment": _text(server.get("environment") or server.get("env"), "Unknown").upper(),
+            "status": _text(server.get("status") or server.get("health"), "UNKNOWN").upper(),
+            "cpu_pct": _number(_first_present(server.get("cpu_used"), server.get("cpu_avg"))),
+            "memory_pct": _number(_first_present(server.get("mem_used"), server.get("memory_used"), server.get("memory_available_pct"))),
+            "disk_pct": _number(_first_present(server.get("disk_used_max"), server.get("disk_used"), server.get("disk_pct"))),
+            "has_timeseries": bool(_as_dict(detail).get("series")),
+            "spike_note": spike_note,
+            "correlation_note": correlation_note,
+        })
+    return sorted(result, key=lambda row: ({"DB": 0, "APP": 1, "SRE": 2}.get(row["role"], 9), row["host"]))
 
 
 def _sow_interpretation(metrics: list[dict[str, Any]]) -> str:
@@ -229,7 +335,7 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
         resolved_id = f"AUD-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8].upper()}"
     resource_summary, quality_flags = _resource_summary(resource, servers)
     exceptions = _exception_table(servers, resource)
-    sow_metrics = [row for row in _as_list(sow.get("metrics")) if isinstance(row, dict)]
+    sow_metrics = [_normalise_sow_metric(row) for row in _as_list(sow.get("metrics")) if isinstance(row, dict)]
     pe = _as_dict(approvals.get("pe"))
     customer_approval = _as_dict(approvals.get("customer"))
     requested_customer_approval = bool(customer_approval.get("approved"))
@@ -244,6 +350,7 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
         headline = "Evidence has been frozen from the loaded dashboard panels; see the section-level findings and data-quality flags."
     deep_dive = _as_dict(resource.get("deep_dive"))
     correlation_events = _as_list(deep_dive.get("patterns"))
+    server_evidence = _server_evidence(servers, resource, correlation_events)
     if correlation_events and not any(_number(_as_dict(event).get("confidence_pct")) is not None for event in correlation_events):
         quality_flags.append(
             "Correlation events are present without numeric confidence. They remain evidence of time overlap only and are not chart-ranked."
@@ -257,6 +364,11 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
             "data_coverage_pct": _number(_as_dict(batch.get("data_coverage")).get("confidence")),
             "missing_metrics": ["resource fleet summary"] if resource_summary is None else [],
             "sign_off_status": sign_off,
+            # Preserve the source record count for the Review Registry.  It is
+            # deliberately independent from generated priority actions: an
+            # action can be closed or filtered without changing how many
+            # issues the reviewer logged for this audit.
+            "issues_logged_count": len(issues),
         },
         "executive_verdict": {"headline": headline, "confidence_pct": _number(final.get("confidence_pct") or batch_kpis.get("confidence")), "data_quality_flags": quality_flags},
         "priority_actions": _priority_actions(batch, exceptions, sow_metrics, issues),
@@ -264,16 +376,35 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
             "window_chart_series": _as_list(batch.get("window")), "breach_days": [row for row in _as_list(batch.get("window")) if _status(_as_dict(row).get("status")) in {"breach", "failed"}],
             "tight_days": [row for row in _as_list(batch.get("window")) if _status(_as_dict(row).get("status")) in {"at_risk", "long_job", "tight"}],
             "buffer_summary": batch_kpis, "long_pole_trend_series": _as_dict(batch.get("longpole_matrix")),
-            "top_jobs_table": _as_list(batch.get("top_jobs") or batch.get("top_breaches")), "excluded_jobs": _as_list(_as_dict(batch.get("data_coverage")).get("excluded_jobs")),
+            "top_jobs_table": [_normalise_job_row(row) for row in _as_list(batch.get("top_jobs") or batch.get("top_breaches")) if isinstance(row, dict)], "excluded_jobs": _as_list(_as_dict(batch.get("data_coverage")).get("excluded_jobs")),
         },
         "resource_review": {
             "fleet_summary": resource_summary, "exception_rule": "status != HEALTHY, with z-score >= 2.0 included as additional anomaly evidence", "exception_table": exceptions,
             "fleet_heatmap_series": _as_dict(deep_dive.get("heatmap")), "timeseries_by_host": _as_dict(deep_dive.get("vms")),
-            "all_servers_table": servers,
+            "all_servers_table": servers, "server_evidence": server_evidence,
             "unit_semantics": {"cpu": "CPU utilisation % (higher = more pressure)", "memory": "available memory % (lower = more pressure)", "disk": "disk bandwidth consumed % (higher = more pressure)"},
         },
         "correlation_rca": correlation_events,
-        "sow_capacity": {"metrics": sow_metrics, "interpretation": _sow_interpretation(sow_metrics)},
+        "sow_capacity": {
+            "metrics": sow_metrics,
+            "interpretation": _sow_interpretation(sow_metrics),
+            # This is a reported source status, not a status inferred from the
+            # report.  Keep it for the legacy Review Registry without making
+            # that registry calculate its own SOW verdict.
+            "reported_status": _text(sow.get("overall_status") or sow.get("status")),
+        },
+        "benchmark": {
+            # The report does not render a benchmark section yet, but Review
+            # Registry still needs the exact upstream summary it historically
+            # displayed.  Forward the precomputed values; do not aggregate
+            # benchmark rows here.
+            "loaded": bool(benchmark),
+            "total_transactions": _number(benchmark.get("total_transactions")),
+            "sla_breach_count": _number(_first_present(benchmark.get("sla_breaches"), benchmark.get("sla_breach_count"))),
+            "degraded_count": _number(_first_present(benchmark.get("degraded"), benchmark.get("degraded_count"))),
+            "batch_perf_regression_count": _number(_as_dict(benchmark.get("batch_perf_summary")).get("regressions")),
+            "batch_perf_total_jobs": _number(_as_dict(benchmark.get("batch_perf_summary")).get("total_jobs")),
+        },
         "methodology": {"job_sla_def": "Job SLA measures each job run against its resolved ceiling.", "window_sla_def": "Window SLA measures each daily effective batch window against its resolved ceiling.", "buffer_formula": "buffer_pct = (SLA hours - runtime hours) / SLA hours * 100", "status_bands": {"OK": ">40% buffer", "LONG_JOB": "15-40% buffer", "AT_RISK": "0-15% buffer", "BREACH": "<=0% buffer"}, "exclusion_rules": _as_list(_as_dict(batch.get("data_coverage")).get("excluded_jobs")), "source_badges": [source["name"] for source in [_source_record("Ctrl-M batch", batch), _source_record("Azure Monitor", resource), _source_record("SOW volume", sow)] if source["loaded"]]},
         "prior_audit_ref": None,
         "deltas": None,

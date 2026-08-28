@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PE Audit Report — {{ customer }}</title>
+<title>PE Audit Report — NFM</title>
 <style>
 /* ============================================================
    PE Audit Report — Grafana / Prometheus observability styling
@@ -134,23 +134,23 @@ body::before{
 .banner{
   position:relative; overflow:hidden; margin-bottom:20px;
   border:1px solid var(--border); border-radius:16px; padding:20px 24px;
-  background:linear-gradient(135deg, color-mix(in srgb, {{ sign_color }} 16%, var(--panel)) 0%, var(--panel) 60%);
+  background:linear-gradient(135deg, color-mix(in srgb, #22c55e 16%, var(--panel)) 0%, var(--panel) 60%);
   box-shadow:var(--shadow); display:flex; align-items:center; gap:20px; flex-wrap:wrap;
 }
 .banner::before{
   content:""; position:absolute; left:0; top:0; bottom:0; width:6px;
-  background:{{ sign_color }}; box-shadow:0 0 26px 2px {{ sign_color }};
+  background:#22c55e; box-shadow:0 0 26px 2px #22c55e;
 }
 .banner__badge{
   width:58px; height:58px; border-radius:14px; flex:0 0 auto; display:grid; place-items:center;
-  font-size:var(--fs-6); color:{{ sign_color }};
-  background:color-mix(in srgb, {{ sign_color }} 18%, transparent);
-  border:1.5px solid color-mix(in srgb, {{ sign_color }} 55%, transparent);
-  box-shadow:inset 0 0 20px color-mix(in srgb, {{ sign_color }} 30%, transparent);
+  font-size:var(--fs-6); color:#22c55e;
+  background:color-mix(in srgb, #22c55e 18%, transparent);
+  border:1.5px solid color-mix(in srgb, #22c55e 55%, transparent);
+  box-shadow:inset 0 0 20px color-mix(in srgb, #22c55e 30%, transparent);
 }
 .banner__txt{flex:1 1 280px;}
 .banner__k{font-size:var(--fs-1); font-weight:700; letter-spacing:1.2px; color:var(--ink-3); text-transform:uppercase;}
-.banner__v{font-size:var(--fs-5); font-weight:800; color:{{ sign_color }}; margin-top:1px; letter-spacing:.3px;}
+.banner__v{font-size:var(--fs-5); font-weight:800; color:#22c55e; margin-top:1px; letter-spacing:.3px;}
 .banner__date{text-align:right; color:var(--ink-3); font-size:var(--fs-2); line-height:1.7;}
 .banner__date b{color:var(--ink-2); font-weight:600;}
 
@@ -263,27 +263,8 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
 .tag-blue{color:var(--blue); background:color-mix(in srgb,var(--blue) 15%, transparent); border-color:color-mix(in srgb,var(--blue) 40%, transparent);}
 .tag-cyan{color:var(--cyan); background:color-mix(in srgb,var(--cyan) 15%, transparent); border-color:color-mix(in srgb,var(--cyan) 40%, transparent);}
 .tag-gray{color:var(--ink-3); background:var(--track); border-color:var(--border);}
-.tag-purple{color:#c084fc; background:color-mix(in srgb,#c084fc 15%, transparent); border-color:color-mix(in srgb,#c084fc 40%, transparent);}
 .tag::before{display:inline-block;}
 .tag-gray::before{box-shadow:none;}
-
-/* Legend — the colour language is only useful if it is written down once. */
-.legend{display:flex; flex-wrap:wrap; gap:8px 18px; padding:12px 20px;
-  border-bottom:1px solid var(--border-soft); background:var(--panel-2);}
-.legend__g{display:flex; align-items:center; gap:9px; flex-wrap:wrap;}
-.legend__k{font-size:var(--fs-1); font-weight:700; letter-spacing:.8px;
-  text-transform:uppercase; color:var(--ink-3);}
-.legend__i{display:inline-flex; align-items:center; gap:5px; font-size:var(--fs-1); color:var(--ink-2);}
-.setaside{padding:12px 20px; border-top:1px solid var(--border-soft);
-  font-size:var(--fs-1); color:var(--ink-2); line-height:1.65;}
-.setaside b{color:var(--ink);}
-.setaside__l{color:var(--ink-3);}
-.notice{padding:16px 18px; border-radius:12px; line-height:1.7;
-  font-size:var(--fs-2); color:var(--ink-2);
-  background:color-mix(in srgb,var(--amber) 9%, var(--panel-2));
-  border:1px solid color-mix(in srgb,var(--amber) 34%, transparent);
-  border-left:4px solid var(--amber);}
-.notice b{color:var(--ink);}
 
 .empty{padding:26px; text-align:center; color:var(--ink-3); font-size:var(--fs-3);}
 
@@ -406,39 +387,29 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
   .mx-chart[hidden]{display:none !important;}
   .mx-ranges{display:none !important;}
   .jump{display:none !important;}
-  #job-table tr[data-cadence]{display:table-row !important;}
-  .legend{background:transparent !important;}
-  .notice{break-inside:avoid;}
-  .setaside{break-inside:avoid;}
 }
 </style>
 </head>
 <body>
 <div class="page">
-  {# Backward-compatible defaults so both export contexts can render this template safely. #}
-  {% set unknown_pct_w = unknown_pct_w|default(0) %}
-  {% set n_unknown = n_unknown|default(0) %}
-  {% set fleet_resolved = fleet_resolved|default(false) %}
-  {% set fleet_source = fleet_source|default('Dashboard fleet grader') %}
-  {% set fleet_disagreement = fleet_disagreement|default('') %}
-  {% set fleet_graded = fleet_graded|default(n_srv|default(0)) %}
-  {% set sow_ceiling_notice = sow_ceiling_notice|default('') %}
-  {% set mx_available = mx_available|default(false) %}
-  {% set mx_hosts = mx_hosts|default(0) %}
-  {% set mx_tabs = mx_tabs|default('') %}
-  {% set mx_panels = mx_panels|default('') %}
-  {% set mx_summary = mx_summary|default('') %}
-  {% set mx_data = mx_data|default('{}') %}
-  {% set job_cadence_tabs = job_cadence_tabs|default('') %}
-  {% set job_legend = job_legend|default('') %}
-  {% set job_setaside = job_setaside|default('') %}
-  {% set infra_coverage = infra_coverage|default('') %}
-  {% set n_jobs_product = n_jobs_product|default(n_jobs|default(0)) %}
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
 
   <div class="toolbar">
     <button class="tbtn" onclick="toggleTheme()">◐ Theme</button>
-    {% if mx_available %}<button class="tbtn" onclick="mxExpandAll(this)">⊞ Expand all hosts</button>
-    <button class="tbtn" onclick="mxDownload()">⭳ Metrics data (JSON)</button>{% endif %}
+    
     <button class="tbtn" onclick="window.print()">⎙ Print / PDF</button>
   </div>
 
@@ -450,14 +421,25 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <div class="panel__t">Audit Evidence Record</div>
         <div class="panel__s">Frozen from the loaded dashboard evidence; the report does not fetch Azure again.</div>
       </div>
-      <div class="panel__count">{{ sign_off_status }}</div>
+      <div class="panel__count">Reviewed</div>
     </div>
     <div class="panel__body" style="display:flex;gap:10px 22px;flex-wrap:wrap;padding:13px 20px;font-size:var(--fs-2);">
-      <span><b>Customer:</b> {{ customer }}</span>
-      <span><b>Audit ID:</b> <span class="num">{{ audit_id }}</span></span>
-      <span><b>Window:</b> {{ audit_window_start }} → {{ audit_window_end }}</span>
-      <span><b>Generated:</b> {{ gen_date }}</span>
-      <span><b>Sources:</b> {% if source_badges %}{% for source in source_badges %}<span class="tag tag-cyan tag-sm" style="margin-left:4px;">{{ source }}</span>{% endfor %}{% else %}<span class="dim">No loaded source recorded</span>{% endif %}</span>
+      <span><b>Customer:</b> NFM</span>
+      <span><b>Audit ID:</b> <span class="num">AUD-20260828T151623Z-6593FCF7</span></span>
+      <span><b>Window:</b> 2026-07-26 → 2026-08-24</span>
+      <span><b>Generated:</b> 28 Aug 2026, 08:46 PM</span>
+      <span><b>Sources:</b> <span class="tag tag-cyan tag-sm" style="margin-left:4px;">Ctrl-M batch</span><span class="tag tag-cyan tag-sm" style="margin-left:4px;">Azure Monitor</span><span class="tag tag-cyan tag-sm" style="margin-left:4px;">SOW volume</span></span>
+    </div>
+  </section>
+
+  <section class="panel" style="--accent:#f59e0b;">
+    <div class="panel__body" style="padding:13px 20px;">
+      <div class="panel__t panel__t--sub" style="color:var(--amber);">Executive evidence summary</div>
+      <div style="margin-top:4px;color:var(--ink-2);">Batch SLA 100.0% (0 breach(es)); resource fleet Grade ?; SOW UNDER-UTILISED.</div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-soft);">
+        <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;">Priority action plan</div>
+        <div style="margin-top:4px;color:var(--ink-2);"><div style='display:flex;gap:10px;align-items:flex-start;margin:7px 0'><span class='tag tag-amber'>P2</span><span>Review tsbf141425001 — rendered resource health is WARNING.</span></div><div style='display:flex;gap:10px;align-items:flex-start;margin:7px 0'><span class='tag tag-amber'>P3</span><span>Review SOW volume status: LOW.</span></div></div>
+      </div>
     </div>
   </section>
 
@@ -473,20 +455,14 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       </div>
       <div class="rhead__meta">
         <div class="cust-eyebrow">Customer</div>
-        <div class="cust-name">{{ customer }}</div>
-        {% if customer and customer != 'Unknown Customer' %}
+        <div class="cust-name">NFM</div>
+        
         <div class="cust-source">Sourced from Ctrl-M filename</div>
-        {% endif %}
-        {% if reviewed_product_labels %}
-        <div class="prod-chips">
-          {% for label in reviewed_product_labels %}
-          <span class="prod-chip">{{ label }}</span>
-          {% endfor %}
-        </div>
-        {% endif %}
+        
+        
         <div class="chips">
-          <span class="chip"><span class="dot"></span>{{ env }}</span>
-          <span class="chip">Generated <b>{{ gen_date }}</b></span>
+          <span class="chip"><span class="dot"></span>Mixed (PROD + TEST + DEV)</span>
+          <span class="chip">Generated <b>28 Aug 2026, 08:46 PM</b></span>
         </div>
       </div>
     </div>
@@ -494,15 +470,15 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
 
   <!-- ── Verdict banner ─────────────────────────────────── -->
   <section class="banner">
-    <div class="banner__badge">{% if sign_state == 'approved' %}✓{% else %}◷{% endif %}</div>
+    <div class="banner__badge">✓</div>
     <div class="banner__txt">
       <div class="banner__k">Overall Sign-off Verdict</div>
-      <div class="banner__v">{{ sign_text }}</div>
+      <div class="banner__v">APPROVED</div>
     </div>
     <div class="banner__date">
-      <div><b>Customer:</b> {{ customer }}</div>
-      <div><b>Environment:</b> {{ env }}</div>
-      <div><b>Report date:</b> {{ gen_date }}</div>
+      <div><b>Customer:</b> NFM</div>
+      <div><b>Environment:</b> Mixed (PROD + TEST + DEV)</div>
+      <div><b>Report date:</b> 28 Aug 2026, 08:46 PM</div>
     </div>
   </section>
 
@@ -510,18 +486,18 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
   <div class="grid stat-grid">
 
     <div class="stat">
-      <div class="stat__top" style="background:{{ comp_col }};box-shadow:0 0 16px {{ comp_col }};"></div>
+      <div class="stat__top" style="background:#22c55e;box-shadow:0 0 16px #22c55e;"></div>
       <div class="stat__label">Batch SLA Compliance</div>
       <div class="stat__body">
-        <div class="gauge" style="--deg:{{ comp_deg }};--gc:{{ comp_col }};">
+        <div class="gauge" style="--deg:360.0;--gc:#22c55e;">
           <div class="gauge__in">
-            <div class="gauge__big tabnum" style="color:{{ comp_col }};">{{ comp_pct }}%</div>
+            <div class="gauge__big tabnum" style="color:#22c55e;">100.0%</div>
             <div class="gauge__cap">Window</div>
           </div>
         </div>
         <div>
-          <div class="stat__sub"><span class="num">{{ n_ok_jobs }}</span> jobs on-time</div>
-          <div class="stat__sub"><span class="num" style="color:{{ '#f43f5e' if n_breach else '#10d96e' }};">{{ n_breach }}</span> breaching</div>
+          <div class="stat__sub"><span class="num">17</span> jobs on-time</div>
+          <div class="stat__sub"><span class="num" style="color:#10d96e;">0</span> breaching</div>
         </div>
       </div>
     </div>
@@ -531,37 +507,37 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="stat__label">Batch Workload</div>
       <div class="stat__body">
         <div>
-          <span class="stat__value tabnum">{{ n_jobs }}</span><span class="stat__unit">jobs</span>
-          <div class="stat__sub"><span class="num">{{ total_runs }}</span> runs<span class="sep">•</span><span class="num">{{ total_hrs }}</span> h runtime</div>
+          <span class="stat__value tabnum">17</span><span class="stat__unit">jobs</span>
+          <div class="stat__sub"><span class="num">1804</span> runs<span class="sep">•</span><span class="num">146.31</span> h runtime</div>
         </div>
       </div>
     </div>
 
     <div class="stat">
-      <div class="stat__top" style="background:{{ grade_color }};box-shadow:0 0 16px {{ grade_color }};"></div>
+      <div class="stat__top" style="background:#6b7a99;box-shadow:0 0 16px #6b7a99;"></div>
       <div class="stat__label">Fleet Health</div>
       <div class="stat__body">
-        <div class="gauge" style="--deg:{{ score_deg }};--gc:{{ grade_color }};">
+        <div class="gauge" style="--deg:0.0;--gc:#6b7a99;">
           <div class="gauge__in">
-            <div class="gauge__big" style="color:{{ grade_color }};">{{ fleet_grade }}</div>
-            <div class="gauge__cap tabnum">{% if fleet_resolved %}{{ fleet_score }}/100{% else %}no score{% endif %}</div>
+            <div class="gauge__big" style="color:#6b7a99;">?</div>
+            <div class="gauge__cap tabnum">no score</div>
           </div>
         </div>
         <div>
-          <div class="stat__sub"><span class="num">{{ n_srv }}</span> servers</div>
-          <div class="stat__sub">{{ n_crit }} crit · {{ n_warn_s }} warn</div>
-          <div class="stat__sub">over {{ capture_days }}-day window</div>
+          <div class="stat__sub"><span class="num">12</span> servers</div>
+          <div class="stat__sub">0 crit · 0 warn</div>
+          <div class="stat__sub">over 15-day window</div>
         </div>
       </div>
     </div>
 
     <div class="stat">
-      <div class="stat__top" style="background:{{ '#f43f5e' if n_issues else '#10d96e' }};box-shadow:0 0 16px {{ '#f43f5e' if n_issues else '#10d96e' }};"></div>
+      <div class="stat__top" style="background:#10d96e;box-shadow:0 0 16px #10d96e;"></div>
       <div class="stat__label">Open Issues</div>
       <div class="stat__body">
         <div>
-          <span class="stat__value tabnum" style="color:{{ '#f43f5e' if n_issues else '#10d96e' }};">{{ n_issues }}</span>
-          <div class="stat__sub">{% if n_issues %}registered for review{% else %}none outstanding{% endif %}</div>
+          <span class="stat__value tabnum" style="color:#10d96e;">0</span>
+          <div class="stat__sub">none outstanding</div>
         </div>
       </div>
     </div>
@@ -574,34 +550,28 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">🩺</div>
       <div>
         <div class="panel__t">Fleet Severity Distribution</div>
-        <div class="panel__s">{{ n_srv }} server(s) graded over the last {{ capture_days }} days · the grade, the bar, and the action plan all read this one reconciled result</div>
+        <div class="panel__s">12 server(s) graded over the last 15 days · the grade, the bar, and the action plan all read this one reconciled result</div>
       </div>
       <div class="panel__count">
-        {% if fleet_resolved %}Grade {{ fleet_grade }} · {{ fleet_score }}/100{% else %}Grade not resolved{% endif %}
+        Grade not resolved
       </div>
     </div>
     <div class="panel__body">
       <div class="hbar">
-        {% if crit_pct_w > 0 %}<div class="hbar__seg seg-crit" style="width:{{ crit_pct_w }}%;">{% if crit_pct_w >= 8 %}{{ n_crit }}{% endif %}</div>{% endif %}
-        {% if warn_pct_w > 0 %}<div class="hbar__seg seg-warn" style="width:{{ warn_pct_w }}%;">{% if warn_pct_w >= 8 %}{{ n_warn_s }}{% endif %}</div>{% endif %}
-        {% if ok_pct_w > 0 %}<div class="hbar__seg seg-ok" style="width:{{ ok_pct_w }}%;">{% if ok_pct_w >= 8 %}{{ n_healthy }}{% endif %}</div>{% endif %}
-        {% if unknown_pct_w > 0 %}<div class="hbar__seg seg-unknown" style="width:{{ unknown_pct_w }}%;">{% if unknown_pct_w >= 8 %}{{ n_unknown }}{% endif %}</div>{% endif %}
+        
+        
+        <div class="hbar__seg seg-ok" style="width:100.0%;">12</div>
+        
       </div>
       <div class="legend">
-        <span class="legend__i"><span class="dot dot-crit"></span>Critical <b>{{ n_crit }}</b></span>
-        <span class="legend__i"><span class="dot dot-warn"></span>Warning <b>{{ n_warn_s }}</b></span>
-        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>{{ n_healthy }}</b></span>
-        {% if n_unknown %}<span class="legend__i"><span class="dot dot-unknown"></span>No metrics <b>{{ n_unknown }}</b></span>{% endif %}
+        <span class="legend__i"><span class="dot dot-crit"></span>Critical <b>0</b></span>
+        <span class="legend__i"><span class="dot dot-warn"></span>Warning <b>0</b></span>
+        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>12</b></span>
+        
       </div>
-      <div class="dim micro">Grade source — {{ fleet_source }}. Bar counts {{ fleet_graded }} graded host row(s) of {{ n_srv }}.</div>
+      <div class="dim micro">Grade source — Dashboard fleet grader. Bar counts 12 graded host row(s) of 12.</div>
     </div>
-    {% if fleet_disagreement %}
-    <div class="panel__note">⚠ {{ fleet_disagreement }}</div>
-    {% endif %}
-    <div style="margin:0 20px 16px;padding-top:12px;border-top:1px solid var(--border-soft);">
-      <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;font-size:var(--fs-1);">Priority action plan</div>
-      <div style="margin-top:6px;">{{ priority_actions|safe }}</div>
-    </div>
+    
   </section>
 
   <!-- ── Batch performance ──────────────────────────────── -->
@@ -610,29 +580,162 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">⚙️</div>
       <div>
         <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
-        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the {{ daily_limit }}h configured default · buffer = (SLA − runtime) ÷ SLA</div>
+        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the 11.0h configured default · buffer = (SLA − runtime) ÷ SLA</div>
       </div>
-      <div class="panel__count">{{ n_jobs_product }} product{% if n_jobs_product != n_jobs %} of {{ n_jobs }}{% endif %} jobs</div>
+      <div class="panel__count">17 jobs</div>
     </div>
     <div class="panel__body panel__body--flush">
       <div style="padding:13px 20px 4px;border-bottom:1px solid var(--border-soft);">
         <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px;">Job cadence &amp; runtime profile</div>
-        {{ cadence_chart|safe }}
+        <svg viewBox='0 0 760 262' width='100%' height='262' role='img' aria-label='Job cadence and peak runtime profile'><text x='8' y='14' fill='var(--ink-3)' font-size='10'>Job cadence and peak runtime (hours)</text><text x='8' y='39' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_JOB_WKLY_2</text><rect x='260' y='28' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='28' width='360.0' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='38' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 8.13h</text><text x='8' y='58' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_JOB_QTRLY_2</text><rect x='260' y='47' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='47' width='223.8' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='57' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 5.06h</text><text x='8' y='77' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_DLY_2</text><rect x='260' y='66' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='66' width='115.7' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='76' fill='#10d96e' font-size='10' font-weight='700'>Daily · 2.61h</text><text x='8' y='96' fill='var(--ink-2)' font-size='10'>DB_Backup_D</text><rect x='260' y='85' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='85' width='61.3' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='95' fill='#10d96e' font-size='10' font-weight='700'>Daily · 1.38h</text><text x='8' y='115' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_DLY_1</text><rect x='260' y='104' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='104' width='44.8' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='114' fill='#10d96e' font-size='10' font-weight='700'>Daily · 1.01h</text><text x='8' y='134' fill='var(--ink-2)' font-size='10'>DB_Backup_W</text><rect x='260' y='123' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='123' width='42.9' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='133' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.97h</text><text x='8' y='153' fill='var(--ink-2)' font-size='10'>DB_Backup_M</text><rect x='260' y='142' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='142' width='42.9' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='152' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.97h</text><text x='8' y='172' fill='var(--ink-2)' font-size='10'>JDA_MAINTENANCE_WKLY</text><rect x='260' y='161' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='161' width='20.5' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='171' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.46h</text><text x='8' y='191' fill='var(--ink-2)' font-size='10'>JDA_MAINTENANCE_QTRLY</text><rect x='260' y='180' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='180' width='19.7' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='190' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.45h</text><text x='8' y='210' fill='var(--ink-2)' font-size='10'>JDA_PROCESSING_JOB_WKLY_1</text><rect x='260' y='199' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='199' width='19.7' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='209' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.44h</text><text x='8' y='229' fill='var(--ink-2)' font-size='10'>JDA_MAINTENANCE_DLY</text><rect x='260' y='218' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='218' width='17.8' height='12' rx='3' fill='#10d96e' opacity='.88'/><text x='630' y='228' fill='#10d96e' font-size='10' font-weight='700'>Daily · 0.40h</text><text x='8' y='248' fill='var(--ink-2)' font-size='10'>JDA_DATA_JOB_LOAD_WKLY</text><rect x='260' y='237' width='360' height='12' rx='3' fill='var(--track)'/><rect x='260' y='237' width='16.4' height='12' rx='3' fill='#22d3ee' opacity='.88'/><text x='630' y='247' fill='#22d3ee' font-size='10' font-weight='700'>Weekly_Specific_Day · 0.37h</text></svg>
       </div>
-      {% if job_cadence_tabs %}
-      <div class="mx-bar" id="job-tabs">{{ job_cadence_tabs|safe }}</div>
-      {% endif %}
-      {{ job_legend|safe }}
-      <table id="job-table">
+      <table>
         <thead><tr>
-          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th><th>Flag</th>
+          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th>
         </tr></thead>
-        <tbody>{{ top_rows|safe }}</tbody>
+        <tbody><tr>
+          <td><b>JDA_PROCESSING_JOB_WKLY_2</b></td>
+          <td >8.133h</td>
+          <td class="dim">6.118h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>37.4%</td>
+          <td><span class="tag tag-amber">LONG JOB</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_JOB_QTRLY_2</b></td>
+          <td >5.057h</td>
+          <td class="dim">5.057h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>61.1%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_DLY_2</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >2.613h</td>
+          <td class="dim">2.220h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>76.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>DB_Backup_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >1.384h</td>
+          <td class="dim">0.896h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>87.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_DLY_1</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >1.013h</td>
+          <td class="dim">0.239h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>90.8%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>DB_Backup_W</b></td>
+          <td >0.969h</td>
+          <td class="dim">0.879h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>92.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>DB_Backup_M</b></td>
+          <td >0.969h</td>
+          <td class="dim">0.969h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>92.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_MAINTENANCE_WKLY</b></td>
+          <td >0.464h</td>
+          <td class="dim">0.450h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_MAINTENANCE_QTRLY</b></td>
+          <td >0.445h</td>
+          <td class="dim">0.445h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_PROCESSING_JOB_WKLY_1</b></td>
+          <td >0.444h</td>
+          <td class="dim">0.217h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_MAINTENANCE_DLY</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.402h</td>
+          <td class="dim">0.206h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>96.3%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_DATA_JOB_LOAD_WKLY</b></td>
+          <td >0.371h</td>
+          <td class="dim">0.354h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.1%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_DATA_LOAD_DLY</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.277h</td>
+          <td class="dim">0.215h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>JDA_DATA_LOAD_JOB_QTRLY</b></td>
+          <td >0.213h</td>
+          <td class="dim">0.213h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PO_EXTRACT_DAILY</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.004h</td>
+          <td class="dim">0.001h</td>
+          <td class="dim">16.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>100.0%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Daily_Filewatcher</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >2.321h</td>
+          <td class="dim">1.080h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>78.9%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Weekly_Filewatcher</b></td>
+          <td >2.164h</td>
+          <td class="dim">0.742h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>83.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Monthly_Filewatcher</b></td>
+          <td >1.499h</td>
+          <td class="dim">1.499h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>88.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Backup_Zip</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.000h</td>
+          <td class="dim">0.000h</td>
+          <td class="dim">11.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>100.0%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>Backup_Zip</b></td>
+          <td >0.000h</td>
+          <td class="dim">0.000h</td>
+          <td class="dim">13.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>100.0%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr></tbody>
       </table>
-      {% if n_jobs_shown < n_jobs_product %}
-      <div class="dim" style="padding:10px 20px;">Showing top {{ n_jobs_shown }} of {{ n_jobs_product }} product jobs by peak runtime{% if job_cadence_tabs %} · use the tabs above to narrow by schedule or jump straight to what needs attention{% endif %}.</div>
-      {% endif %}
-      {{ job_setaside|safe }}
+      
     </div>
   </section>
 
@@ -642,18 +745,77 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">🖥️</div>
       <div>
         <div class="panel__t">Infrastructure Utilisation</div>
-        <div class="panel__s">Role-aware grading — CPU ceilings {{ role_cpu_label }} (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band {{ db_mem_label }} &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
+        <div class="panel__s">Role-aware grading — CPU ceilings APP 60/80 · DB 85/95 · SRE 90/100 (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band 80–92% &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
       </div>
-      <div class="panel__count">{{ n_srv }} servers</div>
+      <div class="panel__count">12 servers</div>
     </div>
     <div class="panel__body panel__body--flush">
       <table>
         <thead><tr>
           <th>Host</th><th>Role</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Health</th>
         </tr></thead>
-        <tbody>{{ srv_rows|safe }}</tbody>
+        <tbody><tr>
+          <td class="host-cell"><b>prbf141403001</b><br><span class="dim">prbf141403001 &middot; 66 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">4.9%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">84.2%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141403001</b><br><span class="dim">tsbf141403001 &middot; 132 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">13.9%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">86.1%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141403011</b><br><span class="dim">tsbf141403011 &middot; 68 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">20.3%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">92.0%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141403021</b><br><span class="dim">tsbf141403021</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="dim">—</span></td><td><span class="dim">—</span></td><td><span class="dim">—</span></td>
+          <td><span class="tag tag-gray">IMAGE ONLY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>dvbf141425001</b><br><span class="dim">dvbf141425001 &middot; 16 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">2.2%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">45.0%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>dvbf141425011</b><br><span class="dim">dvbf141425011 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">7.1%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">15.2%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>dvbf141430001</b><br><span class="dim">dvbf141430001 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">2.6%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">21.3%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>dvbf141430011</b><br><span class="dim">dvbf141430011 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">6.0%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">10.5%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>prbf141425001</b><br><span class="dim">prbf141425001 &middot; 65 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">1.8%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">43.9%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>prbf141430001</b><br><span class="dim">prbf141430001 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">2.1%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">40.5%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>prbf141431001</b><br><span class="dim">prbf141431001 &middot; 162 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">0.9%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">45.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbf141425001</b><br><span class="dim">tsbf141425001 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-amber">98.9%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">55.1%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-amber">WARNING</span></td>
+        </tr></tbody>
       </table>
-      {{ infra_coverage|safe }}
     </div>
   </section>
 
@@ -665,25 +827,11 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <div class="panel__t">Metrics Explorer — Per-host trend &amp; Ctrl-M overlap evidence</div>
         <div class="panel__s">Pick a host to see its captured deep-dive window. One unified chart carries CPU, available memory, and both disk counters against the role CPU ceilings; the statistics, signal pattern, and spikes below it are the values the Resource Review already computed. Ctrl-M overlap is time coincidence only; it is not proof of cause.</div>
       </div>
-      <div class="panel__count">{{ mx_hosts }} with series</div>
+      <div class="panel__count">0 with series</div>
     </div>
-    {% if mx_available and mx_hosts > 0 %}
-    <div class="mx-bar">{{ mx_tabs|safe }}</div>
-    <div id="mx-panels">{{ mx_panels|safe }}</div>
-    <div class="dim micro" style="padding:0 20px 16px;">{{ mx_summary }} Every point plotted here is stored in this file — use “Metrics data (JSON)” in the toolbar to pull the captured series back out.</div>
-    {% elif mx_available %}
-    <div class="panel__body">
-      <div class="notice">
-        <b>No time-series was captured for this export, so there are no trend charts.</b>
-        The {{ n_srv }} host(s) above were graded from their Azure Monitor snapshot only.
-        To archive the charted window with the report, open <b>Resource Review</b>, click
-        <b>Load Metrics Deep Dive</b>, wait for it to finish, then export again — the
-        captured series is embedded in the file and stays readable offline.
-      </div>
-    </div>
-    {% else %}
+    
     <div class="panel__body"><div class="empty">No deep-dive time-series was captured for this engagement.</div></div>
-    {% endif %}
+    
   </section>
 
   <!-- ── SOW volume compliance ───────────────────────────── -->
@@ -692,24 +840,32 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">📄</div>
       <div>
         <div class="panel__t">SOW Contract &amp; Volume Compliance</div>
-        <div class="panel__s">{% if sow_summary %}{{ sow_summary }}{% else %}Actual engagement volumes vs. the contracted SOW ceilings{% endif %}</div>
+        <div class="panel__s">🟡 Mixed results — 1 within the standard window, 1 below 70%, 0 above 110%. Deviations require formal review and acknowledgment.</div>
       </div>
-      <div class="panel__count" style="color:{{ sow_badge_color }};">{{ sow_badge_text }}</div>
+      <div class="panel__count" style="color:#3b82f6;">UNDER-UTILISED</div>
     </div>
-    <div class="panel__body" style="padding:{{ '0' if n_sow else '18px 20px' }};">
-      {% if n_sow %}
+    <div class="panel__body" style="padding:0;">
+      
       <table>
         <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
-        <tbody>{{ sow_rows|safe }}</tbody>
+        <tbody><tr>
+          <td><b>Daily DFU</b></td>
+          <td class="num">9,000,000</td>
+          <td class="num">7,500,000</td>
+          <td >83.3%</td>
+          <td><span class="tag tag-green">ACCEPTABLE</span></td>
+        </tr><tr>
+          <td><b>Daily SKU Count</b></td>
+          <td class="num">9,000,000</td>
+          <td class="num">4,499,995</td>
+          <td >50.0%</td>
+          <td><span class="tag tag-blue">UNDER-UTILISED</span></td>
+        </tr></tbody>
       </table>
-      <div style="padding:12px 20px;font-size:var(--fs-2);line-height:1.5;border-top:1px solid var(--border-soft);color:{{ sow_badge_color }};background:color-mix(in srgb,{{ sow_badge_color }} 8%, transparent);">{{ sow_disclaimer }}</div>
-      {% if sow_ceiling_notice %}
-      <div class="panel__note">{{ sow_ceiling_notice|safe }}</div>
-      {% endif %}
-      <div class="dim" style="padding:8px 20px 14px;font-size:var(--fs-1);">Status bands — <b style="color:var(--blue)">UNDER-UTILISED</b> &lt;{{ sow_under_t }}% &middot; <b style="color:var(--green)">ACCEPTABLE / OPTIMAL</b> {{ sow_under_t }}–{{ sow_over_t }}% &middot; <b style="color:var(--amber)">OVER CONTRACT</b> &gt;{{ sow_over_t }}% &middot; <b style="color:var(--red)">CRITICAL OVER</b> &gt;{{ sow_over_crit_t }}%</div>
-      {% else %}
-      <div class="empty">No SOW contract uploaded for this engagement — volume compliance not assessed.</div>
-      {% endif %}
+      <div style="padding:12px 20px;font-size:var(--fs-2);line-height:1.5;border-top:1px solid var(--border-soft);color:#3b82f6;background:color-mix(in srgb,#3b82f6 8%, transparent);">ℹ Actual volume is below 70% of the contracted SOW ceiling — under-utilised relative to contract.</div>
+      
+      <div class="dim" style="padding:8px 20px 14px;font-size:var(--fs-1);">Status bands — <b style="color:var(--blue)">UNDER-UTILISED</b> &lt;70% &middot; <b style="color:var(--green)">ACCEPTABLE / OPTIMAL</b> 70–110% &middot; <b style="color:var(--amber)">OVER CONTRACT</b> &gt;110% &middot; <b style="color:var(--red)">CRITICAL OVER</b> &gt;120%</div>
+      
     </div>
   </section>
 
@@ -719,28 +875,14 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">📊</div>
       <div>
         <div class="panel__t">Performance Benchmark Results</div>
-        <div class="panel__s">{% if bench_summary %}{{ bench_summary }}{% else %}Baseline vs. current transaction/runtime comparison{% endif %}</div>
+        <div class="panel__s">Baseline vs. current transaction/runtime comparison</div>
       </div>
-      <div class="panel__count" style="color:{{ bench_badge_color }};">{{ bench_badge_text }}</div>
+      <div class="panel__count" style="color:#6b7a99;">NOT ASSESSED</div>
     </div>
-    <div class="panel__body" style="padding:{{ '0' if (n_bench or has_batch_perf) else '18px 20px' }};">
-      {% if n_bench %}
-      <table>
-        <thead><tr><th>Transaction</th><th>Baseline</th><th>Current</th><th>Δ%</th><th>Status</th></tr></thead>
-        <tbody>{{ bench_rows|safe }}</tbody>
-      </table>
-      {% if n_bench < n_bench_total %}
-      <div class="dim" style="padding:10px 20px;">Showing top {{ n_bench }} of {{ n_bench_total }} transactions by regression.</div>
-      {% endif %}
-      {% elif has_batch_perf %}
-      <table>
-        <thead><tr><th>Job</th><th>Baseline</th><th>Current</th><th>Δ%</th><th>Status</th></tr></thead>
-        <tbody>{{ batch_perf_rows|safe }}</tbody>
-      </table>
-      <div class="dim" style="padding:10px 20px;">Showing top {{ n_batch_perf_regr if n_batch_perf_regr < 10 else 10 }} regression(s) of {{ n_batch_perf_total }} jobs compared — Ctrl-M batch runtime comparison, not a UI transaction benchmark.</div>
-      {% else %}
+    <div class="panel__body" style="padding:18px 20px;">
+      
       <div class="empty">No benchmark data uploaded for this engagement — performance benchmarking not assessed.</div>
-      {% endif %}
+      
     </div>
   </section>
 
@@ -752,17 +894,12 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <div class="panel__t">Issues Register</div>
         <div class="panel__s">Open items raised during the audit window</div>
       </div>
-      <div class="panel__count">{{ n_issues }} open</div>
+      <div class="panel__count">0 open</div>
     </div>
-    <div class="panel__body" style="padding:{{ '0' if n_issues else '18px 20px' }};">
-      {% if n_issues %}
-      <table>
-        <thead><tr><th>ID</th><th>Severity</th><th>Type</th><th>Status</th><th>Description</th><th>Owner</th></tr></thead>
-        <tbody>{{ iss_rows|safe }}</tbody>
-      </table>
-      {% else %}
+    <div class="panel__body" style="padding:18px 20px;">
+      
       <div class="empty">✓ No open issues recorded for this engagement.</div>
-      {% endif %}
+      
     </div>
   </section>
 
@@ -776,7 +913,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       </div>
     </div>
     <div class="panel__body">
-      <div class="check-grid">{{ checklist_rows|safe }}</div>
+      <div class="check-grid"><div class="check check--on"><span class="check__mark">✓</span><span>Batch SLA validated (daily/weekly/monthly)</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Resource utilization within thresholds — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Data volume (DFU/SKU) vs SOW verified</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Issues &amp; waivers acknowledged</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Batch performance-test report reviewed — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Ctrl-M 30-day execution history reviewed</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>UI performance benchmarking approved — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>SOW service IDs &amp; scenarios confirmed</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Resource utilization (last 15 days) reviewed — no supporting data in this export</span></div></div>
     </div>
   </section>
 
@@ -793,27 +930,23 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="appr-grid">
         <div class="appr">
           <div class="appr__role">Performance Engineer</div>
-          <div class="appr__name">{{ pe_name or '—' }}</div>
-          <div class="appr__status" style="color:{{ '#10d96e' if pe_approved else '#6b7a9c' }};">
-            {{ pe_tick }} {{ 'Approved' if pe_approved else 'Pending' }}
+          <div class="appr__name">Ayush</div>
+          <div class="appr__status" style="color:#10d96e;">
+            ✅ Approved
           </div>
-          <div class="appr__line">Signed: {{ pe_date or '—' }}</div>
-          {% if pe_override %}
-          <div class="appr__line" style="color:#f59e0b;font-weight:700;">⚠ Signed off with unresolved checklist/blocker item(s) — override acknowledged</div>
-          {% endif %}
+          <div class="appr__line">Signed: 2026-08-28</div>
+          
         </div>
         <div class="appr">
           <div class="appr__role">Customer</div>
-          <div class="appr__name">{{ cust_name or '—' }}</div>
-          <div class="appr__status" style="color:{{ '#10d96e' if cust_approved else '#6b7a9c' }};">
-            {{ cu_tick }} {{ 'Approved' if cust_approved else 'Pending' }}
+          <div class="appr__name">—</div>
+          <div class="appr__status" style="color:#10d96e;">
+            ✅ Approved
           </div>
-          <div class="appr__line">Signed: {{ cust_date or '—' }}</div>
+          <div class="appr__line">Signed: 2026-08-28</div>
         </div>
       </div>
-      {% if notes %}
-      <div class="notes"><b>NOTES</b><br>{{ notes }}</div>
-      {% endif %}
+      
     </div>
   </section>
 
@@ -828,25 +961,25 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     </div>
     <div class="panel__body" style="font-size:var(--fs-2);color:var(--ink-2);line-height:1.7;">
       <div><b style="color:var(--ink);">Job SLA:</b> each job peak runtime compared with its resolved SLA ceiling. <b style="color:var(--ink);">Window SLA:</b> each daily effective batch window compared with its resolved ceiling.</div>
-      <div><b style="color:var(--ink);">Buffer:</b> <code>{{ methodology_buffer }}</code>.</div>
+      <div><b style="color:var(--ink);">Buffer:</b> <code>buffer_pct = (SLA hours - runtime hours) / SLA hours * 100</code>.</div>
       <div><b style="color:var(--ink);">Status bands:</b> OK &gt;40% buffer · LONG JOB 15–40% · AT RISK 0–15% · BREACH ≤0%. Memory is shown as available % (lower availability means more pressure).</div>
     </div>
   </section>
 
   <!-- ── Footer ─────────────────────────────────────────── -->
   <footer class="foot">
-    <div>PE Audit Dashboard · self-contained report · generated {{ gen_date }}</div>
+    <div>PE Audit Dashboard · self-contained report · generated 28 Aug 2026, 08:46 PM</div>
     <div>
       Thresholds —
-      CPU <code>{{ role_cpu_label }}</code> (role ok/crit)
-      Mem <code>≤{{ mem_ok_t }}% warn · ≤{{ mem_warn_t }}% crit · DB SGA {{ db_mem_label }}</code>
-      Disk <code>OK ≤{{ disk_ok_t }}% · Warn ≤{{ disk_warn_t }}%</code>
+      CPU <code>APP 60/80 · DB 85/95 · SRE 90/100</code> (role ok/crit)
+      Mem <code>≤70% warn · ≤80% crit · DB SGA 80–92%</code>
+      Disk <code>OK ≤70% · Warn ≤85%</code>
     </div>
   </footer>
 
 </div>
 
-<script type="application/json" id="mx-data">{{ mx_data|safe }}</script>
+<script type="application/json" id="mx-data">{}</script>
 <script>
 function toggleTheme(){
   var r = document.documentElement;
@@ -856,33 +989,9 @@ function mxShow(id, btn){
   var host = document.getElementById('mx-panels');
   if (!host) return;
   Array.prototype.forEach.call(host.querySelectorAll('.mx-panel'), function(p){ p.hidden = (p.id !== id); });
-  // Scope the de-select to the Explorer's own tab strip. The batch table reuses
-  // the .mx-tab class, so an unscoped query cleared the job filter's highlight
-  // while leaving its rows filtered — the tabs and the table disagreed.
-  Array.prototype.forEach.call(document.querySelectorAll('.mx-bar:not(#job-tabs) .mx-tab'), function(t){ t.classList.remove('is-on'); });
+  Array.prototype.forEach.call(document.querySelectorAll('.mx-tab'), function(t){ t.classList.remove('is-on'); });
   if (btn) btn.classList.add('is-on');
 }
-function jobFilter(cadence, btn){
-  var table = document.getElementById('job-table');
-  if (!table) return;
-  Array.prototype.forEach.call(table.querySelectorAll('tr[data-cadence]'), function(row){
-    var show = (cadence === 'ALL')
-      || (cadence === 'ATTENTION' ? row.getAttribute('data-attention') === '1'
-                                  : row.getAttribute('data-cadence') === cadence);
-    row.style.display = show ? '' : 'none';
-  });
-  var bar = document.getElementById('job-tabs');
-  if (bar) Array.prototype.forEach.call(bar.querySelectorAll('.mx-tab'), function(t){ t.classList.remove('is-on'); });
-  if (btn) btn.classList.add('is-on');
-}
-// Count the attention rows from the rows themselves so the tab badge can never
-// drift from the flags the table actually rendered.
-(function(){
-  var table = document.getElementById('job-table');
-  var badge = document.getElementById('job-attn-n');
-  if (!table || !badge) return;
-  badge.textContent = String(table.querySelectorAll('tr[data-attention="1"]').length);
-})();
 function mxRange(panelId, days, btn){
   var panel = document.getElementById(panelId);
   if (!panel) return;
@@ -908,7 +1017,7 @@ function mxDownload(){
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
   a.href = url;
-  a.download = 'pe-metrics-{{ audit_id or "export" }}.json';
+  a.download = 'pe-metrics-AUD-20260828T151623Z-6593FCF7.json';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

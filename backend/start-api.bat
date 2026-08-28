@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0.."
+set "REPO_ROOT=%~dp0.."
+cd /d "%REPO_ROOT%"
 
 rem Local development serves both browser views from one shared API process.
 rem Production Docker explicitly sets PE_UI_MODE=api and never ships legacy assets.
@@ -8,7 +9,9 @@ if "%PE_UI_MODE%"=="" set "PE_UI_MODE=dual"
 
 rem Local API only. This does not open or serve the retired FastAPI dashboard UI.
 if exist ".venv\Scripts\python.exe" (
-  set "PYTHON_CMD=.venv\Scripts\python.exe"
+  rem Resolve this before changing into the API package below.  A relative
+  rem .venv path works at repository root but fails after the package cd.
+  set "PYTHON_CMD=%CD%\.venv\Scripts\python.exe"
 ) else (
   py -3.14 --version >nul 2>&1
   if not errorlevel 1 (
@@ -54,7 +57,12 @@ echo   This window supplies upload, SLA, findings, and Azure API calls for the R
 echo   Press Ctrl+C to stop the local API.
 echo.
 
-call %PYTHON_CMD% -m uvicorn main:app --app-dir backend\PE_Dashboard_API\app --host 127.0.0.1 --port 8765
+rem Run from the deployable API package, not repository root.  The repository
+rem deliberately retains the legacy FastAPI comparison source at root; running
+rem from root makes Python resolve its `routers` package before the API package
+rem and can silently return the legacy report renderer.
+cd /d "%REPO_ROOT%\backend\PE_Dashboard_API\app"
+call %PYTHON_CMD% -m uvicorn main:app --host 127.0.0.1 --port 8765
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo API stopped with exit code %EXIT_CODE%.

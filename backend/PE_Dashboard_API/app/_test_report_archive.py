@@ -458,7 +458,7 @@ def test_exported_fleet_score_matches_the_frozen_archive_value() -> None:
 def test_registry_template_compacts_rows_and_filters_independent_facts() -> None:
     """Exercise the actual inline filter/chip functions without a browser."""
     template = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "backend"
         / "legacy-ui"
         / "templates"

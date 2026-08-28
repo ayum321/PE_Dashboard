@@ -200,7 +200,7 @@ interface DeepDiveResponse {
   patterns?: DeepDivePattern[];
   baseline?: { days_observed?: number };
   spike_attribution?: {
-    rows: { vm: string; metric: string; peak?: number; severity?: string; concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }[];
+    rows: { vm: string; metric: string; start?: string; end?: string; peak?: number; peak_time?: string; duration_min?: number; severity?: string; concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }[];
     summary: { spikes_total: number; spikes_attributed: number; attribution_rate: number; runs_loaded: number; caveat: string };
   };
   window?: { timezone?: string; start_utc?: string; end_utc?: string; grain?: string; data_points?: number; is_custom?: boolean };
@@ -485,6 +485,38 @@ function Sparkline({ points, color, fixed0to100 }: { points: { t: string; v: num
   );
 }
 
+/** Investigated: does the Unified Time-Series chart's stepped/plateaued
+ * shape indicate forward-filled/interpolated telemetry rather than real
+ * utilization? Checked live snapshot payloads directly: Azure returns a
+ * complete, evenly-spaced bucket per host/metric (e.g. 360 hourly points for
+ * a 15-day window with zero missing buckets in the common case) and the
+ * backend never fills a missing bucket \u2014 `_query_single_vm_timeseries` only
+ * appends a point when Azure actually returned one. The plateaus are real:
+ * idle VMs sit within ~0.5% of their own average for hours, then a real
+ * batch/business-hours spike produces the "cliff". However, on the rare host
+ * where Azure genuinely drops a bucket (confirmed once across four real
+ * snapshots), the chart used to silently bridge the gap with a straight
+ * line \u2014 indistinguishable from a real gradual change. `withGapBreaks`
+ * detects a delta more than 1.75x the series' own median cadence and inserts
+ * a null point so Highcharts renders a break instead of a false ramp. */
+export function withGapBreaks(points: { t: string; v: number }[]): { data: (number | null)[][]; sawGap: boolean } {
+  if (points.length < 3) return { data: points.map((p) => [new Date(p.t).getTime(), p.v]), sawGap: false };
+  const times = points.map((p) => new Date(p.t).getTime());
+  const deltas = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
+  const median = deltas[Math.floor(deltas.length / 2)] || 0;
+  const threshold = median * 1.75;
+  const data: (number | null)[][] = [];
+  let sawGap = false;
+  for (let i = 0; i < points.length; i++) {
+    data.push([times[i], points[i].v]);
+    if (i < points.length - 1 && median > 0 && (times[i + 1] - times[i]) > threshold) {
+      data.push([times[i] + (times[i + 1] - times[i]) / 2, null]);
+      sawGap = true;
+    }
+  }
+  return { data, sawGap };
+}
+
 /** Fuzzy-matches a server's short host name against loaded deep-dive VM keys
  * and returns its CPU series for the Trend column, ported from
  * _serverSparkline()'s lookup logic (app.js) \u2014 Azure VM names often drop the
@@ -575,7 +607,14 @@ export function ResourcePanel() {
   const servers = useMemo(() => (data.resource?.servers || []) as ServerRow[], [data.resource]);
   const isAzureSource = servers.some((s) => s.source === 'azure_monitor');
   const fleetAvg = useMemo(() => {
-    const rows = servers;
+    // Matches the backend's own convention (resource_calculator.py
+    // build_resource_payload): image-only hosts carry no telemetry and must
+    // be excluded from the denominator, not silently averaged in as a 0%
+    // reading. This branch only renders while fleetKpis (the backend-computed,
+    // correctly-filtered average) hasn't loaded yet — but a wrong number
+    // shown briefly is still a wrong number, so it must use the same "known"
+    // definition as fleetKpis, overThreshold and memSeverity below.
+    const rows = servers.filter((s) => !s.image_only);
     const count = rows.length || 1;
     const sum = (key: 'cpu_used' | 'mem_used' | 'disk_used_max' | 'health_score') =>
       rows.reduce((total, server) => total + (server[key] || 0), 0);
@@ -599,6 +638,25 @@ export function ResourcePanel() {
   // fact (7f follow-up: the prior composition-weighted-threshold formula was
   // itself still "the gauge's own opinion"; this reads the verdict instead
   // of deriving a new one).
+  // A fleet MEAN is the wrong headline for a risk dashboard: ten idle hosts drag
+  // "Avg CPU" to 22% on the same screen that flags two boxes pegged at 98-99%.
+  // The mean stays (it is the contracted KPI) but every gauge now carries the
+  // count that actually communicates risk — how many hosts sit at or above the
+  // threshold the gauge is graded against.
+  const overThreshold = useMemo(() => {
+    const live = servers.filter((s) => !s.image_only);
+    const count = (pick: (s: ServerRow) => number | null | undefined, limit: number) =>
+      live.filter((s) => {
+        const v = pick(s);
+        return v != null && v >= limit;
+      }).length;
+    return {
+      cpu: count((s) => s.cpu_used, 80),
+      mem: count((s) => ((s.type || 'APP') === 'DB' ? null : s.mem_used), MEM_CRIT_PCT),
+      disk: count((s) => s.disk_used_max, 85),
+    };
+  }, [servers]);
+
   const memSeverity = useMemo(() => {
     const known = servers.filter((s) => s.mem_used != null);
     if (!known.length) return null;
@@ -663,12 +721,13 @@ export function ResourcePanel() {
     // them to recreate counts independently (and occasionally report a
     // healthy fleet beside warning hosts).
     const resolved = await processResource(fetchedServers);
-    setResource({
+    const resourcePayload = {
       servers: fetchedServers,
       kpis: resolved.kpis,
       anomalies: resolved.anomalies,
       executive_summary: resolved.executive_summary,
-    });
+    };
+    setResource(resourcePayload);
     setFleetKpis((resolved.kpis as FleetKpis) || null);
     setAnomalies((resolved.anomalies as ResourceAnomaly[]) || []);
     const exec = resolved.executive_summary as ExecutiveSummary | undefined;
@@ -680,10 +739,26 @@ export function ResourcePanel() {
     // customer header blank on every page, not just this one.
     if (!data.customerName && meta.customer) setCustomerName(meta.customer);
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);
+    // Capture the time-series in the same motion as the fetch. It used to wait
+    // for a manual "Load Metrics Deep Dive" click, so anyone who fetched and
+    // exported straight away shipped a report whose Metrics Explorer had a
+    // panel per host and a series for none of them ("0 of 12 with series").
+    // Failure here is non-fatal: handleLoadDeepDive records its own error and
+    // the button stays available for a retry.
+    // The rows arrive as ResourceServer from the fetch and are read here as
+    // ServerRow — the same widening `servers` already applies at line ~575.
+    void handleLoadDeepDive(fetchedServers as unknown as ServerRow[], meta.hoursBack, resourcePayload);
   };
 
-  const handleLoadDeepDive = async () => {
-    const vmIds = servers.filter((s) => s.resource_id).map((s) => s.resource_id as string);
+  const handleLoadDeepDive = async (
+    overrideServers?: ServerRow[],
+    overrideHoursBack?: number,
+    overrideResource?: Parameters<typeof setResource>[0],
+  ) => {
+    // `servers` is derived from React state, which has not settled yet when this
+    // runs straight after a fetch — the caller passes the rows it just received.
+    const sourceServers = Array.isArray(overrideServers) ? overrideServers : servers;
+    const vmIds = sourceServers.filter((s) => s.resource_id).map((s) => s.resource_id as string);
     if (!vmIds.length) return;
     setDeepDiveBusy(true);
     setDeepDiveError(null);
@@ -694,7 +769,7 @@ export function ResourcePanel() {
       // each VM against the correct memory band instead of re-guessing from
       // the name alone (7a root cause fix).
       const vmTypes: Record<string, string> = {};
-      for (const s of servers) {
+      for (const s of sourceServers) {
         if (s.resource_id && s.type) vmTypes[s.resource_id] = s.type;
       }
       if (Object.keys(vmTypes).length) payload.vm_types = vmTypes;
@@ -702,7 +777,7 @@ export function ResourcePanel() {
         payload.start_utc = new Date(ddCustomStart).toISOString();
         payload.end_utc = new Date(ddCustomEnd).toISOString();
       } else {
-        payload.hours_back = hoursBack;
+        payload.hours_back = overrideHoursBack ?? hoursBack;
       }
       const result = await fetchAzureTimeseries(payload);
       const dd = result as unknown as DeepDiveResponse;
@@ -711,8 +786,9 @@ export function ResourcePanel() {
       // response that powers this screen. Keep that evidence in the shared
       // session payload so the standalone report can render it without a
       // second query or a different calculation path.
-      if (data.resource) {
-        setResource({ ...data.resource, deep_dive: dd });
+      const baseResource = overrideResource ?? data.resource;
+      if (baseResource) {
+        setResource({ ...baseResource, deep_dive: dd });
       }
       setHeatmapMetric(preferredFleetHeatmapMetric(dd));
       // Prefer auto-opening a VM with detected spikes (matches vanilla's
@@ -770,14 +846,20 @@ export function ResourcePanel() {
     const seriesEntries = Object.entries(vmData.series).filter(([metric]) => gradedMetrics.has(metric));
     if (!seriesEntries.length) return null;
     const colors: Record<string, string> = { 'Percentage CPU': '#3b82f6', 'Available Memory Percentage': '#22d3ee', 'OS Disk Bandwidth Consumed Percentage': '#a855f7', 'Data Disk Bandwidth Consumed Percentage': '#a855f7' };
-    const series: Highcharts.SeriesOptionsType[] = seriesEntries.map(([metric, points]) => ({
-      type: 'line',
-      name: shortMetric(metric),
-      color: colors[metric] || undefined,
-      lineWidth: 2,
-      marker: { enabled: false },
-      data: points.map((p) => [new Date(p.t).getTime(), p.v]),
-    }));
+    let hadGap = false;
+    const series: Highcharts.SeriesOptionsType[] = seriesEntries.map(([metric, points]) => {
+      const gapped = withGapBreaks(points);
+      if (gapped.sawGap) hadGap = true;
+      return {
+        type: 'line',
+        name: shortMetric(metric),
+        color: colors[metric] || undefined,
+        lineWidth: 2,
+        marker: { enabled: false },
+        connectNulls: false,
+        data: gapped.data,
+      };
+    });
     // True per-bucket MAXIMUM series from FastAPI.  This is deliberately
     // timestamp-aligned rather than a horizontal whole-window max: the latter
     // falsely implies every average bucket peaked at the same value.
@@ -837,32 +919,89 @@ export function ResourcePanel() {
       legend: { itemStyle: { color: '#cbd5e1', fontSize: '10px', fontWeight: '500' } },
       tooltip: { shared: true, valueDecimals: 1, backgroundColor: 'rgba(9,14,31,.98)', borderColor: 'rgba(96,165,250,.42)', style: { color: '#e2e8f0' } },
       series,
-    };
+      _hadGap: hadGap,
+    } as Highcharts.Options & { _hadGap: boolean };
   }, [deepDive, deepDiveVm, ddShowMaxOverlay, ddShowMinOverlay]);
 
   // ── Requires Investigation card grid data, ported from _renderVmServerCard()
   // + renderFilteredGrid() (app.js). Groups deep-dive VMs into "has spikes"
   // (critical, sortable/filterable card grid) vs "clean" (compact table). ──
-  // Three-way pattern taxonomy, ported from vanilla's Detected Patterns panel
-  // (cross_vm_correlation / recurring_time / sustained_pressure) \u2014 was flattened
-  // to the single "N Critical Anomalies" banner, which counts raw SPIKE EVENTS,
-  // not detected PATTERNS (one pattern can bundle many events). Both numbers are
-  // real and independently correct; they are not the same measure (IMPROVE).
+  // Four-way pattern taxonomy, ported from vanilla's Detected Patterns panel
+  // (cross_vm_correlation / recurring_time / sustained_pressure / regime_change)
+  // \u2014 was flattened to the single "N Critical Anomalies" banner, which counts
+  // raw SPIKE EVENTS, not detected PATTERNS (one pattern can bundle many
+  // events). Both numbers are real and independently correct; they are not
+  // the same measure (IMPROVE).
   const patternTaxonomy = useMemo(() => {
     const patterns = deepDive?.patterns || [];
     if (!patterns.length) return null;
-    const byType = { cross_vm_correlation: 0, recurring_time: 0, sustained_pressure: 0 } as Record<string, number>;
+    // Own-property counters, and an explicit `other` bucket. `p.type in byType`
+    // previously walked the prototype chain, so a pattern typed "constructor" or
+    // "toString" would increment a function into NaN; and any new backend type
+    // would be counted in `total` but shown in no chip, leaving the chips and
+    // the "N grouped patterns" caption silently disagreeing.
+    const byType: Record<string, number> = Object.create(null);
+    byType.cross_vm_correlation = 0;
+    byType.recurring_time = 0;
+    byType.sustained_pressure = 0;
+    byType.regime_change = 0;
+    byType.other = 0;
     let critical = 0;
     for (const p of patterns) {
-      if (p.type && p.type in byType) byType[p.type]++;
+      const key = typeof p.type === 'string' && Object.prototype.hasOwnProperty.call(byType, p.type) && p.type !== 'other'
+        ? p.type
+        : 'other';
+      byType[key]++;
       if (p.severity === 'critical') critical++;
     }
-    return { total: patterns.length, critical, byType };
+    // Derive the headline from the buckets so the chips can never fail to sum.
+    const total = byType.cross_vm_correlation + byType.recurring_time
+      + byType.sustained_pressure + byType.regime_change + byType.other;
+    return { total, critical, byType };
   }, [deepDive]);
+
+  // Regime-shift patterns (baseline μ/σ step-change vs the prior pull window)
+  // were computed by the backend and typed on DeepDivePattern, but were never
+  // rendered anywhere — they landed in the taxonomy's "Other" bucket with no
+  // way to see *what* changed, silently discarding the direction/magnitude the
+  // backend already worked out. Surface them as their own compact list so
+  // "Other" only ever means genuinely-unclassified evidence.
+  const regimeShifts = useMemo(
+    () => (deepDive?.patterns || []).filter((p) => p.type === 'regime_change'),
+    [deepDive],
+  );
 
   const correlationGroups = useMemo(
     () => groupCrossServerCorrelations(deepDive?.patterns || []),
     [deepDive],
+  );
+
+  // Every host in this estate shares a long site/tenant prefix (tsbf1414…), so
+  // the only distinguishing characters sit at the end — and tsbf141430011 vs
+  // tsbf141403011 differ by a digit transposition in the middle. Rendered at one
+  // weight they are effectively indistinguishable at a glance, which risks
+  // investigating the wrong box. Dim the shared prefix so the eye lands on the
+  // part that actually differs.
+  const hostPrefixLen = useMemo(() => {
+    const names = Object.keys(deepDive?.vms || {});
+    if (names.length < 2) return 0;
+    const first = names[0];
+    let i = 0;
+    while (i < first.length) {
+      const ch = first[i];
+      const pos = i;
+      if (!names.every((n) => n[pos] === ch)) break;
+      i += 1;
+    }
+    // Never dim so much that fewer than four characters stay emphasised.
+    return Math.max(0, Math.min(i, first.length - 4));
+  }, [deepDive]);
+
+  const renderHostId = (name: string, key?: string | number) => (
+    <span key={key} style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+      <span style={{ opacity: 0.5 }}>{name.slice(0, hostPrefixLen)}</span>
+      <span style={{ fontWeight: 800, color: '#e6edff' }}>{name.slice(hostPrefixLen)}</span>
+    </span>
   );
 
   // Surface the detector's own baseline quality at fleet level.  A few low-pull
@@ -1073,16 +1212,43 @@ export function ResourcePanel() {
     let insight = '';
     if (rows.length) {
       const top = rows[0];
+      const label = shortMetric(top.metric);
+      const topIsCpu = /Percentage CPU/i.test(top.metric);
       const cpuStat = vmData.stats?.['Percentage CPU'];
       const cpuP95 = cpuStat?.p95 ?? cpuStat?.mean ?? null;
-      const cpuContext = cpuP95 != null ? (cpuP95 < 40 ? `minimal CPU impact (P95 ${cpuP95.toFixed(0)}%)` : `concurrent CPU pressure (P95 ${cpuP95.toFixed(0)}%)`) : 'CPU context unavailable';
-      const label = shortMetric(top.metric);
+      const topPeak = (top.peak ?? 0).toFixed(1);
       const topCtrlM = findCtrlM(top);
-      insight = /Available Memory/i.test(top.metric)
-        ? `Likely root cause: pressure on available memory around ${(top.peak ?? 0).toFixed(1)}% on ${deepDiveVm}; ${cpuContext}.`
-        : `Likely root cause: pressure on ${label} for ${deepDiveVm}; ${cpuContext}.`;
+
+      // The window P95 is a BASELINE statistic, not an impact measure. Calling a
+      // low P95 "minimal CPU impact" next to a critical CPU spike is a direct
+      // self-contradiction — and it used to be appended even when the dominant
+      // anomaly WAS CPU, producing "pressure on CPU ...; minimal CPU impact".
+      // Peak-vs-baseline is the honest reading: a high peak over a low P95 is an
+      // isolated burst; a high peak over a high P95 is sustained load.
+      const shape = (peak: number, p95: number | null) => {
+        if (p95 == null) return null;
+        return peak - p95 >= 40
+          ? `an isolated burst against a ${p95.toFixed(0)}% P95 baseline for this window, not sustained load`
+          : `consistent with sustained load (P95 baseline ${p95.toFixed(0)}%)`;
+      };
+
+      if (topIsCpu) {
+        // Same metric — describe the spike against its own baseline instead of
+        // restating CPU a second time with an opposing adjective.
+        const s = shape(top.peak ?? 0, cpuP95);
+        insight = `Dominant signal on ${deepDiveVm}: CPU peaked ${topPeak}%${s ? ` — ${s}` : ''}.`;
+      } else {
+        // Different metric — CPU is genuine cross-metric context. Word it as a
+        // baseline reading so it cannot be misread as a competing root cause.
+        const cpuContext = cpuP95 != null
+          ? `CPU stayed near its ${cpuP95.toFixed(0)}% P95 baseline over the same window`
+          : 'CPU context unavailable for this window';
+        insight = /Available Memory/i.test(top.metric)
+          ? `Dominant signal on ${deepDiveVm}: available memory fell to about ${topPeak}%; ${cpuContext}.`
+          : `Dominant signal on ${deepDiveVm}: ${label} peaked ${topPeak}%; ${cpuContext}.`;
+      }
       if (topCtrlM?.heaviest) {
-        insight += ` Ctrl-M correlation: ${topCtrlM.heaviest} (${(topCtrlM.heaviest_hrs || 0).toFixed(1)}h) was running concurrently \u2014 ${topCtrlM.concurrent_jobs} job(s) overlapped this window.`;
+        insight += ` Ctrl-M correlation: ${topCtrlM.heaviest} (${(topCtrlM.heaviest_hrs || 0).toFixed(1)}h) was running concurrently \u2014 ${topCtrlM.concurrent_jobs} job(s) overlapped this window (time overlap only, not proof of cause).`;
       }
     }
 
@@ -1111,6 +1277,15 @@ export function ResourcePanel() {
     );
   }
 
+  // Every coverage denominator anchors on the SAME fleet total the Servers card
+  // shows. These used to divide by known_servers (telemetry-bearing hosts only),
+  // so a fully-resolved fleet rendered "12/12" directly beside a "13 Servers"
+  // headline and read as an arithmetic error rather than a documented exclusion.
+  const fleetTotal = servers.length;
+  const excludedNote = fleetKpis?.image_only
+    ? ` \u00b7 ${fleetKpis.image_only} excluded (no telemetry)`
+    : '';
+
   return (
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Resource Review</Typography>
@@ -1119,7 +1294,12 @@ export function ResourcePanel() {
       <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} />
 
       <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16, marginBottom: 16 }}>
-        <KpiStatCard label="Servers" value={servers.length} sub={`${servers.filter((s) => (s.type || 'APP') === 'APP').length} APP \u00b7 ${servers.filter((s) => s.type === 'DB').length} DB`} accent="#3b82f6" />
+        <KpiStatCard
+          label="Servers"
+          value={servers.length}
+          sub={`${servers.filter((s) => (s.type || 'APP') === 'APP').length} APP \u00b7 ${servers.filter((s) => s.type === 'DB').length} DB${fleetKpis?.image_only ? ` \u00b7 ${fleetKpis.image_only} no telemetry` : ''}`}
+          accent="#3b82f6"
+        />
         {isAzureSource && <KpiStatCard label="Source" value="Azure Monitor" valueColor="#22d3ee" sub={`Live \u00b7 last ${hoursBack}h`} accent="#22d3ee" />}
         {fleetKpis ? (
           <>
@@ -1127,14 +1307,14 @@ export function ResourcePanel() {
               label="Fleet vCPUs"
               value={fleetKpis.total_vcpus != null ? fleetKpis.total_vcpus.toLocaleString() : '\u2014'}
               valueColor={fleetKpis.total_vcpus != null ? '#4a9eff' : '#6b7db3'}
-              sub={fleetKpis.vcpus_reporting ? `${fleetKpis.vcpus_reporting}/${fleetKpis.known_servers || servers.length} VM capacities resolved` : 'Azure Compute capacity unavailable'}
+              sub={fleetKpis.vcpus_reporting ? `${fleetKpis.vcpus_reporting}/${fleetTotal} VM capacities resolved${excludedNote}` : 'Azure Compute capacity unavailable'}
               accent="#4a9eff"
             />
             <KpiStatCard label="Fleet Grade" value={fleetKpis.fleet_grade || '?'} sub={`Score ${(fleetKpis.fleet_score || 0).toFixed(1)}/100`} accent="#a855f7" />
             {fleetKpis.cpu_reporting === 0 ? (
               <KpiStatCard label="Avg CPU" value="—" valueColor="#6b7db3" sub="0 servers reporting CPU" accent="#6b7db3" />
             ) : (
-              <MiniGauge label="Avg CPU" value={fleetKpis.avg_cpu || 0} threshold={80} sub={`${fleetKpis.cpu_reporting}/${fleetKpis.known_servers || servers.length} reporting · threshold 80%`} />
+              <MiniGauge label="Avg CPU" value={fleetKpis.avg_cpu || 0} threshold={80} sub={`${fleetKpis.cpu_reporting}/${fleetTotal} reporting · ${overThreshold.cpu ? `${overThreshold.cpu} host(s) ≥ 80%` : 'none ≥ 80%'}`} />
             )}
             {fleetKpis.mem_reporting === 0 ? (
               <KpiStatCard label="Avg Memory" value="—" valueColor="#6b7db3" sub="0 servers reporting memory" accent="#6b7db3" />
@@ -1144,14 +1324,14 @@ export function ResourcePanel() {
                 value={fleetKpis.avg_mem || 0}
                 threshold={80}
                 overrideColor={memSeverity?.color}
-                sub={!memSeverity || memSeverity.dbCount === 0 ? `${fleetKpis.mem_reporting}/${fleetKpis.known_servers || servers.length} reporting · threshold 70/80%` : memSeverity.dbExpectedCount === memSeverity.dbCount ? `${fleetKpis.mem_reporting}/${fleetKpis.known_servers || servers.length} reporting · ${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB host profile` : `${fleetKpis.mem_reporting}/${fleetKpis.known_servers || servers.length} reporting · ${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB in expected band${memSeverity.dbHighCount ? `, ${memSeverity.dbHighCount} above 92%` : `, ${memSeverity.dbCount - memSeverity.dbExpectedCount} below 80%`}`}
+                sub={!memSeverity || memSeverity.dbCount === 0 ? `${fleetKpis.mem_reporting}/${fleetTotal} reporting · threshold 70/80%` : memSeverity.dbExpectedCount === memSeverity.dbCount ? `${fleetKpis.mem_reporting}/${fleetTotal} reporting · ${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB host profile` : `${fleetKpis.mem_reporting}/${fleetTotal} reporting · ${memSeverity.dbExpectedCount}/${memSeverity.dbCount} DB in expected band${memSeverity.dbHighCount ? `, ${memSeverity.dbHighCount} above 92%` : `, ${memSeverity.dbCount - memSeverity.dbExpectedCount} below 80%`}`}
                 tooltip={memSeverity ? `${memSeverity.dbCount} DB server(s): ${memSeverity.dbExpectedCount} in the configured 80\u201392% host-memory profile, ${memSeverity.dbHighCount} above it. Azure cannot verify SGA/PGA from this host metric alone. ${memSeverity.total - memSeverity.dbCount} non-DB server(s): ${memSeverity.nonDbCritCount} \u2265 80%, ${memSeverity.nonDbWarnCount} \u2265 70%. Color reflects these tallies directly \u2014 same facts Fleet Diagnosis uses below.` : undefined}
               />
             )}
             {fleetKpis.disk_reporting === 0 ? (
               <KpiStatCard label="Avg Disk" value="—" valueColor="#6b7db3" sub="0 servers reporting disk" accent="#6b7db3" />
             ) : (
-              <MiniGauge label="Avg Disk" value={fleetKpis.avg_disk || 0} threshold={85} sub={`${fleetKpis.disk_reporting}/${fleetKpis.known_servers || servers.length} reporting · threshold 85%`} />
+              <MiniGauge label="Avg Disk" value={fleetKpis.avg_disk || 0} threshold={85} sub={`${fleetKpis.disk_reporting}/${fleetTotal} reporting · ${overThreshold.disk ? `${overThreshold.disk} host(s) ≥ 85%` : 'none ≥ 85%'}`} />
             )}
             <KpiStatCard label="Health" accent="#f43f5e" value={
               <Box display="flex" alignItems="flex-start" style={{ gap: 10 }}>
@@ -1163,7 +1343,7 @@ export function ResourcePanel() {
                 ].map((b) => (
                   <Box key={b.label} display="flex" flexDirection="column" alignItems="center" style={{ gap: 3 }}>
                     <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 8, fontSize: 15, fontWeight: 800, color: b.color, background: `${b.color}1a`, border: `1px solid ${b.color}4d` }}>{b.n}</span>
-                    <span style={{ fontSize: 7, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: b.color }}>{b.label}</span>
+                    <span style={{ fontSize: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: b.color }}>{b.label}</span>
                   </Box>
                 ))}
               </Box>
@@ -1343,7 +1523,7 @@ export function ResourcePanel() {
                         {m.val != null && <Box style={{ width: `${Math.min(100, Math.max(0, m.val))}%`, height: '100%', background: m.color }} />}
                       </Box>
                       <Typography variant="caption" style={{ color: m.color, fontSize: 9 }}>{m.label} ({utilAggMode}) {m.val != null ? `${m.val.toFixed(0)}%` : 'N/A'}</Typography>
-                      {m.note && <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 7 }}>{m.note}</Typography>}
+                      {m.note && <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8 }}>{m.note}</Typography>}
                     </Box>
                   ))}
                 </Box>
@@ -1443,7 +1623,7 @@ export function ResourcePanel() {
               </TableCell>
               <TableCell align="right" style={{ color: cpuColor }} title={cpuAvail ? undefined : 'Data unavailable'}>
                 {cpuAvail ? `${(server.cpu_used || 0).toFixed(1)}%` : 'N/A'}
-                {server.agg_trap && <span className="metric-badge metric-badge-teal" style={{ fontSize: 7, marginLeft: 4 }} title={`Aggregation Artifact: Max CPU ${(server.cpu_used || 0).toFixed(1)}% but Avg only ${(server.cpu_avg_pct || 0).toFixed(1)}% \u2014 brief spike, server is healthy`}>BRIEF SPIKE</span>}
+                {server.agg_trap && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }} title={`Aggregation Artifact: Max CPU ${(server.cpu_used || 0).toFixed(1)}% but Avg only ${(server.cpu_avg_pct || 0).toFixed(1)}% \u2014 brief spike, server is healthy`}>BRIEF SPIKE</span>}
               </TableCell>
               <TableCell align="right" title={server.cpu_avg_pct != null ? undefined : 'Insufficient data for period average'}>
                 {server.cpu_avg_pct != null ? `${server.cpu_avg_pct.toFixed(1)}%` : 'N/A'}
@@ -1497,7 +1677,7 @@ export function ResourcePanel() {
               <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>Critical anomalies only {'\u2014'} normal &amp; moderate filtered out. Pattern detection across fleet (z-score {'\u2265'} 3{'\u03c3'})</Typography>
               <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, opacity: 0.8 }}>Metric source: Azure Monitor Average + timestamp-aligned Maximum aggregation, with automatic grain by selected time range.</Typography>
             </Box>
-            <Button size="small" variant="contained" color="primary" onClick={handleLoadDeepDive} disabled={deepDiveBusy}>
+            <Button size="small" variant="contained" color="primary" onClick={() => handleLoadDeepDive()} disabled={deepDiveBusy}>
               {deepDiveBusy ? <CircularProgress size={16} color="inherit" /> : 'Load Time-Series'}
             </Button>
           </Box>
@@ -1584,10 +1764,43 @@ export function ResourcePanel() {
                     <span className="metric-badge" style={{ fontSize: 8, color: '#3b82f6' }}>{patternTaxonomy.byType.cross_vm_correlation} Correlated Across Servers</span>
                     <span className="metric-badge" style={{ fontSize: 8, color: '#f59e0b' }}>{patternTaxonomy.byType.recurring_time} Recurring at a Fixed Hour</span>
                     <span className="metric-badge" style={{ fontSize: 8, color: '#f43f5e' }}>{patternTaxonomy.byType.sustained_pressure} Sustained Pressure</span>
+                    {patternTaxonomy.byType.regime_change > 0 && (
+                      <span className="metric-badge" style={{ fontSize: 8, color: '#6366f1' }}>{patternTaxonomy.byType.regime_change} Baseline Regime Shift</span>
+                    )}
+                    {patternTaxonomy.byType.other > 0 && (
+                      <span className="metric-badge" style={{ fontSize: 8, color: '#6b7db3' }}>{patternTaxonomy.byType.other} Other</span>
+                    )}
                   </Box>
                   <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, fontSize: 8 }}>
-                    {patternTaxonomy.total} grouped pattern{patternTaxonomy.total !== 1 ? 's' : ''}; the critical-event count above remains the raw event total.
+                    {`${patternTaxonomy.total} grouped pattern${patternTaxonomy.total !== 1 ? 's' : ''} \u2014 each pattern carries exactly one type, so the counts above sum to this total. The critical-event count above remains the raw event total.`}
                   </Typography>
+                </Box>
+              )}
+
+              {regimeShifts.length > 0 && (
+                <Box style={{ marginTop: 10, borderRadius: 10, border: '1px solid rgba(99,102,241,.35)', background: 'rgba(99,102,241,.06)', padding: 10 }}>
+                  <Typography variant="subtitle2" style={{ color: '#818cf8' }}>Baseline Regime Shifts</Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ fontSize: 9, display: 'block' }}>
+                    A statistically significant step-change between this pull's mean and the prior pull's baseline for the same host+metric \u2014 not a spike, a shift in the new normal.
+                  </Typography>
+                  <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 6, marginTop: 6 }}>
+                    {regimeShifts.map((p, index) => {
+                      const worsening = p.worsening !== false;
+                      const color = worsening ? '#f43f5e' : '#10d96e';
+                      const vm = p.vms?.[0];
+                      return (
+                        <Box key={`${vm}-${p.metric}-${index}`} style={{ borderRadius: 8, border: `1px solid ${color}40`, background: `${color}0d`, padding: 8 }}>
+                          <Box display="flex" alignItems="center" style={{ gap: 6 }}>
+                            {vm && <Typography component="span" variant="caption" style={{ fontWeight: 700, fontFamily: 'monospace' }}>{renderHostId(vm)}</Typography>}
+                            <span className="metric-badge" style={{ fontSize: 7, color }}>{worsening ? '\u2191 worsening' : '\u2193 improving'}</span>
+                          </Box>
+                          <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 2 }}>
+                            {p.metric ? shortMetric(p.metric) : 'Metric unavailable'}: {'\u03bc'}={p.mean_prior ?? '\u2014'}% {'\u2192'} {'\u03bc'}={p.mean_recent ?? '\u2014'}%
+                          </Typography>
+                        </Box>
+                      );
+                    })}
+                  </Box>
                 </Box>
               )}
 
@@ -1614,7 +1827,19 @@ export function ResourcePanel() {
                           title="Highlight related investigation cards and open the first server's evidence."
                         >
                           <Typography variant="caption" style={{ color: '#22d3ee', fontWeight: 800 }}>{group.timeUtc === 'time unavailable' ? 'Selected window' : `Around ${group.timeUtc} UTC`}</Typography>
-                          <Typography variant="body2" style={{ marginTop: 3, fontWeight: 700 }}>{group.vms.join(' + ')}</Typography>
+                          <Box style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {group.vms.map((vm, vmIndex) => (
+                              <span
+                                key={`${vm}-${vmIndex}`}
+                                style={{
+                                  fontSize: 11, lineHeight: 1.6, padding: '1px 6px', borderRadius: 5,
+                                  background: 'rgba(34,211,238,.10)', border: '1px solid rgba(34,211,238,.22)',
+                                }}
+                              >
+                                {renderHostId(vm)}
+                              </span>
+                            ))}
+                          </Box>
                           <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 3 }}>{group.metrics.map(shortMetric).join(' · ') || 'Metric unavailable'} · {group.eventCount} correlated event{group.eventCount === 1 ? '' : 's'}</Typography>
                         </Box>
                       );
@@ -1648,9 +1873,18 @@ export function ResourcePanel() {
                           <thead>
                             <tr>
                               <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#111d36', minWidth: 150, textAlign: 'left' }}>Server</th>
-                              {fleetHeatmapView.columns.map((column, index) => (
-                                <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: 16, maxWidth: 28, padding: '4px 1px', fontSize: 7, whiteSpace: 'nowrap', writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>{column.label}</th>
-                              ))}
+                                  {/* A label on every column of a 30+ column heatmap is a wall of
+                                      near-vertical text nobody can actually read. Every column still
+                                      gets its own coloured cell (no resolution lost); the visible
+                                      text is thinned to roughly a dozen evenly-spaced ticks, same idea
+                                      as a chart axis — the hidden ones remain in the hover title. */}
+                                  {fleetHeatmapView.columns.map((column, index) => {
+                                    const labelStride = Math.max(1, Math.ceil(fleetHeatmapView.columns.length / 12));
+                                    const showLabel = index % labelStride === 0 || index === fleetHeatmapView.columns.length - 1;
+                                    return (
+                                      <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: 18, maxWidth: 30, padding: '4px 1px', fontSize: 9, whiteSpace: 'nowrap', writingMode: 'vertical-rl', transform: 'rotate(180deg)', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '\u00b7'}</th>
+                                    );
+                                  })}
                             </tr>
                           </thead>
                           <tbody>
@@ -1664,7 +1898,7 @@ export function ResourcePanel() {
                                       key={index}
                                       aria-label={`${row.name}, ${fleetHeatmapView.columns[index].title}: ${state}`}
                                       title={`${row.name}\n${fleetHeatmapView.columns[index].title}\n${state}`}
-                                      style={{ width: 16, minWidth: 16, height: 20, padding: 0, background: fleetHeatmapCellColor(value, heatmapMetric), border: value == null ? '1px solid rgba(148,163,184,.72)' : '1px solid rgba(255,255,255,.16)' }}
+                                      style={{ width: 18, minWidth: 18, height: 20, padding: 0, background: fleetHeatmapCellColor(value, heatmapMetric), border: value == null ? '1px solid rgba(148,163,184,.72)' : '1px solid rgba(255,255,255,.16)' }}
                                     />
                                   );
                                 })}
@@ -1675,9 +1909,12 @@ export function ResourcePanel() {
                       </Box>
                       <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
                         <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Legend:</Typography>
-                        <Typography variant="caption" style={{ fontSize: 9, color: '#10d96e' }}>■ healthy</Typography>
-                        <Typography variant="caption" style={{ fontSize: 9, color: '#f59e0b' }}>■ watch</Typography>
-                        <Typography variant="caption" style={{ fontSize: 9, color: '#f43f5e' }}>■ pressure</Typography>
+                        {/* Distinct glyph per band, not just a recoloured square:
+                            severity was previously encoded by colour alone, which
+                            disappears in greyscale print and for red-green CVD. */}
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#10d96e' }}>{'\u25cf healthy'}</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#f59e0b' }}>{'\u25b2 watch'}</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#f43f5e' }}>{'\u25a0 pressure'}</Typography>
                         <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}><span style={{ display: 'inline-block', width: 10, height: 10, marginRight: 3, verticalAlign: '-1px', border: '1px solid rgba(148,163,184,.9)', background: 'repeating-linear-gradient(135deg, rgba(100,116,139,.45) 0, rgba(100,116,139,.45) 2px, rgba(15,23,42,.92) 2px, rgba(15,23,42,.92) 5px)' }} />metric not emitted</Typography>
                       </Box>
                     </>
@@ -1751,27 +1988,28 @@ export function ResourcePanel() {
                             <Box style={{ minWidth: 0 }}>
                               <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap' }}>
                                 <Typography component="span" variant="body2" style={{ fontWeight: 700, fontFamily: 'monospace' }}>{c.vmName}</Typography>
-                                <span className="metric-badge" style={{ fontSize: 7 }}>{c.role}</span>
-                                {c.env && <span className="metric-badge" style={{ fontSize: 7 }}>{c.env}</span>}
+                                <span className="metric-badge" style={{ fontSize: 8 }}>{c.role}</span>
+                                {c.env && <span className="metric-badge" style={{ fontSize: 8 }}>{c.env}</span>}
                               </Box>
                               <Box display="flex" alignItems="center" style={{ gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
                                 <span className="metric-badge" style={{ fontSize: 8, color: c.severityColor, borderColor: `${c.severityColor}40`, background: `${c.severityColor}1f` }}>{c.severityLabel}</span>
                                 <Typography component="span" variant="caption" color="textSecondary" style={{ fontSize: 9 }}>
                                   {c.spikeCount} spike event{c.spikeCount !== 1 ? 's' : ''} {'\u00b7'} {c.thresholdCrossCount} threshold crossing{c.thresholdCrossCount !== 1 ? 's' : ''}
                                 </Typography>
+                                {c.vmData.baseline_confidence && (
+                                  <span
+                                    className="metric-badge"
+                                    title={`Baseline: ${c.vmData.baseline_confidence.pulls} pull${c.vmData.baseline_confidence.pulls !== 1 ? 's' : ''} / ${c.vmData.baseline_confidence.retention_days ?? c.vmData.baseline_confidence.min_pulls}d${c.vmData.baseline_confidence.baseline_mean != null ? ` \u00b7 \u03bc=${c.vmData.baseline_confidence.baseline_mean}%` : ''}${c.vmData.baseline_confidence.baseline_std != null ? ` \u03c3=${c.vmData.baseline_confidence.baseline_std}%` : ''}${c.vmData.baseline_confidence.degraded ? ' \u2014 session only, not yet baseline-eligible' : ''}`}
+                                    style={{ fontSize: 8, color: c.vmData.baseline_confidence.degraded ? '#f59e0b' : '#6b7db3', cursor: 'help' }}
+                                  >
+                                    {'\u24d8'} baseline{c.vmData.baseline_confidence.degraded ? ' (session-only)' : ''}
+                                  </span>
+                                )}
                               </Box>
-                              {c.vmData.baseline_confidence && (
-                                <Typography component="span" variant="caption" style={{ display: 'block', marginTop: 4, fontSize: 8, color: c.vmData.baseline_confidence.degraded ? '#f59e0b' : '#10d96e' }}>
-                                  Baseline: {c.vmData.baseline_confidence.pulls} pull{c.vmData.baseline_confidence.pulls !== 1 ? 's' : ''} / {c.vmData.baseline_confidence.retention_days ?? c.vmData.baseline_confidence.min_pulls}d
-                                  {c.vmData.baseline_confidence.baseline_mean != null && ` \u00b7 \u03bc=${c.vmData.baseline_confidence.baseline_mean}%`}
-                                  {c.vmData.baseline_confidence.baseline_std != null && ` \u03c3=${c.vmData.baseline_confidence.baseline_std}%`}
-                                  {c.vmData.baseline_confidence.degraded ? ' \u2014 session only, not yet baseline-eligible' : ''}
-                                </Typography>
-                              )}
                               {(c.waveformLabel || c.breachLabel) && (
                                 <Box display="flex" style={{ gap: 5, flexWrap: 'wrap', marginTop: 4 }}>
-                                  {c.waveformLabel && <span className="metric-badge" title="Signal shape classification" style={{ fontSize: 7, color: c.waveformRisk === 'critical' ? '#a855f7' : c.waveformRisk === 'high' ? '#f43f5e' : '#22d3ee' }}>{c.waveformIcon} {c.waveformLabel}</span>}
-                                  {c.breachLabel && <span className="metric-badge metric-badge-amber" style={{ fontSize: 7 }}>{'\u23f1'} {c.breachLabel}</span>}
+                                  {c.waveformLabel && <span className="metric-badge" title="Signal shape classification" style={{ fontSize: 8, color: c.waveformRisk === 'critical' ? '#a855f7' : c.waveformRisk === 'high' ? '#f43f5e' : '#22d3ee' }}>{c.waveformIcon} {c.waveformLabel}</span>}
+                                  {c.breachLabel && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8 }}>{'\u23f1'} {c.breachLabel}</span>}
                                 </Box>
                               )}
                             </Box>
@@ -1848,9 +2086,9 @@ export function ResourcePanel() {
                                 const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
                                 return (
                                   <TableRow key={i}>
-                                    <TableCell><span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>{s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 7, marginLeft: 4 }}>ABS</span>}</TableCell>
+                                    <TableCell><span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>{s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}</TableCell>
                                     <TableCell>{shortMetric(s.metric)}</TableCell>
-                                    <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 7, marginLeft: 4 }}>{count}x</span>}</TableCell>
+                                    <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }}>{count}x</span>}</TableCell>
                                     <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : <>{start} {'\u2192'} {end}</>}</TableCell>
                                     <TableCell style={{ fontSize: 10 }}>{recurring ? `${humanizeDurationMin(avgDuration)} each` : s.duration_min != null ? humanizeDurationMin(s.duration_min) : '\u2014'}</TableCell>
                                     <TableCell style={{ fontSize: 10, color: recurring ? '#f59e0b' : undefined }}>{pattern}</TableCell>
@@ -1894,6 +2132,7 @@ export function ResourcePanel() {
                           <Typography variant="subtitle2">Unified Time-Series {'\u2014'} All Metrics</Typography>
                           <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginBottom: 4 }}>
                             Shaded windows are detected anomaly events. Dotted lines are Azure bucket peaks; average lines remain the primary time series.
+                            {(deepDiveVmChart as (Highcharts.Options & { _hadGap?: boolean }) | null)?._hadGap && ' A broken line marks a bucket Azure did not report \u2014 it is a gap, not interpolated data.'}
                           </Typography>
                           {(() => {
                             const waveforms = deepDive?.vms?.[deepDiveVm]?.waveforms;
@@ -1963,15 +2202,35 @@ export function ResourcePanel() {
               )}
 
               {/* Spike attribution */}
-              {deepDive.spike_attribution && deepDive.spike_attribution.rows.length > 0 && (
+              {deepDive.spike_attribution && deepDive.spike_attribution.rows.length > 0 && (() => {
+                const attrRows = deepDive.spike_attribution.rows;
+                const linked = attrRows.filter((r) => r.concurrent_jobs > 0);
+                const unlinked = attrRows.filter((r) => !r.concurrent_jobs);
+                // Attributed spikes first. An unattributed spike is still a real
+                // spike worth seeing, but interleaving it with attributed ones in
+                // a table titled "Attribution" implied a job link that the row
+                // explicitly does not have.
+                const ordered = [...linked, ...unlinked].slice(0, 20);
+                const fmtWindow = (row: typeof attrRows[number]) => {
+                  if (!row.peak_time) return '\u2014';
+                  const d = new Date(row.peak_time);
+                  if (Number.isNaN(d.getTime())) return '\u2014';
+                  const stamp = d.toISOString().replace('T', ' ').slice(5, 16);
+                  return row.duration_min ? `${stamp} \u00b7 ${row.duration_min.toFixed(0)}min` : stamp;
+                };
+                return (
                 <Box style={{ marginTop: 12 }}>
                   <Typography variant="subtitle2">{'Spike \u2192 Batch Job Attribution'}</Typography>
-                  <Typography variant="caption" color="textSecondary">{deepDive.spike_attribution.summary.caveat}</Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>{deepDive.spike_attribution.summary.caveat}</Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 2, fontSize: 9 }}>
+                    {`One row per detected spike, newest evidence first. ${linked.length} of ${attrRows.length} spike(s) had a Ctrl-M job running in the same window; ${unlinked.length} had none and are listed last. A host that saturates its CPU repeats a near-identical peak on every spike \u2014 read the Spike Window column to tell them apart.`}
+                  </Typography>
                   <Table size="small" className="pe-table" aria-label="Spike attribution table" style={{ marginTop: 8 }}>
                     <TableHead>
                       <TableRow>
                         <TableCell>VM</TableCell>
                         <TableCell>Metric</TableCell>
+                        <TableCell>Spike Window (UTC)</TableCell>
                         <TableCell align="right">Peak</TableCell>
                         <TableCell>Severity</TableCell>
                         <TableCell align="right">Concurrent Jobs</TableCell>
@@ -1979,20 +2238,29 @@ export function ResourcePanel() {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {deepDive.spike_attribution.rows.slice(0, 20).map((row, index) => (
-                        <TableRow key={index}>
-                          <TableCell style={{ fontFamily: 'monospace' }}>{row.vm}</TableCell>
+                      {ordered.map((row, index) => {
+                        const isLinked = row.concurrent_jobs > 0;
+                        return (
+                        <TableRow key={`${row.vm}-${row.metric}-${row.peak_time || index}`} style={isLinked ? undefined : { opacity: 0.62 }}>
+                          <TableCell>{renderHostId(row.vm)}</TableCell>
                           <TableCell>{shortMetric(row.metric)}</TableCell>
+                          <TableCell style={{ fontFamily: 'monospace', fontSize: 11 }}>{fmtWindow(row)}</TableCell>
                           <TableCell align="right">{row.peak != null ? row.peak.toFixed(1) : '\u2014'}</TableCell>
                           <TableCell><span className="metric-badge" style={{ color: row.severity === 'critical' ? '#f43f5e' : '#f59e0b' }}>{row.severity}</span></TableCell>
                           <TableCell align="right">{row.concurrent_jobs}</TableCell>
-                          <TableCell>{row.heaviest ? `${row.heaviest} (${(row.heaviest_hrs || 0).toFixed(1)}h)` : '\u2014'}</TableCell>
+                          <TableCell>
+                            {row.heaviest
+                              ? `${row.heaviest} (${(row.heaviest_hrs || 0).toFixed(1)}h)`
+                              : <span style={{ color: '#6b7db3', fontStyle: 'italic' }}>no Ctrl-M job overlapped</span>}
+                          </TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </Box>
-              )}
+                );
+              })()}
             </>
           )}
         </Box>

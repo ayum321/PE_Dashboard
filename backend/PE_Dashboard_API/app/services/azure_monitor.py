@@ -448,6 +448,10 @@ def _list_vms(credential, subscription_id: str, resource_group: Optional[str]) -
 # ── Metrics cache: { (resource_id, hours_back) → (timestamp, metrics_dict) }
 _metrics_cache: Dict[tuple, tuple] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
+# Azure Monitor starts throttling quickly when every selected VM falls back to
+# multiple metric queries.  Eight concurrent VM workers keeps the request pool
+# responsive without serialising a customer fetch.
+_AZURE_MONITOR_MAX_WORKERS = 8
 
 
 def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
@@ -467,8 +471,11 @@ def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
                               memory, this is the highest-pressure point since the
                               raw metric is 'available %', inverted from used %).
 
-    Strategy: try ALL metrics in a single API call first (fastest).
-    If that fails, fall back to platform-only + individual disk queries.
+    Strategy: try ALL metrics in a single API call first (fastest).  If Azure
+    rejects that combined request because one optional metric is unavailable,
+    retry each metric independently.  This makes CPU availability independent
+    from AMA memory or disk support and prevents one unsupported metric from
+    hiding otherwise usable telemetry.
     """
     from azure.monitor.query import MetricAggregationType
     import time as _t
@@ -505,32 +512,21 @@ def _query_single_vm_metrics(client, rid, start_time, end_time, granularity):
     except Exception as exc:
         logger.debug("All-in-one metrics failed for %s: %s — falling back", vm_label, exc)
 
-    # Fallback: platform metrics separately
-    try:
-        response = client.query_resource(
-            resource_uri=rid,
-            metric_names=list(_VM_METRICS_PLATFORM),
-            timespan=(start_time, end_time),
-            granularity=granularity,
-            aggregations=_AGGS,
-        )
-        _extract(response)
-    except Exception as exc:
-        logger.warning("Platform metrics failed for %s: %s", vm_label, exc)
-
-    # Fallback: disk metrics individually
-    for disk_metric in _VM_METRICS_DISK:
+    # Fallback: every metric is an isolation boundary.  In particular, memory
+    # counters commonly require AMA while Percentage CPU is platform-native.
+    # Do not let a missing agent counter suppress CPU for the whole server.
+    for metric_name in _VM_METRICS:
         try:
             response = client.query_resource(
                 resource_uri=rid,
-                metric_names=[disk_metric],
+                metric_names=[metric_name],
                 timespan=(start_time, end_time),
                 granularity=granularity,
                 aggregations=_AGGS,
             )
             _extract(response)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Metric %s unavailable for %s: %s", metric_name, vm_label, exc)
 
     logger.info("Metrics for %s (fallback, %.1fs): %s", vm_label, _t.perf_counter() - t0, {k: v for k, v in metrics.items() if '__' not in k} or "EMPTY")
     return (rid, metrics)
@@ -540,11 +536,14 @@ def _query_metrics(
     credential,
     resource_ids: List[str],
     hours_back: int,
+    on_progress=None,
 ) -> Dict[str, Dict[str, float]]:
     """
     Query Azure Monitor for CPU / Memory / Disk metrics — PARALLEL.
-    Uses ThreadPoolExecutor to query up to 10 VMs concurrently.
-    Results are cached for 5 minutes.
+    Uses a bounded ThreadPoolExecutor to avoid Azure Monitor throttling.
+    Results are cached for 5 minutes.  ``on_progress`` is deliberately invoked
+    only after a VM has a complete metric result (or a recorded failure), so a
+    caller can show truthful per-VM progress without changing the result shape.
     """
     from azure.monitor.query import MetricsQueryClient
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -553,7 +552,18 @@ def _query_metrics(
 
     end_time   = datetime.now(timezone.utc)
     start_time = end_time - timedelta(hours=hours_back)
-    granularity = timedelta(hours=1)
+
+    # This endpoint builds the Resource Review *snapshot*, not the interactive
+    # deep-dive chart.  The snapshot only consumes period aggregates, recent
+    # value, and extrema; a coarser valid Azure Monitor grain preserves those
+    # facts while avoiding hundreds of unnecessary buckets per VM.  The deep
+    # dive keeps its own fine-grained selection in _query_timeseries().
+    if hours_back <= 72:
+        granularity = timedelta(hours=1)
+    elif hours_back <= 720:
+        granularity = timedelta(hours=6)
+    else:
+        granularity = timedelta(hours=12)
 
     results: Dict[str, Dict[str, float]] = {}
     uncached_rids = []
@@ -571,13 +581,17 @@ def _query_metrics(
         uncached_rids.append(rid)
 
     if not uncached_rids:
+        if on_progress:
+            on_progress(len(results), len(resource_ids))
         return results
 
-    # Query uncached VMs in parallel (max 20 concurrent)
+    # Query uncached VMs in parallel.  A single VM can issue several
+    # failure-isolated requests, therefore an unbounded 20-VM pool turns into
+    # dozens of simultaneous Azure Monitor calls and causes retry/backoff delay.
     logger.info("Querying metrics for %d VMs in parallel (cached: %d)…",
                 len(uncached_rids), len(results))
 
-    workers = min(20, len(uncached_rids))
+    workers = min(_AZURE_MONITOR_MAX_WORKERS, len(uncached_rids))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(_query_single_vm_metrics, client, rid,
@@ -594,6 +608,8 @@ def _query_metrics(
                 rid = futures[future]
                 logger.warning("Metrics failed for %s: %s", rid.split("/")[-1], exc)
                 results[rid] = {}
+            if on_progress:
+                on_progress(len(results), len(resource_ids))
 
     return results
 
@@ -625,39 +641,23 @@ def _query_single_vm_timeseries(client, rid, start_time, end_time, granularity):
         if not group:
             continue
         try:
-            # Primary query: Average aggregation for chart line rendering
+            # Azure returns all requested aggregations in one response.  The
+            # earlier implementation made an Average request followed by a
+            # Max/Min request for every group, doubling remote calls for each
+            # VM and making a 15-day, multi-VM deep dive unnecessarily slow.
             response = client.query_resource(
                 resource_uri=rid,
                 metric_names=list(group),
                 timespan=(start_time, end_time),
                 granularity=granularity,
-                aggregations=[MetricAggregationType.AVERAGE],
+                aggregations=[
+                    MetricAggregationType.AVERAGE,
+                    MetricAggregationType.MAXIMUM,
+                    MetricAggregationType.MINIMUM,
+                ],
             )
             for m in response.metrics:
                 points = []
-                for ts in m.timeseries:
-                    for dp in ts.data:
-                        if dp.average is not None:
-                            points.append({
-                                "t": dp.timestamp.isoformat(),
-                                "v": round(dp.average, 4),
-                            })
-                if points:
-                    series[m.name] = points
-        except Exception as exc:
-            logger.warning("Time-series query failed for %s [%s]: %s",
-                           vm_label, ", ".join(group), exc)
-
-        try:
-            # Secondary query: Max/Min aggregation for accurate header stats
-            extremes_response = client.query_resource(
-                resource_uri=rid,
-                metric_names=list(group),
-                timespan=(start_time, end_time),
-                granularity=granularity,
-                aggregations=[MetricAggregationType.MAXIMUM, MetricAggregationType.MINIMUM],
-            )
-            for m in extremes_response.metrics:
                 max_val = None
                 min_val = None
                 # The MAXIMUM aggregate is already per-timestamp. It was being
@@ -671,6 +671,11 @@ def _query_single_vm_timeseries(client, rid, start_time, end_time, granularity):
                 max_points = []
                 for ts in m.timeseries:
                     for dp in ts.data:
+                        if dp.average is not None:
+                            points.append({
+                                "t": dp.timestamp.isoformat(),
+                                "v": round(dp.average, 4),
+                            })
                         if dp.maximum is not None:
                             max_val = max(max_val, dp.maximum) if max_val is not None else dp.maximum
                             max_points.append({
@@ -685,8 +690,10 @@ def _query_single_vm_timeseries(client, rid, start_time, end_time, granularity):
                 }
                 if max_points and m.name not in _CHART_ONLY_METRICS:
                     series_max[m.name] = max_points
+                if points:
+                    series[m.name] = points
         except Exception as exc:
-            logger.warning("Max/Min aggregation query failed for %s [%s]: %s",
+            logger.warning("Time-series query failed for %s [%s]: %s",
                            vm_label, ", ".join(group), exc)
 
     return (rid, series, true_extremes, series_max)
@@ -1659,7 +1666,10 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         if resource_id and role
     }
     result = {}
-    workers = min(20, len(resource_ids))
+    # Each worker performs several failure-isolated Azure calls.  Keep the
+    # service below the Monitor throttling threshold instead of creating a
+    # burst that spends most of its time retrying.
+    workers = min(_AZURE_MONITOR_MAX_WORKERS, len(resource_ids))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
@@ -2256,6 +2266,86 @@ def _regional_vm_size_profile(vm_sizes: Any, vm_size: str) -> Dict[str, Any]:
     return profile
 
 
+# One resource_skus / virtual_machine_sizes catalog per (subscription, region),
+# cached for the life of the process. See the perf note in _vm_sku_profile:
+# this is what turns "one ARM call per distinct VM size" into "one ARM call
+# per distinct region, ever". A per-key lock stops N concurrent worker threads
+# resolving different VM sizes in the SAME cold region from all issuing the
+# same catalog-building ARM call at once.
+_sku_catalog_cache: Dict[tuple, Dict[str, Dict[str, Any]]] = {}
+_vmsize_catalog_cache: Dict[tuple, Dict[str, Dict[str, Any]]] = {}
+_catalog_locks: Dict[tuple, Any] = {}
+_catalog_locks_guard = _threading.Lock()
+
+
+def _catalog_lock(key: tuple):
+    with _catalog_locks_guard:
+        lock = _catalog_locks.get(key)
+        if lock is None:
+            lock = _threading.Lock()
+            _catalog_locks[key] = lock
+        return lock
+
+
+def _sku_catalog_for_location(credential, subscription_id: str, location: str) -> Dict[str, Dict[str, Any]]:
+    """All virtualMachines ResourceSku capacity profiles for one region, built
+    with exactly one Azure call and cached forever after that."""
+    key = (subscription_id.lower(), location.strip().lower())
+    if key in _sku_catalog_cache:
+        return _sku_catalog_cache[key]
+    with _catalog_lock(key):
+        if key in _sku_catalog_cache:
+            return _sku_catalog_cache[key]
+        catalog: Dict[str, Dict[str, Any]] = {}
+        try:
+            from azure.mgmt.compute import ComputeManagementClient
+            compute = ComputeManagementClient(credential, subscription_id)
+            for sku in compute.resource_skus.list(filter=f"location eq '{location}'"):
+                if sku.resource_type != "virtualMachines":
+                    continue
+                name = str(sku.name or "").strip().casefold()
+                if not name:
+                    continue
+                candidate = _sku_capacity_profile(sku.capabilities)
+                existing = catalog.get(name)
+                if existing is None:
+                    catalog[name] = candidate
+                elif existing["memory_bytes"] is None and candidate["memory_bytes"] is not None:
+                    # Multiple regional SKU records can exist for one name; keep the
+                    # first complete one rather than the first seen.
+                    catalog[name] = candidate
+        except Exception as exc:
+            logger.info("Resource SKU catalog unavailable for %s/%s; will try regional VM-size metadata: %s",
+                        subscription_id, location, exc)
+        _sku_catalog_cache[key] = catalog
+        return catalog
+
+
+def _vmsize_catalog_for_location(credential, subscription_id: str, location: str) -> Dict[str, Dict[str, Any]]:
+    """Fallback regional VM-size catalog for one region — same one-call-ever
+    caching as ``_sku_catalog_for_location``, used only for names ResourceSkus
+    could not resolve (e.g. a reader role without ResourceSkus access)."""
+    key = (subscription_id.lower(), location.strip().lower())
+    if key in _vmsize_catalog_cache:
+        return _vmsize_catalog_cache[key]
+    with _catalog_lock(("vmsize",) + key):
+        if key in _vmsize_catalog_cache:
+            return _vmsize_catalog_cache[key]
+        catalog: Dict[str, Dict[str, Any]] = {}
+        try:
+            from azure.mgmt.compute import ComputeManagementClient
+            compute = ComputeManagementClient(credential, subscription_id)
+            for size in compute.virtual_machine_sizes.list(location):
+                name = str(getattr(size, "name", "") or "").strip().casefold()
+                if not name:
+                    continue
+                catalog[name] = _regional_vm_size_profile([size], size.name)
+        except Exception as exc:
+            logger.info("Regional VM-size catalog unavailable for %s/%s: %s", subscription_id, location, exc)
+        _vmsize_catalog_cache[key] = catalog
+        return catalog
+
+
 def _vm_sku_profile(credential, subscription_id: str, vm_size: str,
                     location: str = "") -> Dict[str, Any]:
     """Return capacity facts for one Azure VM SKU, cached per subscription/SKU.
@@ -2265,6 +2355,18 @@ def _vm_sku_profile(credential, subscription_id: str, vm_size: str,
     count. This is intentionally distinct from CPU utilisation percentage.
     A missing SKU capability remains ``None``; it is never guessed from a SKU
     name or from a customer-specific lookup table.
+
+    Root-cause note (perf): this used to call ``resource_skus.list(filter=
+    "name eq '<size>'")`` — and, on failure, ``virtual_machine_sizes.list``
+    — separately for EVERY distinct VM size in the fleet. Each of those is a
+    live Azure Resource Manager round trip; a fleet with 5-8 distinct sizes
+    across a 12-VM selection paid for 5-8+ sequential-feeling ARM calls with
+    zero progress feedback, which is exactly the multi-second "stuck at
+    12/12" stall reported against this dialog. Both catalogs are now fetched
+    ONCE per (subscription, location) and cached for the life of the process
+    (see ``_sku_catalog_for_location`` / ``_vmsize_catalog_for_location``), so
+    every VM size after the first in a given region is a plain dict lookup —
+    no network call at all, not even a cached-but-still-checked one.
     """
     empty = {"memory_bytes": None, "vcpus": None, "vcpu_source": ""}
     if not subscription_id or not vm_size:
@@ -2274,12 +2376,31 @@ def _vm_sku_profile(credential, subscription_id: str, vm_size: str,
     if cache_key in cache:
         return dict(cache[cache_key])
     profile = dict(empty)
+    name_key = vm_size.strip().casefold()
     try:
-        from azure.mgmt.compute import ComputeManagementClient
-        compute = ComputeManagementClient(credential, subscription_id)
-        try:
-            # ResourceSkus is subscription-scoped. Capability names are Azure's
-            # contract, so match them case-insensitively but do not infer aliases.
+        if location:
+            candidate = _sku_catalog_for_location(credential, subscription_id, location).get(name_key)
+            if candidate:
+                if profile["memory_bytes"] is None:
+                    profile["memory_bytes"] = candidate["memory_bytes"]
+                if profile["vcpus"] is None:
+                    profile["vcpus"] = candidate["vcpus"]
+                    profile["vcpu_source"] = candidate["vcpu_source"]
+            if profile["memory_bytes"] is None or profile["vcpus"] is None:
+                regional = _vmsize_catalog_for_location(credential, subscription_id, location).get(name_key)
+                if regional:
+                    if profile["memory_bytes"] is None:
+                        profile["memory_bytes"] = regional["memory_bytes"]
+                    if profile["vcpus"] is None:
+                        profile["vcpus"] = regional["vcpus"]
+                        profile["vcpu_source"] = regional["vcpu_source"]
+        else:
+            # No location supplied — cannot scope either catalog by region, so
+            # fall back to the original one-off, unscoped name-filter lookup.
+            # This path is rare (Azure VMs always report a location) and is
+            # intentionally not optimised further.
+            from azure.mgmt.compute import ComputeManagementClient
+            compute = ComputeManagementClient(credential, subscription_id)
             for sku in compute.resource_skus.list(filter=f"name eq '{vm_size}'"):
                 candidate = _sku_capacity_profile(sku.capabilities)
                 if profile["memory_bytes"] is None:
@@ -2287,29 +2408,8 @@ def _vm_sku_profile(credential, subscription_id: str, vm_size: str,
                 if profile["vcpus"] is None:
                     profile["vcpus"] = candidate["vcpus"]
                     profile["vcpu_source"] = candidate["vcpu_source"]
-                # There can be more than one regional SKU record. The first record
-                # with both capacity facts is sufficient because the requested size
-                # is exact; incomplete rows may be followed by a complete one.
                 if profile["memory_bytes"] is not None and profile["vcpus"] is not None:
                     break
-        except Exception as exc:
-            logger.info("Resource SKU capacity unavailable for %s; trying regional VM-size metadata: %s", vm_size, exc)
-
-        # Reader-like access can expose regional VM-size metadata even where
-        # ResourceSkus enumeration is denied. It is still Azure metadata and
-        # returns number_of_cores directly, rather than a guessed SKU mapping.
-        if location and (profile["memory_bytes"] is None or profile["vcpus"] is None):
-            try:
-                regional = _regional_vm_size_profile(
-                    compute.virtual_machine_sizes.list(location), vm_size
-                )
-                if profile["memory_bytes"] is None:
-                    profile["memory_bytes"] = regional["memory_bytes"]
-                if profile["vcpus"] is None:
-                    profile["vcpus"] = regional["vcpus"]
-                    profile["vcpu_source"] = regional["vcpu_source"]
-            except Exception as exc:
-                logger.info("Regional VM-size capacity unavailable for %s in %s: %s", vm_size, location, exc)
     except Exception as exc:
         logger.debug("SKU capacity lookup failed for %s: %s", vm_size, exc)
     cache[cache_key] = dict(profile)
@@ -2689,8 +2789,8 @@ def fetch_vm_metrics(cfg: dict, hours_back: int = 24,
     return _build_server_records(credential, vms, hours_back)
 
 
-def _build_server_records(credential, vms: List[dict],
-                          hours_back: int) -> List[Dict[str, Any]]:
+def _build_server_records(credential, vms: List[dict], hours_back: int,
+                          on_metrics_progress=None, on_capacity_progress=None) -> List[Dict[str, Any]]:
     """Shared helper: query metrics for a list of VMs and build server records.
     
     Computes total memory from Available Memory Bytes + Available Memory
@@ -2705,7 +2805,10 @@ def _build_server_records(credential, vms: List[dict],
 
     t0 = _time.perf_counter()
 
-    metrics_map = _query_metrics(credential, resource_ids, hours_back)
+    metrics_map = _query_metrics(
+        credential, resource_ids, hours_back,
+        on_progress=on_metrics_progress,
+    )
     t_metrics = _time.perf_counter() - t0
     logger.info("Metrics query took %.1fs for %d VMs", t_metrics, len(vms))
 
@@ -2822,8 +2925,30 @@ def _build_server_records(credential, vms: List[dict],
         logger.info("SKU capacity lookup for %d VMs (%d need RAM fallback)", len(sku_metadata_needed), memory_fallbacks)
         t1 = _time.perf_counter()
         unique_sizes = {(sub_id, vm_size, location) for _, sub_id, vm_size, location, _ in sku_metadata_needed}
+        unique_regions = {(sub_id, location) for _, sub_id, _vm_size, location, _ in sku_metadata_needed if location}
 
-        with ThreadPoolExecutor(max_workers=min(5, len(unique_sizes))) as pool:
+        # Pre-warm one region catalog per (subscription, location) in parallel
+        # BEFORE resolving individual VM sizes. This is the real fix for the
+        # "stuck after metrics reach N/N" stall: previously every distinct VM
+        # size triggered its own live ARM call; now it is one call per region,
+        # ever (cached — see _sku_catalog_for_location), and a fleet confined
+        # to one region pays for exactly one network round trip total.
+        if on_capacity_progress:
+            on_capacity_progress(0, len(unique_regions) or 1)
+        if unique_regions:
+            with ThreadPoolExecutor(max_workers=min(8, len(unique_regions))) as warm_pool:
+                warm_futures = [
+                    warm_pool.submit(_sku_catalog_for_location, credential, sub_id, location)
+                    for sub_id, location in unique_regions
+                ]
+                warmed = 0
+                for future in warm_futures:
+                    future.result()
+                    warmed += 1
+                    if on_capacity_progress:
+                        on_capacity_progress(warmed, len(unique_regions))
+
+        with ThreadPoolExecutor(max_workers=min(8, len(unique_sizes))) as pool:
             results = {
                 pair: profile
                 for pair, profile in pool.map(
@@ -2843,7 +2968,8 @@ def _build_server_records(credential, vms: List[dict],
                     servers[idx]["mem_pct"] = round(max(0.0, min(100.0, (1.0 - avail_bytes / total_bytes) * 100.0)), 2)
                     servers[idx]["mem_used"] = servers[idx]["mem_pct"]
 
-        logger.info("SKU capacity lookup took %.1fs", _time.perf_counter() - t1)
+        logger.info("SKU capacity lookup took %.1fs (%d region catalog(s), %d distinct size(s))",
+                    _time.perf_counter() - t1, len(unique_regions), len(unique_sizes))
 
     total_time = _time.perf_counter() - t0
     logger.info("Azure fetch complete — %d servers in %.1fs (metrics: %.1fs)", len(servers), total_time, t_metrics)

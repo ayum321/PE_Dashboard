@@ -858,14 +858,82 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
             total = len(vms)
             yield _sse("progress", {"phase": "Resolved VMs", "done": total, "total": total})
 
-            # Phase 2: Metrics query
+            # Phase 2: Metrics query.  The Azure SDK call is blocking, but the
+            # stream must not look frozen while its parallel VM futures finish.
+            # Run the builder in one worker and relay its truthful per-VM
+            # completions through this generator.
             t_metrics = time.perf_counter()
             yield _sse("progress", {"phase": "Querying Azure Monitor metrics", "done": 0, "total": total})
 
-            servers = _build_server_records(credential, vms, body.hours_back)
+            from queue import Empty, Queue
+            from threading import Event, Thread
+
+            progress_queue = Queue()
+            fetch_done = Event()
+            fetch_result = {}
+            fetch_error = {}
+
+            def _metric_progress(done: int, progress_total: int) -> None:
+                progress_queue.put(("metrics", done, progress_total))
+
+            def _capacity_progress(done: int, progress_total: int) -> None:
+                progress_queue.put(("capacity", done, progress_total))
+
+            def _build_records() -> None:
+                try:
+                    fetch_result["servers"] = _build_server_records(
+                        credential, vms, body.hours_back,
+                        on_metrics_progress=_metric_progress,
+                        on_capacity_progress=_capacity_progress,
+                    )
+                except Exception as exc:
+                    fetch_error["error"] = exc
+                finally:
+                    fetch_done.set()
+
+            _phase_text = {
+                "metrics": "Querying Azure Monitor metrics",
+                # Only fires on a cold region cache — see _sku_catalog_for_location.
+                # Named explicitly so this phase is never silently invisible again.
+                "capacity": "Resolving VM capacity (vCPU / RAM) for new region(s)",
+            }
+
+            Thread(target=_build_records, daemon=True).start()
+            reported = 0
+            while not fetch_done.wait(timeout=0.2):
+                while True:
+                    try:
+                        kind, done, progress_total = progress_queue.get_nowait()
+                    except Empty:
+                        break
+                    reported = max(reported, done)
+                    yield _sse("progress", {
+                        "phase": _phase_text[kind],
+                        "done": done,
+                        "total": progress_total,
+                    })
+
+            # Drain any final completion events before returning the payload.
+            while True:
+                try:
+                    kind, done, progress_total = progress_queue.get_nowait()
+                except Empty:
+                    break
+                reported = max(reported, done)
+                yield _sse("progress", {
+                    "phase": _phase_text[kind],
+                    "done": done,
+                    "total": progress_total,
+                })
+            if "error" in fetch_error:
+                raise fetch_error["error"]
+            servers = fetch_result["servers"]
             metrics_elapsed = round(time.perf_counter() - t_metrics, 1)
 
-            yield _sse("progress", {"phase": f"Metrics complete ({metrics_elapsed}s)", "done": total, "total": total})
+            # The last VM completion is not the end of the request: payload
+            # severity and evidence assembly still run below.  Make that work
+            # explicit so the dialog never looks stuck at N/N.
+            yield _sse("progress", {"phase": f"Metrics complete ({metrics_elapsed}s) — finalising evidence", "done": total, "total": total})
 
             # Phase 3: Build payload
             yield _sse("progress", {"phase": "Building analysis", "done": total, "total": total})

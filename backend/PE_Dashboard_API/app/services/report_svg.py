@@ -113,6 +113,94 @@ def long_pole_chart(matrix: dict[str, Any]) -> tuple[str | None, str | None]:
     return _svg(width, height, "".join(items), "Long-pole job runtime trend"), None
 
 
+def batch_cadence_chart(rows: list[Any]) -> tuple[str | None, str | None]:
+    """Render the one batch chart: precomputed peak/average runtime by cadence.
+
+    This intentionally draws existing top-job values only. It does not
+    reclassify schedules or recalculate any SLA status for the export.
+    """
+    records = [row for row in rows if isinstance(row, dict) and _float(row.get("peak_hrs")) is not None]
+    if not records:
+        return None, "Batch cadence chart was requested but contains zero plotted points."
+    records = records[:14]
+    width, height, left, top = 920, 330, 245, 52
+    maximum = max((_float(row.get("peak_hrs")) or 0 for row in records), default=0)
+    if maximum <= 0:
+        return None, "Batch cadence chart was requested but contains zero plotted points."
+    cadence_colours = {"DAILY": "#22d3ee", "WEEKLY": "#a855f7", "MONTHLY": "#f59e0b", "QUARTERLY": "#fb7185"}
+    chart_w = width - left - 60
+    row_h = (height - top - 26) / len(records)
+    items = [
+        '<text x="18" y="24" fill="#eef3ff" font-size="14" font-weight="700">Job cadence and runtime profile</text>',
+        '<text x="18" y="41" fill="#8ca1cf" font-size="10">Bars show precomputed average and peak runtime; colour identifies the supplied job cadence.</text>',
+    ]
+    for index, row in enumerate(records):
+        peak = _float(row.get("peak_hrs")) or 0
+        average = _float(row.get("avg_hrs")) or 0
+        cadence = str(row.get("schedule_type") or "Unclassified").upper()
+        cadence_key = next((key for key in cadence_colours if key in cadence), "OTHER")
+        colour = cadence_colours.get(cadence_key, "#4a9eff")
+        y = top + index * row_h + 2
+        label = escape(str(row.get("job_name") or "Unknown job"))
+        label = label[:31] + ("…" if len(label) > 31 else "")
+        peak_w, average_w = chart_w * peak / maximum, chart_w * average / maximum
+        items.append(f'<text x="10" y="{y+12:.1f}" fill="#e8eefc" font-size="10">{label}</text>')
+        items.append(f'<rect x="{left}" y="{y:.1f}" width="{peak_w:.1f}" height="12" rx="3" fill="#1b2a45"/>')
+        items.append(f'<rect x="{left}" y="{y:.1f}" width="{average_w:.1f}" height="12" rx="3" fill="{colour}" opacity=".92"/>')
+        items.append(f'<text x="{left+peak_w+6:.1f}" y="{y+11:.1f}" fill="#d6e1f8" font-size="10">avg {average:.2f}h · peak {peak:.2f}h</text>')
+        items.append(f'<text x="{width-8}" y="{y+11:.1f}" text-anchor="end" fill="{colour}" font-size="9">{escape(cadence_key.title())}</text>')
+    legend = [('Daily', '#22d3ee'), ('Weekly', '#a855f7'), ('Monthly', '#f59e0b'), ('Quarterly', '#fb7185')]
+    x = 250
+    for label, colour in legend:
+        items.append(f'<rect x="{x}" y="{height-17}" width="9" height="9" rx="2" fill="{colour}"/>')
+        items.append(f'<text x="{x+14}" y="{height-9}" fill="#8ca1cf" font-size="9">{label}</text>')
+        x += 74
+    return _svg(width, height, "".join(items), "Job cadence and runtime profile"), None
+
+
+def _find_metric_series(series: dict[str, Any], candidates: tuple[str, ...]) -> list[Any]:
+    for metric, values in series.items():
+        normalized = str(metric).lower()
+        if any(candidate in normalized for candidate in candidates):
+            return _list(values)
+    return []
+
+
+def server_snippet_chart(detail: dict[str, Any], host: str) -> tuple[str | None, str | None]:
+    """Compact CPU/memory/disk shape chart for one host's existing series."""
+    series = _dict(detail.get("series"))
+    candidates = (
+        ("cpu", ("percentage cpu",)),
+        ("memory", ("available memory percentage", "memory available", "memory used")),
+        ("disk", ("disk bandwidth consumed percentage", "disk used", "disk io")),
+    )
+    lines: list[tuple[str, str, list[Any]]] = []
+    for label, terms in candidates:
+        values = _find_metric_series(series, terms)
+        points = [_float(_dict(value).get("v") if isinstance(value, dict) else value) for value in values]
+        if any(value is not None for value in points):
+            lines.append((label, {"cpu": "#22d3ee", "memory": "#a855f7", "disk": "#10d96e"}[label], points))
+    if not lines:
+        return None, "Time-series evidence is absent for this host."
+    width, height, pad = 330, 88, 12
+    content = [f'<text x="{pad}" y="14" fill="#dbe7ff" font-size="10" font-weight="700">{escape(host)}</text>']
+    for line_index, (label, colour, values) in enumerate(lines):
+        span = max(1, len(values) - 1)
+        points: list[str] = []
+        for index, value in enumerate(values):
+            if value is None:
+                continue
+            x = pad + index * (width - pad * 2) / span
+            y = 24 + (100 - max(0, min(100, value))) * (height - 32) / 100
+            points.append(f"{'M' if not points else 'L'} {x:.1f} {y:.1f}")
+        if points:
+            content.append(f'<path d="{" ".join(points)}" fill="none" stroke="{colour}" stroke-width="1.6"/>')
+        lx = 14 + line_index * 68
+        content.append(f'<rect x="{lx}" y="{height-13}" width="7" height="7" rx="1" fill="{colour}"/>')
+        content.append(f'<text x="{lx+10}" y="{height-6}" fill="#8ca1cf" font-size="8">{label}</text>')
+    return _svg(width, height, "".join(content), f"CPU, memory and disk trend for {host}"), None
+
+
 def fleet_heatmap_chart(heatmap: dict[str, Any]) -> tuple[str | None, str | None]:
     grids = _dict(heatmap).get("grids")
     rows = _list(_dict(grids).get("cpu") if isinstance(grids, dict) else _dict(heatmap).get("vms"))
@@ -199,23 +287,19 @@ def render_report_charts(report: dict[str, Any]) -> tuple[dict[str, str], list[s
     batch = _dict(report.get("batch_sla"))
     resource = _dict(report.get("resource_review"))
     chart_calls: dict[str, tuple[str | None, str | None]] = {}
-    window_series = _list(batch.get("window_chart_series"))
-    long_pole_series = _dict(batch.get("long_pole_trend_series"))
+    top_jobs = _list(batch.get("top_jobs_table"))
     heatmap_series = _dict(resource.get("fleet_heatmap_series"))
     exception_rows = [str(row.get("host")) for row in _list(resource.get("exception_table")) if isinstance(row, dict)]
     timeseries = _dict(resource.get("timeseries_by_host"))
     correlations = _list(report.get("correlation_rca"))
 
-    # Absent evidence is visible but does not masquerade as a failed chart.
-    # Once a source exists, a renderer that yields zero points is a hard gate.
-    if window_series:
-        chart_calls["batch_window"] = batch_window_chart(window_series)
+    # The report intentionally has one Batch SLA chart.  It visualises the
+    # supplied job cadence and runtime values without duplicating the dense
+    # dashboard-only daily-window and long-pole views.
+    if top_jobs:
+        chart_calls["batch_cadence"] = batch_cadence_chart(top_jobs)
     else:
-        warnings.append("Daily batch window source evidence is absent; chart was not rendered.")
-    if long_pole_series:
-        chart_calls["long_pole"] = long_pole_chart(long_pole_series)
-    else:
-        warnings.append("Long-pole trend source evidence is absent; chart was not rendered.")
+        warnings.append("Batch top-job source evidence is absent; cadence chart was not rendered.")
     if heatmap_series:
         chart_calls["fleet_heatmap"] = fleet_heatmap_chart(heatmap_series)
     else:
@@ -226,6 +310,19 @@ def render_report_charts(report: dict[str, Any]) -> tuple[dict[str, str], list[s
         warnings.append("Exception hosts exist but their time-series source evidence is absent; chart was not rendered.")
     if correlations:
         chart_calls["correlation"] = correlation_chart(correlations)
+    snippets: dict[str, str] = {}
+    for row in _list(resource.get("server_evidence")):
+        if not isinstance(row, dict) or not row.get("has_timeseries"):
+            continue
+        host = str(row.get("host") or "")
+        detail = next((_dict(value) for name, value in timeseries.items() if str(name).lower() == host.lower()), {})
+        svg, issue = server_snippet_chart(detail, host)
+        if svg:
+            snippets[host] = svg
+        if issue:
+            warnings.append(f"{host}: {issue}")
+    if snippets:
+        charts["resource_snippets"] = snippets
     for key, (svg, issue) in chart_calls.items():
         if svg:
             charts[key] = svg
