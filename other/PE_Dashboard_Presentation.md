@@ -31,16 +31,17 @@ audit with one deterministic pipeline that never disagrees with itself."*
 
 1. The problem this replaces
 2. Tech stack
-3. Architecture — one core pipeline, two independent read paths
-4. Six data sources (only 3 feed the shared table)
-5. SLA resolution — tiered fallback + the buffer formula
-6. Job exclusion, concurrent-job handling, false-signal negation, cyclic/multi-SLA batches
-7. Pulling Azure resource metrics
-8. Correlating batch, SLA & resource — 5 formulas (RFCS / SRI / JRTOS / CRS / OSHS)
-9. SOW contract vs. actual volume
-10. Findings engine — 14 automated rule sections
-11. Governance, export & sign-off
-12. Roadmap / Q&A
+3. Two UI surfaces, one set of fundamentals
+4. Architecture — one core pipeline, two independent read paths
+5. Six data sources (only 3 feed the shared table)
+6. SLA resolution — tiered fallback + the buffer formula
+7. Job exclusion, concurrent-job handling, false-signal negation, cyclic/multi-SLA batches
+8. Pulling Azure resource metrics
+9. Correlating batch, SLA & resource — 5 formulas (RFCS / SRI / JRTOS / CRS / OSHS)
+10. SOW contract vs. actual volume
+11. Findings engine — 14 automated rule sections
+12. Governance, export & sign-off
+13. Roadmap / Q&A
 
 ---
 
@@ -64,8 +65,9 @@ design and the correlation formulas that follow.*
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI + Python 3.14, Pydantic v2 |
-| Frontend | Vanilla JS (ES2020+), Tailwind v3, Chart.js + Plotly.js |
+| Backend (shared, one process) | FastAPI + Python 3.14, Pydantic v2 |
+| Frontend — React MFE (deployed) | React 18, MUI v5, Highcharts — the Blue Yonder Portal target |
+| Frontend — legacy browser UI (local only) | Vanilla JS (ES2020+), Tailwind v3, Chart.js + Plotly.js — parity comparison, never deployed |
 | AI (optional) | Google Gemini (narrative generation, findings text) — toggleable, deterministic engine works with it fully off |
 | Azure | `azure-identity`, `azure-monitor-query`, `azure-mgmt-compute/resource/subscription` |
 | Data processing | pandas, numpy, openpyxl, PyMuPDF, python-docx, pypdf |
@@ -73,6 +75,32 @@ design and the correlation formulas that follow.*
 
 *Talk track: no framework lock-in on the frontend, no DB server to provision —
 the whole tool runs from one Python process, easy to deploy per-engagement.*
+
+---
+
+## Two UI Surfaces, One Set of Fundamentals
+
+- **React MFE** (`frontend/PE_Dashboard_MFE`) — the deployed Blue Yonder Portal
+  experience.
+- **Legacy FastAPI browser UI** (`backend/legacy-ui`, served at `/legacy`) —
+  local-only, kept purely for parity comparison. Never deployed.
+
+**They are not two implementations that happen to agree — they are structurally
+incapable of disagreeing:**
+- `backend/legacy-ui/` contains only `static/` and `templates/` — zero
+  processing logic lives there.
+- Every SLA tier, buffer formula, exclusion rule, correlation formula
+  (RFCS/SRI/CRS/OSHS/JRTOS), and findings rule lives in exactly one place:
+  `backend/PE_Dashboard_API/app/` (`routers/` + `services/`).
+- Both surfaces call the same running FastAPI process and the same `/api/*`
+  routers. `PE_UI_MODE` only decides which HTML shell is served at `/` — it
+  never swaps out which code computes a number.
+- `start-legacy-ui.bat` even checks for the already-running shared API before
+  starting anything, specifically so a second backend can never spin up and
+  drift from the first.
+
+*Talk track: "same fundamentals" isn't a design goal here — it's enforced by
+there being nowhere else for the logic to live.*
 
 ---
 
