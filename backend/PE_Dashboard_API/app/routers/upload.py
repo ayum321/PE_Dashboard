@@ -216,9 +216,27 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
 
     image_only = not any(_has_data(s) for s in (servers_raw or []))
 
-    # Customer name is ONLY extracted from Ctrl-M filenames (see routers/batch.py).
-    # Resource uploads never contribute to customer identity.
+    # Customer name — resource_parser already tags every server record with
+    # _customer_name when the DOCX/report title/heading names the customer.
+    # Adopt it only if no customer is active yet, matching the same rule the
+    # Azure live-fetch path uses (ResourcePanel.tsx handleFetched): never
+    # silently override an engagement already established from Ctrl-M/SOW.
     customer_name: Optional[str] = None
+    for _s in (servers_raw or []):
+        _tag = _s.get("_customer_name")
+        if _tag:
+            customer_name = str(_tag).strip()
+            break
+
+    if customer_name:
+        try:
+            from services import session_cache as _sc_cust
+            _prev_customer = _sc_cust.ac_get("customer_name") or config_store.get("customer_name") or ""
+            if not _prev_customer:
+                config_store.set("customer_name", customer_name)
+                _sc_cust.ac_set("customer_name", customer_name)
+        except Exception:
+            pass
 
     enriched = [_enrich(dict(s), image_only) for s in (servers_raw or [])]
 
@@ -297,12 +315,31 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 for s in (servers_raw or [])
             )
 
+            # See /api/upload above — adopt the DOCX/report-detected customer
+            # name only if none is active yet.
+            _customer_name: Optional[str] = None
+            for _s in (servers_raw or []):
+                _tag = _s.get("_customer_name")
+                if _tag:
+                    _customer_name = str(_tag).strip()
+                    break
+            if _customer_name:
+                try:
+                    from services import session_cache as _sc_cust
+                    _prev_customer = _sc_cust.ac_get("customer_name") or config_store.get("customer_name") or ""
+                    if not _prev_customer:
+                        config_store.set("customer_name", _customer_name)
+                        _sc_cust.ac_set("customer_name", _customer_name)
+                except Exception:
+                    pass
+
             enriched = [_enrich(dict(s), img_only) for s in (servers_raw or [])]
             data = {
                 "filename": file.filename,
                 "file_type": ext.lstrip("."),
                 "server_count": len(enriched),
                 "image_only": img_only,
+                "customer_name": _customer_name,
                 "servers": enriched,
             }
 

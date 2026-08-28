@@ -113,7 +113,7 @@ export function CustomerAuditBanner() {
           <Box display="flex" alignItems="center" style={{ gap: 6, marginTop: 2 }}>
             <Typography variant="caption" style={{ color: '#6b7db3' }}>
               {customerName
-                ? (batch ? 'Sourced from Ctrl-M filename' : 'Sourced from Azure tags')
+                ? (batch ? 'Sourced from Ctrl-M filename' : 'Sourced from resource utilization data')
                 : 'No customer tag was supplied; fleet analysis remains valid.'}
             </Typography>
             {envBadge && <span className="metric-badge" style={{ fontSize: 8 }}>{envBadge}</span>}

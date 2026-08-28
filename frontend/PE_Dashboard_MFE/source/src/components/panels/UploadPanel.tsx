@@ -315,10 +315,18 @@ export function UploadPanel() {
       markProcessing('resource');
       const resource = { ...result.data, servers: result.data.servers || [] };
       setResource(resource);
+      // Resource reports often name the customer in a title/heading even when
+      // Ctrl-M's filename doesn't match the expected pattern. Adopt it only
+      // when no customer is already known — same rule as the Azure live-fetch
+      // path (handleFetched in ResourcePanel.tsx) — so it never silently
+      // overrides an engagement already established from Ctrl-M/SOW.
+      const resourceCustomer = (result.data as { customer_name?: string }).customer_name;
+      if (!data.customerName && resourceCustomer) setCustomerName(resourceCustomer);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
         resource,
+        customerName: data.customerName || resourceCustomer || null,
         findings: null,
         redFlags: null,
         peNarrative: null,
