@@ -807,6 +807,49 @@ def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
     }
 
 
+def _timestamp_minutes(value) -> float | None:
+    """Parse an ISO timestamp for cadence checks without changing its source value."""
+    from datetime import datetime as _dt
+    try:
+        return _dt.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() / 60.0
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _break_series_on_data_gaps(series_points: list, neutral_value: float) -> list:
+    """Insert a neutral, same-timestamp marker before a telemetry gap.
+
+    Azure can omit buckets. Treating the next returned sample as adjacent to the
+    previous one lets the detector turn a one-hour breach into a multi-day event:
+    duration was computed from wall-clock endpoints, not observed continuity.
+    The marker closes both classifiers at the last observed bucket while leaving
+    the original samples (and their statistics) unchanged.
+    """
+    if len(series_points) < 3:
+        return series_points
+    ordered = sorted(series_points, key=lambda point: _timestamp_minutes(point.get("t")) if _timestamp_minutes(point.get("t")) is not None else float("inf"))
+    times = [_timestamp_minutes(point.get("t")) for point in ordered]
+    deltas = [times[i] - times[i - 1] for i in range(1, len(times)) if times[i] is not None and times[i - 1] is not None and times[i] > times[i - 1]]
+    if not deltas:
+        return ordered
+    deltas.sort()
+    # Use the lower median so a short series such as [1h, 7h] still learns the
+    # normal 1h cadence instead of averaging the only real cadence with the
+    # very gap we are trying to detect.
+    cadence = deltas[(len(deltas) - 1) // 2]
+    if cadence <= 0:
+        return ordered
+    gap_limit = cadence * 1.5
+    result = [ordered[0]]
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_min = _timestamp_minutes(previous.get("t"))
+        current_min = _timestamp_minutes(current.get("t"))
+        if previous_min is not None and current_min is not None and current_min - previous_min > gap_limit:
+            result.append({"t": previous["t"], "v": neutral_value})
+        result.append(current)
+    return result
+
+
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                    metric_name: str = "", is_db: bool = False) -> list:
     """Detect spikes in a time-series using DUAL classifiers:
@@ -878,6 +921,10 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     # inverted?" that could drift apart. The band is now the single source, and
     # `_abs_breach_cfg` (below) derives its own `invert` from the same place.
     is_inverted_metric = bool(band.get("invert"))
+    # A missing Azure bucket is not evidence that a condition stayed elevated.
+    # Break the detector at the last observed point so duration means observed
+    # continuous evidence, not a timestamp gap filled in by arithmetic.
+    series_points = _break_series_on_data_gaps(series_points, 100.0 if is_inverted_metric else 0.0)
     if std >= 0.001:
         in_spike = False
         spike_start = None

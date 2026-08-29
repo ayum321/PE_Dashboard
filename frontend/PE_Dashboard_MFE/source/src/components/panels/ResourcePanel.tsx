@@ -674,7 +674,9 @@ export function withGapBreaks(points: { t: string; v: number }[]): { data: (numb
   if (points.length < 3) return { data: points.map((p) => [new Date(p.t).getTime(), p.v]), sawGap: false };
   const times = points.map((p) => new Date(p.t).getTime());
   const deltas = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
-  const median = deltas[Math.floor(deltas.length / 2)] || 0;
+  // Lower median keeps a short series such as [1h, 7h] anchored to its
+  // observed cadence instead of learning the missing-bucket gap as normal.
+  const median = deltas[Math.floor((deltas.length - 1) / 2)] || 0;
   const threshold = median * 1.75;
   const data: (number | null)[][] = [];
   let sawGap = false;
@@ -738,6 +740,7 @@ export function ResourcePanel() {
   const [ddShowMaxOverlay, setDdShowMaxOverlay] = useState(true);
   const [ddShowMinOverlay, setDdShowMinOverlay] = useState(false);
   const [correlatedVms, setCorrelatedVms] = useState<Set<string>>(new Set());
+  const [correlationSort, setCorrelationSort] = useState<'servers' | 'events' | 'time'>('servers');
   // ── Custom absolute time range, ported from toggleDeepDiveCustomPicker()/
   // setDeepDiveCustomRange() (app.js) — scope the deep dive to one batch
   // night or one incident instead of a rolling preset window. ──
@@ -777,6 +780,11 @@ export function ResourcePanel() {
 
   const servers = useMemo(() => (data.resource?.servers || []) as ServerRow[], [data.resource]);
   const isAzureSource = servers.some((s) => s.source === 'azure_monitor');
+  const serverTypeCounts = useMemo(() => servers.reduce<Record<string, number>>((counts, server) => {
+    const type = String(server.type || 'APP').trim().toUpperCase() || 'APP';
+    counts[type] = (counts[type] || 0) + 1;
+    return counts;
+  }, {}), [servers]);
   const fleetAvg = useMemo(() => {
     // Matches the backend's own convention (resource_calculator.py
     // build_resource_payload): image-only hosts carry no telemetry and must
@@ -1146,32 +1154,25 @@ export function ResourcePanel() {
     () => groupCrossServerCorrelations(deepDive?.patterns || []),
     [deepDive],
   );
+  const sortedCorrelationGroups = useMemo(() => [...correlationGroups].sort((a, b) => {
+    if (correlationSort === 'events') return b.eventCount - a.eventCount || b.vms.length - a.vms.length;
+    if (correlationSort === 'time') return a.timeUtc.localeCompare(b.timeUtc);
+    return b.vms.length - a.vms.length || b.eventCount - a.eventCount;
+  }), [correlationGroups, correlationSort]);
 
   // Every host in this estate shares a long site/tenant prefix (tsbf1414…), so
-  // the only distinguishing characters sit at the end — and tsbf141430011 vs
-  // tsbf141403011 differ by a digit transposition in the middle. Rendered at one
-  // weight they are effectively indistinguishable at a glance, which risks
-  // investigating the wrong box. Dim the shared prefix so the eye lands on the
-  // part that actually differs.
-  const hostPrefixLen = useMemo(() => {
-    const names = Object.keys(deepDive?.vms || {});
-    if (names.length < 2) return 0;
-    const first = names[0];
-    let i = 0;
-    while (i < first.length) {
-      const ch = first[i];
-      const pos = i;
-      if (!names.every((n) => n[pos] === ch)) break;
-      i += 1;
-    }
-    // Never dim so much that fewer than four characters stay emphasised.
-    return Math.max(0, Math.min(i, first.length - 4));
-  }, [deepDive]);
+  // the only distinguishing characters may sit anywhere in the ID — and
+  // tsbf141430011 vs tsbf141403011 differ by a digit transposition in the
+  // middle. Dim matching positions and highlight differing positions so the
+  // eye lands on the characters that identify the actual host.
+  const hostNames = useMemo(() => Object.keys(deepDive?.vms || {}), [deepDive]);
 
   const renderHostId = (name: string, key?: string | number) => (
     <span key={key} style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
-      <span style={{ opacity: 0.5 }}>{name.slice(0, hostPrefixLen)}</span>
-      <span style={{ fontWeight: 800, color: '#e6edff' }}>{name.slice(hostPrefixLen)}</span>
+      {Array.from(name).map((character, index) => {
+        const differs = hostNames.length < 2 || hostNames.some((other) => other[index] !== character);
+        return <span key={`${character}-${index}`} style={{ opacity: differs ? 1 : 0.45, fontWeight: differs ? 800 : 500, color: differs ? '#fbbf24' : '#e6edff' }}>{character}</span>;
+      })}
     </span>
   );
 
@@ -1231,13 +1232,10 @@ export function ResourcePanel() {
       const domColor = dominant.color;
       const domKey = dominant.key;
       const hasSustained = dominant.severityRank >= SEVERITY_RANK.critical_sustained;
-      const maxZ = Math.max(0, ...Object.values(spikes).flat().map((event) => Number(event.z_score) || 0));
-
       // Single-sourced from the SAME mem_status flag Fleet Diagnosis and the
       // Server Detail Table already use (7a) \u2014 a DB server's memory sitting in
       // its expected 80\u201392% SGA/PGA band is not a pressure signal, so it must
       // not out-rank a non-sustained z-score breach into CRITICAL here either.
-      const absMeaningful = dominant.family === 'memory-percent' ? domVal <= 30 : domVal >= 50;
       const isDbMemExpected = dominant.family === 'memory-percent' && matchedServer?.mem_status === 'DB_NORMAL' && dominant.severityRank < SEVERITY_RANK.critical;
       const severityLabel = isDbMemExpected ? 'EXPECTED DB LOAD' : dominant.severityLabel;
       const severityColor = isDbMemExpected ? DB_EXPECTED_COLOR : (SEVERITY_COLOR[severityLabel] || SEVERITY_COLOR.WARNING);
@@ -1334,7 +1332,7 @@ export function ResourcePanel() {
         | { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }
         | undefined;
 
-    const groupedRows: Array<{ row: typeof rows[number]; recurring: boolean; count: number; days: number; avgDuration: number; maxPeak: number; ctrlM?: { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] } }> = [];
+    const groupedRows: Array<{ row: typeof rows[number]; recurring: boolean; count: number; days: number; durations: number[]; maxPeak: number; ctrlM?: { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] } }> = [];
     const used = new Set<number>();
     rows.forEach((row, index) => {
       if (used.has(index)) return;
@@ -1356,7 +1354,7 @@ export function ResourcePanel() {
         recurring: related.length > 1,
         count: related.length,
         days: new Set(related.map((item) => item.peak_time ? new Date(item.peak_time).toISOString().slice(0, 10) : '')).size,
-        avgDuration: related.reduce((sum, item) => sum + (item.duration_min || 0), 0) / related.length,
+        durations: related.map((item) => durationMinutesFromBounds(item.start, item.end) ?? item.duration_min ?? 0),
         maxPeak: Math.max(...related.map((item) => item.peak || 0)),
         ctrlM: findCtrlM(row),
       });
@@ -1417,9 +1415,7 @@ export function ResourcePanel() {
       // Metrics with stats but NO spike events \u2014 excludes anything already
       // shown in the anomaly table above, so this line is genuinely "the rest",
       // not a duplicate of what's already flagged (7d).
-      normalMetrics: Object.keys(vmData.stats || {})
-        .filter((m) => !(vmData.spikes?.[m] || []).length)
-        .map(shortMetric),
+      normalMetrics: normalMetricLabels(vmData.stats || {}, spikes),
       ctrlMActive: attributionRows.length > 0,
     };
   }, [deepDive, deepDiveVm]);
@@ -1457,7 +1453,7 @@ export function ResourcePanel() {
         <KpiStatCard
           label="Servers"
           value={servers.length}
-          sub={`${servers.filter((s) => (s.type || 'APP') === 'APP').length} APP \u00b7 ${servers.filter((s) => s.type === 'DB').length} DB${fleetKpis?.image_only ? ` \u00b7 ${fleetKpis.image_only} no telemetry` : ''}`}
+          sub={`${serverTypeCounts.APP || 0} APP \u00b7 ${serverTypeCounts.DB || 0} DB \u00b7 ${serverTypeCounts.SRE || 0} SRE${fleetKpis?.image_only ? ` \u00b7 ${fleetKpis.image_only} no telemetry` : ''}`}
           accent="#3b82f6"
         />
         {isAzureSource && <KpiStatCard label="Source" value="Azure Monitor" valueColor="#22d3ee" sub={`Live \u00b7 last ${hoursBack}h`} accent="#22d3ee" />}
@@ -1973,37 +1969,40 @@ export function ResourcePanel() {
                     </Box>
                     {correlatedVms.size > 0 && <Button size="small" variant="outlined" onClick={() => setCorrelatedVms(new Set())}>Clear highlight</Button>}
                   </Box>
-                  <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 8, marginTop: 8 }}>
-                    {correlationGroups.map((group, index) => {
-                      const active = group.vms.some((vm) => correlatedVms.has(vm));
-                      return (
-                        <Box
-                          key={`${group.timeUtc}-${group.metrics.join('-')}-${index}`}
-                          onClick={() => {
-                            setCorrelatedVms(new Set(group.vms));
-                            if (group.vms[0]) setDeepDiveVm(group.vms[0]);
-                          }}
-                          style={{ borderRadius: 8, border: `1px solid ${active ? '#22d3ee' : 'rgba(34,211,238,.25)'}`, background: active ? 'rgba(34,211,238,.11)' : 'rgba(17,29,54,.45)', padding: 9, cursor: 'pointer' }}
-                          title="Highlight related investigation cards and open the first server's evidence."
-                        >
-                          <Typography variant="caption" style={{ color: '#22d3ee', fontWeight: 800 }}>{group.timeUtc === 'time unavailable' ? 'Selected window' : `Around ${group.timeUtc} UTC`}</Typography>
-                          <Box style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                            {group.vms.map((vm, vmIndex) => (
-                              <span
-                                key={`${vm}-${vmIndex}`}
-                                style={{
-                                  fontSize: 11, lineHeight: 1.6, padding: '1px 6px', borderRadius: 5,
-                                  background: 'rgba(34,211,238,.10)', border: '1px solid rgba(34,211,238,.22)',
-                                }}
-                              >
-                                {renderHostId(vm)}
-                              </span>
-                            ))}
-                          </Box>
-                          <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 3 }}>{group.metrics.map(shortMetric).join(' · ') || 'Metric unavailable'} · {group.eventCount} correlated event{group.eventCount === 1 ? '' : 's'}</Typography>
-                        </Box>
-                      );
-                    })}
+                  <Box className="pe-table-shell" style={{ marginTop: 8, overflowX: 'auto' }}>
+                    <Table size="small" className="pe-table" aria-label="Cross-server correlation evidence">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell><TableSortLabel active={correlationSort === 'time'} onClick={() => setCorrelationSort('time')}>Window (UTC)</TableSortLabel></TableCell>
+                          <TableCell><TableSortLabel active={correlationSort === 'servers'} onClick={() => setCorrelationSort('servers')}>Servers</TableSortLabel></TableCell>
+                          <TableCell>Metrics</TableCell>
+                          <TableCell align="right"><TableSortLabel active={correlationSort === 'events'} onClick={() => setCorrelationSort('events')}>Events</TableSortLabel></TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {sortedCorrelationGroups.map((group, index) => {
+                          const active = group.vms.some((vm) => correlatedVms.has(vm));
+                          return (
+                            <TableRow
+                              key={`${group.timeUtc}-${group.metrics.join('-')}-${index}`}
+                              hover
+                              onClick={() => { setCorrelatedVms(new Set(group.vms)); if (group.vms[0]) setDeepDiveVm(group.vms[0]); }}
+                              style={{ cursor: 'pointer', background: active ? 'rgba(34,211,238,.09)' : undefined }}
+                              title="Highlight related investigation cards and open the first server's evidence."
+                            >
+                              <TableCell style={{ color: '#22d3ee', fontWeight: 700, whiteSpace: 'nowrap' }}>{group.timeUtc === 'time unavailable' ? 'Selected window' : `${group.timeUtc} UTC`}</TableCell>
+                              <TableCell>
+                                <Box display="flex" style={{ gap: 5, flexWrap: 'wrap' }}>
+                                  {group.vms.map((vm, vmIndex) => <span key={`${vm}-${vmIndex}`} style={{ fontSize: 11, padding: '1px 5px', borderRadius: 5, background: 'rgba(34,211,238,.10)', border: '1px solid rgba(34,211,238,.22)' }}>{renderHostId(vm)}</span>)}
+                                </Box>
+                              </TableCell>
+                              <TableCell>{group.metrics.map(shortMetric).join(' · ') || 'Metric unavailable'}</TableCell>
+                              <TableCell align="right">{group.eventCount}</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
                   </Box>
                 </Box>
               )}
@@ -2033,16 +2032,13 @@ export function ResourcePanel() {
                           <thead>
                             <tr>
                               <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#111d36', minWidth: 150, textAlign: 'left' }}>Server</th>
-                                  {/* A label on every column of a 30+ column heatmap is a wall of
-                                      near-vertical text nobody can actually read. Every column still
-                                      gets its own coloured cell (no resolution lost); the visible
-                                      text is thinned to roughly a dozen evenly-spaced ticks, same idea
-                                      as a chart axis — the hidden ones remain in the hover title. */}
+                                  {/* Keep every coloured bucket while showing only about a dozen
+                                      horizontal labels; the remaining columns stay available by hover. */}
                                   {fleetHeatmapView.columns.map((column, index) => {
                                     const labelStride = Math.max(1, Math.ceil(fleetHeatmapView.columns.length / 12));
                                     const showLabel = index % labelStride === 0 || index === fleetHeatmapView.columns.length - 1;
                                     return (
-                                      <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: 18, maxWidth: 30, padding: '4px 1px', fontSize: 9, whiteSpace: 'nowrap', writingMode: 'vertical-rl', transform: 'rotate(180deg)', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '\u00b7'}</th>
+                                      <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: showLabel ? 58 : 18, padding: '4px 3px', fontSize: 8, whiteSpace: 'nowrap', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '·'}</th>
                                     );
                                   })}
                             </tr>
@@ -2137,7 +2133,7 @@ export function ResourcePanel() {
                     {ddCards.critical.map((c) => {
                       const isSelected = c.vmName === deepDiveVm;
                       const isCorrelated = correlatedVms.has(c.vmName);
-                      const points = c.vmData.series?.[c.domLabel === 'MEM' ? 'Available Memory Percentage' : c.domLabel === 'DISK' ? 'OS Disk Bandwidth Consumed Percentage' : 'Percentage CPU'] || [];
+                      const points = c.vmData.series?.[c.domKey] || [];
                       return (
                         <Box
                           key={c.vmName}
@@ -2174,7 +2170,7 @@ export function ResourcePanel() {
                               )}
                             </Box>
                             <Box style={{ textAlign: 'right', flexShrink: 0 }}>
-                              <Typography component="span" variant="h6" style={{ color: c.domColor, fontWeight: 800 }}>{c.domVal.toFixed(0)}%</Typography>
+                              <Typography component="span" variant="h6" title={c.domLabel === 'MEM' ? 'Observed minimum Available Memory Percentage in this window.' : `${c.domLabel} P95 from this window.`} style={{ color: c.domColor, fontWeight: 800 }}>{c.domVal.toFixed(0)}%</Typography>
                               <Typography variant="caption" style={{ display: 'block', color: c.domColor, fontSize: 8, fontWeight: 700 }}>
                                 {c.domLabel} {c.domLabel === 'MEM' ? 'MIN AVAIL' : 'P95'}
                               </Typography>
@@ -2238,22 +2234,26 @@ export function ResourcePanel() {
                               </TableRow>
                             </TableHead>
                             <TableBody>
-                              {ddDetail.groupedRows.slice(0, 30).map(({ row: s, recurring, count, days, avgDuration, maxPeak, ctrlM }, i) => {
+                              {ddDetail.groupedRows.slice(0, 30).map(({ row: s, recurring, count, days, durations, maxPeak, ctrlM }, i) => {
                                 const sevLabel = (s.severity || 'critical').toUpperCase().replace('_', ' ');
                                 const sevColor = SEVERITY_COLOR[sevLabel] || '#f43f5e';
-                                const start = s.start ? new Date(s.start).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '\u2014';
-                                const end = s.end ? new Date(s.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '\u2014';
+                                const start = formatUtcDateTime(s.start);
+                                const end = formatUtcDateTime(s.end);
+                                const durationText = recurring ? formatRecurringDurations(durations) : humanizeDurationMin(durationMinutesFromBounds(s.start, s.end) ?? s.duration_min ?? 0);
+                                const detailText = recurring
+                                  ? `${count} events · durations ${durations.map(humanizeDurationMin).join(', ')}${s.severity_reason ? ` · representative event: ${s.severity_reason}` : ''}`
+                                  : s.severity_reason || '\u2014';
                                 const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
                                 return (
                                   <TableRow key={i}>
                                     <TableCell><span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>{s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}</TableCell>
                                     <TableCell>{shortMetric(s.metric)}</TableCell>
                                     <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }}>{count}x</span>}</TableCell>
-                                    <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : <>{start} {'\u2192'} {end}</>}</TableCell>
-                                    <TableCell style={{ fontSize: 10 }}>{recurring ? `${humanizeDurationMin(avgDuration)} each` : s.duration_min != null ? humanizeDurationMin(s.duration_min) : '\u2014'}</TableCell>
+                                    <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : `${start} → ${end} UTC`}</TableCell>
+                                    <TableCell style={{ fontSize: 10 }}>{durationText}</TableCell>
                                     <TableCell style={{ fontSize: 10, color: recurring ? '#f59e0b' : undefined }}>{pattern}</TableCell>
                                     <TableCell style={{ fontSize: 10 }}>
-                                      <span title={s.severity_reason || ''}>{s.severity_reason || '\u2014'}</span>
+                                      <span title={detailText}>{detailText}</span>
                                       {ctrlM && ctrlM.concurrent_jobs > 0 && (
                                         <Box style={{ marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
                                           <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf' }}>
@@ -2274,7 +2274,7 @@ export function ResourcePanel() {
                           </Table>
                           {ddDetail.normalMetrics.length > 0 && (
                             <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 6 }}>
-                              {'\u2713 '}{ddDetail.normalMetrics.length} other metric{ddDetail.normalMetrics.length > 1 ? 's' : ''} within normal range: {ddDetail.normalMetrics.join(', ')}
+                              {'\u2713 '}{ddDetail.normalMetrics.length} other graded metric{ddDetail.normalMetrics.length > 1 ? 's' : ''} with no detected anomaly: {ddDetail.normalMetrics.join(', ')}
                             </Typography>
                           )}
                         </>
@@ -2282,7 +2282,7 @@ export function ResourcePanel() {
                         <Box style={{ marginTop: 8, borderRadius: 6, border: '1px solid rgba(16,217,110,.3)', background: 'rgba(16,217,110,.06)', padding: '8px 10px' }}>
                           <Typography variant="caption" style={{ color: '#10d96e', fontWeight: 700 }}>{'\u2713'} ALL PATTERNS NORMAL</Typography>
                           {ddDetail.normalMetrics.length > 0 && (
-                            <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9 }}>{ddDetail.normalMetrics.length} metrics within normal range: {ddDetail.normalMetrics.join(', ')}</Typography>
+                            <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9 }}>{ddDetail.normalMetrics.length} graded metrics with no detected anomaly: {ddDetail.normalMetrics.join(', ')}</Typography>
                           )}
                         </Box>
                       )}
@@ -2372,11 +2372,9 @@ export function ResourcePanel() {
                 // explicitly does not have.
                 const ordered = [...linked, ...unlinked].slice(0, 20);
                 const fmtWindow = (row: typeof attrRows[number]) => {
-                  if (!row.peak_time) return '\u2014';
-                  const d = new Date(row.peak_time);
-                  if (Number.isNaN(d.getTime())) return '\u2014';
-                  const stamp = d.toISOString().replace('T', ' ').slice(5, 16);
-                  return row.duration_min ? `${stamp} \u00b7 ${row.duration_min.toFixed(0)}min` : stamp;
+                  const range = formatSpikeWindow(row.start, row.end);
+                  if (range !== '—') return range;
+                  return row.peak_time ? `${formatUtcDateTime(row.peak_time)} UTC` : '—';
                 };
                 return (
                 <Box style={{ marginTop: 12 }}>
@@ -2406,7 +2404,7 @@ export function ResourcePanel() {
                           <TableCell>{shortMetric(row.metric)}</TableCell>
                           <TableCell style={{ fontFamily: 'monospace', fontSize: 11 }}>{fmtWindow(row)}</TableCell>
                           <TableCell align="right">{row.peak != null ? row.peak.toFixed(1) : '\u2014'}</TableCell>
-                          <TableCell><span className="metric-badge" style={{ color: row.severity === 'critical' ? '#f43f5e' : '#f59e0b' }}>{row.severity}</span></TableCell>
+                          <TableCell><span className="metric-badge" style={{ color: (row.severity || '').startsWith('critical') ? '#f43f5e' : '#f59e0b' }}>{row.severity}</span></TableCell>
                           <TableCell align="right">{row.concurrent_jobs}</TableCell>
                           <TableCell>
                             {row.heaviest

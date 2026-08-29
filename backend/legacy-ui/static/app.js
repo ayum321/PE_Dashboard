@@ -7362,10 +7362,96 @@ let _deepDiveAttribution = null;   // spike-to-batch join, stored for export
 function _ddShortMetric(k) {
   k = k || "";
   if (k.includes("CPU")) return "CPU";
+  if (/Available Memory Bytes/i.test(k)) return "Memory Bytes";
   if (k.includes("Memory")) return "Memory";
   if (k.includes("OS Disk")) return "OS Disk";
   if (k.includes("Data Disk")) return "Data Disk";
   return k.replace(" Percentage", "").replace(" Consumed", "");
+}
+
+// Canonical display families keep Azure aliases from becoming contradictory
+// rows (e.g. "Memory" normal beside "Available Memory Percentage" anomalous).
+function _ddMetricFamily(k) {
+  const key = String(k || "").toLowerCase();
+  if (key.includes("cpu")) return "cpu";
+  if (key.includes("memory") || key.includes("mem")) return key.includes("byte") ? "memory-bytes" : "memory-percent";
+  if (key.includes("os disk") && key.includes("bandwidth") && key.includes("percentage")) return "os-disk";
+  if (key.includes("data disk") && key.includes("bandwidth") && key.includes("percentage")) return "data-disk";
+  return "other";
+}
+
+const _DD_SEVERITY_RANK = { critical_sustained: 4, critical: 3, warning: 2, notable: 1 };
+
+function _ddHighestSeverity(events) {
+  const top = (events || []).reduce((best, event) => {
+    if (!best || (_DD_SEVERITY_RANK[event.severity] || 0) > (_DD_SEVERITY_RANK[best.severity] || 0)) return event;
+    return best;
+  }, null);
+  const severity = top?.severity || "";
+  return {
+    rank: _DD_SEVERITY_RANK[severity] ?? -1,
+    severityLabel: severity === "critical_sustained" ? "CRITICAL SUSTAINED" : severity === "critical" ? "CRITICAL" : severity === "notable" ? "ELEVATED" : "WARNING",
+  };
+}
+
+function _ddSelectDominantMetric(stats, spikes) {
+  const entries = Object.entries(stats || {});
+  const eventsFor = family => Object.entries(spikes || {})
+    .filter(([metric]) => _ddMetricFamily(metric) === family)
+    .flatMap(([, values]) => values || []);
+  const statFor = families => entries
+    .filter(([metric]) => families.includes(_ddMetricFamily(metric)))
+    .sort(([, a], [, b]) => (b.p95 ?? b.max ?? 0) - (a.p95 ?? a.max ?? 0))[0];
+  const candidates = [];
+  const add = (families, label, statType, valueFor, color) => {
+    const events = families.flatMap(eventsFor);
+    const entry = statFor(families);
+    if (!entry && !events.length) return;
+    const stat = entry?.[1];
+    const value = valueFor(stat, events);
+    const severity = _ddHighestSeverity(events);
+    candidates.push({ key: entry?.[0] || Object.keys(spikes || {}).find(k => families.includes(_ddMetricFamily(k))) || families[0], family: _ddMetricFamily(entry?.[0] || ""), label, value, pressure: label === "MEM" ? 100 - value : value, statType, events, ...severity, color });
+  };
+  add(["cpu"], "CPU", "P95", (stat, events) => stat?.p95 ?? stat?.max ?? Math.max(...events.map(e => e.peak || 0), 0), THEME.blue);
+  add(["memory-percent"], "MEM", "min avail", (stat, events) => stat?.min ?? Math.min(...events.map(e => e.peak ?? 100), 100), THEME.cyan);
+  add(["os-disk", "data-disk"], "DISK", "P95", (stat, events) => stat?.p95 ?? stat?.max ?? Math.max(...events.map(e => e.peak || 0), 0), THEME.amber);
+  candidates.sort((a, b) => b.rank - a.rank || b.events.length - a.events.length || b.pressure - a.pressure);
+  return candidates[0] || null;
+}
+
+function _ddNormalMetricLabels(stats, spikes) {
+  const spikeFamilies = new Set(Object.keys(spikes || {}).map(_ddMetricFamily));
+  return [...new Set(Object.keys(stats || {})
+    .filter(k => ["cpu", "memory-percent", "os-disk", "data-disk"].includes(_ddMetricFamily(k)))
+    .filter(k => !spikeFamilies.has(_ddMetricFamily(k)))
+    .map(_ddShortMetric))];
+}
+
+function _ddFormatUtcDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("en-US", { timeZone: "UTC", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: true });
+}
+
+function _ddDurationFromBounds(start, end) {
+  const startMs = new Date(start || "").getTime();
+  const endMs = new Date(end || "").getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null;
+  return Math.max(1, Math.round((endMs - startMs) / 60000));
+}
+
+function _ddFormatSpikeWindow(start, end) {
+  const s = _ddFormatUtcDateTime(start);
+  const e = _ddFormatUtcDateTime(end);
+  return s === "—" || e === "—" ? "—" : `${s} → ${e} UTC`;
+}
+
+function _ddFormatRecurringDurations(durations) {
+  const values = (durations || []).filter(Number.isFinite).map(v => Math.max(1, Math.round(v)));
+  if (!values.length) return "—";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return min === max ? `${_humanizeDurationMin(min)} each` : `${_humanizeDurationMin(min)}–${_humanizeDurationMin(max)} per event`;
 }
 
 function _renderDeepDivePatterns(patterns) {
@@ -7563,9 +7649,10 @@ function _renderSpikeAttribution(attr) {
   panel.style.border = `1px solid ${hexA(THEME.cyan, 0.25)}`;
   const top = rows.slice(0, 6).map(r => {
     const pk = r.peak != null ? `${Math.round(r.peak)}%` : "?";
-    const t = r.peak_time ? new Date(r.peak_time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    const windowText = _ddFormatSpikeWindow(r.start, r.end);
+    const t = windowText !== "—" ? windowText : (r.peak_time ? `${_ddFormatUtcDateTime(r.peak_time)} UTC` : "—");
     return `<div class="flex items-center justify-between gap-2 py-0.5">
-      <span class="text-Cmuted truncate">${escapeHtml(r.vm)} · ${escapeHtml(r.metric.replace(" Percentage",""))} ${pk} @ ${t}</span>
+      <span class="text-Cmuted truncate">${escapeHtml(r.vm)} · ${escapeHtml(r.metric.replace(" Percentage",""))} ${pk} · ${t}</span>
       <span class="font-semibold" style="color:${THEME.cyan}">${r.concurrent_jobs} job${r.concurrent_jobs>1?"s":""} · ${escapeHtml(r.heaviest||"")}${r.heaviest_hrs!=null?` (${r.heaviest_hrs}h)`:""}</span>
     </div>`;
   }).join("");
@@ -7779,8 +7866,8 @@ function _renderDeepDiveHeatmap(heatmap) {
     xaxis: {
       type: "date",
       tickfont: { color: THEME.muted, size: 9 },
-      tickangle: -45,
-      nticks: 20,
+      tickangle: 0,
+      nticks: 12,
       tickformat: "%b %d %I%p",
       hoverformat: "%b %d %I:%M %p",
       rangeslider: { visible: false },
@@ -7961,8 +8048,8 @@ function _renderDeepDiveMemoryHeatmap(vms) {
     xaxis: {
       type: "date",
       tickfont: { color: THEME.muted, size: 9 },
-      tickangle: -45,
-      nticks: 20,
+      tickangle: 0,
+      nticks: 12,
       tickformat: "%b %d %I%p",
       hoverformat: "%b %d %I:%M %p",
     },
@@ -8101,8 +8188,8 @@ function _renderDeepDiveDiskHeatmap() {
       font: { size: 9, color: THEME.muted }, x: 0.01, xanchor: "left",
     },
     xaxis: {
-      type: "date", tickfont: { color: THEME.muted, size: 9 }, tickangle: -45,
-      nticks: 20, tickformat: "%b %d %I%p", hoverformat: "%b %d %I:%M %p",
+      type: "date", tickfont: { color: THEME.muted, size: 9 }, tickangle: 0,
+      nticks: 12, tickformat: "%b %d %I%p", hoverformat: "%b %d %I:%M %p",
     },
     yaxis: { tickfont: { color: THEME.muted, size: 10 }, autorange: "reversed" },
   });
@@ -8706,48 +8793,27 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
   // Count event types for explicit labeling (prevents "3 vs 5" ambiguity).
   let spikeEventCount = 0;
   let thresholdCrossCount = 0;
-  let highestSev = 0;
-  let hasSustained = false;
-  let lastBreach = null;
-  for (const [mk, arr] of Object.entries(spikes)) {
+  for (const arr of Object.values(spikes)) {
     spikeEventCount += arr.length;
     for (const s of arr) {
-      highestSev = Math.max(highestSev, s.z_score || 0);
-      if ((s.severity || "").includes("sustained")) hasSustained = true;
       if ((s.severity || "").startsWith("critical") || s.detection === "absolute_threshold") thresholdCrossCount++;
-      const bt = new Date(s.peak_time);
-      if (!lastBreach || bt > lastBreach) lastBreach = bt;
     }
   }
 
-  // Determine dominant metric — single large callout
-  // Use P95 for headline (representative peak), not max (single-point outlier)
-  const cpuStats = stats["Percentage CPU"];
-  const cpuP95 = cpuStats?.p95 ?? cpuStats?.max ?? 0;
-  const cpuMax = cpuStats?.max ?? 0;
-  // Memory: show lowest available % (P5 or min) — lower = more pressure
-  const memAvailStats = stats["Available Memory Percentage"];
-  const memLowest = memAvailStats
-    ? (memAvailStats.min_anomalous && memAvailStats.p5 != null
-      ? memAvailStats.p5
-      : memAvailStats.min ?? 100)
-    : 100;
-  const diskStats = stats["OS Disk Bandwidth Consumed Percentage"];
-  const diskP95 = diskStats?.p95 ?? diskStats?.max ?? 0;
-  let domLabel, domVal, domColor, domStatType;
-  // Pick the metric under most pressure:
-  // CPU/Disk: highest % = worst; Memory: lowest available % = worst
-  // Convert to a common "pressure" score for comparison
-  const memPressure = 100 - memLowest;  // high pressure = low available
-  if (memPressure >= cpuP95 && memPressure >= diskP95) {
-    domLabel = "MEM"; domVal = memLowest; domColor = THEME.cyan; domStatType = "min avail";
-  } else if (cpuP95 >= diskP95) {
-    domLabel = "CPU"; domVal = cpuP95; domColor = THEME.blue; domStatType = "P95";
-  } else {
-    domLabel = "DISK"; domVal = diskP95; domColor = THEME.amber; domStatType = "P95";
-  }
-  // If P95 < max by a large margin, note the outlier
-  const domMaxVal = domLabel === "CPU" ? cpuMax : domLabel === "DISK" ? (diskStats?.max ?? 0) : 0;
+  // Select one metric for the complete card story. Severity evidence wins;
+  // pressure is only a tie-breaker, so the badge cannot contradict the stat.
+  const dominant = _ddSelectDominantMetric(stats, spikes);
+  if (!dominant) return;
+  const domLabel = dominant.label;
+  const domVal = dominant.value;
+  const domColor = dominant.color;
+  const domStatType = dominant.statType;
+  const domKey = dominant.key;
+  const memStats = Object.entries(stats).find(([metric]) => _ddMetricFamily(metric) === "memory-percent")?.[1];
+  const memLowest = memStats?.min ?? (dominant.family === "memory-percent" ? dominant.value : 100);
+  const memPressure = 100 - memLowest;
+  const domStat = stats[domKey];
+  const domMaxVal = domLabel === "CPU" || domLabel === "DISK" ? (domStat?.max ?? 0) : 0;
   const domHasOutlier = domMaxVal > domVal * 1.3 && domMaxVal > domVal + 10;
 
   const card = document.createElement("div");
@@ -8761,8 +8827,7 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
     card.classList.add("saturated-pulse");
   }
 
-  // Sparkline from dominant metric series — last 6 hours only
-  const domKey = domLabel === "MEM" ? "Available Memory Percentage" : (domLabel === "DISK" ? "OS Disk Bandwidth Consumed Percentage" : "Percentage CPU");
+  // Sparkline from the same metric used by the headline and severity badge.
   const fullSeries = metrics[domKey] || metrics["Percentage CPU"] || [];
   const now = Date.now();
   const sixHoursMs = 6 * 60 * 60 * 1000;
@@ -8787,26 +8852,11 @@ function _renderVmServerCard(vmName, vmData, metricConfig, container) {
 
   // Two-stage severity: z-score + absolute threshold gate
   // For CPU/Disk: high value = pressure. For MEM (available %): low value = pressure.
-  const _absFloor = { CPU: 50, MEM: 30, DISK: 50 };
-  const domFloor = _absFloor[domLabel] || 50;
-  // For memory, "meaningful" pressure means available is LOW (≤ 30%)
-  const absIsMeaningful = domLabel === "MEM" ? domVal <= domFloor : domVal >= domFloor;
-  // DB memory leniency: 8-20% available is expected (SGA/PGA uses 80-92%)
-  const isDbMem = _isDbRole(_inferRole(vmName)) && domLabel === "MEM" && domVal >= 8;
+  const isDbMem = dominant.family === "memory-percent" && _isDbRole(_inferRole(vmName)) && dominant.rank < _DD_SEVERITY_RANK.critical;
 
   let sevLabel, sevColor;
-  if (isDbMem && !hasSustained) {
-    sevLabel = domVal < 8 ? "WARNING" : "HEALTHY";
-    sevColor = domVal < 8 ? THEME.amber : THEME.green;
-  } else if (hasSustained && absIsMeaningful) {
-    sevLabel = "CRITICAL SUSTAINED"; sevColor = THEME.purple;
-  } else if (highestSev >= 3 && absIsMeaningful) {
-    sevLabel = "CRITICAL"; sevColor = THEME.red;
-  } else if (highestSev >= 3 && !absIsMeaningful) {
-    sevLabel = "ELEVATED"; sevColor = THEME.amber;  // downgraded — z high but abs low
-  } else {
-    sevLabel = "WARNING"; sevColor = THEME.amber;
-  }
+  sevLabel = isDbMem ? "EXPECTED DB LOAD" : dominant.severityLabel;
+  sevColor = isDbMem ? THEME.cyan : (dominant.severityLabel === "CRITICAL SUSTAINED" ? THEME.purple : dominant.severityLabel === "CRITICAL" ? THEME.red : THEME.amber);
 
   // E3: Trend direction — current vs 2h ago
   const twoHoursMs = 2 * 60 * 60 * 1000;
@@ -9174,12 +9224,10 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       if (group.length === 1) {
         const s = group[0];
         const metricLabel = metricConfig.find(m => m.key === s.metric)?.label || s.metric;
-        const start = new Date(s.start).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-        // Show full date+time for end when duration > 24h (multi-day window)
-        const end = s.duration_min > 1440
-          ? new Date(s.end).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
-          : new Date(s.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const peakTime = new Date(s.peak_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const start = _ddFormatUtcDateTime(s.start);
+        const end = _ddFormatUtcDateTime(s.end);
+        const peakTime = _ddFormatUtcDateTime(s.peak_time);
+        const canonicalDuration = _ddDurationFromBounds(s.start, s.end) ?? (Number(s.duration_min) || 0);
 
         // Bug 3+4: severity-aware labels (sustained, absolute threshold)
         const sev = (s.severity || "critical").toUpperCase().replace("_", " ");
@@ -9191,7 +9239,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const activeBadge = _stillActive
           ? `<span class="ml-1 px-1.5 py-0.5 rounded text-[8px] font-extrabold" style="color:${THEME.red};background:${hexA(THEME.red,0.15)};border:1px solid ${hexA(THEME.red,0.45)}">STILL ACTIVE</span>`
           : "";
-        const durLabel = _humanizeDurationMin(s.duration_min, {
+        const durLabel = _humanizeDurationMin(canonicalDuration, {
           ongoing: _stillActive,
         });
         const detectionTag = s.detection === "absolute_threshold"
@@ -9210,8 +9258,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         return { notable: isNotable, html: `<tr class="border-t border-red-500/15 cursor-pointer hover:bg-white/[0.04] group" title="Click to reload deep dive for this exact time window" onclick="openSpikeWindow(${JSON.stringify(s.start)},${JSON.stringify(s.end)})">          <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${sevColor}" title="${sevReason}">${sev}${_severityInfoIcon(sev)}${detectionTag}${_confBadge(s.confidence)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite" title="${lineageTitle}">${escapeHtml(metricLabel)}${s.is_derived ? ' <span class="text-[7px] px-0.5 rounded" style="color:'+THEME.cyan+';background:'+hexA(THEME.cyan,0.12)+'">derived</span>' : ''}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s.metric, s.peak)}</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end}${activeBadge}</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="${s.duration_min} min">${durLabel}${activeBadge ? ` <span class="font-semibold" style="color:${THEME.red}">(open incident)</span>` : ""}</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${start} → ${end} UTC${activeBadge}</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="${canonicalDuration} min">${durLabel}${activeBadge ? ` <span class="font-semibold" style="color:${THEME.red}">(open incident)</span>` : ""}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">peak @ ${peakTime}</td>
           <td class="py-1.5 text-[10px] text-Cmuted">${_formatDeviation(s)}</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
@@ -9222,8 +9270,8 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
         const s0 = group[0];
         const metricLabel = metricConfig.find(m => m.key === s0.metric)?.label || s0.metric;
         const maxPeak = Math.max(...group.map(g => g.peak));
-        const avgDurMin = (group.reduce((a, g) => a + g.duration_min, 0) / group.length);
-        const avgDurLabel = _humanizeDurationMin(avgDurMin);
+        const durations = group.map(g => _ddDurationFromBounds(g.start, g.end) ?? (Number(g.duration_min) || 0));
+        const durationLabel = _ddFormatRecurringDurations(durations);
         const days = group.map(g => new Date(g.peak_time).toLocaleDateString([], { weekday: "short", timeZone: "UTC" }));
         const uniqueDays = [...new Set(days)];
         // Bug 2: "Daily" when ≥6 unique days, otherwise list them
@@ -9249,9 +9297,9 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite">${escapeHtml(metricLabel)} <span class="px-1 py-0.5 rounded text-[8px] font-bold" style="color:${THEME.amber};background:${hexA(THEME.amber,0.15)}">${group.length}×</span></td>
           <td class="py-1.5 pr-3 text-[10px] text-Cwhite font-mono font-bold">${_formatPeak(s0.metric, maxPeak)}</td>
           <td class="py-1.5 pr-3 text-[10px] text-Cmuted">${dayLabel} pattern</td>
-          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="avg ${Math.round(avgDurMin)} min each">${avgDurLabel} each</td>
+          <td class="py-1.5 pr-3 text-[10px] text-Cmuted" title="Observed duration for each grouped event: ${durations.join(", ")} min">${durationLabel}</td>
           <td class="py-1.5 pr-3 text-[10px] font-semibold" style="color:${patternColor}">${patternLabel} <span class="text-[8px] text-Cmuted">(${distinctDays}d)</span></td>
-          <td class="py-1.5 text-[10px] text-Cmuted">peak ${_formatPeak(s0.metric, maxPeak)}, avg duration ${avgDurLabel}</td>
+          <td class="py-1.5 text-[10px] text-Cmuted">${group.length} events · durations ${durations.map(_humanizeDurationMin).join(", ")} · representative peak ${_formatPeak(s0.metric, maxPeak)}</td>
           <td class="py-1.5 pl-1 text-[9px] opacity-0 group-hover:opacity-100 transition" style="color:${THEME.blue}">→ drill</td>
         </tr>` };
       }
@@ -9300,9 +9348,15 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       const metricLabel = metricConfig.find(m => m.key === k)?.label || k;
       const cpuP95 = stats["Percentage CPU"]?.p95 ?? stats["Percentage CPU"]?.mean ?? null;
       const cpuContext = cpuP95 != null
-        ? (cpuP95 < 40 ? `minimal CPU impact (P95 ${cpuP95.toFixed(0)}%)` : `concurrent CPU pressure (P95 ${cpuP95.toFixed(0)}%)`)
+        ? `CPU P95 baseline ${cpuP95.toFixed(0)}%`
         : "CPU context unavailable";
-      if (k === "Available Memory Percentage") {
+      if (/CPU/i.test(k)) {
+        const peak = Number(topSignal.peak) || 0;
+        const shape = cpuP95 == null ? "baseline unavailable" : peak - cpuP95 >= 40
+          ? `isolated burst over the ${cpuP95.toFixed(0)}% P95 baseline`
+          : `consistent with the ${cpuP95.toFixed(0)}% P95 baseline`;
+        insightLine = `Likely root cause: CPU peaked at ${peak.toFixed(1)}% on ${escapeHtml(vmName)}; ${shape}.`;
+      } else if (k === "Available Memory Percentage") {
         const peakAvail = topRecurring
           ? Math.max(...topRecurring.map(x => Number(x.peak) || 0))
           : Number(topSignal.peak) || 0;
@@ -9386,6 +9440,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
     // Separate actionable vs healthy
     const actionable = []; // critical, high, medium
     const healthy = [];    // low, none
+    const spikeFamilies = new Set(Object.keys(spikes).map(_ddMetricFamily));
     for (const [metric, wf] of wfEntries) {
       let dWf = wf;
       if (metric.includes("Memory")) {
@@ -9396,7 +9451,7 @@ function _renderVmDeepDiveCard(vmName, vmData, metricConfig, container, showChar
       }
       const entry = { metric, wf, dWf };
       if (dWf.risk === "critical" || dWf.risk === "high" || dWf.risk === "medium") actionable.push(entry);
-      else healthy.push(entry);
+      else if (!spikeFamilies.has(_ddMetricFamily(metric))) healthy.push(entry);
     }
 
     let wfRows = "";
