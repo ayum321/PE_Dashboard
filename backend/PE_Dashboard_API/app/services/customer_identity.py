@@ -391,12 +391,43 @@ def best_candidate(cands: List[CustomerCandidate]) -> Optional[CustomerCandidate
 
 
 # How much stronger a NEW identification must be than the evidence that set
-# the CURRENT active customer before we auto-correct instead of just warning.
+# the CURRENT active customer before we auto-correct instead of just warning
+# — used only when the two sources are of EQUAL trust tier (see below).
 # Kept high enough that two comparably strong sources (e.g. a well-matched
-# Sub_Application column vs. a Resource DOCX tag) still just conflict-warn
-# rather than flip-flop on every upload.
+# Sub_Application column vs. another Sub_Application-tier source) still just
+# conflict-warn rather than flip-flop on every upload.
 SUPERSEDE_MARGIN = 15
 MIN_SUPERSEDE_CONFIDENCE = 80
+
+# Not every identification source is equally reliable, independent of its
+# numeric confidence score. An explicit customer field pulled from a real
+# uploaded document (a Resource DOCX heading, a SOW contract, an explicit
+# "Customer: X" text line) is structurally more trustworthy than a value
+# INFERRED from naming conventions (a Ctrl-M filename token, a frequent word
+# in a Sub_Application column) — those are educated guesses about what a
+# scheduler job's naming convention probably means, not a field someone
+# actually filled in as "this is the customer."
+#
+# Lower tier number = more trustworthy. This tiering drives cross-upload
+# supersession: a lower-tier (more trustworthy) source can correct a
+# higher-tier (less trustworthy) one with just a modest confidence floor,
+# while a higher-tier source trying to override a lower-tier one is held to
+# the strict SUPERSEDE_MARGIN comparison above, and a source trying to
+# downgrade to an even less trustworthy tier is never auto-applied — it
+# only produces a warning, so a fleet's confirmed Resource/SOW identity is
+# never silently clobbered by a later, weaker Ctrl-M filename guess.
+SOURCE_TRUST_TIER = {
+    "header": 0, "sow": 0, "resource": 0,
+    "sub_application": 1,
+    "filename": 2,
+    "content": 3,
+    "config": 4,
+}
+# Confidence floor required for a lower-tier (more trustworthy) source to
+# override a higher-tier one — deliberately lower than MIN_SUPERSEDE_CONFIDENCE
+# because the tier itself is already the primary trust signal here, not the
+# raw score.
+TIER_OVERRIDE_MIN_CONFIDENCE = 70
 
 _ACTIVE_CONF_KEY = "customer_name_confidence"
 _ACTIVE_SRC_KEY = "customer_name_source"
@@ -599,20 +630,41 @@ def identify(
             message=f"Confirmed customer '{display_name(active)}'.{corr_msg}",
         )
 
-    # The new upload disagrees with the active customer. Rather than always
-    # treating this as a stop-and-warn condition, compare the strength of the
-    # new evidence against whatever set the CURRENT active customer: if the
-    # new candidate is both absolutely strong (>= MIN_SUPERSEDE_CONFIDENCE)
-    # and meaningfully stronger than the prior evidence (>= SUPERSEDE_MARGIN
-    # points), auto-correct instead of just flagging a conflict — e.g. a
-    # Resource DOCX tag (confidence 90) should be able to fix a bare Ctrl-M
-    # filename guess (confidence 60), not just get silently ignored.
+    # The new upload disagrees with the active customer. Compare the new
+    # evidence against whatever set the CURRENT active customer using BOTH
+    # source trust tier and confidence — not confidence alone. An explicit
+    # field from a real document (Resource DOCX tag, SOW, "Customer:" line)
+    # should be able to correct a value INFERRED from naming conventions
+    # (Ctrl-M filename/Sub_Application) without needing a big numeric
+    # margin, because the tier gap IS the trust signal. Two sources of the
+    # SAME tier still require the stricter numeric margin, so they don't
+    # flip-flop on every upload. A LESS trustworthy source can never
+    # silently downgrade a MORE trustworthy one — only warn.
     active_conf = get_active_confidence()
     active_source = get_active_source()
-    can_supersede = (
-        best.confidence >= MIN_SUPERSEDE_CONFIDENCE
-        and (best.confidence - active_conf) >= SUPERSEDE_MARGIN
-    )
+    active_tier = SOURCE_TRUST_TIER.get(active_source or "", 4)
+    new_tier = SOURCE_TRUST_TIER.get(best.source, 2)
+
+    if new_tier < active_tier:
+        can_supersede = best.confidence >= TIER_OVERRIDE_MIN_CONFIDENCE
+        supersede_reason = (
+            f"'{best.source}' identification is a more reliable source type "
+            f"than '{active_source}'" if active_source else
+            f"'{best.source}' is a reliable, document-sourced identification"
+        )
+    elif new_tier == active_tier:
+        can_supersede = (
+            best.confidence >= MIN_SUPERSEDE_CONFIDENCE
+            and (best.confidence - active_conf) >= SUPERSEDE_MARGIN
+        )
+        supersede_reason = (
+            f"confidence {best.confidence} is stronger than the prior "
+            f"identification's {active_conf}"
+        )
+    else:
+        can_supersede = False
+        supersede_reason = None
+
     if can_supersede:
         if auto_adopt:
             set_active(best.name, best.raw, confidence=best.confidence, source=best.source)
@@ -623,11 +675,8 @@ def identify(
             previous_name=active, previous_display=display_name(active),
             previous_confidence=active_conf, previous_source=active_source,
             message=(f"Customer identity corrected: '{display_name(active)}' → "
-                     f"'{display_name(best.name)}'. New evidence from {best.source} "
-                     f"(confidence {best.confidence}) is stronger than the prior "
-                     f"identification"
-                     f"{f' from {active_source}' if active_source else ''} "
-                     f"(confidence {active_conf}).{corr_msg}"),
+                     f"'{display_name(best.name)}'. {supersede_reason}."
+                     f"{corr_msg}"),
         )
 
     return _verdict(

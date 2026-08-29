@@ -62,7 +62,12 @@ rem deliberately retains the legacy FastAPI comparison source at root; running
 rem from root makes Python resolve its `routers` package before the API package
 rem and can silently return the legacy report renderer.
 cd /d "%REPO_ROOT%\backend\PE_Dashboard_API\app"
-call %PYTHON_CMD% -m uvicorn main:app --host 127.0.0.1 --port 8765
+rem --reload watches this directory tree and restarts the worker automatically
+rem on every saved .py change, so local edits take effect without manually
+rem killing/relaunching this window. Production (Dockerfile CMD) intentionally
+rem does NOT use --reload -- containers are rebuilt and redeployed per release,
+rem so file-watching there would be pure overhead, not a benefit.
+call %PYTHON_CMD% -m uvicorn main:app --host 127.0.0.1 --port 8765 --reload
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo API stopped with exit code %EXIT_CODE%.
