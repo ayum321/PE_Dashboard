@@ -28,6 +28,10 @@ interface CustomerIdentityPayload {
   customer_message?: string;
   customer_active_name?: string;
   customer_candidate_name?: string;
+  customer_confidence?: number;
+  customer_previous_name?: string;
+  customer_previous_confidence?: number;
+  customer_previous_source?: string;
 }
 
 /** Deterministic 6-char audit id from customer+filename+runs+date, ported from
@@ -78,6 +82,33 @@ export function CustomerAuditBanner() {
     return null;
   }, [batch, customerName, resource, sow]);
 
+  // A later upload's identity evidence can outrank the one that originally
+  // set the active customer (e.g. a Resource DOCX tag beats a bare Ctrl-M
+  // filename guess) — customer_identity.identify() auto-corrects in that
+  // case instead of just warning. Surface it distinctly from a mismatch:
+  // this already happened and is informational, not a blocking conflict.
+  const corrected = useMemo(() => {
+    const sources = [
+      { label: 'Ctrl-M upload', payload: batch },
+      { label: 'Resource upload', payload: resource },
+      { label: 'SOW upload', payload: sow },
+    ];
+    for (const { label, payload } of sources) {
+      if (!payload || payload.customer_status !== 'corrected') continue;
+      return {
+        label,
+        from: payload.customer_previous_name || 'the prior identification',
+        fromConfidence: payload.customer_previous_confidence,
+        fromSource: payload.customer_previous_source,
+        to: payload.customer_candidate_name || payload.customer_name || 'this upload',
+        toConfidence: payload.customer_confidence,
+        message: payload.customer_message
+          || `Customer identity corrected from ${payload.customer_previous_name || 'a prior guess'} to ${payload.customer_candidate_name || payload.customer_name}.`,
+      };
+    }
+    return null;
+  }, [batch, resource, sow]);
+
   const pulse = useMemo(() => {
     const winRows = (batch?.window as WindowRow[]) || [];
     const runs = Number((batch?.kpis as { total_runs?: number })?.total_runs) || 0;
@@ -127,13 +158,15 @@ export function CustomerAuditBanner() {
 
   const sourceNote = mismatch
     ? `Active engagement retained after ${mismatch.label.toLowerCase()} mismatch.`
-    : batch?.customer_name
-      ? 'Sourced from Ctrl-M identity checks'
-      : resource?.customer_name
-        ? 'Sourced from resource utilization data'
-        : sow?.customer_name
-          ? 'Sourced from SOW contract metadata'
-          : 'No customer tag was supplied; fleet analysis remains valid.';
+    : corrected
+      ? `Corrected by ${corrected.label.toLowerCase()} — stronger identity evidence found.`
+      : batch?.customer_name
+        ? 'Sourced from Ctrl-M identity checks'
+        : resource?.customer_name
+          ? 'Sourced from resource utilization data'
+          : sow?.customer_name
+            ? 'Sourced from SOW contract metadata'
+            : 'No customer tag was supplied; fleet analysis remains valid.';
 
   const sparkPoints = pulse.vals
     .map((v, i) => {
@@ -176,6 +209,7 @@ export function CustomerAuditBanner() {
               </Typography>
               {envBadge && <span className="metric-badge" style={{ fontSize: 8 }}>{envBadge}</span>}
               {mismatch && <span className="metric-badge metric-badge-red" style={{ fontSize: 8 }}>CUSTOMER MISMATCH</span>}
+              {corrected && !mismatch && <span className="metric-badge metric-badge-green" style={{ fontSize: 8 }}>IDENTITY CORRECTED</span>}
             </Box>
           </Box>
         </Box>
@@ -237,6 +271,29 @@ export function CustomerAuditBanner() {
           </Typography>
           <Typography variant="caption" style={{ color: 'rgba(240,244,255,.82)' }}>
             {mismatch.detail}
+          </Typography>
+        </Box>
+      )}
+
+      {corrected && !mismatch && (
+        <Box
+          style={{
+            width: '100%',
+            borderRadius: 8,
+            border: '1px solid rgba(16, 217, 110, .35)',
+            background: 'rgba(16, 217, 110, .08)',
+            padding: '12px 14px',
+          }}
+        >
+          <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+            <span className="metric-badge metric-badge-green">Identity corrected</span>
+            <span className="metric-badge metric-badge-amber">{corrected.label}</span>
+            <Typography variant="caption" style={{ color: '#f0f4ff', fontWeight: 700 }}>
+              {`${corrected.from}${corrected.fromConfidence != null ? ` (${corrected.fromConfidence})` : ''} → ${corrected.to}${corrected.toConfidence != null ? ` (${corrected.toConfidence})` : ''}`}
+            </Typography>
+          </Box>
+          <Typography variant="body2" style={{ color: '#f0f4ff', fontWeight: 700 }}>
+            {corrected.message}
           </Typography>
         </Box>
       )}

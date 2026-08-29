@@ -116,8 +116,8 @@ def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
 
 def _resolve_customer_identity(**kwargs: Any) -> Dict[str, Any]:
     verdict = identify_customer(auto_adopt=False, **kwargs)
-    if verdict.status == "first_upload" and verdict.name:
-        set_active_customer(verdict.name, verdict.raw)
+    if verdict.status in ("first_upload", "corrected") and verdict.name:
+        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
     return verdict_response_fields(verdict)
 
 

@@ -48,6 +48,8 @@ _SOW_ENGAGEMENT_KEYS = (
     "_sow_volume_by_year",
     "_sow_contract_meta",
     "customer_name",
+    "customer_name_confidence",
+    "customer_name_source",
 )
 
 
@@ -191,7 +193,12 @@ def _clear_sow_engagement_state_for_customer_switch() -> None:
     from services import config_store, session_cache
 
     for key in _SOW_ENGAGEMENT_KEYS:
-        config_store.set(key, "" if key == "customer_name" else {})
+        if key in ("customer_name", "customer_name_source"):
+            config_store.set(key, "")
+        elif key == "customer_name_confidence":
+            config_store.set(key, 0)
+        else:
+            config_store.set(key, {})
     session_cache.ac_del("sow_contract")
     session_cache.ac_del("volume_vs_sow")
     session_cache.set("last_sow_compare", None)
@@ -209,8 +216,11 @@ def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[s
     active = get_active_customer()
     if verdict.name and verdict.status != "mismatch" and active and active != verdict.name:
         _clear_sow_engagement_state_for_customer_switch()
-    if verdict.status == "first_upload" and verdict.name:
-        set_active_customer(verdict.name, verdict.raw)
+    # "corrected" means this upload's evidence was strong enough to
+    # supersede a weaker prior identification (see customer_identity's
+    # SUPERSEDE_MARGIN) — adopt it the same way a first upload is adopted.
+    if verdict.status in ("first_upload", "corrected") and verdict.name:
+        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
     return verdict_response_fields(verdict)
 
 

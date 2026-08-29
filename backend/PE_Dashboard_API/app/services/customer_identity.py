@@ -114,12 +114,19 @@ class CustomerVerdict:
     source:      str                      # provenance of the chosen name
     confidence:  int                      # 0..100
     candidates:  List[CustomerCandidate]  # all candidates considered
-    status:      str                      # first_upload | match | mismatch | unknown
+    status:      str                      # first_upload | match | mismatch | corrected | unknown
     active:      Optional[str]            # the previously-active customer (canonical)
     message:     str                      # human-readable explanation
     corroborated_by: List[str] = field(default_factory=list)  # sources confirming the pick
     conflicts:       List[Dict[str, str]] = field(default_factory=list)  # sources disagreeing
     cross_check:     str = "unknown"      # confirmed | partial | conflict | single_source
+    # Populated only for status == "corrected": what the active customer WAS,
+    # and how confident that prior identification was, so the UI can show
+    # "corrected from X to Y" instead of a bare, unexplained switch.
+    previous_name:       Optional[str] = None
+    previous_display:    Optional[str] = None
+    previous_confidence: Optional[int] = None
+    previous_source:     Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -364,6 +371,18 @@ def best_candidate(cands: List[CustomerCandidate]) -> Optional[CustomerCandidate
     return sorted(cands, key=_sort_key)[0]
 
 
+# How much stronger a NEW identification must be than the evidence that set
+# the CURRENT active customer before we auto-correct instead of just warning.
+# Kept high enough that two comparably strong sources (e.g. a well-matched
+# Sub_Application column vs. a Resource DOCX tag) still just conflict-warn
+# rather than flip-flop on every upload.
+SUPERSEDE_MARGIN = 15
+MIN_SUPERSEDE_CONFIDENCE = 80
+
+_ACTIVE_CONF_KEY = "customer_name_confidence"
+_ACTIVE_SRC_KEY = "customer_name_source"
+
+
 def get_active() -> Optional[str]:
     """Return canonical active customer from session/config state, if any."""
     try:
@@ -379,16 +398,58 @@ def get_active() -> Optional[str]:
     return norm or None
 
 
-def set_active(canonical: str, raw: Optional[str] = None) -> None:
-    """Persist the active customer under the shared customer_name key."""
+def get_active_confidence() -> int:
+    """Confidence score of the evidence that set the current active customer.
+
+    Defaults to 0 for legacy/pre-migration sessions where no confidence was
+    ever recorded, so any freshly-identified candidate can supersede it.
+    """
+    try:
+        from services import session_cache
+        val = session_cache.ac_get(_ACTIVE_CONF_KEY, None)
+        if val is not None:
+            return int(val)
+    except Exception:
+        pass
+    try:
+        return int(config_store.get(_ACTIVE_CONF_KEY, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_active_source() -> Optional[str]:
+    try:
+        from services import session_cache
+        val = session_cache.ac_get(_ACTIVE_SRC_KEY, "") or ""
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    return config_store.get(_ACTIVE_SRC_KEY, "") or None
+
+
+def set_active(canonical: str, raw: Optional[str] = None, *,
+                confidence: Optional[int] = None, source: Optional[str] = None) -> None:
+    """Persist the active customer under the shared customer_name key.
+
+    When `confidence`/`source` are supplied, they are recorded alongside the
+    name so a later upload's identify() call can decide whether its own
+    evidence is strong enough to supersede this one (see SUPERSEDE_MARGIN).
+    """
     canonical = normalise(canonical)
     if not canonical:
         return
     display = display_name(canonical)
     config_store.set("customer_name", display)
+    conf_val = int(confidence) if confidence is not None else 0
+    src_val = source or ""
+    config_store.set(_ACTIVE_CONF_KEY, conf_val)
+    config_store.set(_ACTIVE_SRC_KEY, src_val)
     try:
         from services import session_cache
         session_cache.ac_set("customer_name", display)
+        session_cache.ac_set(_ACTIVE_CONF_KEY, conf_val)
+        session_cache.ac_set(_ACTIVE_SRC_KEY, src_val)
     except Exception:
         pass
     # Retire the old active_customer keys so stale legacy values never win.
@@ -400,9 +461,13 @@ def clear_active() -> None:
     config_store.set("customer_name", "")
     config_store.set("active_customer", "")
     config_store.set("active_customer_raw", "")
+    config_store.set(_ACTIVE_CONF_KEY, 0)
+    config_store.set(_ACTIVE_SRC_KEY, "")
     try:
         from services import session_cache
         session_cache.ac_del("customer_name")
+        session_cache.ac_del(_ACTIVE_CONF_KEY)
+        session_cache.ac_del(_ACTIVE_SRC_KEY)
     except Exception:
         pass
 
@@ -499,7 +564,7 @@ def identify(
 
     if not active:
         if auto_adopt:
-            set_active(best.name, best.raw)
+            set_active(best.name, best.raw, confidence=best.confidence, source=best.source)
         return _verdict(
             name=best.name, display=display_name(best.name),
             raw=best.raw, source=best.source, confidence=best.confidence,
@@ -513,6 +578,37 @@ def identify(
             raw=best.raw, source=best.source, confidence=best.confidence,
             candidates=cands, status="match", active=active,
             message=f"Confirmed customer '{display_name(active)}'.{corr_msg}",
+        )
+
+    # The new upload disagrees with the active customer. Rather than always
+    # treating this as a stop-and-warn condition, compare the strength of the
+    # new evidence against whatever set the CURRENT active customer: if the
+    # new candidate is both absolutely strong (>= MIN_SUPERSEDE_CONFIDENCE)
+    # and meaningfully stronger than the prior evidence (>= SUPERSEDE_MARGIN
+    # points), auto-correct instead of just flagging a conflict — e.g. a
+    # Resource DOCX tag (confidence 90) should be able to fix a bare Ctrl-M
+    # filename guess (confidence 60), not just get silently ignored.
+    active_conf = get_active_confidence()
+    active_source = get_active_source()
+    can_supersede = (
+        best.confidence >= MIN_SUPERSEDE_CONFIDENCE
+        and (best.confidence - active_conf) >= SUPERSEDE_MARGIN
+    )
+    if can_supersede:
+        if auto_adopt:
+            set_active(best.name, best.raw, confidence=best.confidence, source=best.source)
+        return _verdict(
+            name=best.name, display=display_name(best.name),
+            raw=best.raw, source=best.source, confidence=best.confidence,
+            candidates=cands, status="corrected", active=best.name,
+            previous_name=active, previous_display=display_name(active),
+            previous_confidence=active_conf, previous_source=active_source,
+            message=(f"Customer identity corrected: '{display_name(active)}' → "
+                     f"'{display_name(best.name)}'. New evidence from {best.source} "
+                     f"(confidence {best.confidence}) is stronger than the prior "
+                     f"identification"
+                     f"{f' from {active_source}' if active_source else ''} "
+                     f"(confidence {active_conf}).{corr_msg}"),
         )
 
     return _verdict(
@@ -540,6 +636,10 @@ def verdict_to_dict(verdict: CustomerVerdict, *, max_candidates: int = 8) -> Dic
         "cross_check":     verdict.cross_check,
         "corroborated_by": list(verdict.corroborated_by),
         "conflicts":       list(verdict.conflicts),
+        "previous_name":       verdict.previous_name,
+        "previous_display":    verdict.previous_display,
+        "previous_confidence": verdict.previous_confidence,
+        "previous_source":     verdict.previous_source,
         "candidates": [
             {"name": c.name, "raw": c.raw, "source": c.source,
              "confidence": c.confidence}
@@ -570,6 +670,13 @@ def verdict_response_fields(verdict: CustomerVerdict) -> Dict[str, Any]:
         "customer_message": verdict.message,
         "customer_active_name": display_name(verdict.active) if verdict.active else None,
         "customer_candidate_name": verdict.display,
+        "customer_confidence": verdict.confidence,
+        # Only meaningful when customer_status == "corrected" — what the
+        # active customer WAS before this upload's stronger evidence
+        # superseded it, so the UI can show "corrected from X to Y".
+        "customer_previous_name": verdict.previous_display,
+        "customer_previous_confidence": verdict.previous_confidence,
+        "customer_previous_source": verdict.previous_source,
     }
 
 

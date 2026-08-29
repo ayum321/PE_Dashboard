@@ -76,6 +76,8 @@ _SOW_ENGAGEMENT_KEYS = (
     "_sow_volume_by_year",
     "_sow_contract_meta",
     "customer_name",
+    "customer_name_confidence",
+    "customer_name_source",
 )
 
 
@@ -90,7 +92,14 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     Only config_store SOW engagement keys are reset."""
     from services import config_store
     for key in _SOW_ENGAGEMENT_KEYS:
-        config_store.set(key, "" if key == "customer_name" else {})
+        if key == "customer_name":
+            config_store.set(key, "")
+        elif key == "customer_name_confidence":
+            config_store.set(key, 0)
+        elif key == "customer_name_source":
+            config_store.set(key, "")
+        else:
+            config_store.set(key, {})
     yield
     # (no shutdown logic needed)
 
