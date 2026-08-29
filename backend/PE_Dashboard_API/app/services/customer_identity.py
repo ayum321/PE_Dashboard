@@ -49,11 +49,21 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from services import config_store
 
 # Tokens that are *never* a customer name.  Keep this list SMALL — only
-# universally-generic terms belong here.  Scheduler / batch vocabulary
-# (INTRADAY, CYCLIC, ETL, …) is intentionally ABSENT: the cross-source
-# boost in best_candidate() handles those automatically — a token that
-# only appears in Sub_Application but NOT in the filename loses to one
-# that appears in both.
+# universally-generic terms belong here.
+#
+# NOTE: scheduler/batch-window vocabulary (DAYTIME, NIGHTLY, INTRADAY, …)
+# used to be deliberately excluded here, on the assumption that the
+# cross-source boost in best_candidate() would always let a customer token
+# appearing in BOTH the filename and Sub_Application beat a scheduler term
+# that only appears in Sub_Application. That assumption breaks in a very
+# common real-world Ctrl-M layout: when Sub_Application encodes ONLY the
+# batch-window/type (e.g. every row says "DAYTIME_BATCH" or "NIGHTLY_BATCH")
+# and never repeats the customer's account code at all, a high-frequency
+# scheduling term can out-score the filename-only customer name with no
+# cross-source corroboration to save it (reproduced: NFM in the filename
+# lost to DAYTIME from Sub_Application because "NFM" never appeared as a
+# raw Sub_Application token). These terms are now explicitly blocklisted,
+# the same way DAILY/WEEKLY/MONTHLY already are below.
 _NOISE_TOKENS = {
     # environment / lifecycle
     "PROD", "PRODUCTION", "UAT", "DEV", "TEST", "SIT", "STAGE", "STAGING",
@@ -75,6 +85,15 @@ _NOISE_TOKENS = {
     "LAST", "DAYS", "DAY", "WEEK", "MONTH", "YEAR",
     "RUN", "RUNS", "LOG", "LOGS", "HISTORY",
     "UTILIZATION", "UTILISATION", "UTIL", "USAGE", "METRICS",
+    # batch-window / scheduling vocabulary — generic Ctrl-M / SCPO job
+    # grouping terms, never a customer identifier (see note above)
+    "DAYTIME", "NIGHTLY", "OVERNIGHT", "INTRADAY", "CYCLIC", "ADHOC",
+    "HOURLY", "REALTIME", "WEEKEND", "WEEKDAY", "MORNING", "EVENING",
+    "NIGHT", "BATCH", "BATCHES", "WINDOW", "WINDOWS", "CYCLE", "CYCLES",
+    "SCHEDULE", "SCHEDULED", "SCHEDULER", "WORKFLOW", "WORKFLOWS",
+    "PROCESS", "PROCESSES", "STREAM", "STREAMS", "CHAIN", "CHAINS",
+    "FOLDER", "FOLDERS", "TRIGGER", "TRIGGERS", "CONDITION", "CONDITIONS",
+    "GROUP", "GROUPS",
     # document type
     "CSV", "XLSX", "XLS", "PDF", "DOCX", "DOC", "TXT", "JSON", "XML",
     # generic English
