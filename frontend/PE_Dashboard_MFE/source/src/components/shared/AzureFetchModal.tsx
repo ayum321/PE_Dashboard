@@ -88,6 +88,8 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   // clicks can both enter handleSignIn before React re-renders the button.
   const signInInFlight = useRef(false);
   const autoSignInAttempted = useRef(false);
+  const modalGeneration = useRef(0);
+  const subscriptionLoadGeneration = useRef(0);
   const [step, setStep] = useState<1 | 2>(1);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -114,6 +116,10 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const [fetchBusy, setFetchBusy] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
 
+  const cancelSubscriptionLoads = useCallback(() => {
+    subscriptionLoadGeneration.current += 1;
+  }, []);
+
   /**
    * Browser credentials live in the API process and are scoped to its pe_sid
    * cookie.  A restarted local API (or an expired portal session) can make a
@@ -121,6 +127,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
    * "Signed in" once a protected endpoint has rejected that same session.
    */
   const invalidateAzureSession = useCallback((message: string) => {
+    cancelSubscriptionLoads();
     setAuthInfo({ method: 'none' });
     setSubscriptions([]);
     setSubscriptionsWarming(false);
@@ -128,10 +135,14 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setGroups([]);
     setSelectedGroup('');
     setDiscoverStatus({ text: message, tone: 'red' });
-  }, []);
+  }, [cancelSubscriptionLoads]);
 
-  const loadSubscriptions = useCallback(async () => {
+  const loadSubscriptions = useCallback(async (modalToken: number = modalGeneration.current) => {
+    const requestId = ++subscriptionLoadGeneration.current;
+    const stillCurrent = () =>
+      modalToken === modalGeneration.current && requestId === subscriptionLoadGeneration.current;
     const result = await getAzureSubscriptions();
+    if (!stillCurrent()) return false;
     if (result.ok === false) {
       invalidateAzureSession(typeof result.error === 'string'
         ? `${result.error} Your local Azure session may have expired or the API was restarted.`
@@ -140,6 +151,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     }
     const rows = (result.subscriptions as { id: string; name: string }[]) || [];
     const warming = result._cache_warming === true && rows.length === 0;
+    if (!stillCurrent()) return false;
     setSubscriptions(rows);
     setSubscriptionsWarming(warming);
     setDiscoverStatus(warming
@@ -149,52 +161,67 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   }, [invalidateAzureSession]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      modalGeneration.current += 1;
+      cancelSubscriptionLoads();
+      return;
+    }
+    const modalToken = ++modalGeneration.current;
     setStep(1);
     setFetchStatus(null);
     setDiscoverStatus(null);
     setSubscriptionsWarming(false);
     getAzureAuthStatus()
       .then((result) => {
+        if (modalToken !== modalGeneration.current) return;
         if (result.method !== 'browser') {
           setAuthInfo({ method: 'none' });
           setSubscriptions([]);
           return;
         }
         setAuthInfo(result);
-        loadSubscriptions().catch(() =>
-          invalidateAzureSession('Azure session could not be verified. Sign in with Browser again.')
-        );
+        loadSubscriptions(modalToken).catch(() => {
+          if (modalToken === modalGeneration.current) {
+            invalidateAzureSession('Azure session could not be verified. Sign in with Browser again.');
+          }
+        });
       })
       .catch(() => {
+        if (modalToken !== modalGeneration.current) return;
         setAuthInfo({ method: 'none' });
         setSubscriptions([]);
       });
-  }, [open, loadSubscriptions, invalidateAzureSession]);
+  }, [open, loadSubscriptions, invalidateAzureSession, cancelSubscriptionLoads]);
 
   // The API deliberately warms a large tenant's subscription list in the
   // background. Poll only while it says it is warming, then stop immediately.
   useEffect(() => {
     if (!open || authInfo?.method !== 'browser' || !subscriptionsWarming) return;
+    const modalToken = modalGeneration.current;
     const timer = window.setTimeout(() => {
-      loadSubscriptions().catch(() =>
-        invalidateAzureSession('Azure session could not be verified. Sign in with Browser again.')
-      );
+      loadSubscriptions(modalToken).catch(() => {
+        if (modalToken === modalGeneration.current) {
+          invalidateAzureSession('Azure session could not be verified. Sign in with Browser again.');
+        }
+      });
     }, 1200);
     return () => window.clearTimeout(timer);
   }, [open, authInfo?.method, subscriptionsWarming, loadSubscriptions, invalidateAzureSession]);
 
   const handleSignIn = useCallback(async () => {
     if (signInInFlight.current) return;
+    const modalToken = modalGeneration.current;
     signInInFlight.current = true;
     setAuthBusy(true);
     setDiscoverStatus({ text: 'Waiting for Azure browser sign-in to complete\u2026', tone: 'muted' });
     try {
       const result = await connectAzure();
+      if (modalToken !== modalGeneration.current) return;
       setAuthInfo(result);
       onAuthChanged?.(result);
-      await loadSubscriptions();
+      await loadSubscriptions(modalToken);
     } catch (error) {
+      if (modalToken !== modalGeneration.current) return;
       setDiscoverStatus({ text: error instanceof Error ? error.message : 'Azure sign-in failed.', tone: 'red' });
     } finally {
       signInInFlight.current = false;
@@ -217,6 +244,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
 
   const handleSignOut = async () => {
     setAuthBusy(true);
+    cancelSubscriptionLoads();
     try {
       await disconnectAzure();
       setAuthInfo({ method: 'none' });

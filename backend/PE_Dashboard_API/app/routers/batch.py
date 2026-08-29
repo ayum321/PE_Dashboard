@@ -18,7 +18,6 @@ returns plain dicts (no DataFrames), per the Phase 3 brief.
 from __future__ import annotations
 
 import os
-import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -30,12 +29,26 @@ from services.batch_calculator import (
     build_batch_payload,
     load_ctrlm_bytes,
 )
+from services.customer_identity import (
+    get_active as get_active_customer,
+    identify as identify_customer,
+    set_active as set_active_customer,
+    verdict_response_fields,
+)
 
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_BATCH_FILES = 8
+_SOW_ENGAGEMENT_KEYS = (
+    "sow_baseline",
+    "sow_dfu", "sow_sku", "sow_orders", "sow_batch_jobs",
+    "_sow_sla_windows",
+    "_sow_volume_by_year",
+    "_sow_contract_meta",
+    "customer_name",
+)
 
 
 # ── Pydantic response models ────────────────────────────────────
@@ -125,7 +138,8 @@ class BatchResponse(BaseModel):
     # ── AI narrative (best-effort, populated by narrator) ──
     ai_narrative: Optional[str] = None
     ai_model: Optional[str] = None
-    # Customer name extracted from the Ctrl-M filename (only source the dashboard trusts).
+    # Active customer after the shared identity check; mismatches keep the
+    # existing engagement active and return warning metadata alongside it.
     customer_name: Optional[str] = None
     # Per-day job timings for the concurrency Gantt chart.
     daily_jobs: Optional[Dict[str, Any]] = None
@@ -148,6 +162,13 @@ class BatchResponse(BaseModel):
     # Concurrent-job evidence: which distinct jobs genuinely overlapped in
     # clock time, on how many days, and the peak simultaneous-run count.
     concurrency: Optional[Dict[str, Any]] = None
+    customer_status: Optional[str] = None
+    customer_cross_check: Optional[str] = None
+    customer_conflicts: Optional[List[Dict[str, str]]] = None
+    customer_corroborated_by: Optional[List[str]] = None
+    customer_message: Optional[str] = None
+    customer_active_name: Optional[str] = None
+    customer_candidate_name: Optional[str] = None
 
 
 class BatchJsonRequest(BaseModel):
@@ -166,37 +187,31 @@ def _ext(filename: str) -> str:
     return os.path.splitext(filename or "")[1].lower()
 
 
-# Customer-name patterns recognised in Ctrl-M filenames.
-# Examples that match:
-#   Report_of_CS_ACMECORP_SCPO_ctrlm.csv     -> ACMECORP
-#   _CS_ACME_CORP_SCPO_runs.xlsx             -> ACME CORP
-#   CUSTOMER_ACMECORP_SCPO.csv               -> ACMECORP
-_CUSTOMER_PATTERNS = (
-    r"Report_of_CS[_]([A-Z][A-Z0-9_]+?)_SCPO",
-    r"_CS_([A-Z][A-Z0-9_]+?)_SCPO",
-    r"CUSTOMER_([A-Z][A-Z0-9_]+?)_SCPO",
-)
+def _clear_sow_engagement_state_for_customer_switch() -> None:
+    from services import config_store, session_cache
+
+    for key in _SOW_ENGAGEMENT_KEYS:
+        config_store.set(key, "" if key == "customer_name" else {})
+    session_cache.ac_del("sow_contract")
+    session_cache.ac_del("volume_vs_sow")
+    session_cache.set("last_sow_compare", None)
 
 
-def _extract_customer_from_ctrlm_filename(filename: str) -> Optional[str]:
-    """Pull a customer name from a Ctrl-M report filename.
-
-    Only the filename is consulted — never the file contents — so the value
-    is deterministic and never inferred from job/server text.
-    Returns None if no pattern matches.
-    """
-    if not filename:
-        return None
-    stem = re.sub(r"\.(csv|xlsx|xls)$", "", os.path.basename(filename), flags=re.IGNORECASE)
-    for pat in _CUSTOMER_PATTERNS:
-        m = re.search(pat, stem, flags=re.IGNORECASE)
-        if m:
-            raw = m.group(1).replace("_", " ").strip()
-            if not raw:
-                return None
-            parts = raw.split()
-            return " ".join(p if (len(p) <= 4 and p.isupper()) else p.title() for p in parts)
-    return None
+def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    df_sub_app = None
+    if df is not None and "Sub_Application" in df.columns:
+        df_sub_app = df["Sub_Application"].dropna().tolist()
+    verdict = identify_customer(
+        filename=filename,
+        df_sub_app=df_sub_app,
+        auto_adopt=False,
+    )
+    active = get_active_customer()
+    if verdict.name and verdict.status != "mismatch" and active and active != verdict.name:
+        _clear_sow_engagement_state_for_customer_switch()
+    if verdict.status == "first_upload" and verdict.name:
+        set_active_customer(verdict.name, verdict.raw)
+    return verdict_response_fields(verdict)
 
 
 def _payload_to_response(
@@ -204,7 +219,10 @@ def _payload_to_response(
     payload: Dict[str, Any],
     df=None,
     customer_name: Optional[str] = None,
+    customer_fields: Optional[Dict[str, Any]] = None,
 ) -> BatchResponse:
+    customer_fields = dict(customer_fields or {})
+    resolved_customer_name = customer_fields.get("customer_name") or customer_name
     # Compute full-dataset SLA Matrix from the parsed dataframe so PE Findings
     # + Red Flags + PE Consultant all see ALL runs (not just top_jobs).
     sla_mx_dict: Optional[Dict[str, Any]] = None
@@ -277,7 +295,7 @@ def _payload_to_response(
         sla_source=payload.get("sla_source"),
         data_coverage=payload.get("data_coverage"),
         sla_matrix=sla_mx_dict,
-        customer_name=customer_name,
+        customer_name=resolved_customer_name,
         daily_jobs=payload.get("daily_jobs"),
         window_sub_app=payload.get("window_sub_app", []),
         failure_grid=payload.get("failure_grid"),
@@ -285,6 +303,13 @@ def _payload_to_response(
         user_excluded_job_names=payload.get("user_excluded_job_names") or [],
         manual_exclusion_audit=payload.get("manual_exclusion_audit") or [],
         concurrency=payload.get("concurrency"),
+        customer_status=customer_fields.get("customer_status"),
+        customer_cross_check=customer_fields.get("customer_cross_check"),
+        customer_conflicts=customer_fields.get("customer_conflicts"),
+        customer_corroborated_by=customer_fields.get("customer_corroborated_by"),
+        customer_message=customer_fields.get("customer_message"),
+        customer_active_name=customer_fields.get("customer_active_name"),
+        customer_candidate_name=customer_fields.get("customer_candidate_name"),
     )
 
     # Cache the full batch response so the agent tools can query it
@@ -311,8 +336,8 @@ def _payload_to_response(
         session_cache.ac_set("regression_df",   resp_dict.get("anomalies") or [])
         session_cache.ac_set("failure_grid",     resp_dict.get("failure_grid") or {})
         session_cache.ac_set("longpole_matrix",  resp_dict.get("longpole_matrix") or {})
-        if customer_name:
-            session_cache.ac_set("customer_name", customer_name)
+        if resolved_customer_name:
+            session_cache.ac_set("customer_name", resolved_customer_name)
         # sla_matrix slots written by _compute_sla_matrix call (see below)
         if sla_mx_dict:
             session_cache.ac_set("sla_resolved",     sla_mx_dict.get("breaches") or [])
@@ -411,19 +436,14 @@ async def process_batch(file: UploadFile = File(...)) -> BatchResponse:
             detail=f"Batch metrics computation failed: {exc}",
         ) from exc
 
-    customer = _extract_customer_from_ctrlm_filename(file.filename)
-    if customer:
-        try:
-            from services import config_store, session_cache as _sc
-            # Fix 4b — SOW cache isolation: if customer changed, clear last_sow_compare
-            # so SOW override data from the previous customer never bleeds into this one.
-            _prev_customer = _sc.ac_get("customer_name") or ""
-            if _prev_customer and _prev_customer.lower() != customer.lower():
-                _sc.set("last_sow_compare", None)
-            config_store.set("customer_name", customer)
-        except Exception:
-            pass
-    return _payload_to_response(file.filename, payload, df=df, customer_name=customer)
+    customer_fields = _resolve_batch_customer(file.filename, df)
+    return _payload_to_response(
+        file.filename,
+        payload,
+        df=df,
+        customer_name=customer_fields.get("customer_name"),
+        customer_fields=customer_fields,
+    )
 
 
 @router.post(
@@ -522,19 +542,14 @@ async def process_batch_multi(
         ) from exc
 
     combined_name = " + ".join(filenames)
-    customer: Optional[str] = None
-    for fn in filenames:
-        c = _extract_customer_from_ctrlm_filename(fn)
-        if c:
-            customer = c
-            break
-    if customer:
-        try:
-            from services import config_store
-            config_store.set("customer_name", customer)
-        except Exception:
-            pass
-    return _payload_to_response(combined_name, payload, df=merged, customer_name=customer)
+    customer_fields = _resolve_batch_customer(combined_name, merged)
+    return _payload_to_response(
+        combined_name,
+        payload,
+        df=merged,
+        customer_name=customer_fields.get("customer_name"),
+        customer_fields=customer_fields,
+    )
 
 
 @router.post(
@@ -572,7 +587,14 @@ async def process_batch_json(body: BatchJsonRequest) -> BatchResponse:
         raise HTTPException(status_code=422, detail=f"Invalid row payload: {exc}") from exc
 
     payload = build_batch_payload(df)
-    return _payload_to_response(body.filename or "payload.json", payload, df=df)
+    customer_fields = _resolve_batch_customer(body.filename or "payload.json", df)
+    return _payload_to_response(
+        body.filename or "payload.json",
+        payload,
+        df=df,
+        customer_name=customer_fields.get("customer_name"),
+        customer_fields=customer_fields,
+    )
 
 
 @router.post(

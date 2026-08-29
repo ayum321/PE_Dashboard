@@ -463,7 +463,7 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
     except Exception:
         pass
 
-    return {
+    response = {
         "kpis":            kpis,
         "oshs":            oshs,
         "rfcs":            rfcs,
@@ -481,6 +481,12 @@ def executive_dashboard(body: ExecDashRequest) -> Dict[str, Any]:
         "volume_vs_sow":   _volume_vs_sow,
         "deep_dive_summary": deep_dive_summary,
     }
+    try:
+        from services import session_cache as _sc_exec
+        _sc_exec.set("last_executive", response)
+    except Exception:
+        pass
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────

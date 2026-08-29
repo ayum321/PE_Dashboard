@@ -584,7 +584,7 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
     if recon.mismatches:
         verdict_line += f" [{len(recon.mismatches)} mismatch(es) reconciled]"
 
-    return FinalJudgmentResponse(
+    response = FinalJudgmentResponse(
         verdict=verdict_line,
         decision=final_decision,
         grade=grade,
@@ -602,3 +602,9 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         pillars_present=pillars_present,
         ai_model=ai_model,
     )
+    try:
+        from services import session_cache
+        session_cache.set("last_final_judgment", response.model_dump())
+    except Exception:
+        pass
+    return response

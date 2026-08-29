@@ -1175,13 +1175,16 @@ def build_top_jobs_df(df: pd.DataFrame,
     )
 
     # F3 — observed SLA Buffer from Ctrl-M data (sla_hrs - peak_hrs)
-    # Guard against sla_hrs=0 (SLA_MISSING rows) — produces inf/NaN without the guard.
-    # GAP-6: also guard against entirely-absent sla_hrs column (all NaN after replace).
-    # Use np.where so the entire column is vectorised; NaN propagates correctly downstream.
+    # Guard against sla_hrs=0 / NaN (SLA_MISSING rows) — otherwise the API leaks
+    # inf/NaN percentages. Any unresolved row falls back to the same global ceiling
+    # used elsewhere so the table stays aligned with the batch-level gauge.
     _sla_safe = top_jobs["sla_hrs"].replace(0, float("nan"))
     # Coerce to numeric in case any SlaContract reconstruction silently left strings
     _sla_safe = pd.to_numeric(_sla_safe, errors="coerce")
     _nan_ratio = float(_sla_safe.isna().mean())
+    _global_ceil_for_nan = float(
+        sla_index.get("global_ceiling", 0) if sla_index else 0
+    ) or float(getattr(pe_config, "SLA_DAILY_HRS", 6.0))
     if _nan_ratio > 0.5:
         logger.warning(
             "build_top_jobs_df: %.0f%% of jobs have NaN/0 sla_hrs — "
@@ -1189,9 +1192,7 @@ def build_top_jobs_df(df: pd.DataFrame,
             "Falling back to global_ceil for NaN rows so gauge and table stay in sync.",
             _nan_ratio * 100,
         )
-        _global_ceil_for_nan = float(
-            sla_index.get("global_ceiling", 0) if sla_index else 0
-        ) or float(getattr(pe_config, "SLA_DAILY_HRS", 6.0))
+    if _sla_safe.isna().any():
         _sla_safe = _sla_safe.fillna(_global_ceil_for_nan)
     top_jobs["buffer_pct"]   = ((_sla_safe - top_jobs["peak_hrs"]) / _sla_safe * 100).round(1)
     top_jobs["sla_used_pct"] = (top_jobs["peak_hrs"] / _sla_safe * 100).round(1)
@@ -3994,6 +3995,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                               "concurrent_overlap_hrs", "concurrent_job_count",
                               "concurrent_jobs_sample"]
                  if c in top_jobs_df.columns]
+    import json as _json
 
     # CHANGE 1: cache the full df so SLA-matrix upload can recompute without
     # the user re-uploading the Ctrl-M CSV.
@@ -4171,8 +4173,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         # frontend confirm which per-job exclusions the server already applied.
         "user_excluded_job_names": sorted(str(j) for j in m.get("user_excluded_job_names", [])),
         "manual_exclusion_audit": m.get("manual_exclusion_audit") or [],
-        "top_jobs":     top15_df[_job_cols].to_dict(orient="records"),
-        "top_breaches": breaches_df[_job_cols].to_dict(orient="records"),
+        # Keep optional numeric fields JSON-safe: pandas emits NaN/Inf floats unless
+        # we round-trip through JSON first, which converts them to null for the API/UI.
+        "top_jobs":     _json.loads(top15_df[_job_cols].to_json(orient="records", default_handler=str)),
+        "top_breaches": _json.loads(breaches_df[_job_cols].to_json(orient="records", default_handler=str)),
         "window":       window_records,
         "window_sub_app": (m.get("window_compliance") or {}).get("per_sub_app", []),
         # Concurrent-job groups: which specific jobs genuinely overlapped in

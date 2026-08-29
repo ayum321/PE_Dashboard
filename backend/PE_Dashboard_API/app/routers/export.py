@@ -956,6 +956,46 @@ def _downsample(points: list[tuple[datetime, float]], limit: int = _MAX_PLOT_POI
     return reduced, True
 
 
+def _metric_gap_neutral_value(metric: str) -> float:
+    """Match the Azure spike detector's neutral side when probing for gaps."""
+    return 100.0 if "available memory percentage" in metric.casefold() else 0.0
+
+
+def _series_segments_with_gap_breaks(metric: str, points: list[tuple[datetime, float]]) -> tuple[list[list[tuple[datetime, float]]], bool]:
+    """Reuse Azure cadence-gap detection but render the gap as an SVG break."""
+    if not points:
+        return [], False
+    if len(points) < 3:
+        return [points], False
+    from services.azure_monitor import _break_series_on_data_gaps
+
+    gapped = _break_series_on_data_gaps(
+        [{"t": stamp.isoformat(), "v": value} for stamp, value in points],
+        _metric_gap_neutral_value(metric),
+    )
+    if len(gapped) <= len(points):
+        return [points], False
+
+    segments: list[list[tuple[datetime, float]]] = []
+    current: list[tuple[datetime, float]] = []
+    previous_stamp: datetime | None = None
+    for entry in gapped:
+        stamp = _parse_ts(entry.get("t")) if isinstance(entry, dict) else None
+        value = _number_or_none(entry.get("v")) if isinstance(entry, dict) else None
+        if stamp is None or value is None:
+            continue
+        if previous_stamp is not None and stamp == previous_stamp:
+            if current:
+                segments.append(current)
+            current = []
+        else:
+            current.append((stamp, value))
+        previous_stamp = stamp
+    if current:
+        segments.append(current)
+    return [segment for segment in segments if segment], len(segments) > 1
+
+
 def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: float, cpu_warn: float) -> str:
     """Unified 0–100 % chart across every captured metric for one host."""
     populated = {metric: points for metric, points in series.items() if len(points) >= 2}
@@ -1002,21 +1042,34 @@ def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: flo
         parts.append(f"<text x='{x:.1f}' y='{height - 12}' text-anchor='{anchor}' fill='var(--ink-3)' "
                      f"font-size='11'>{stamp.strftime('%d %b')}</text>")
     sampled = False
+    saw_gap = False
     for metric, label, colour, _key in _EXPLORER_METRICS:
         points = populated.get(metric)
         if not points:
             continue
-        drawn, was_sampled = _downsample(points)
-        sampled = sampled or was_sampled
-        coords = " ".join(f"{_x(stamp):.0f},{_y(value):.1f}" for stamp, value in drawn)
-        parts.append(f"<polyline points='{coords}' fill='none' stroke='{colour}' stroke-width='1.5' "
-                     f"stroke-linejoin='round' opacity='.95'><title>{_esc(label)}</title></polyline>")
+        segments, segment_gap = _series_segments_with_gap_breaks(metric, points)
+        saw_gap = saw_gap or segment_gap
+        for segment in segments:
+            drawn, was_sampled = _downsample(segment)
+            sampled = sampled or was_sampled
+            if len(drawn) >= 2:
+                coords = " ".join(f"{_x(stamp):.0f},{_y(value):.1f}" for stamp, value in drawn)
+                parts.append(f"<polyline points='{coords}' fill='none' stroke='{colour}' stroke-width='1.5' "
+                             f"stroke-linejoin='round' opacity='.95'><title>{_esc(label)}</title></polyline>")
+            elif len(drawn) == 1:
+                stamp, value = drawn[0]
+                parts.append(f"<circle cx='{_x(stamp):.1f}' cy='{_y(value):.1f}' r='2.2' fill='{colour}' opacity='.95'>"
+                             f"<title>{_esc(label)}</title></circle>")
     parts.append("</svg>")
     legend = "".join(
         f"<span class='mx-key'><i style='background:{colour}'></i>{_esc(label)}</span>"
         for metric, label, colour, _key in _EXPLORER_METRICS if populated.get(metric))
-    note = (" &middot; sampled to the chart width, each point is its bucket maximum"
-            if sampled else "")
+    notes: list[str] = []
+    if sampled:
+        notes.append("sampled to the chart width, each point is its bucket maximum")
+    if saw_gap:
+        notes.append("telemetry gaps shown as line breaks")
+    note = f" &middot; {' &middot; '.join(notes)}" if notes else ""
     return ("".join(parts)
             + f"<div class='mx-legend'>{legend}<span class='dim micro'>"
               f"{t0.strftime('%d %b %H:%M')} → {t1.strftime('%d %b %H:%M')} UTC{note}</span></div>")

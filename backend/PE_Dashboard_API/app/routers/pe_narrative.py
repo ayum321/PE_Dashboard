@@ -1750,10 +1750,16 @@ async def pe_narrative(body: PeNarrativeRequest) -> Dict[str, Any]:
     except Exception:
         pass
     try:
-        return await _pe_narrative_inner(body, customer)
+        response = await _pe_narrative_inner(body, customer)
     except Exception as exc:
         log.error("pe_narrative: top-level error (%s)", exc, exc_info=True)
-        return _bare_fallback(customer)
+        response = _bare_fallback(customer)
+    try:
+        from services import session_cache
+        session_cache.set("last_pe_narrative", response)
+    except Exception:
+        pass
+    return response
 
 
 async def _pe_narrative_inner(body: PeNarrativeRequest, customer: str) -> Dict[str, Any]:

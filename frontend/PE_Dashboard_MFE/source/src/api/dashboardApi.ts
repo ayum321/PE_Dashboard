@@ -514,3 +514,21 @@ export const exportReportWithStatus = async (payload: DashboardPayload): Promise
 /** Compatibility for callers that only need a downloaded blob. */
 export const exportReport = async (payload: DashboardPayload): Promise<Blob> =>
   (await exportReportWithStatus(payload)).blob;
+
+export interface SessionRestorePayload {
+  batch?: DashboardPayload | null;
+  resource?: DashboardPayload | null;
+  sla_matrix?: DashboardPayload | null;
+  benchmark?: DashboardPayload | null;
+  findings?: DashboardPayload | null;
+  red_flags?: DashboardPayload | null;
+  pe_narrative?: DashboardPayload | null;
+  executive?: DashboardPayload | null;
+  final_judgment?: DashboardPayload | null;
+  customer_name?: string | null;
+  reviewed_products?: string[];
+}
+
+/** Session-scoped cached payloads used to rebuild the MFE after a browser refresh. */
+export const getSessionRestore = (): Promise<SessionRestorePayload> =>
+  request<SessionRestorePayload>('/api/session/restore');

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Box,
   Button,
@@ -206,6 +206,8 @@ interface DeepDiveResponse {
   window?: { timezone?: string; start_utc?: string; end_utc?: string; grain?: string; data_points?: number; is_custom?: boolean };
   summary?: { vm_count: number; hours_back: number; total_critical: number; total_warning: number; affected_vms: number };
 }
+
+type BaselineConfidence = NonNullable<DeepDiveVm['baseline_confidence']>;
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -625,6 +627,26 @@ export function preferredFleetHeatmapMetric(response: Pick<DeepDiveResponse, 'vm
   );
 }
 
+function defaultDeepDiveVm(response: Pick<DeepDiveResponse, 'vms'>): string {
+  const vmEntries = Object.entries(response.vms || {});
+  const firstWithSpikes = vmEntries.find(([, vmData]) => Object.values(vmData.spikes || {}).some((events) => events.length > 0));
+  return (firstWithSpikes || vmEntries[0])?.[0] || '';
+}
+
+function baselineConfidenceTitle(confidence: BaselineConfidence): string {
+  return `Baseline: ${confidence.pulls} pull${confidence.pulls !== 1 ? 's' : ''} / ${confidence.retention_days ?? confidence.min_pulls}d${confidence.baseline_mean != null ? ` · μ=${confidence.baseline_mean}%` : ''}${confidence.baseline_std != null ? ` σ=${confidence.baseline_std}%` : ''}${confidence.degraded ? ' — session only, not yet baseline-eligible' : ''}`;
+}
+
+function lowConfidenceBaselineTitle(confidence: BaselineConfidence): string {
+  return `${baselineConfidenceTitle(confidence)} — severity uses a low-confidence baseline; corroborate with the raw time series.`;
+}
+
+function stripPersistedDeepDive<T extends Record<string, unknown> | null>(resource: T): T {
+  if (!resource || !Object.prototype.hasOwnProperty.call(resource, 'deep_dive')) return resource;
+  const { deep_dive: _discarded, ...rest } = resource as T & { deep_dive?: DeepDiveResponse };
+  return rest as T;
+}
+
 const SEVERITY_COLOR: Record<string, string> = {
   'CRITICAL SUSTAINED': '#a855f7', CRITICAL: '#f43f5e', WARNING: '#f59e0b', NOTABLE: '#6b7db3', ELEVATED: '#f59e0b',
 };
@@ -710,6 +732,9 @@ function findDeepDiveSeries(deepDive: DeepDiveResponse | null, host: string): { 
 export function ResourcePanel() {
   const classes = useStyles();
   const { data, setResource, setCustomerName } = useAppData();
+  const resourceRefreshId = useRef(0);
+  const deepDiveRefreshId = useRef(0);
+  const derivedResourceRefreshId = useRef(0);
   const [filter, setFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [envFilter, setEnvFilter] = useState('');
@@ -748,6 +773,20 @@ export function ResourcePanel() {
   const [ddCustomStart, setDdCustomStart] = useState('');
   const [ddCustomEnd, setDdCustomEnd] = useState('');
   const [ddCustomActive, setDdCustomActive] = useState(false);
+  const resourceWithDeepDive = data.resource as (((typeof data.resource) & { deep_dive?: DeepDiveResponse }) | null);
+  const persistedDeepDive = resourceWithDeepDive?.deep_dive;
+
+  const clearDeepDiveState = (clearPersisted = false) => {
+    deepDiveRefreshId.current += 1;
+    setDeepDiveBusy(false);
+    setDeepDiveError(null);
+    setDeepDive(null);
+    setDeepDiveVm('');
+    setCorrelatedVms(new Set<string>());
+    if (clearPersisted && resourceWithDeepDive?.deep_dive) {
+      setResource(stripPersistedDeepDive(resourceWithDeepDive) as Parameters<typeof setResource>[0]);
+    }
+  };
 
   React.useEffect(() => {
     getAzureAuthStatus()
@@ -757,7 +796,33 @@ export function ResourcePanel() {
   }, []);
 
   React.useEffect(() => {
+    return () => {
+      resourceRefreshId.current += 1;
+      deepDiveRefreshId.current += 1;
+      derivedResourceRefreshId.current += 1;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!persistedDeepDive) {
+      setDeepDive((current) => current == null ? current : null);
+      setDeepDiveVm((current) => current ? '' : current);
+      setCorrelatedVms((current) => current.size ? new Set<string>() : current);
+      return;
+    }
+    setDeepDive((current) => current === persistedDeepDive ? current : persistedDeepDive);
+    setHeatmapMetric(preferredFleetHeatmapMetric(persistedDeepDive));
+    const nextVm = defaultDeepDiveVm(persistedDeepDive);
+    setDeepDiveVm((current) => current && persistedDeepDive.vms?.[current] ? current : nextVm);
+    setCorrelatedVms((current) => current.size
+      ? new Set(Array.from(current).filter((vm) => Boolean(persistedDeepDive.vms?.[vm])))
+      : current);
+  }, [persistedDeepDive]);
+
+  React.useEffect(() => {
     const rows = data.resource?.servers || [];
+    const refreshId = ++derivedResourceRefreshId.current;
+    const stillCurrent = () => refreshId === derivedResourceRefreshId.current;
     if (rows.length === 0) {
       setFleetKpis(null);
       setAnomalies([]);
@@ -766,12 +831,14 @@ export function ResourcePanel() {
     }
     processResource(rows)
       .then((result) => {
+        if (!stillCurrent()) return;
         setFleetKpis((result.kpis as FleetKpis) || null);
         setAnomalies((result.anomalies as ResourceAnomaly[]) || []);
         const exec = result.executive_summary as ExecutiveSummary | undefined;
         setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
       })
       .catch(() => {
+        if (!stillCurrent()) return;
         setFleetKpis(null);
         setAnomalies([]);
         setExecSummary(null);
@@ -895,11 +962,15 @@ export function ResourcePanel() {
   };
 
   const handleFetched = async (fetchedServers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => {
+    const refreshId = ++resourceRefreshId.current;
+    const stillCurrent = () => refreshId === resourceRefreshId.current;
+    clearDeepDiveState(false);
     // Persist the exact resource-engine verdict alongside the raw Azure rows.
     // Export/Findings consume this same object; storing only `servers` caused
     // them to recreate counts independently (and occasionally report a
     // healthy fleet beside warning hosts).
     const resolved = await processResource(fetchedServers);
+    if (!stillCurrent()) return;
     const resourcePayload = {
       servers: fetchedServers,
       kpis: resolved.kpis,
@@ -939,6 +1010,8 @@ export function ResourcePanel() {
     const sourceServers = Array.isArray(overrideServers) ? overrideServers : servers;
     const vmIds = sourceServers.filter((s) => s.resource_id).map((s) => s.resource_id as string);
     if (!vmIds.length) return;
+    const refreshId = ++deepDiveRefreshId.current;
+    const stillCurrent = () => refreshId === deepDiveRefreshId.current;
     setDeepDiveBusy(true);
     setDeepDiveError(null);
     try {
@@ -959,6 +1032,7 @@ export function ResourcePanel() {
         payload.hours_back = overrideHoursBack ?? hoursBack;
       }
       const result = await fetchAzureTimeseries(payload);
+      if (!stillCurrent()) return;
       const dd = result as unknown as DeepDiveResponse;
       setDeepDive(dd);
       // Deep-dive charts/correlation are already produced by the same Azure
@@ -972,14 +1046,13 @@ export function ResourcePanel() {
       setHeatmapMetric(preferredFleetHeatmapMetric(dd));
       // Prefer auto-opening a VM with detected spikes (matches vanilla's
       // "auto-open one card so the highest-priority evidence is visible").
-      const vmEntries = Object.entries(dd.vms || {});
-      const firstCritical = vmEntries.find(([, v]) => Object.values(v.spikes || {}).some((arr) => arr.length > 0));
-      const firstVm = (firstCritical || vmEntries[0])?.[0];
+      const firstVm = defaultDeepDiveVm(dd);
       if (firstVm) setDeepDiveVm(firstVm);
     } catch (error) {
+      if (!stillCurrent()) return;
       setDeepDiveError(error instanceof Error ? error.message : 'Metrics Deep Dive fetch failed.');
     } finally {
-      setDeepDiveBusy(false);
+      if (stillCurrent()) setDeepDiveBusy(false);
     }
   };
 
@@ -990,15 +1063,14 @@ export function ResourcePanel() {
       return;
     }
     setDdCustomActive(true);
-    setDeepDiveError(null);
-    setDeepDive(null);
+    clearDeepDiveState(true);
     setDdCustomPickerOpen(false);
   };
   const handleClearCustomRange = () => {
     setDdCustomActive(false);
     setDdCustomStart('');
     setDdCustomEnd('');
-    setDeepDive(null);
+    clearDeepDiveState(true);
   };
 
   // ── Deep Dive derived views ──
@@ -1419,6 +1491,7 @@ export function ResourcePanel() {
       ctrlMActive: attributionRows.length > 0,
     };
   }, [deepDive, deepDiveVm]);
+  const selectedBaselineConfidence = deepDive?.vms?.[deepDiveVm]?.baseline_confidence;
 
   if (!data.resource || servers.length === 0) {
     return (
@@ -1842,7 +1915,7 @@ export function ResourcePanel() {
           <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
             <Typography component="span" variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#6b7db3', marginRight: 4 }}>Time Range</Typography>
             {[{ h: 1, l: '1h' }, { h: 6, l: '6h' }, { h: 12, l: '12h' }, { h: 24, l: '24h' }, { h: 48, l: '48h' }, { h: 72, l: '3d' }, { h: 168, l: '7d' }, { h: 360, l: '15d' }, { h: 720, l: '30d' }].map((p) => (
-              <button key={p.h} onClick={() => { setHoursBack(p.h); setDdCustomActive(false); setDeepDive(null); }} style={ddPillStyle(!ddCustomActive && hoursBack === p.h)}>{p.l}</button>
+              <button key={p.h} onClick={() => { setHoursBack(p.h); setDdCustomActive(false); clearDeepDiveState(true); }} style={ddPillStyle(!ddCustomActive && hoursBack === p.h)}>{p.l}</button>
             ))}
             <button onClick={() => setDdCustomPickerOpen((v) => !v)} style={ddPillStyle(ddCustomActive)} title={'Pick an exact start and end instead of a rolling window \u2014 for scoping the deep dive to one batch night or one incident.'}>{'\ud83d\udcc5'} Custom{'\u2026'}</button>
           </Box>
@@ -2149,13 +2222,18 @@ export function ResourcePanel() {
                               </Box>
                               <Box display="flex" alignItems="center" style={{ gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
                                 <span className="metric-badge" style={{ fontSize: 8, color: c.severityColor, borderColor: `${c.severityColor}40`, background: `${c.severityColor}1f` }}>{c.severityLabel}</span>
+                                {c.vmData.baseline_confidence?.degraded && (
+                                  <span className="metric-badge metric-badge-amber" style={{ fontSize: 8 }} title={lowConfidenceBaselineTitle(c.vmData.baseline_confidence)}>
+                                    {'⚠'} low-confidence baseline
+                                  </span>
+                                )}
                                 <Typography component="span" variant="caption" color="textSecondary" style={{ fontSize: 9 }}>
                                   {c.spikeCount} spike event{c.spikeCount !== 1 ? 's' : ''} {'\u00b7'} {c.thresholdCrossCount} threshold crossing{c.thresholdCrossCount !== 1 ? 's' : ''}
                                 </Typography>
                                 {c.vmData.baseline_confidence && (
                                   <span
                                     className="metric-badge"
-                                    title={`Baseline: ${c.vmData.baseline_confidence.pulls} pull${c.vmData.baseline_confidence.pulls !== 1 ? 's' : ''} / ${c.vmData.baseline_confidence.retention_days ?? c.vmData.baseline_confidence.min_pulls}d${c.vmData.baseline_confidence.baseline_mean != null ? ` \u00b7 \u03bc=${c.vmData.baseline_confidence.baseline_mean}%` : ''}${c.vmData.baseline_confidence.baseline_std != null ? ` \u03c3=${c.vmData.baseline_confidence.baseline_std}%` : ''}${c.vmData.baseline_confidence.degraded ? ' \u2014 session only, not yet baseline-eligible' : ''}`}
+                                    title={baselineConfidenceTitle(c.vmData.baseline_confidence)}
                                     style={{ fontSize: 8, color: c.vmData.baseline_confidence.degraded ? '#f59e0b' : '#6b7db3', cursor: 'help' }}
                                   >
                                     {'\u24d8'} baseline{c.vmData.baseline_confidence.degraded ? ' (session-only)' : ''}
@@ -2246,7 +2324,15 @@ export function ResourcePanel() {
                                 const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
                                 return (
                                   <TableRow key={i}>
-                                    <TableCell><span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>{s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}</TableCell>
+                                    <TableCell>
+                                      <span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>
+                                      {s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}
+                                      {selectedBaselineConfidence?.degraded && (
+                                        <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }} title={lowConfidenceBaselineTitle(selectedBaselineConfidence)}>
+                                          {'⚠'} low-confidence baseline
+                                        </span>
+                                      )}
+                                    </TableCell>
                                     <TableCell>{shortMetric(s.metric)}</TableCell>
                                     <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }}>{count}x</span>}</TableCell>
                                     <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : `${start} → ${end} UTC`}</TableCell>

@@ -13,6 +13,11 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 from services import config_store
 from services import session_cache
+from services.customer_identity import (
+    identify as identify_customer,
+    set_active as set_active_customer,
+    verdict_response_fields,
+)
 from services import pe_config as _pc
 
 router = APIRouter()
@@ -61,6 +66,19 @@ class SowCompareResponse(BaseModel):
     bands:           Optional[Dict[str, float]] = None
     ai_narrative:   Optional[str] = None
     ai_model:       Optional[str] = None
+
+
+class SowParseResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    customer_name: Optional[str] = None
+    customer_status: Optional[str] = None
+    customer_cross_check: Optional[str] = None
+    customer_conflicts: Optional[List[Dict[str, str]]] = None
+    customer_corroborated_by: Optional[List[str]] = None
+    customer_message: Optional[str] = None
+    customer_active_name: Optional[str] = None
+    customer_candidate_name: Optional[str] = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -150,7 +168,19 @@ def clear_baseline() -> dict:
     config_store.set(_SOW_KEY, {})
     return {"ok": True}
 
-@router.post("/sow/parse")
+
+def _resolve_sow_customer(filename: str, sow_payload: Dict[str, Any]) -> Dict[str, Any]:
+    verdict = identify_customer(
+        filename=filename,
+        sow_payload=sow_payload,
+        auto_adopt=False,
+    )
+    if verdict.status == "first_upload" and verdict.name:
+        set_active_customer(verdict.name, verdict.raw)
+    return verdict_response_fields(verdict)
+
+
+@router.post("/sow/parse", response_model=SowParseResponse)
 async def parse_sow(file: UploadFile = File(...)) -> dict:
     raw = await file.read()
     if not raw:
@@ -160,41 +190,40 @@ async def parse_sow(file: UploadFile = File(...)) -> dict:
         from services.sow_parser import parse_sow_volumes, parse_sow_contract
         # Full contract extraction (SLA windows + volume ramp + metadata)
         contract = parse_sow_contract(raw, file.filename or "", api_key)
-        # Store SLA ceilings for the 3-tier SLA resolver (tier 2)
-        if contract.get("sla_windows"):
-            config_store.set("_sow_sla_windows", contract["sla_windows"])
-        # Store volume-by-year for the SOW tab growth chart
-        if contract.get("volume_by_year"):
-            config_store.set("_sow_volume_by_year", contract["volume_by_year"])
         # Store contract metadata
         meta_keys = ("customer_name", "contract_years", "annual_fee", "currency",
                      "max_item_locations", "growth_pack_size",
                      "availability_sla_pct", "disaster_recovery")
         meta = {k: contract[k] for k in meta_keys if contract.get(k) is not None}
-        if meta:
+        customer_fields = _resolve_sow_customer(file.filename or "", meta or contract)
+        persist_contract = customer_fields.get("customer_status") != "mismatch"
+        if persist_contract and contract.get("sla_windows"):
+            config_store.set("_sow_sla_windows", contract["sla_windows"])
+        if persist_contract and contract.get("volume_by_year"):
+            config_store.set("_sow_volume_by_year", contract["volume_by_year"])
+        if meta and persist_contract:
             existing = config_store.get("_sow_contract_meta") or {}
             config_store.set("_sow_contract_meta", {**existing, **meta})
         # ── Audit context: sow_contract + volume_vs_sow (E5) ─────────
         try:
-            from services import session_cache
-            full_contract = {
-                **meta,
-                "sla_windows":    contract.get("sla_windows")    or {},
-                "volume_by_year": contract.get("volume_by_year") or {},
-                "operational_standards": contract.get("operational_standards") or {},
-            }
-            session_cache.ac_set("sow_contract",  full_contract)
-            session_cache.ac_set("volume_vs_sow", {
-                "volume_by_year": contract.get("volume_by_year") or {},
-                "max_item_locations": contract.get("max_item_locations"),
-            })
-            if meta.get("customer_name"):
-                session_cache.ac_set("customer_name", meta["customer_name"])
-            # Auto-update the manual baseline with SOW-extracted DFU/SKU values so
-            # the manual override form always reflects the current SOW document.
+            if persist_contract:
+                from services import session_cache
+                full_contract = {
+                    **meta,
+                    "sla_windows":    contract.get("sla_windows")    or {},
+                    "volume_by_year": contract.get("volume_by_year") or {},
+                    "operational_standards": contract.get("operational_standards") or {},
+                }
+                session_cache.ac_set("sow_contract",  full_contract)
+                session_cache.ac_set("volume_vs_sow", {
+                    "volume_by_year": contract.get("volume_by_year") or {},
+                    "max_item_locations": contract.get("max_item_locations"),
+                })
+            # Auto-populate the manual baseline only when no manual baseline exists yet.
             vol_by_year = contract.get("volume_by_year") or {}
             raw_volumes = contract.get("raw_volumes") or {}
-            if vol_by_year:
+            existing_baseline = config_store.get(_SOW_KEY) or {}
+            if persist_contract and not existing_baseline and vol_by_year:
                 max_vol = max(
                     (v.get("item_locations", 0) if isinstance(v, dict) else float(v or 0)
                      for v in vol_by_year.values()),
@@ -211,7 +240,7 @@ async def parse_sow(file: UploadFile = File(...)) -> dict:
             pass
         # Return flat volume dict (backward compat) merged with contract enrichments
         volumes = contract.get("raw_volumes") or {}
-        return {**volumes, "_contract": contract}
+        return {**volumes, "_contract": contract, **customer_fields}
     except Exception as exc:
         raise HTTPException(422, f"Cannot parse SOW: {exc}") from exc
 

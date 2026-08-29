@@ -1847,8 +1847,18 @@ def sla_matrix_json(body: JsonSlaRequest) -> SlaMatrixResponse:
     try:
         from services import session_cache as _sc_jrd
         _full_rows = _sc_jrd.get("sla_matrix_runs_df")
-        _excluded_job_names = ((_sc_jrd.get("last_batch") or {})
-                               .get("user_excluded_job_names") or [])
+        # Prefer the live reviewer exclusion list; last_batch only captures the
+        # upload-time snapshot and goes stale after analysts edit exclusions.
+        _live_excluded = _sc_jrd.ac_get("manual_excluded_jobs")
+        if _live_excluded is not None:
+            _excluded_job_names = [
+                str(name).strip()
+                for name in _live_excluded
+                if name and str(name).strip()
+            ]
+        else:
+            _excluded_job_names = ((_sc_jrd.get("last_batch") or {})
+                                   .get("user_excluded_job_names") or [])
     except Exception:
         pass
 

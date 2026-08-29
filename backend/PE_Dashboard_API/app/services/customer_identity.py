@@ -25,7 +25,8 @@ This service prevents that by:
      like SCPO, DNF, TEST, PROD, UAT, _2022, …).
 
   3. Comparing the new candidate to the **active customer** held in
-     `config_store["active_customer"]`. Returns one of:
+     `config_store["customer_name"]` / session_cache audit context.
+     Returns one of:
         - "first_upload"    no active customer yet → adopt the new one
         - "match"           same customer
         - "mismatch"        different customer → caller MUST surface a
@@ -33,8 +34,9 @@ This service prevents that by:
 
 The normalisation rules are deterministic and only operate on
 strings the user already supplied — no external lookup. The active
-customer is stored in `config_store` so it survives across server
-restarts.
+customer is stored under `customer_name`, which the app wipes on a
+fresh server start so a prior engagement cannot silently bleed into
+the next one.
 """
 from __future__ import annotations
 
@@ -363,23 +365,46 @@ def best_candidate(cands: List[CustomerCandidate]) -> Optional[CustomerCandidate
 
 
 def get_active() -> Optional[str]:
-    """Return canonical active customer from persistent store, if any."""
-    val = config_store.get("active_customer", "") or ""
-    return val.strip().upper() or None
+    """Return canonical active customer from session/config state, if any."""
+    try:
+        from services import session_cache
+        val = session_cache.ac_get("customer_name", "") or ""
+        norm = normalise(str(val))
+        if norm:
+            return norm
+    except Exception:
+        pass
+    val = config_store.get("customer_name", "") or ""
+    norm = normalise(str(val))
+    return norm or None
 
 
 def set_active(canonical: str, raw: Optional[str] = None) -> None:
-    """Persist the active customer (canonical UPPERCASE)."""
+    """Persist the active customer under the shared customer_name key."""
+    canonical = normalise(canonical)
     if not canonical:
         return
-    config_store.set("active_customer", canonical.upper())
-    if raw:
-        config_store.set("active_customer_raw", raw)
+    display = display_name(canonical)
+    config_store.set("customer_name", display)
+    try:
+        from services import session_cache
+        session_cache.ac_set("customer_name", display)
+    except Exception:
+        pass
+    # Retire the old active_customer keys so stale legacy values never win.
+    config_store.set("active_customer", "")
+    config_store.set("active_customer_raw", "")
 
 
 def clear_active() -> None:
+    config_store.set("customer_name", "")
     config_store.set("active_customer", "")
     config_store.set("active_customer_raw", "")
+    try:
+        from services import session_cache
+        session_cache.ac_del("customer_name")
+    except Exception:
+        pass
 
 
 def identify(
@@ -520,6 +545,31 @@ def verdict_to_dict(verdict: CustomerVerdict, *, max_candidates: int = 8) -> Dic
              "confidence": c.confidence}
             for c in verdict.candidates[:max_candidates]
         ],
+    }
+
+
+def selected_customer_name(verdict: CustomerVerdict) -> Optional[str]:
+    """Customer name that should remain active after applying this verdict."""
+    if verdict.status == "mismatch" and verdict.active:
+        return display_name(verdict.active)
+    if verdict.display:
+        return verdict.display
+    if verdict.active:
+        return display_name(verdict.active)
+    return None
+
+
+def verdict_response_fields(verdict: CustomerVerdict) -> Dict[str, Any]:
+    """Flatten the verdict into stable response fields for routers/UI."""
+    return {
+        "customer_name": selected_customer_name(verdict),
+        "customer_status": verdict.status,
+        "customer_cross_check": verdict.cross_check,
+        "customer_corroborated_by": list(verdict.corroborated_by),
+        "customer_conflicts": list(verdict.conflicts),
+        "customer_message": verdict.message,
+        "customer_active_name": display_name(verdict.active) if verdict.active else None,
+        "customer_candidate_name": verdict.display,
     }
 
 

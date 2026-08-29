@@ -75,6 +75,7 @@ _SOW_ENGAGEMENT_KEYS = (
     "_sow_sla_windows",
     "_sow_volume_by_year",
     "_sow_contract_meta",
+    "customer_name",
 )
 
 
@@ -89,7 +90,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     Only config_store SOW engagement keys are reset."""
     from services import config_store
     for key in _SOW_ENGAGEMENT_KEYS:
-        config_store.set(key, {})
+        config_store.set(key, "" if key == "customer_name" else {})
     yield
     # (no shutdown logic needed)
 
@@ -288,13 +289,87 @@ async def get_audit_context() -> dict:
             if isinstance(_src_obj, dict) and _src_obj.get("type") in ("default", None, ""):
                 _src_obj["type"] = _src_type or "batch_sla_xlsx"
                 last_batch["sla_source"] = _src_obj
-                # Also strip the DEFAULT_SLA data warning from data_coverage
+                _default_job_count = None
+                _total_job_count = 0
+                try:
+                    import pandas as pd
+                    from services.batch_calculator import build_sla_index as _build_sla_index
+
+                    _live_rows = (
+                        session_cache.get("_last_ctrlm_df_records")
+                        or session_cache.ac_get("job_runs_df")
+                        or []
+                    )
+                    if _live_rows:
+                        _live_df = pd.DataFrame(_live_rows)
+                        _live_excluded = session_cache.ac_get("manual_excluded_jobs")
+                        if _live_excluded is not None and "Job_Name" in _live_df.columns:
+                            _excluded_names = {
+                                str(name).strip()
+                                for name in _live_excluded
+                                if name and str(name).strip()
+                            }
+                            if _excluded_names:
+                                _live_df = _live_df[
+                                    ~_live_df["Job_Name"].astype(str).isin(_excluded_names)
+                                ]
+                        if not _live_df.empty and "Job_Name" in _live_df.columns:
+                            _job_sla = (_build_sla_index(_live_df) or {}).get("job_sla", {})
+                            _default_markers = {"", "default", "assumed", "none"}
+                            _group_cols = (
+                                ["Sub_Application", "Job_Name"]
+                                if "Sub_Application" in _live_df.columns
+                                else ["Job_Name"]
+                            )
+                            _default_job_count = 0
+                            for _, _job in _live_df[_group_cols].drop_duplicates().iterrows():
+                                _job_name = str(_job.get("Job_Name", "")).strip()
+                                if not _job_name:
+                                    continue
+                                _sub_app = (
+                                    str(_job.get("Sub_Application", "")).strip()
+                                    if "Sub_Application" in _job.index
+                                    else ""
+                                )
+                                _key = f"{_sub_app}|{_job_name}" if _sub_app else _job_name
+                                _src = str(
+                                    (_job_sla.get(_key) or _job_sla.get(_job_name) or {}).get("source")
+                                    or "default"
+                                ).strip().lower()
+                                _total_job_count += 1
+                                if _src in _default_markers:
+                                    _default_job_count += 1
+                except Exception:
+                    _default_job_count = None
+                    _total_job_count = 0
+
+                # Only clear the batch-level DEFAULT_SLA warning when every in-scope
+                # job resolves away from assumed/default ceilings after the live upload.
                 _dc = last_batch.get("data_coverage") or {}
                 if isinstance(_dc.get("warnings"), list):
-                    _dc["warnings"] = [
-                        w for w in _dc["warnings"]
-                        if w.get("code") != "DEFAULT_SLA"
-                    ]
+                    if _default_job_count == 0 and _total_job_count > 0:
+                        _dc["warnings"] = [
+                            w for w in _dc["warnings"]
+                            if not isinstance(w, dict) or w.get("code") != "DEFAULT_SLA"
+                        ]
+                    elif isinstance(_default_job_count, int) and _default_job_count > 0:
+                        _warning_text = (
+                            f"{_default_job_count} of {_total_job_count} jobs still use "
+                            "assumed/default SLA ceilings. Complete the customer SLA "
+                            "mappings for accurate compliance measurement."
+                        )
+                        _updated = False
+                        for _warning in _dc["warnings"]:
+                            if isinstance(_warning, dict) and _warning.get("code") == "DEFAULT_SLA":
+                                _warning["text"] = _warning_text
+                                _warning["severity"] = "info"
+                                _updated = True
+                        if not _updated:
+                            _dc["warnings"].append({
+                                "code": "DEFAULT_SLA",
+                                "text": _warning_text,
+                                "severity": "info",
+                            })
     except Exception:
         pass
 

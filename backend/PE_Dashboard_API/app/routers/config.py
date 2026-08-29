@@ -258,3 +258,29 @@ def clear_session(body: ClearSessionRequest = ClearSessionRequest()) -> dict:
         # Reload pe_config from defaults
         pe_config.reload()
         return {"status": "ok", "cleared": "all"}
+
+
+@router.get("/session/restore")
+def get_session_restore() -> dict[str, Any]:
+    """Return browser-refresh-safe cached dashboard payloads for this session."""
+    from services import session_cache
+
+    reviewed_products = session_cache.ac_get("reviewed_products")
+    if not isinstance(reviewed_products, list):
+        reviewed_products = config_store.get("reviewed_products") or []
+
+    customer_name = session_cache.ac_get("customer_name") or config_store.get("customer_name") or None
+
+    return {
+        "batch": session_cache.get("last_batch") or None,
+        "resource": session_cache.get("last_resource") or None,
+        "sla_matrix": session_cache.get("last_sla_matrix") or None,
+        "benchmark": session_cache.get("last_benchmark") or None,
+        "findings": session_cache.get("last_findings") or None,
+        "red_flags": session_cache.get("last_red_flags") or None,
+        "pe_narrative": session_cache.get("last_pe_narrative") or None,
+        "executive": session_cache.get("last_executive") or None,
+        "final_judgment": session_cache.get("last_final_judgment") or None,
+        "customer_name": customer_name,
+        "reviewed_products": reviewed_products,
+    }

@@ -64,7 +64,7 @@ _PERSIST_AC_SLOTS = {
     "daily_window_series", "workflow_sla_summary", "sla_detected_mode",
     "sla_resolved",
     "resource_summary", "regression_df", "adaptive_sla", "sla_matrix_kpis",
-}
+} - {"customer_name"}
 _LOCAL_CACHE_FILE = Path(__file__).resolve().parent.parent / ".pe_cache.json"
 
 

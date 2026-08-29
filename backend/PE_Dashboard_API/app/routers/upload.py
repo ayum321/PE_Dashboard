@@ -22,6 +22,11 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from services import config_store
+from services.customer_identity import (
+    identify as identify_customer,
+    set_active as set_active_customer,
+    verdict_response_fields,
+)
 from services.resource_parser import get_health_score
 from services.resource_parser_generic import parse_resource_file
 from services.sla_parser import detect_resource_mode
@@ -53,20 +58,38 @@ class ServerRecord(BaseModel):
 
 
 class UploadResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     filename:         str
     file_type:        str
     server_count:     int
     image_only:       bool
-    customer_name:    Optional[str] = None   # extracted from document heading
+    customer_name:    Optional[str] = None   # active customer after identity checks
+    customer_status: Optional[str] = None
+    customer_cross_check: Optional[str] = None
+    customer_conflicts: Optional[List[Dict[str, str]]] = None
+    customer_corroborated_by: Optional[List[str]] = None
+    customer_message: Optional[str] = None
+    customer_active_name: Optional[str] = None
+    customer_candidate_name: Optional[str] = None
     servers:          List[ServerRecord]
     ai_summary:       Optional[str] = None   # post-upload Gemma/Llama briefing
     ai_model:         Optional[str] = None
 
 
 class SmartUploadResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     filename:       str
     classification: Dict[str, Any]    # { type, confidence, notes }
     data:           Dict[str, Any]    # engine-specific result payload
+    customer_status: Optional[str] = None
+    customer_cross_check: Optional[str] = None
+    customer_conflicts: Optional[List[Dict[str, str]]] = None
+    customer_corroborated_by: Optional[List[str]] = None
+    customer_message: Optional[str] = None
+    customer_active_name: Optional[str] = None
+    customer_candidate_name: Optional[str] = None
 
 
 # ── Helpers ─────────────────────────────────────────────────────
@@ -89,6 +112,13 @@ def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
     record["health_score"]    = float(get_health_score(cpu, mem, disk, stype))
     record["image_only"]      = bool(record.get("_image_only", image_only))
     return record
+
+
+def _resolve_customer_identity(**kwargs: Any) -> Dict[str, Any]:
+    verdict = identify_customer(auto_adopt=False, **kwargs)
+    if verdict.status == "first_upload" and verdict.name:
+        set_active_customer(verdict.name, verdict.raw)
+    return verdict_response_fields(verdict)
 
 
 def _run_post_upload_summary(
@@ -216,27 +246,12 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
 
     image_only = not any(_has_data(s) for s in (servers_raw or []))
 
-    # Customer name — resource_parser already tags every server record with
-    # _customer_name when the DOCX/report title/heading names the customer.
-    # Adopt it only if no customer is active yet, matching the same rule the
-    # Azure live-fetch path uses (ResourcePanel.tsx handleFetched): never
-    # silently override an engagement already established from Ctrl-M/SOW.
-    customer_name: Optional[str] = None
-    for _s in (servers_raw or []):
-        _tag = _s.get("_customer_name")
-        if _tag:
-            customer_name = str(_tag).strip()
-            break
-
-    if customer_name:
-        try:
-            from services import session_cache as _sc_cust
-            _prev_customer = _sc_cust.ac_get("customer_name") or config_store.get("customer_name") or ""
-            if not _prev_customer:
-                config_store.set("customer_name", customer_name)
-                _sc_cust.ac_set("customer_name", customer_name)
-        except Exception:
-            pass
+    customer_fields = _resolve_customer_identity(
+        filename=file.filename,
+        servers=servers_raw,
+    )
+    customer_name = customer_fields.get("customer_name")
+    detected_customer = customer_fields.get("customer_candidate_name") or customer_name
 
     enriched = [_enrich(dict(s), image_only) for s in (servers_raw or [])]
 
@@ -254,7 +269,7 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     # ── Post-upload AI summary (Gemma→Llama→Gemini waterfall) ───────
     ai_summary, ai_model = _run_post_upload_summary(
         kind="resource", filename=file.filename,
-        servers=enriched, customer_name=customer_name,
+        servers=enriched, customer_name=detected_customer,
     )
 
     return UploadResponse(
@@ -263,6 +278,13 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
         server_count=len(enriched),
         image_only=bool(image_only),
         customer_name=customer_name,
+        customer_status=customer_fields.get("customer_status"),
+        customer_cross_check=customer_fields.get("customer_cross_check"),
+        customer_conflicts=customer_fields.get("customer_conflicts"),
+        customer_corroborated_by=customer_fields.get("customer_corroborated_by"),
+        customer_message=customer_fields.get("customer_message"),
+        customer_active_name=customer_fields.get("customer_active_name"),
+        customer_candidate_name=customer_fields.get("customer_candidate_name"),
         servers=enriched,
         ai_summary=ai_summary,
         ai_model=ai_model,
@@ -299,6 +321,7 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
 
     # Route to appropriate engine
     data: Dict[str, Any] = {}
+    customer_fields: Dict[str, Any] = {}
 
     try:
         if file_type == "batch":
@@ -306,6 +329,11 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
             df = load_ctrlm_bytes(raw, file.filename)
             data = build_batch_payload(df)
             data["filename"] = file.filename
+            customer_fields = _resolve_customer_identity(
+                filename=file.filename,
+                df_sub_app=df["Sub_Application"].dropna().tolist() if "Sub_Application" in df.columns else None,
+            )
+            data.update(customer_fields)
 
         elif file_type == "resource":
             # RULE 4 — single entry point; detect_resource_mode + session clear inside
@@ -315,23 +343,10 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 for s in (servers_raw or [])
             )
 
-            # See /api/upload above — adopt the DOCX/report-detected customer
-            # name only if none is active yet.
-            _customer_name: Optional[str] = None
-            for _s in (servers_raw or []):
-                _tag = _s.get("_customer_name")
-                if _tag:
-                    _customer_name = str(_tag).strip()
-                    break
-            if _customer_name:
-                try:
-                    from services import session_cache as _sc_cust
-                    _prev_customer = _sc_cust.ac_get("customer_name") or config_store.get("customer_name") or ""
-                    if not _prev_customer:
-                        config_store.set("customer_name", _customer_name)
-                        _sc_cust.ac_set("customer_name", _customer_name)
-                except Exception:
-                    pass
+            customer_fields = _resolve_customer_identity(
+                filename=file.filename,
+                servers=servers_raw,
+            )
 
             enriched = [_enrich(dict(s), img_only) for s in (servers_raw or [])]
             data = {
@@ -339,9 +354,9 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 "file_type": ext.lstrip("."),
                 "server_count": len(enriched),
                 "image_only": img_only,
-                "customer_name": _customer_name,
                 "servers": enriched,
             }
+            data.update(customer_fields)
 
         elif file_type == "sla_matrix":
             from services.batch_calculator import load_ctrlm_bytes
@@ -396,6 +411,13 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
         filename=file.filename,
         classification=classification,
         data=data,
+        customer_status=customer_fields.get("customer_status"),
+        customer_cross_check=customer_fields.get("customer_cross_check"),
+        customer_conflicts=customer_fields.get("customer_conflicts"),
+        customer_corroborated_by=customer_fields.get("customer_corroborated_by"),
+        customer_message=customer_fields.get("customer_message"),
+        customer_active_name=customer_fields.get("customer_active_name"),
+        customer_candidate_name=customer_fields.get("customer_candidate_name"),
     )
 
 

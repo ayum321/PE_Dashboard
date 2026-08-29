@@ -1,5 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { clearSession, DashboardPayload, getSowState, ResourceServer } from '../api/dashboardApi';
+import {
+  clearSession,
+  DashboardPayload,
+  getReviewedProducts,
+  getSessionRestore,
+  getSowState,
+  ResourceServer,
+} from '../api/dashboardApi';
 
 export interface IssueRecord {
   ID: string;
@@ -63,6 +70,22 @@ const EMPTY_APP_DATA: AppData = {
   reviewedProducts: [],
 };
 
+const isDashboardPayload = (value: unknown): value is DashboardPayload =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const hasDashboardPayload = (value: unknown): value is DashboardPayload =>
+  isDashboardPayload(value) && Object.keys(value as Record<string, unknown>).length > 0;
+
+const isEmptyDashboardPayload = (value: DashboardPayload | null | undefined): boolean =>
+  !hasDashboardPayload(value);
+
+const normalizeStringList = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+    : [];
+
 interface AppDataContextValue {
   data: AppData;
   setBatch: (value: DashboardPayload | null) => void;
@@ -89,20 +112,51 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   const [data, setData] = useState<AppData>(EMPTY_APP_DATA);
 
   // The provider is recreated by a browser refresh and can be bypassed by a
-  // direct route. Restore saved SOW evidence once so Findings never receives a
-  // blank client snapshot and substitutes zero actuals.
+  // direct route. Restore saved SOW, cached dashboard payloads, and reviewed
+  // products once so refreshes do not blank analysis screens that the backend
+  // already holds for the active session.
   useEffect(() => {
     let active = true;
-    getSowState()
-      .then((state) => {
+    Promise.allSettled([getSowState(), getSessionRestore(), getReviewedProducts()])
+      .then(([sowResult, sessionRestoreResult, reviewedProductsResult]) => {
         if (!active) return;
-        const baseline = state.baseline;
-        const comparison = state.compare;
-        setData((prev) => ({
-          ...prev,
-          sowBaseline: baseline && typeof baseline === 'object' ? baseline as DashboardPayload : prev.sowBaseline,
-          sowCompare: comparison && typeof comparison === 'object' ? comparison as DashboardPayload : prev.sowCompare,
-        }));
+        setData((prev) => {
+          const updates: Partial<AppData> = {};
+
+          if (sowResult.status === 'fulfilled') {
+            const baseline = sowResult.value.baseline;
+            const comparison = sowResult.value.compare;
+            if (isEmptyDashboardPayload(prev.sowBaseline) && hasDashboardPayload(baseline)) updates.sowBaseline = baseline;
+            if (isEmptyDashboardPayload(prev.sowCompare) && hasDashboardPayload(comparison)) updates.sowCompare = comparison;
+          }
+
+          if (sessionRestoreResult.status === 'fulfilled') {
+            const restored = sessionRestoreResult.value;
+            if (isEmptyDashboardPayload(prev.batch) && hasDashboardPayload(restored.batch)) updates.batch = restored.batch;
+            if (isEmptyDashboardPayload(prev.resource) && hasDashboardPayload(restored.resource)) updates.resource = restored.resource as AppData['resource'];
+            if (isEmptyDashboardPayload(prev.slaMatrix) && hasDashboardPayload(restored.sla_matrix)) updates.slaMatrix = restored.sla_matrix;
+            if (isEmptyDashboardPayload(prev.benchmark) && hasDashboardPayload(restored.benchmark)) updates.benchmark = restored.benchmark;
+            if (isEmptyDashboardPayload(prev.findings) && hasDashboardPayload(restored.findings)) updates.findings = restored.findings;
+            if (isEmptyDashboardPayload(prev.redFlags) && hasDashboardPayload(restored.red_flags)) updates.redFlags = restored.red_flags;
+            if (isEmptyDashboardPayload(prev.peNarrative) && hasDashboardPayload(restored.pe_narrative)) updates.peNarrative = restored.pe_narrative;
+            if (isEmptyDashboardPayload(prev.executive) && hasDashboardPayload(restored.executive)) updates.executive = restored.executive;
+            if (isEmptyDashboardPayload(prev.finalJudgment) && hasDashboardPayload(restored.final_judgment)) updates.finalJudgment = restored.final_judgment;
+            if ((!prev.customerName || !prev.customerName.trim()) && typeof restored.customer_name === 'string' && restored.customer_name.trim()) {
+              updates.customerName = restored.customer_name.trim();
+            }
+            if (prev.reviewedProducts.length === 0) {
+              const restoredProducts = normalizeStringList(restored.reviewed_products);
+              if (restoredProducts.length) updates.reviewedProducts = restoredProducts;
+            }
+          }
+
+          if (reviewedProductsResult.status === 'fulfilled' && prev.reviewedProducts.length === 0 && !updates.reviewedProducts?.length) {
+            const restoredProducts = normalizeStringList(reviewedProductsResult.value.products);
+            if (restoredProducts.length) updates.reviewedProducts = restoredProducts;
+          }
+
+          return Object.keys(updates).length ? { ...prev, ...updates } : prev;
+        });
       })
       .catch(() => undefined);
     return () => { active = false; };
