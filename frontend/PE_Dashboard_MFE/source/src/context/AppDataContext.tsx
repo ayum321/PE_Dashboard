@@ -108,6 +108,16 @@ interface AppDataContextValue {
 
 const AppDataContext = createContext<AppDataContextValue | undefined>(undefined);
 
+// Settle a promise into a fulfilled/rejected descriptor without depending on the
+// environment's Promise.allSettled implementation — some polyfilled test/build
+// targets return a settled status but silently drop the resolved value.
+type Settled<T> = { status: 'fulfilled'; value: T } | { status: 'rejected'; reason: unknown };
+const settle = <T,>(promise: Promise<T>): Promise<Settled<T>> =>
+  promise.then(
+    (value): Settled<T> => ({ status: 'fulfilled', value }),
+    (reason): Settled<T> => ({ status: 'rejected', reason }),
+  );
+
 export const AppDataProvider = ({ children }: { children: React.ReactNode }) => {
   const [data, setData] = useState<AppData>(EMPTY_APP_DATA);
 
@@ -117,7 +127,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   // already holds for the active session.
   useEffect(() => {
     let active = true;
-    Promise.allSettled([getSowState(), getSessionRestore(), getReviewedProducts()])
+    Promise.all([settle(getSowState()), settle(getSessionRestore()), settle(getReviewedProducts())])
       .then(([sowResult, sessionRestoreResult, reviewedProductsResult]) => {
         if (!active) return;
         setData((prev) => {
