@@ -1,31 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { Box, Button, CircularProgress, Paper, Typography, makeStyles } from '@material-ui/core';
+import { Box, Button, CircularProgress, Paper, Typography } from '@material-ui/core';
 import { generateFindings, getFinalJudgment, getPeNarrative, getRedFlags } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
 import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
-import { KpiStatCard } from '../shared/KpiStatCard';
 import { FinalJudgmentCard } from './FinalJudgmentCard';
 import { PeReviewSummary } from './PeReviewSummary';
-
-interface Finding {
-  level: string;
-  text: string;
-  sub?: string;
-  impact?: string;
-  recommendation?: string;
-  evidence?: string;
-  root_cause?: string;
-  confidence?: number;
-  source?: string;
-}
-
-interface DataCoverage {
-  batch: boolean;
-  resource: boolean;
-  sla: boolean;
-  benchmark: boolean;
-  sow: boolean;
-}
+import { FindingsDataGrid, FindingItem } from '../shared/FindingsDataGrid';
+import { WorkflowHeadroomCard } from '../shared/WorkflowHeadroomCard';
+import { SeverityDonutChart } from '../shared/SeverityDonutChart';
 
 interface TopAction {
   rank?: number;
@@ -38,18 +20,26 @@ interface TopAction {
   root_cause?: string;
 }
 
-const useStyles = makeStyles((theme) => ({
-  panel: { padding: theme.spacing(3) },
-  row: { display: 'flex', gap: theme.spacing(2), alignItems: 'center', marginTop: theme.spacing(2) },
-  finding: { padding: theme.spacing(1.5), marginTop: theme.spacing(1.5) },
-  empty: { marginTop: theme.spacing(2) },
-}));
+type SeverityFilter = 'all' | 'critical' | 'warning' | 'info' | 'ok';
+
+export function buildWorkflowItems(slaMatrix: any) {
+  const summaries = slaMatrix?.workflow_summary || slaMatrix?.workflows || [];
+  if (!Array.isArray(summaries)) return [];
+  return summaries.map((w: any) => ({
+    name: w.workflow_name ?? w.workflow ?? w.sub_application ?? w.Sub_Application ?? w.name ?? 'Workflow',
+    runtime_h: Number(w.runtime_h ?? w.runtime_hours ?? w.peak_hrs ?? 0),
+    sla_h: Number(w.sla_h ?? w.sla_hours ?? w.sla_hrs ?? w.sla_ceiling ?? 0),
+    buffer_pct: Number(w.buffer_pct != null ? w.buffer_pct : 100 - (w.sla_used_pct || 0)),
+    status: String(w.status || 'OK').toUpperCase(),
+    source: w.data_src || w.source,
+  }));
+}
 
 export function FindingsPanel() {
-  const classes = useStyles();
   const { data, setFindings, setFinalJudgment, setPeNarrative, setRedFlags } = useAppData();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<SeverityFilter>('all');
 
   const handleGenerate = async () => {
     setBusy(true);
@@ -59,24 +49,22 @@ export function FindingsPanel() {
       const findings = await generateFindings(payload);
       setFindings(findings);
 
-      // Mirror the local dashboard: findings refresh produces the supporting
-      // red-flag evidence and then refreshes the one final PE decision.
       let redFlags = data.redFlags;
       try {
         redFlags = await getRedFlags(payload);
         setRedFlags(redFlags);
       } catch {
-        // Existing red flags remain valid when the optional refresh fails.
+        // Red flags refresh is optional
       }
       try {
         setPeNarrative(await getPeNarrative(buildPeNarrativePayload(data, { findings, redFlags })));
       } catch {
-        // The flat deterministic findings remain usable if narrative enrichment is unavailable.
+        // Narrative is optional
       }
       try {
         setFinalJudgment(await getFinalJudgment(buildFinalJudgmentPayload(data, { findings, redFlags })));
       } catch {
-        // Findings are still a complete deterministic result if judgment is unavailable.
+        // Final judgment is optional
       }
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : 'Generating findings failed.');
@@ -85,106 +73,118 @@ export function FindingsPanel() {
     }
   };
 
-  const findings = useMemo(() => (data.findings?.findings as Finding[]) || [], [data.findings]);
-  const summary = data.findings?.summary as { critical?: number; warning?: number; total?: number } | undefined;
-  const dataCoverage = data.findings?.data_coverage as DataCoverage | undefined;
-  // This is intentionally server-ranked: the hero must not change priority
-  // locally when a user refreshes, filters, or receives additional findings.
+  const findings = useMemo(() => (data.findings?.findings as FindingItem[]) || [], [data.findings]);
   const topAction = data.findings?.top_action as TopAction | undefined;
-  const orderedFindings = useMemo(() => {
-    const severity = (level: string) => ({ critical: 0, warning: 1, info: 2, ok: 3 }[level.toLowerCase()] ?? 4);
-    return [...findings].sort((a, b) => severity(a.level) - severity(b.level));
-  }, [findings]);
   const immediateAction = topAction?.text ? topAction : null;
-  const priorityFindings = orderedFindings.filter((finding) => ['critical', 'warning'].includes(finding.level.toLowerCase()));
-  const supportingFindings = orderedFindings.filter((finding) => !['critical', 'warning'].includes(finding.level.toLowerCase()));
 
-  const renderFinding = (finding: Finding, index: number) => {
-    const level = finding.level.toLowerCase();
-    return (
-      <Paper key={`${level}-${index}-${finding.text}`} className={`${classes.finding} insight-card ${level} pe-finding-card`} elevation={0}>
-        <Box className="pe-finding-card__header">
-          <span className={`pe-finding-card__severity ${level}`}>{level.toUpperCase()}</span>
-          <Typography component="span" className="pe-finding-card__title">{finding.text}</Typography>
-        </Box>
-        {finding.impact && <Typography component="p" className="pe-finding-card__impact">{finding.impact}</Typography>}
-        {finding.recommendation && finding.text !== immediateAction?.text && (
-          <Typography component="p" className="pe-finding-card__action"><strong>Recommended action:</strong> {finding.recommendation}</Typography>
-        )}
-        {(finding.evidence || finding.root_cause || finding.source || finding.confidence != null) && (
-          <details className="pe-finding-evidence">
-            <summary>View evidence and provenance</summary>
-            {finding.evidence && <Typography component="p">Evidence: {finding.evidence}</Typography>}
-            {finding.root_cause && <Typography component="p">Root cause: {finding.root_cause}</Typography>}
-            {(finding.source || finding.confidence != null) && <Typography component="p">{finding.source && `Source: ${finding.source}`}{finding.source && finding.confidence != null && ' · '}{finding.confidence != null && `Confidence: ${finding.confidence}%`}</Typography>}
-          </details>
-        )}
-      </Paper>
-    );
-  };
+  // Severity counts for filter tabs
+  const counts = useMemo(() => {
+    const c = { all: findings.length, critical: 0, warning: 0, info: 0, ok: 0 };
+    findings.forEach((f) => {
+      const lvl = f.level.toLowerCase() as keyof typeof c;
+      if (lvl in c && lvl !== 'all') c[lvl]++;
+    });
+    return c;
+  }, [findings]);
+
+  // Extract workflow data for visual headroom bar
+  const workflowItems = useMemo(() => {
+    return buildWorkflowItems(data.slaMatrix);
+  }, [data.slaMatrix]);
 
   return (
-    <Paper className={`${classes.panel} kpi-card`} elevation={0}>
-      <Typography variant="h6">PE Findings</Typography>
-      <Box className={classes.row}>
-        <Button variant="contained" color="primary" onClick={handleGenerate} disabled={busy}>
-          Generate Findings
-        </Button>
-        {busy && <CircularProgress size={22} aria-label="Generating findings" />}
+    <Box p={2} pb={4}>
+      {/* ═══ PAGE HEADER ═══ */}
+      <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" style={{ gap: 12, marginBottom: 12 }}>
+        <Box>
+          <Typography variant="h5" style={{ fontWeight: 800, letterSpacing: '-.01em', color: '#f0f4ff' }}>
+            PE Findings &amp; Intelligence
+          </Typography>
+          <Typography variant="caption" color="textSecondary">
+            Synthesized cross-pillar intelligence from SOW, Batch Execution, Azure Infrastructure, and Benchmark telemetry
+          </Typography>
+        </Box>
+        <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+          <Button
+            variant="contained"
+            color="primary"
+            onClick={handleGenerate}
+            disabled={busy}
+            style={{ borderRadius: 10, fontWeight: 700 }}
+          >
+            {busy ? 'Analyzing…' : data.findings ? 'Regenerate Findings' : 'Generate Findings'}
+          </Button>
+          {busy && <CircularProgress size={22} aria-label="Generating findings" />}
+        </Box>
       </Box>
-      {error && <Typography variant="body2" color="error">{error}</Typography>}
+
+      {error && (
+        <Paper elevation={0} style={{ padding: '10px 14px', marginBottom: 12, borderRadius: 8, border: '1px solid rgba(244,63,94,.4)', background: 'rgba(244,63,94,.08)' }}>
+          <Typography variant="body2" color="error">{error}</Typography>
+        </Paper>
+      )}
+
+      {/* ═══ TIER 1: COMMAND CENTER (Decision, Score, Canonical Pillar Gauges, Ledger Table) ═══ */}
+      <FinalJudgmentCard />
+
+      {/* ═══ IMMEDIATE ACTION BANNER (Only when urgent action is required) ═══ */}
+      {immediateAction && (
+        <div className="pe-action-banner-v2" style={{ marginTop: 14 }}>
+          <div className="pe-action-banner-v2__icon">⚡</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="caption" style={{ color: '#ff8aa5', fontWeight: 800, letterSpacing: '.1em', textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>
+              Immediate Action Required
+            </Typography>
+            <Typography variant="subtitle2" style={{ lineHeight: 1.45, fontWeight: 700, color: '#f0f4ff' }}>
+              {immediateAction.recommendation || immediateAction.text}
+            </Typography>
+            {immediateAction.impact && (
+              <Typography variant="body2" color="textSecondary" style={{ marginTop: 4, fontSize: 13 }}>
+                Why now: {immediateAction.impact}
+              </Typography>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══ VISUAL WORKFLOW HEADROOM & UTILIZATION BAR ═══ */}
+      {workflowItems.length > 0 && <WorkflowHeadroomCard workflows={workflowItems} />}
+
+      {/* ═══ TIER 2: TABBED SYNTHESIZED PILLAR EVIDENCE & QUESTIONNAIRE ═══ */}
       <PeReviewSummary />
 
-      {!data.findings ? (
-        <>
-          <Typography className={classes.empty} variant="body2" color="textSecondary">
-            Upload batch and resource data first, then generate findings from the collected evidence.
-          </Typography>
-          <FinalJudgmentCard />
-        </>
-      ) : (
-        <>
-          <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12, marginTop: 12 }}>
-            {typeof data.findings.findings_grade === 'string' && data.findings.findings_grade && (
-              <KpiStatCard label="Findings Grade" value={String(data.findings.findings_grade)} sub={String(data.findings.findings_grade_label || '')} accent="#a855f7" />
-            )}
-            <KpiStatCard label="Critical" value={summary?.critical || 0} accent="#f43f5e" />
-            <KpiStatCard label="Warning" value={summary?.warning || 0} accent="#f59e0b" />
-            <KpiStatCard label="Total" value={summary?.total || 0} accent="#3b82f6" />
+      {data.findings && counts.all > 0 && (
+        <Box display="flex" alignItems="center" style={{ gap: 16, marginTop: 14, marginBottom: -8 }}>
+          <SeverityDonutChart counts={counts} size={100} />
+          <Box>
+            <Typography variant="subtitle2" style={{ fontWeight: 800, color: '#f0f4ff' }}>
+              Finding Severity Distribution
+            </Typography>
+            <Typography variant="caption" color="textSecondary">
+              {counts.critical} critical · {counts.warning} warning · {counts.info} info · {counts.ok} passed
+            </Typography>
           </Box>
-          {dataCoverage && (
-            <Box style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
-              {(['batch', 'resource', 'sla', 'benchmark', 'sow'] as const).map((pillar) => (
-                <span key={pillar} className={`metric-badge ${dataCoverage[pillar] ? 'metric-badge-green' : 'metric-badge-blue'}`}>
-                  {pillar.toUpperCase()} {dataCoverage[pillar] ? '✓' : '—'}
-                </span>
-              ))}
-            </Box>
-          )}
-          {immediateAction && (
-            <Box className="pe-immediate-action" style={{ marginTop: 16 }}>
-              <Typography variant="caption" className="pe-immediate-action__eyebrow">Immediate PE action</Typography>
-              <Typography variant="subtitle2">{immediateAction.recommendation || immediateAction.text}</Typography>
-              {immediateAction.impact && <Typography variant="body2" color="textSecondary">Why now: {immediateAction.impact}</Typography>}
-            </Box>
-          )}
-          <Box className="pe-findings-list" aria-label="Priority PE findings">
-            {priorityFindings.length > 0 ? (
-              <Typography className="pe-findings-list__heading">Priority findings — action required</Typography>
-            ) : (
-              <Typography className="pe-findings-list__heading">No critical or warning findings</Typography>
-            )}
-            {priorityFindings.map(renderFinding)}
-          </Box>
-          {supportingFindings.length > 0 && (
-            <details className="pe-supporting-findings">
-              <summary>{supportingFindings.length} supporting observation{supportingFindings.length === 1 ? '' : 's'} — informational and healthy evidence</summary>
-              <Box className="pe-findings-list">{supportingFindings.map(renderFinding)}</Box>
-            </details>
-          )}
-          <FinalJudgmentCard />
-        </>
+        </Box>
       )}
-    </Paper>
+
+      {/* ═══ TIER 3: DENSE TABULAR FINDINGS GRID ═══ */}
+      {!data.findings ? (
+        <Paper
+          elevation={0}
+          style={{ marginTop: 14, padding: 24, textAlign: 'center', borderRadius: 12, border: '1px dashed #213060', background: 'transparent' }}
+        >
+          <Typography variant="body2" color="textSecondary">
+            Upload batch, resource, and SLA data, then generate findings to populate this ledger.
+          </Typography>
+        </Paper>
+      ) : (
+        <FindingsDataGrid
+          findings={findings}
+          filter={filter}
+          onFilterChange={setFilter}
+          counts={counts}
+        />
+      )}
+    </Box>
   );
 }

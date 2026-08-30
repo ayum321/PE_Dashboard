@@ -3,13 +3,14 @@ import { render } from '@testing-library/react';
 import { AppDataProvider, useAppData } from '../../context/AppDataContext';
 import { PeReviewSummary } from './PeReviewSummary';
 
-function NarrativeInjector({ narrative, flags, findings }: { narrative: unknown; flags?: unknown; findings?: unknown }) {
-  const { setPeNarrative, setRedFlags, setFindings } = useAppData();
+function NarrativeInjector({ narrative, flags, findings, finalJudgment }: { narrative: unknown; flags?: unknown; findings?: unknown; finalJudgment?: unknown }) {
+  const { setPeNarrative, setRedFlags, setFindings, setFinalJudgment } = useAppData();
   useEffect(() => {
     setPeNarrative(narrative as never);
     setRedFlags((flags ? { flags } : null) as never);
     setFindings((findings || null) as never);
-  }, [findings, flags, narrative, setFindings, setPeNarrative, setRedFlags]);
+    setFinalJudgment((finalJudgment || null) as never);
+  }, [finalJudgment, findings, flags, narrative, setFinalJudgment, setFindings, setPeNarrative, setRedFlags]);
   return <PeReviewSummary />;
 }
 
@@ -28,7 +29,7 @@ describe('PeReviewSummary UAT evidence gating', () => {
   });
 
   it('renders the explicit backend UAT evidence even without a narrative UAT section', () => {
-    const { getByText } = render(
+    const { getByRole, getByText } = render(
       <AppDataProvider>
         <NarrativeInjector
           narrative={{ verdict: 'HOLD', sections: [] }}
@@ -37,8 +38,22 @@ describe('PeReviewSummary UAT evidence gating', () => {
         />
       </AppDataProvider>,
     );
-    expect(getByText('UAT Validation')).toBeDefined();
+    expect(getByRole('heading', { name: /UAT Validation/i })).toBeDefined();
     expect(getByText(/Validate the three regressed workflows/i)).toBeDefined();
     expect(getByText('Confirm the regression with the customer.')).toBeDefined();
+  });
+
+  it('shows the authoritative final decision instead of a stale narrative verdict', () => {
+    const { getAllByText, getByText, queryByText } = render(
+      <AppDataProvider>
+        <NarrativeInjector
+          narrative={{ verdict: 'CONDITIONAL', verdict_reason: 'Stale narrative reason.', summary: 'Overall verdict: CONDITIONAL. Stale narrative reason.', sections: [] }}
+          finalJudgment={{ decision: 'BLOCKED', verdict_reason: '2 CRITICAL finding(s) require resolution before sign-off.' }}
+        />
+      </AppDataProvider>,
+    );
+    expect(getByText('BLOCKED')).toBeDefined();
+    expect(getAllByText(/2 CRITICAL finding\(s\)/i).length).toBeGreaterThan(0);
+    expect(queryByText(/Overall verdict: CONDITIONAL/i)).toBeNull();
   });
 });

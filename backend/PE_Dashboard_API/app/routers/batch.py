@@ -153,6 +153,7 @@ class BatchResponse(BaseModel):
     # (ENDED NOT OK / FAILED counts per sub-app per day). Drives the PE
     # Findings failure-density heatmap.
     failure_grid: Optional[Dict[str, Any]] = None
+    failure_jobs: Optional[List[Dict[str, Any]]] = None
     # Long-pole consistency heatmap: top-N longest jobs × run_date runtime
     # matrix (longest single run per job per day) + per-job avg/max/window-share.
     # Drives the "which jobs eat the window, consistently?" heatmap on Batch Review.
@@ -309,6 +310,7 @@ def _payload_to_response(
         daily_jobs=payload.get("daily_jobs"),
         window_sub_app=payload.get("window_sub_app", []),
         failure_grid=payload.get("failure_grid"),
+        failure_jobs=payload.get("failure_jobs"),
         longpole_matrix=payload.get("longpole_matrix"),
         user_excluded_job_names=payload.get("user_excluded_job_names") or [],
         manual_exclusion_audit=payload.get("manual_exclusion_audit") or [],

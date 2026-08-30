@@ -17,6 +17,7 @@ import {
 import Highcharts from '../../theme/highchartsSetup';
 import HighchartsReact from 'highcharts-react-official';
 import {
+  DashboardPayload,
   fetchAzureTimeseries,
   getAzureAuthStatus,
   getAzureStatus,
@@ -24,7 +25,7 @@ import {
   ResourceServer,
 } from '../../api/dashboardApi';
 import { useAppData } from '../../context/AppDataContext';
-import { AzureFetchModal } from '../shared/AzureFetchModal';
+import { AzureFetchMeta, AzureFetchModal } from '../shared/AzureFetchModal';
 import { KpiStatCard } from '../shared/KpiStatCard';
 import { MiniGauge } from '../shared/MiniGauge';
 
@@ -122,6 +123,28 @@ interface ServerRow {
   mem_status?: string;
   agg_trap?: boolean;
   dual_pressure?: boolean;
+}
+
+interface ObservationWindow {
+  requested_hours?: number;
+  start_utc?: string;
+  end_utc?: string;
+  snapshot_grain_hours?: number;
+  cache_ttl_seconds?: number;
+}
+
+function formatWindowHours(hours: number): string {
+  return hours >= 24 && hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`;
+}
+
+function formatUtc(value?: string): string {
+  if (!value) return '\u2014';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString('en-US', {
+    timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }) + ' UTC';
 }
 
 interface DeepDiveSpike {
@@ -752,6 +775,11 @@ export function ResourcePanel() {
   const [anomalies, setAnomalies] = useState<ResourceAnomaly[]>([]);
   const [execSummary, setExecSummary] = useState<ExecutiveSummary | null>(null);
 
+  React.useEffect(() => {
+    const persisted = Number(data.resource?.hours_back);
+    if (Number.isFinite(persisted) && persisted > 0) setHoursBack(persisted);
+  }, [data.resource?.hours_back]);
+
   // ── Metrics Deep Dive state ──
   const [deepDive, setDeepDive] = useState<DeepDiveResponse | null>(null);
   const [deepDiveBusy, setDeepDiveBusy] = useState(false);
@@ -829,6 +857,13 @@ export function ResourcePanel() {
       setExecSummary(null);
       return;
     }
+    if (data.resource?.kpis) {
+      setFleetKpis((data.resource.kpis as FleetKpis) || null);
+      setAnomalies((data.resource.anomalies as ResourceAnomaly[]) || []);
+      const exec = data.resource.executive_summary as ExecutiveSummary | undefined;
+      setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
+      return;
+    }
     processResource(rows)
       .then((result) => {
         if (!stillCurrent()) return;
@@ -836,6 +871,7 @@ export function ResourcePanel() {
         setAnomalies((result.anomalies as ResourceAnomaly[]) || []);
         const exec = result.executive_summary as ExecutiveSummary | undefined;
         setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
+        setResource({ ...data.resource, ...result, servers: (result.servers as ResourceServer[]) || rows });
       })
       .catch(() => {
         if (!stillCurrent()) return;
@@ -843,10 +879,11 @@ export function ResourcePanel() {
         setAnomalies([]);
         setExecSummary(null);
       });
-  }, [data.resource]);
+  }, [data.resource, setResource]);
 
   const servers = useMemo(() => (data.resource?.servers || []) as ServerRow[], [data.resource]);
   const isAzureSource = servers.some((s) => s.source === 'azure_monitor');
+  const observationWindow = (data.resource?.observation_window || null) as ObservationWindow | null;
   const serverTypeCounts = useMemo(() => servers.reduce<Record<string, number>>((counts, server) => {
     const type = String(server.type || 'APP').trim().toUpperCase() || 'APP';
     counts[type] = (counts[type] || 0) + 1;
@@ -961,7 +998,11 @@ export function ResourcePanel() {
     }
   };
 
-  const handleFetched = async (fetchedServers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => {
+  const handleFetched = async (
+    fetchedServers: ResourceServer[],
+    meta: AzureFetchMeta,
+    fetchedPayload?: DashboardPayload,
+  ) => {
     const refreshId = ++resourceRefreshId.current;
     const stillCurrent = () => refreshId === resourceRefreshId.current;
     clearDeepDiveState(false);
@@ -969,13 +1010,17 @@ export function ResourcePanel() {
     // Export/Findings consume this same object; storing only `servers` caused
     // them to recreate counts independently (and occasionally report a
     // healthy fleet beside warning hosts).
-    const resolved = await processResource(fetchedServers);
+    const resolved = fetchedPayload?.kpis ? fetchedPayload : await processResource(fetchedServers);
     if (!stillCurrent()) return;
+    const resolvedServers = (resolved.servers as ResourceServer[]) || fetchedServers;
     const resourcePayload = {
-      servers: fetchedServers,
-      kpis: resolved.kpis,
-      anomalies: resolved.anomalies,
-      executive_summary: resolved.executive_summary,
+      ...resolved,
+      servers: resolvedServers,
+      hours_back: resolved.hours_back ?? meta.hoursBack,
+      customer_name: meta.customer,
+      customer_status: meta.customerStatus,
+      customer_message: meta.customerMessage,
+      customer_source: meta.customer ? 'azure_vm_tags' : undefined,
     };
     setResource(resourcePayload);
     setFleetKpis((resolved.kpis as FleetKpis) || null);
@@ -997,7 +1042,7 @@ export function ResourcePanel() {
     // the button stays available for a retry.
     // The rows arrive as ResourceServer from the fetch and are read here as
     // ServerRow — the same widening `servers` already applies at line ~575.
-    void handleLoadDeepDive(fetchedServers as unknown as ServerRow[], meta.hoursBack, resourcePayload);
+    void handleLoadDeepDive(resolvedServers as unknown as ServerRow[], meta.hoursBack, resourcePayload);
   };
 
   const handleLoadDeepDive = async (
@@ -1514,6 +1559,11 @@ export function ResourcePanel() {
   const excludedNote = fleetKpis?.image_only
     ? ` \u00b7 ${fleetKpis.image_only} excluded (no telemetry)`
     : '';
+  const windowHours = Number(observationWindow?.requested_hours || data.resource?.hours_back || hoursBack);
+  const windowLabel = formatWindowHours(windowHours);
+  const sourceWindowSub = observationWindow?.start_utc && observationWindow?.end_utc
+    ? `${windowLabel} \u00b7 ${formatUtc(observationWindow.start_utc).split(', ')[0]} \u2192 ${formatUtc(observationWindow.end_utc).split(', ')[0]}`
+    : `Requested window \u00b7 ${windowLabel}`;
 
   return (
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
@@ -1529,7 +1579,7 @@ export function ResourcePanel() {
           sub={`${serverTypeCounts.APP || 0} APP \u00b7 ${serverTypeCounts.DB || 0} DB \u00b7 ${serverTypeCounts.SRE || 0} SRE${fleetKpis?.image_only ? ` \u00b7 ${fleetKpis.image_only} no telemetry` : ''}`}
           accent="#3b82f6"
         />
-        {isAzureSource && <KpiStatCard label="Source" value="Azure Monitor" valueColor="#22d3ee" sub={`Live \u00b7 last ${hoursBack}h`} accent="#22d3ee" />}
+        {isAzureSource && <KpiStatCard label="Source" value="Azure Monitor" valueColor="#22d3ee" sub={sourceWindowSub} accent="#22d3ee" />}
         {fleetKpis ? (
           <>
             <KpiStatCard
@@ -1593,6 +1643,29 @@ export function ResourcePanel() {
           </>
         )}
       </Box>
+
+      {isAzureSource && (
+        <Box
+          className={classes.section}
+          style={{ borderRadius: 10, border: '1px solid rgba(34,211,238,.28)', background: 'rgba(34,211,238,.04)', padding: '12px 14px' }}
+        >
+          <Box display="flex" alignItems="center" justifyContent="space-between" style={{ gap: 10, flexWrap: 'wrap' }}>
+            <Typography variant="subtitle2">Evidence window &amp; calculation basis</Typography>
+            <span className="metric-badge metric-badge-teal">REQUESTED {windowLabel}</span>
+          </Box>
+          <Typography variant="body2" style={{ marginTop: 5, fontWeight: 700 }}>
+            {observationWindow?.start_utc && observationWindow?.end_utc
+              ? `${formatUtc(observationWindow.start_utc)} \u2192 ${formatUtc(observationWindow.end_utc)}`
+              : `${windowLabel} rolling window; exact UTC bounds were not stored in this older result. Re-fetch to capture them.`}
+          </Typography>
+          <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, lineHeight: 1.5 }}>
+            {`Avg = arithmetic mean of valid Azure buckets (missing buckets excluded). Peak = highest Azure Maximum bucket and drives role status. Current = latest returned bucket. Snapshot grain: ${observationWindow?.snapshot_grain_hours || (windowHours <= 72 ? 1 : 6)}h${observationWindow?.cache_ttl_seconds ? ` \u00b7 cache up to ${observationWindow.cache_ttl_seconds / 60} min` : ''}.`}
+          </Typography>
+          <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 2 }}>
+            {`Coverage: CPU ${fleetKpis?.cpu_reporting || 0}/${fleetTotal} \u00b7 Memory ${fleetKpis?.mem_reporting || 0}/${fleetTotal} \u00b7 Disk ${fleetKpis?.disk_reporting || 0}/${fleetTotal}. APP, DB, and SRE hosts use different role thresholds; these limits are not fleet averages.`}
+          </Typography>
+        </Box>
+      )}
 
       {/* \u2500\u2500 Fleet Diagnosis \u2014 ported from renderResourceExecutiveSummary() (app.js).
           True verdict after filtering aggregation-artifact false alarms, with

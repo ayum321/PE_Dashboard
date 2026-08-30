@@ -293,7 +293,7 @@ def _build_verdict_reason(
         or _safe_int((kpi.get("redflags", {}) or {}).get("critical"))
         or 0
     )
-    if findings_crit > 0:
+    if findings_crit > 0 and not (has_det_reason and "critical finding" in (det_verdict_reason or "").lower()):
         facts.append(f"{findings_crit} critical finding(s)")
 
     reg_count = _safe_int(batch.get("regression_count"))

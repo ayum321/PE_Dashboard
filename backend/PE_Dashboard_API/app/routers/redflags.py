@@ -548,16 +548,17 @@ def red_flags(body: RedFlagsRequest) -> RedFlagsResponse:  # noqa: C901
                     _ev,
                 )
             elif _pct < 90:
-                # Mildly under — just outside the ±10% accepted band. Lightest touch.
+                _floor_gap = 90.0 - _pct
+                _distance = "materially below" if _floor_gap >= 15.0 else "below"
                 _q = _vol_pick([
-                    (f"{_label} is a little under the accepted range, at {_pct:.0f}% of contract. Is it "
+                    (f"{_label} is {_distance} the accepted range, at {_pct:.0f}% of contract. Is it "
                      f"expected to grow toward {_sow_s}, and is that captured in a plan?"),
-                    (f"This sits just below the ±10% band. Please confirm whether the remaining "
+                    (f"This sits {_floor_gap:.1f} percentage points below the 90% floor. Please confirm whether the remaining "
                      f"{_gap:,.0f} of {_low} will be loaded, and flag any growth for a quick TEST check first."),
                 ], _seed)
                 add_flag(
                     "Volume",
-                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — just below the accepted ±10% range.",
+                    f"{_label} is at {_pct:.1f}% of the contracted volume ({_act_s} of {_sow_s}) — {_floor_gap:.1f} percentage points below the accepted 90% floor.",
                     _q,
                     "LOW",
                     _ev,

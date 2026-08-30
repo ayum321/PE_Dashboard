@@ -2685,7 +2685,12 @@ def search_vms(credential, query: str,
             "subscription_id": row.get("subscriptionId", ""),
             "tags":           tags,
             "product_group":  _extract_product_group(tags),
-            "customer":       tags.get("CustomerName") or tags.get("customerName") or "",
+            "customer":       (
+                tags.get("CustomerName") or tags.get("customerName")
+                or tags.get("Customer") or tags.get("customer")
+                or tags.get("ClientName") or tags.get("clientName")
+                or tags.get("Client") or tags.get("client") or ""
+            ),
             "application":    tags.get("Application") or tags.get("application") or "",
             "environment":    tags.get("Environment_Type") or tags.get("environment_type")
                               or tags.get("Environment") or "",
@@ -2942,6 +2947,7 @@ def _build_server_records(credential, vms: List[dict], hours_back: int,
             "cpu_max_pct":   cpu_max_pct,
             "cpu_min_pct":   cpu_min_pct,
             "mem_used":      mem_pct,
+            "mem_avg":       mem_pct,
             "mem_max_pct":   mem_max_pct,
             "mem_min_pct":   mem_min_pct,
             "mem_total_gb":  mem_total_gb,

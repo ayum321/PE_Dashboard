@@ -292,7 +292,8 @@ def normalize_server(s: dict) -> Dict[str, Any]:
     raw_cpu = _opt_round(s.get("cpu_used"))
     raw_mem = _opt_round(s.get("mem_used"))
     raw_disk = _opt_round(s.get("disk_used_max"))
-    raw_cpu_avg = _opt_round(s.get("cpu_avg"))
+    raw_cpu_avg = _opt_round(s.get("cpu_avg") if s.get("cpu_avg") is not None else s.get("cpu_avg_pct"))
+    raw_mem_avg = _opt_round(s.get("mem_avg") if s.get("mem_avg") is not None else s.get("mem_avg_pct"))
     raw_mem_gb = _opt_round(s.get("mem_total_gb"))
     raw_vcpus = _opt_round(s.get("vcpus"), 0)
     cpu     = raw_cpu if raw_cpu is not None else 0.0
@@ -373,6 +374,7 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         "cpu_avg_pct":    round(cpu_avg, 1) if cpu_available else None,
         "effective_cpu":  round(effective_cpu, 1) if cpu_available else None,
         "mem_pct":        round(mem, 1) if mem_available else None,
+        "mem_avg_pct":    round(raw_mem_avg, 1) if mem_available and raw_mem_avg is not None else None,
         "mem_gb":         round(mem_gb, 1) if mem_available else None,
         "disk_pct":       round(disk, 1) if disk_available else None,
         # ── Period MAX/MIN — Azure-live only (None when parsed from a static

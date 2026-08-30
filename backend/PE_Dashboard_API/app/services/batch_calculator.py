@@ -3116,6 +3116,21 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     has_sub_app = "Sub_Application" in df.columns and (df["Sub_Application"] != "UNKNOWN").any()
     ok_count    = int((df["Status"] == "OK").sum()) if has_status else 0
     fail_count  = int((df["Status"] == "FAILED").sum()) if has_status else 0
+    failure_jobs: list[dict[str, Any]] = []
+    if has_status and fail_count:
+        _failed = df[df["Status"] == "FAILED"]
+        _failure_group_cols = [c for c in ("Sub_Application", "Job_Name") if c in _failed.columns]
+        if _failure_group_cols:
+            failure_jobs = (
+                _failed.groupby(_failure_group_cols, dropna=False)
+                .size().reset_index(name="fail_count")
+                .sort_values("fail_count", ascending=False)
+                .to_dict("records")
+            )
+            for _failure_job in failure_jobs:
+                _failure_job["fail_count"] = int(_failure_job["fail_count"])
+                for _failure_key in _failure_group_cols:
+                    _failure_job[_failure_key] = str(_failure_job.get(_failure_key) or "?")
 
     # Confidence score (0-100): penalise missing columns, short date range, etc.
     conf = 100.0
@@ -3286,6 +3301,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "date_range":       [str(unique_dates[0]), str(unique_dates[-1])] if unique_dates else [],
         "ok_runs":          ok_count,
         "fail_runs":        fail_count,
+        "failure_jobs":     failure_jobs,
         "sla_source":       sla_src_type,
         "sla_daily_hrs":    global_ceil,
         "sla_ceiling":      global_ceil,   # canonical name for downstream callers
@@ -4189,6 +4205,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         "sla_heatmap":  _build_sla_heatmap(m["daily"], ceiling=m.get("sla_ceiling")),
         "hour_heatmap": _build_hour_heatmap(_df_payload_scope),
         "failure_grid": _build_failure_grid(_df_payload_scope),
+        "failure_jobs": m.get("failure_jobs") or [],
         "longpole_matrix": _longpole_matrix,
         "daily_jobs":   _build_daily_jobs(_df_payload_scope),
     }

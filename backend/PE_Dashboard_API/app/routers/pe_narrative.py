@@ -69,7 +69,7 @@ _SECTIONS = [
         "guide": (
             "Average + peak CPU / memory / disk per server role, each shown against "
             "the role-aware governing threshold (APP/DB/SRE differ; DB memory 80-92% "
-            "is the expected SGA/PGA band). Flag any host whose peak exceeds its role ceiling."
+            "is the expected SGA/PGA band). Flag any host whose peak exceeds its role's OK limit."
         ),
         "default_table": {
             "headers": ["Resource Type", "Avg", "Peak", "Governing Threshold", "Status"],
@@ -1126,8 +1126,8 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         _pair_sentence = ""
         if _pair_n is not None and compliance is not None and abs(_pair_n - float(compliance)) > 0.1:
             _pair_sentence = (
-                f" Counting every sub-app × day combination individually, "
-                f"compliance is {_pair_n:.1f}%."
+                f" Secondary denominator: {_pair_n:.1f}% of sub-app × day windows were compliant; "
+                f"the {_comp_s} headline remains the stricter calendar-day sign-off metric."
             )
 
         prose_b = (
@@ -1218,12 +1218,12 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         return "HIGH"
 
     def _cpu_thresh_label(ok: float, warn: float) -> str:
-        return f"role ceil {ok:.0f}% / warn {warn:.0f}%"
+        return f"OK ≤{ok:.0f}% · WATCH ≤{warn:.0f}% · HIGH >{warn:.0f}%"
 
     def _mem_thresh_label(stype: str) -> str:
         if stype == "DB":
-            return f"{DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% expected (SGA/PGA)"
-        return f"warn {MEM_WARN:.0f}% / crit {MEM_CRIT:.0f}%"
+            return f"Expected {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% · HIGH >{DB_MEM_EXPECTED_HI:.0f}%"
+        return f"OK ≤{MEM_WARN:.0f}% · WATCH ≤{MEM_CRIT:.0f}% · HIGH >{MEM_CRIT:.0f}%"
 
     for stype, items in type_buckets.items():
         def _pick(srv, *fields):
@@ -1233,22 +1233,35 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                     return v
             return 0.0
 
-        cpu_vals = [_pick(s, "cpu_pct", "cpu_utilisation", "cpu_usage") for s in items]
-        mem_vals = [_pick(s, "mem_pct", "mem_utilisation", "mem_usage", "memory_pct") for s in items]
-        cpu_avg  = sum(cpu_vals) / len(cpu_vals) if cpu_vals else 0
-        cpu_peak = max(cpu_vals, default=0)
-        mem_avg  = sum(mem_vals) / len(mem_vals) if mem_vals else 0
-        mem_peak = max(mem_vals, default=0)
+        def _pick_optional(srv, *fields):
+            for f in fields:
+                v = _num(srv.get(f))
+                if v is not None:
+                    return v
+            return None
+
+        cpu_avg_vals = [v for s in items if (v := _pick_optional(s, "cpu_avg_pct", "cpu_avg")) is not None]
+        cpu_peak_vals = [v for s in items if (v := _pick_optional(s, "cpu_max_pct", "cpu_used", "cpu_pct", "cpu_utilisation", "cpu_usage")) is not None]
+        mem_avg_vals = [v for s in items if (v := _pick_optional(s, "mem_avg_pct", "mem_avg")) is not None]
+        mem_peak_vals = [v for s in items if (v := _pick_optional(s, "mem_max_pct", "mem_used", "mem_pct", "mem_utilisation", "mem_usage", "memory_pct")) is not None]
+        cpu_avg  = sum(cpu_avg_vals) / len(cpu_avg_vals) if cpu_avg_vals else None
+        cpu_peak = max(cpu_peak_vals) if cpu_peak_vals else None
+        mem_avg  = sum(mem_avg_vals) / len(mem_avg_vals) if mem_avg_vals else None
+        mem_peak = max(mem_peak_vals) if mem_peak_vals else None
         label    = {"APP": "Application", "DB": "Database", "SRE": "SRE/Batch"}.get(stype, stype)
         _rct     = role_cpu_thresholds(stype)
         _c_ok, _c_warn = _rct["ok"], _rct["warn"]
         # Each row now carries the governing threshold the grader actually applied
         # for this role + a peak-vs-threshold status, so a reviewer can verify the
         # math in-place instead of trusting a summary sentence that may disagree.
-        inf_rows.append([f"{label} CPU",    f"{cpu_avg:.1f}%", f"{cpu_peak:.1f}%",
-                         _cpu_thresh_label(_c_ok, _c_warn), _cpu_status(cpu_peak, _c_ok, _c_warn)])
-        inf_rows.append([f"{label} Memory", f"{mem_avg:.1f}%", f"{mem_peak:.1f}%",
-                         _mem_thresh_label(stype), _mem_status(stype, mem_peak)])
+        inf_rows.append([f"{label} CPU", f"{cpu_avg:.1f}%" if cpu_avg is not None else "N/A",
+                         f"{cpu_peak:.1f}%" if cpu_peak is not None else "N/A",
+                         _cpu_thresh_label(_c_ok, _c_warn),
+                         _cpu_status(cpu_peak, _c_ok, _c_warn) if cpu_peak is not None else "NO PEAK DATA"])
+        inf_rows.append([f"{label} Memory", f"{mem_avg:.1f}%" if mem_avg is not None else "N/A",
+                         f"{mem_peak:.1f}%" if mem_peak is not None else "N/A",
+                         _mem_thresh_label(stype),
+                         _mem_status(stype, mem_peak) if mem_peak is not None else "NO PEAK DATA"])
 
     if not inf_rows:
         inf_rows = [["NA", "NA", "NA", "NA", "NA"]]
@@ -1282,7 +1295,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             f"APP CPU {_app_ok:.0f}%, DB CPU {_db_ok:.0f}%, SRE CPU {_sre_ok:.0f}%; "
             f"DB memory {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% is the expected "
             "SGA/PGA band and is not alarmed. "
-            + (f"{len(role_hot)} host(s) read above their role ceiling on peak "
+            + (f"{len(role_hot)} host(s) read above their role's OK limit on peak "
                f"({', '.join(role_hot[:3])}); "
                if role_hot
                else "No host reads above its role-specific ceiling on peak; ")
@@ -1303,10 +1316,17 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 )
             )
         )
+        _obs = r.get("observation_window") or {}
+        _obs_range = (
+            f" Requested Azure window: {_obs.get('start_utc')} to {_obs.get('end_utc')}."
+            if _obs.get("start_utc") and _obs.get("end_utc") else ""
+        )
         inf_caption = (
-            f"Role-aware thresholds — APP CPU {_app_ok:.0f}% / DB CPU {_db_ok:.0f}% / "
+            f"AVG = mean of valid period buckets; N/A means the source did not provide a period average. "
+            f"PEAK = worst observed bucket on any host in the role and governs status. "
+            f"Role limits: APP CPU {_app_ok:.0f}% / DB CPU {_db_ok:.0f}% / "
             f"SRE CPU {_sre_ok:.0f}%; DB memory {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% "
-            f"expected (SGA/PGA), other memory crit {MEM_CRIT:.0f}%. Peak = worst single host in the role."
+            f"expected (SGA/PGA), other memory HIGH >{MEM_CRIT:.0f}%.{_obs_range}"
         )
     else:
         prose_i = (
@@ -1547,7 +1567,10 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             + (f" and breached it on {wbd}" if wbd else "") + "."
         )
         if _window_pair_n is not None and abs(_window_pair_n - _day_comp) > 0.1:
-            _win_line += f" (Counted per sub-app \u00d7 day, window compliance is {_window_pair_n:.1f}%.)"
+            _win_line += (
+                f" Secondary denominator: {_window_pair_n:.1f}% of sub-app × day windows were compliant; "
+                f"the {_day_comp:.1f}% headline is calendar-day compliance."
+            )
         parts.append(_win_line)
     elif _comp_n is not None:
         parts.append(f"Batch SLA compliance: {_comp_n:.1f}%.")

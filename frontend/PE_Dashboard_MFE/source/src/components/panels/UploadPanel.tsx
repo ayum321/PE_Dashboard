@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Button, Paper, Typography, makeStyles } from '@material-ui/core';
 import { useHistory } from 'react-router-dom';
 import {
+  DashboardPayload,
   disconnectAzure,
   getAzureAuthStatus,
   getExecutiveDashboard,
@@ -21,7 +22,7 @@ import {
 import { AppData, useAppData } from '../../context/AppDataContext';
 import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
 import { BatchIcon, BenchmarkIcon, ResourceIcon, SlaMatrixIcon, SowIcon } from '../../theme/icons';
-import { AzureFetchModal } from '../shared/AzureFetchModal';
+import { AzureFetchMeta, AzureFetchModal } from '../shared/AzureFetchModal';
 import { UploadTile } from '../shared/UploadTile';
 
 type UploadKey = 'batch' | 'resource' | 'sla' | 'benchmark' | 'sow';
@@ -450,8 +451,18 @@ export function UploadPanel() {
     setAzureModalOpen(true);
   };
 
-  const handleAzureFetched = (servers: ResourceServer[]) => {
-    setResource({ servers });
+  const handleAzureFetched = (servers: ResourceServer[], meta: AzureFetchMeta, resolved: DashboardPayload) => {
+    const resource = {
+      ...resolved,
+      servers,
+      hours_back: resolved.hours_back ?? meta.hoursBack,
+      customer_name: meta.customer,
+      customer_status: meta.customerStatus,
+      customer_message: meta.customerMessage,
+      customer_source: meta.customer ? 'azure_vm_tags' : undefined,
+    };
+    setResource(resource);
+    if (!data.customerName && meta.customer) setCustomerName(meta.customer);
     setAzureMessage(`Live Azure Monitor metrics fetched for ${servers.length} server(s).`);
     // Matches vanilla's runAzureFetch(): jump straight to Resource Review so
     // the fetch result is immediately visible instead of sitting on Upload.

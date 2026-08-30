@@ -6,7 +6,7 @@ POST /api/final-judgment
             redflags, executive, findings, issues }   (any subset; all optional)
     response: {
         verdict: str,
-        decision: "GO" | "HOLD" | "REMEDIATE",
+        decision: "GO" | "GO_WITH_NOTES" | "HOLD" | "BLOCKED" | "REMEDIATE",
         grade: "A" | "B" | "C" | "D" | "F",
         score: float,         # 0..100
         pillars: { resource, batch, sla, benchmark, sow, correlation } scores,
@@ -55,6 +55,10 @@ class FinalJudgmentResponse(BaseModel):
     pillars:      Dict[str, float]
     pillar_weights: Dict[str, float] = {}
     pillar_contributions: Dict[str, float] = {}
+    pillar_statuses: Dict[str, str] = {}
+    evidence_coverage_pct: float = 0.0
+    missing_pillars: List[str] = []
+    scoring_formula: str = ""
     pillar_details: Dict[str, Any] = {}        # per-pillar base/final/penalty breakdown
     evidence_chain: List[Dict[str, Any]] = []  # auditable fact→threshold→points ledger
     cross_pillar_links: List[Dict[str, Any]] = []  # computed (not LLM-guessed) correlations
@@ -64,6 +68,7 @@ class FinalJudgmentResponse(BaseModel):
     next_actions: List[str]
     pillars_present: List[str]
     ai_model:     Optional[str] = None
+    critical_findings: int = 0
 
 
 # ── Per-pillar scoring ────────────────────────────────────────────
@@ -226,7 +231,7 @@ def _resource_despite(kpi_evidence: Dict[str, Any]) -> Optional[str]:
 def _decision_with_reason(
     score: float,
     pillars: Dict[str, float],
-    redflag_critical: int,
+    critical_findings: int,
     loaded_count: int,
     kpi_evidence: Optional[Dict[str, Any]] = None,
 ) -> tuple:
@@ -251,9 +256,9 @@ def _decision_with_reason(
         if val < 40:
             return ("BLOCKED",
                     _with_support(f"{name.upper()} score {val:.1f}% < 40% hard-block floor"))
-    if redflag_critical >= 3:
+    if critical_findings >= 1:
         return ("BLOCKED",
-                f"{redflag_critical} CRITICAL red-flags >= 3 hard-block floor")
+                f"{critical_findings} CRITICAL finding(s) require resolution before sign-off")
 
     # SLA-specific hard block
     sla_score = pillars.get("sla")
@@ -458,29 +463,50 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         sow=body.sow,
     )
 
-    # 2. Composite score — weighted, only over pillars present
-    #    Pillars with no data get neutral 50 in the numerator
-    #    but their weight still counts in the denominator
+    # 2. Performance score — weighted only over pillars actually present.
+    # Missing evidence is reported separately as coverage; it must not silently
+    # become a synthetic score of 50 and drag an otherwise healthy audit down.
     weights = {"batch": 0.30, "sla": 0.25, "resource": 0.22,
                "correlation": 0.10, "benchmark": 0.08, "sow": 0.05}
-    
+
     pillar_contributions: Dict[str, float] = {}
+    loaded_weight = sum(weights.get(k, 0.0) for k in pillars)
+    evidence_coverage_pct = round(loaded_weight * 100.0 / sum(weights.values()), 1)
+    missing_pillars = [k for k in weights if k not in pillars]
     if pillars:
-        w_total = sum(weights.values())
-        weighted_sum = 0.0
-        for k, w in weights.items():
-            val = pillars.get(k, 50.0)  # neutral 50 for missing pillars
-            contrib = val * w / w_total
+        weighted_sum = sum(pillars[k] * weights.get(k, 0.0) for k in pillars)
+        for k, val in pillars.items():
+            w = weights.get(k, 0.0)
+            contrib = val * w / loaded_weight if loaded_weight else 0.0
             pillar_contributions[k] = round(contrib, 2)
-            weighted_sum += val * w
-        score = round(weighted_sum / w_total, 1)
+        score = round(weighted_sum / loaded_weight, 1) if loaded_weight else 0.0
     else:
         score = 0.0
 
-    # 3. Red-flag critical count drives the decision matrix
+    # 3. PE Findings is the authoritative action-required count. Red flags are
+    # consultative questions and must not silently replace the findings count.
     rf_critical = 0
     if body.redflags:
         rf_critical = int((body.redflags.get("by_risk") or {}).get("CRITICAL") or 0)
+    findings_critical = 0
+    critical_sources: set[str] = set()
+    if body.findings:
+        findings_critical = int((body.findings.get("summary") or {}).get("critical") or 0)
+        critical_sources = {
+            str(f.get("source") or "").lower()
+            for f in (body.findings.get("findings") or [])
+            if str(f.get("level") or "").lower() == "critical"
+        }
+    decision_critical = findings_critical if body.findings is not None else rf_critical
+    pillar_statuses = {
+        name: (
+            "BLOCKED" if name in critical_sources else
+            "FAIL" if value < 60 else
+            "WATCH" if value < 90 else
+            "PASS"
+        )
+        for name, value in pillars.items()
+    }
 
     # Build named KPI evidence once, before both deterministic decisioning and
     # LLM reconciliation, so every downstream surface cites the same facts.
@@ -488,7 +514,7 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
 
     grade    = _grade(score) if pillars else "N/A"
     decision, verdict_reason = _decision_with_reason(
-        score, pillars, rf_critical, len(pillars), kpi_ev
+        score, pillars, decision_critical, len(pillars), kpi_ev
     ) if pillars else ("INSUFFICIENT_DATA", "No pillar data loaded")
 
     # 4. AI verdict via narrator (best-effort) — narrate FROM the computed ledger
@@ -497,6 +523,7 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
     digest["composite_grade"] = grade
     digest["proposed_decision"] = decision
     digest["redflag_critical"]  = rf_critical
+    digest["critical_findings"] = decision_critical
     digest["evidence_facts"] = kpi_ev
     digest["verdict_reason"] = verdict_reason
     digest["scoring_mode"] = scoring_mode
@@ -540,8 +567,8 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
                 llm_grade_parsed = gm.group(1)
 
     det_actions: List[str] = []
-    if rf_critical >= 1:
-        det_actions.append(f"Resolve {rf_critical} CRITICAL red-flag(s) before next release")
+    if decision_critical >= 1:
+        det_actions.append(f"Resolve {decision_critical} CRITICAL finding(s) before next release")
     if pillars.get("batch", 100) < 90:
         det_actions.append("Stabilise batch SLA — investigate top breaching jobs")
     if pillars.get("resource", 100) < 80:
@@ -592,6 +619,10 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         pillars=pillars,
         pillar_weights=weights,
         pillar_contributions=pillar_contributions,
+        pillar_statuses=pillar_statuses,
+        evidence_coverage_pct=evidence_coverage_pct,
+        missing_pillars=missing_pillars,
+        scoring_formula="weighted mean of loaded pillars; missing pillars reported as evidence coverage",
         pillar_details=pillar_details,
         evidence_chain=evidence_chain,
         cross_pillar_links=cross_pillar_links,
@@ -601,6 +632,7 @@ def final_judgment(body: FinalJudgmentRequest) -> FinalJudgmentResponse:
         next_actions=final_actions,
         pillars_present=pillars_present,
         ai_model=ai_model,
+        critical_findings=decision_critical,
     )
     try:
         from services import session_cache

@@ -1,7 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box,
-  Paper,
   Table,
   TableBody,
   TableCell,
@@ -10,7 +9,7 @@ import {
   Typography,
 } from '@material-ui/core';
 import { useAppData } from '../../context/AppDataContext';
-import { KpiStatCard } from '../shared/KpiStatCard';
+import { DecisionBadge } from '../shared/DecisionBadge';
 
 type NarrativeTable = { headers?: unknown[]; rows?: unknown[][] };
 type NarrativeKpi = { label?: string; value?: unknown; sub?: string; tone?: string; binding?: boolean };
@@ -42,11 +41,11 @@ type BackendUat = {
   regressions?: number;
 };
 
-const SECTION_STYLE: Record<string, { accent: string; number: number }> = {
-  data_volume: { accent: '#22d3ee', number: 1 },
-  batch_sla: { accent: '#f59e0b', number: 2 },
-  infrastructure: { accent: '#a855f7', number: 3 },
-  uat: { accent: '#10d96e', number: 4 },
+const SECTION_STYLE: Record<string, { accent: string; number: number; icon: string; label: string }> = {
+  data_volume: { accent: '#22d3ee', number: 1, icon: '📦', label: 'Data Volume (SOW)' },
+  batch_sla: { accent: '#f59e0b', number: 2, icon: '⚙️', label: 'Batch & SLA' },
+  infrastructure: { accent: '#a855f7', number: 3, icon: '🖥️', label: 'Infrastructure' },
+  uat: { accent: '#10d96e', number: 4, icon: '🧪', label: 'Benchmark / UAT' },
 };
 
 const QUESTION_SECTION: Record<string, string> = {
@@ -85,80 +84,33 @@ const TONE_COLOR: Record<string, string> = {
 
 const text = (value: unknown): string => (value === undefined || value === null || value === '' ? '—' : String(value));
 
-function Questions({ sectionId, accent, flags }: { sectionId: string; accent: string; flags: RedFlag[] }) {
-  const questions = flags
-    .filter((flag) => QUESTION_SECTION[flag.category || ''] === sectionId)
-    .sort((a, b) => ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].indexOf(a.risk || '') - ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].indexOf(b.risk || ''))
-    .slice(0, sectionId === 'batch_sla' ? 5 : 3);
-
-  if (!questions.length) return null;
-
-  return (
-    <Box style={{ borderTop: '1px solid #213060', background: `${accent}0d`, padding: '14px 16px' }}>
-      <Typography variant="caption" style={{ color: accent, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
-        Questions to raise with the customer
-      </Typography>
-      {questions.map((flag, index) => {
-        const color = TONE_COLOR[(flag.risk || '').toLowerCase()] || '#3b82f6';
-        return (
-          <Box key={flag.id || `${sectionId}-${index}`} style={{ display: 'flex', gap: 10, borderTop: index ? '1px solid rgba(33,48,96,.55)' : undefined, marginTop: index ? 10 : 6, paddingTop: index ? 10 : 0 }}>
-            <span style={{ background: `${color}26`, color, borderRadius: 999, fontSize: 11, fontWeight: 700, height: 20, minWidth: 20, textAlign: 'center', lineHeight: '20px' }}>{index + 1}</span>
-            <Box>
-              {flag.context && <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>{flag.context}</Typography>}
-              <Typography variant="body2">{flag.question || 'Review this evidence with the customer.'}</Typography>
-              {flag.data_point && <Typography variant="caption" style={{ color: '#6b7db3' }}>{flag.data_point}</Typography>}
-            </Box>
-          </Box>
-        );
-      })}
-    </Box>
-  );
-}
-
-function BatchVerdictPanel({ panel }: { panel?: NarrativePanel }) {
-  if (!panel?.verdict) return null;
-  const verdict = panel.verdict;
-  const color = TONE_COLOR[verdict.tone || ''] || '#3b82f6';
-  return (
-    <Box style={{ borderBottom: '1px solid #213060', padding: '12px 16px' }}>
-      <Box style={{ borderLeft: `3px solid ${color}`, background: `${color}12`, padding: '9px 12px' }}>
-        <Typography variant="caption" style={{ color, fontWeight: 700, letterSpacing: '.06em' }}>{text(verdict.status)}</Typography>
-        <Typography variant="body2" style={{ fontWeight: 600, marginTop: 3 }}>{text(verdict.headline)}</Typography>
-      </Box>
-      {!!panel.kpis?.length && (
-        <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 10, marginTop: 12 }}>
-          {panel.kpis.map((kpi, index) => (
-            <KpiStatCard
-              key={`${kpi.label}-${index}`}
-              label={text(kpi.label)}
-              value={text(kpi.value)}
-              sub={kpi.sub || ''}
-              accent={TONE_COLOR[kpi.tone || ''] || '#3b82f6'}
-            />
-          ))}
-        </Box>
-      )}
-      {panel.explainer && <Typography variant="caption" style={{ color: '#22d3ee', display: 'block', marginTop: 10 }}>{panel.explainer}</Typography>}
-      {panel.direction && <Typography variant="caption" style={{ color: '#f0f4ff', display: 'block', marginTop: 8 }}>{panel.direction}</Typography>}
-    </Box>
-  );
-}
-
-/** The same deterministic structured response rendered by the FastAPI PE Findings page. */
+/** Tabbed Synthesized View of the 4 Evidence Pillars. */
 export function PeReviewSummary() {
   const { data } = useAppData();
+  const [activeTab, setActiveTab] = useState<string>('data_volume');
+  const [expandedProseTabs, setExpandedProseTabs] = useState<Record<string, boolean>>({});
+  const [expandedQuestionsTabs, setExpandedQuestionsTabs] = useState<Record<string, boolean>>({});
+
   const narrative = data.peNarrative;
   if (!narrative) return null;
 
-  const verdict = text(narrative.verdict).toUpperCase();
-  const verdictColor = verdict === 'APPROVED' ? '#10d96e' : verdict === 'BLOCKED' ? '#f43f5e' : '#f59e0b';
   const sections = (narrative.sections as NarrativeSection[]) || [];
   const flags = (data.redFlags?.flags as RedFlag[]) || [];
   const backendUat = data.findings?.uat as BackendUat | undefined;
-  // UAT questions must be evidence-led. The backend may support them with an
-  // explicit UAT artefact, a UI benchmark, or a batch-performance comparison;
-  // therefore use the returned UAT section as the contract, but suppress an
-  // explicit missing/NA placeholder.
+  const finalJudgment = data.finalJudgment as { decision?: string; verdict?: string; verdict_reason?: string; pillars?: Record<string, number> } | null;
+  const pillarScores = (finalJudgment?.pillars as Record<string, number>) || {};
+
+  // The narrative's own verdict/summary text is generated ahead of final
+  // judgment scoring and can go stale the moment findings/final-judgment
+  // are recomputed (e.g. a new critical finding lands after the narrative
+  // was drafted). Final judgment's decision is the single source of truth
+  // for sign-off status, so whenever it's present it takes over the
+  // top-level verdict display entirely — the narrative's own summary line
+  // is never rendered here once an authoritative decision exists.
+  const authoritativeDecision = finalJudgment?.decision ? String(finalJudgment.decision) : null;
+  const authoritativeReason = String(finalJudgment?.verdict_reason || finalJudgment?.verdict || '');
+
+  // UAT evidence detection
   const narrativeHasUatEvidence = sections.some((section) => {
     if ((section.id || '').toLowerCase() !== 'uat') return false;
     const evidenceText = [
@@ -199,60 +151,296 @@ export function PeReviewSummary() {
     : sections;
   const visibleSections = sectionSource.filter((section) => (section.id || '').toLowerCase() !== 'uat' || hasUatEvidence);
 
-  return (
-    <Paper className="kpi-card" elevation={0} style={{ marginTop: 16, padding: 16 }}>
-      <Box display="flex" justifyContent="space-between" alignItems="flex-start" flexWrap="wrap" style={{ gap: 10 }}>
-        <Box>
-          <Box display="flex" alignItems="center" style={{ gap: 8 }}>
-            <Typography variant="h6">PE Review Summary</Typography>
-            <span className="metric-badge" style={{ color: verdictColor, borderColor: `${verdictColor}66`, background: `${verdictColor}1f` }}>{verdict}</span>
+  // Helper: get questions for a section
+  const getQuestions = (sectionId: string) =>
+    flags
+      .filter((flag) => QUESTION_SECTION[flag.category || ''] === sectionId)
+      .sort((a, b) => ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].indexOf(a.risk || '') - ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].indexOf(b.risk || ''))
+      .slice(0, sectionId === 'batch_sla' ? 5 : 3);
+
+  // Pillar scores & status
+  const getPillarStatus = (sectionId: string) => {
+    const pillarKey = { data_volume: 'sow', batch_sla: 'batch', infrastructure: 'resource', uat: 'benchmark' }[sectionId] || sectionId;
+    const score = pillarScores[pillarKey];
+    if (score == null) return { score: null, label: 'LOADED', color: '#3b82f6' };
+    if (score < 60) return { score, label: 'BLOCKED', color: '#f43f5e' };
+    if (score < 90) return { score, label: 'REVIEW', color: '#f59e0b' };
+    return { score, label: 'PASS', color: '#10d96e' };
+  };
+
+  const currentSection = visibleSections.find((s) => (s.id || '') === activeTab) || visibleSections[0];
+  const currentStyle = SECTION_STYLE[currentSection?.id || ''] || { accent: '#3b82f6', number: 1, icon: '📋', label: 'Section' };
+  const currentQuestions = currentSection ? getQuestions(currentSection.id || '') : [];
+  const currentTable = currentSection?.table || {};
+  const headers = currentTable.headers || [];
+  const rows = currentTable.rows || [];
+
+  const isInfra = currentSection?.id === 'infrastructure';
+  const peakIndex = headers.findIndex((h) => String(h).toUpperCase().includes('PEAK'));
+  const thresholdIndex = headers.findIndex((h) => String(h).toUpperCase().includes('THRESHOLD'));
+
+  const renderTableCell = (cell: unknown, ci: number, row: unknown[]) => {
+    let content = <>{text(cell)}</>;
+
+    if (isInfra && ci === peakIndex && thresholdIndex !== -1) {
+      const peakStr = String(cell);
+      const threshStr = String(row[thresholdIndex]);
+      const peakNum = parseFloat(peakStr.replace(/[^0-9.]/g, ''));
+      const threshNum = parseFloat(threshStr.replace(/[^0-9.]/g, ''));
+      
+      if (!isNaN(peakNum) && !isNaN(threshNum) && threshNum > 0) {
+        const pct = Math.min(100, Math.max(0, (peakNum / threshNum) * 100));
+        const color = pct < 60 ? '#10d96e' : pct <= 80 ? '#f59e0b' : '#f43f5e';
+        
+        content = (
+          <Box display="flex" alignItems="center" style={{ gap: 6, minWidth: 100 }}>
+            <span>{text(cell)}</span>
+            <Box className="pe-inline-gauge" style={{ width: 60 }}>
+              <Box className="pe-inline-gauge__bar">
+                <Box className="pe-inline-gauge__fill" style={{ width: `${pct}%`, background: color }} />
+              </Box>
+            </Box>
           </Box>
-          <Typography variant="body2" style={{ marginTop: 6 }}>{text(narrative.summary)}</Typography>
+        );
+      }
+    }
+    
+    return <TableCell key={ci} style={{ fontSize: 12 }}>{content}</TableCell>;
+  };
+
+  return (
+    <Box className="kpi-card" style={{ padding: '16px 20px', borderRadius: 14, marginTop: 14 }}>
+      {/* ── Pillar Tab Switcher ── */}
+      <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap" style={{ gap: 10, borderBottom: '1px solid rgba(33, 48, 96, .6)', paddingBottom: 12 }}>
+        <Box display="flex" flexWrap="wrap" style={{ gap: 8 }} role="tablist">
+          {visibleSections.map((sec) => {
+            const secId = sec.id || '';
+            const style = SECTION_STYLE[secId] || { accent: '#3b82f6', number: 1, icon: '📋', label: sec.title || 'Pillar' };
+            const stat = getPillarStatus(secId);
+            const isActive = activeTab === secId;
+
+            return (
+              <button
+                key={secId}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => setActiveTab(secId)}
+                style={{
+                  all: 'unset',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 14px',
+                  borderRadius: 10,
+                  background: isActive ? `${style.accent}18` : 'rgba(6, 12, 26, .5)',
+                  border: `1px solid ${isActive ? style.accent : 'rgba(33, 48, 96, .6)'}`,
+                  color: isActive ? '#f0f4ff' : '#91a7d8',
+                  fontWeight: isActive ? 800 : 600,
+                  fontSize: 13,
+                  transition: 'all .15s ease',
+                  boxShadow: isActive ? `0 0 16px ${style.accent}22` : 'none',
+                }}
+              >
+                <span>{style.icon}</span>
+                <span>{style.label}</span>
+                {stat.score != null && (
+                  <span
+                    style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 11,
+                      padding: '1px 6px',
+                      borderRadius: 4,
+                      background: `${stat.color}22`,
+                      color: stat.color,
+                      fontWeight: 800,
+                    }}
+                  >
+                    {stat.score.toFixed(0)}%
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </Box>
       </Box>
-      {narrative.verdict_reason && (
-        <Box style={{ borderLeft: `3px solid ${verdictColor}`, background: `${verdictColor}12`, marginTop: 12, padding: '9px 12px' }}>
-          <Typography variant="caption" style={{ color: verdictColor, fontWeight: 700 }}>PE DECISION</Typography>
-          <Typography variant="body2">{text(narrative.verdict_reason)}</Typography>
+
+      {/* ── Authoritative Final Decision ──
+          Rendered independent of pillar-tab content (even with zero
+          sections) because it reflects the sign-off gate, not a
+          per-pillar narrative — see comment above authoritativeDecision. */}
+      {authoritativeDecision && (
+        <Box
+          display="flex"
+          alignItems="center"
+          flexWrap="wrap"
+          style={{
+            gap: 12, marginTop: 14, padding: '10px 14px', borderRadius: 8,
+            border: '1px solid rgba(33, 48, 96, .6)', background: 'rgba(6, 12, 26, .5)',
+          }}
+        >
+          <DecisionBadge decision={authoritativeDecision} reason={authoritativeReason} compact />
+          {authoritativeReason && (
+            <Typography variant="body2" style={{ color: '#c7d4ed', fontWeight: 600 }}>
+              {authoritativeReason}
+            </Typography>
+          )}
         </Box>
       )}
 
-      {visibleSections.map((section, index) => {
-        const style = SECTION_STYLE[section.id || ''] || { accent: '#3b82f6', number: index + 1 };
-        const table = section.table || {};
-        const headers = table.headers || [];
-        const rows = table.rows || [];
-        return (
-          <Paper key={section.id || index} elevation={0} style={{ border: '1px solid #213060', marginTop: 12, overflow: 'hidden' }}>
-            <Box display="flex" alignItems="center" style={{ gap: 10, background: `${style.accent}12`, borderBottom: '1px solid #213060', padding: '10px 14px' }}>
-              <span style={{ border: `1px solid ${style.accent}77`, borderRadius: 4, color: style.accent, fontFamily: 'monospace', fontSize: 12, padding: '2px 7px' }}>{style.number}</span>
-              <Typography variant="subtitle2">{text(section.title)}</Typography>
+      {/* ── Active Pillar Synthesized Content ── */}
+      {currentSection && (
+        <Box style={{ marginTop: 14 }}>
+          {/* Header & Verdict */}
+          <Box display="flex" justifyContent="space-between" alignItems="flex-start" flexWrap="wrap" style={{ gap: 12, marginBottom: 12 }}>
+            <Box>
+              <Typography variant="h6" style={{ fontWeight: 800, color: '#f0f4ff' }}>
+                {currentStyle.icon} {text(currentSection.title)}
+              </Typography>
+              {currentSection.provenance && (
+                <Typography variant="caption" style={{ color: TONE_COLOR[currentSection.provenance.tone || ''] || '#6b7db3', fontWeight: 700 }}>
+                  {text(currentSection.provenance.label)} {currentSection.provenance.note ? `· ${currentSection.provenance.note}` : ''}
+                </Typography>
+              )}
             </Box>
-            {section.provenance && (
-              <Box style={{ borderBottom: '1px solid #213060', padding: '8px 14px' }}>
-                <Typography variant="caption" style={{ color: TONE_COLOR[section.provenance.tone || ''] || '#6b7db3', fontWeight: 700 }}>{text(section.provenance.label)}</Typography>
-                {section.provenance.note && <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>{section.provenance.note}</Typography>}
-              </Box>
-            )}
-            <BatchVerdictPanel panel={section.panel} />
-            {section.prose && <Typography variant="body2" style={{ borderBottom: '1px solid #213060', lineHeight: 1.6, padding: '12px 14px' }}>{section.prose}</Typography>}
-            {section.table_caption && <Typography variant="caption" style={{ color: style.accent, display: 'block', fontWeight: 700, padding: '10px 14px 4px', textTransform: 'uppercase' }}>{section.table_caption}</Typography>}
-            {!!headers.length && (
-              <Box style={{ overflowX: 'auto' }}>
-                <Table size="small" className="pe-table" aria-label={`${text(section.title)} evidence`}>
-                  <TableHead><TableRow>{headers.map((header, headerIndex) => <TableCell key={headerIndex} style={{ color: style.accent }}>{text(header)}</TableCell>)}</TableRow></TableHead>
+          </Box>
+
+          {/* Verdict Banner */}
+          {currentSection.panel?.verdict?.headline && (
+            <Box
+              style={{
+                borderLeft: `4px solid ${TONE_COLOR[currentSection.panel.verdict.tone || ''] || currentStyle.accent}`,
+                background: `${TONE_COLOR[currentSection.panel.verdict.tone || ''] || currentStyle.accent}14`,
+                padding: '10px 14px',
+                borderRadius: '0 8px 8px 0',
+                marginBottom: 12,
+              }}
+            >
+              <Typography variant="caption" style={{ color: TONE_COLOR[currentSection.panel.verdict.tone || ''] || currentStyle.accent, fontWeight: 800, letterSpacing: '.06em' }}>
+                {text(currentSection.panel.verdict.status)}
+              </Typography>
+              <Typography variant="body2" style={{ fontWeight: 700, marginTop: 2, color: '#f0f4ff' }}>
+                {text(currentSection.panel.verdict.headline)}
+              </Typography>
+            </Box>
+          )}
+
+          {/* KPIs Grid */}
+          {currentSection.panel?.kpis && currentSection.panel.kpis.length > 0 && (
+            <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, marginBottom: 12 }}>
+              {currentSection.panel.kpis.map((kpi, i) => (
+                <Box key={i} style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(33, 48, 96, .6)', background: 'rgba(6, 12, 26, .5)' }}>
+                  <Typography variant="caption" style={{ color: '#6b7db3', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 9.5 }}>
+                    {text(kpi.label)}
+                  </Typography>
+                  <Typography style={{ fontSize: 22, fontWeight: 800, color: TONE_COLOR[kpi.tone || ''] || currentStyle.accent, marginTop: 2, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {text(kpi.value)}
+                  </Typography>
+                  {kpi.sub && <Typography variant="caption" style={{ color: '#6b7db3', fontSize: 10 }}>{kpi.sub}</Typography>}
+                </Box>
+              ))}
+            </Box>
+          )}
+
+          {/* Prose */}
+          {currentSection.prose && (
+            <Box style={{ marginBottom: 12 }}>
+              {expandedProseTabs[currentSection.id || ''] ? (
+                <Box className="pe-info-bar" onClick={() => setExpandedProseTabs({ ...expandedProseTabs, [currentSection.id || '']: false })}>
+                  <Box className="pe-info-bar__text" style={{ whiteSpace: 'normal', color: '#c7d4ed', fontSize: 13, lineHeight: 1.6 }}>
+                    {currentSection.prose}
+                  </Box>
+                  <span className="pe-info-bar__toggle">▲ Collapse</span>
+                </Box>
+              ) : (
+                <Box className="pe-info-bar" onClick={() => setExpandedProseTabs({ ...expandedProseTabs, [currentSection.id || '']: true })}>
+                  <span style={{ fontSize: 13, filter: 'grayscale(1)' }}>ℹ️</span>
+                  <span className="pe-info-bar__text">
+                    {currentSection.prose.length > 80 ? `${currentSection.prose.substring(0, 80)}...` : currentSection.prose}
+                  </span>
+                  <span className="pe-info-bar__toggle">▼ Expand</span>
+                </Box>
+              )}
+            </Box>
+          )}
+
+          {/* Data Table */}
+          {headers.length > 0 && (
+            <Box style={{ marginBottom: 12 }}>
+              {currentSection.table_caption && (
+                <Typography variant="caption" style={{ color: currentStyle.accent, fontWeight: 800, letterSpacing: '.08em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>
+                  {currentSection.table_caption}
+                </Typography>
+              )}
+              <Box className="pe-table-shell" style={{ border: '1px solid rgba(59, 130, 246, .2)', borderRadius: 8 }}>
+                <Table size="small" className="pe-table">
+                  <TableHead>
+                    <TableRow>
+                      {headers.map((h, i) => (
+                        <TableCell key={i} style={{ color: currentStyle.accent, fontWeight: 800 }}>
+                          {text(h)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  </TableHead>
                   <TableBody>
-                    {rows.map((row, rowIndex) => (
-                      <TableRow key={rowIndex}>{(Array.isArray(row) ? row : [row]).map((cell, cellIndex) => <TableCell key={cellIndex}>{text(cell)}</TableCell>)}</TableRow>
+                    {rows.map((row, ri) => (
+                      <TableRow key={ri} hover>
+                        {(Array.isArray(row) ? row : [row]).map((cell, ci) => renderTableCell(cell, ci, Array.isArray(row) ? row : [row]))}
+                      </TableRow>
                     ))}
                   </TableBody>
                 </Table>
               </Box>
-            )}
-            <Questions sectionId={section.id || ''} accent={style.accent} flags={flags} />
-          </Paper>
-        );
-      })}
-    </Paper>
+            </Box>
+          )}
+
+          {/* Questions to raise */}
+          {currentQuestions.length > 0 && (
+            <Box
+              style={{
+                borderTop: `1px solid ${currentStyle.accent}33`,
+                background: `${currentStyle.accent}0a`,
+                padding: '12px 16px',
+                borderRadius: 8,
+                marginTop: 10,
+              }}
+            >
+              <Typography variant="caption" style={{ color: currentStyle.accent, fontWeight: 800, letterSpacing: '.08em', textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
+                Questions to raise with the customer ({currentQuestions.length})
+              </Typography>
+              <Box style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {currentQuestions.map((flag, i) => {
+                  if (!expandedQuestionsTabs[currentSection.id || ''] && i >= 2) return null;
+                  const qColor = TONE_COLOR[(flag.risk || '').toLowerCase()] || '#3b82f6';
+                  return (
+                    <Box
+                      key={flag.id || `${currentSection.id}-q-${i}`}
+                      className="pe-question-card"
+                      style={{ borderLeft: `4px solid ${qColor}` }}
+                    >
+                      {flag.context && <Typography className="pe-question-card__context">{flag.context}</Typography>}
+                      <Typography className="pe-question-card__text">{flag.question || 'Review this evidence with the customer.'}</Typography>
+                      {flag.data_point && <Typography className="pe-question-card__data">{flag.data_point}</Typography>}
+                    </Box>
+                  );
+                })}
+                {!expandedQuestionsTabs[currentSection.id || ''] && currentQuestions.length > 2 && (
+                  <button
+                    type="button"
+                    className="pe-view-toggle__btn"
+                    style={{ alignSelf: 'flex-start', marginTop: 4 }}
+                    onClick={() => setExpandedQuestionsTabs({ ...expandedQuestionsTabs, [currentSection.id || '']: true })}
+                  >
+                    Show {currentQuestions.length - 2} more questions
+                  </button>
+                )}
+              </Box>
+            </Box>
+          )}
+        </Box>
+      )}
+    </Box>
   );
 }

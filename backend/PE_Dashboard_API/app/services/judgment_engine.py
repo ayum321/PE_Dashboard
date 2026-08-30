@@ -285,6 +285,18 @@ def _score_sla(s: Optional[Dict[str, Any]], mode: str) -> Optional[PillarScore]:
                       f"0/{tot} runs breached their SLA ceiling",
                       "PASS", 0.0, value=0, citation=f"total_runs={tot}"))
 
+    # Workflow-level tight buffer penalty (near-breach workflows <= 5% buffer)
+    wfs = s.get("workflow_summary") or s.get("wf_low_buffer") or []
+    tight_wfs = [w for w in wfs if isinstance(w, dict) and _f(w.get("buffer_pct")) is not None and _f(w.get("buffer_pct")) <= 5.0]
+    if tight_wfs:
+        tight_names = ", ".join(w.get("workflow") or w.get("Sub_Application") or "?" for w in tight_wfs[:3])
+        p = _capped(len(tight_wfs) * 7.5, 15.0)
+        pen += p
+        ev.append(_ev("sla", "workflow_headroom",
+                      f"{len(tight_wfs)} workflow(s) operating with ≤5% SLA headroom ({tight_names})",
+                      "FAIL", -p, value=len(tight_wfs), threshold=">15% buffer",
+                      citation=f"tight_workflows={tight_names}"))
+
     return _finalize(ps, pen, mode, binding_base=wc)
 
 
@@ -294,10 +306,14 @@ def _score_sla(s: Optional[Dict[str, Any]], mode: str) -> Optional[PillarScore]:
 def _score_benchmark(bm: Optional[Dict[str, Any]], mode: str) -> Optional[PillarScore]:
     if not bm:
         return None
-    total = _i(bm.get("total_transactions")) or 0
-    if total == 0:
+    rows = bm.get("rows") or []
+    total = _i(_first(bm.get("total_transactions"), bm.get("total")))
+    if total is None:
+        total = len(rows)
+    if total <= 0:
         return None
     degraded = _i(bm.get("degraded")) or 0
+    degraded = min(degraded, total)
     base = max(0.0, 100.0 * (1.0 - degraded / total))
 
     ps = PillarScore("benchmark", base)
@@ -396,15 +412,24 @@ def _score_sow(sw: Optional[Dict[str, Any]], mode: str) -> Optional[PillarScore]
     metrics = sw.get("metrics") or []
     if not metrics:
         return None
-    optimal = sum(1 for m in metrics if str(m.get("status")).upper() == "OPTIMAL")
-    base = 100.0 * optimal / len(metrics)
+    # Both statuses are inside the comparator's contractual 70-110% window.
+    # Counting only OPTIMAL made compliant ACCEPTABLE rows score a defensive 0%.
+    status_points = {
+        "OPTIMAL": 100.0, "ACCEPTABLE": 100.0,
+        "LOW": 70.0, "UNDER": 70.0,
+        # Overages start from the full evidence base and receive the explicit
+        # magnitude penalty below; their critical finding is the sign-off gate.
+        "OVER": 100.0, "EXCEEDED": 100.0, "CRITICAL": 100.0,
+        "CRITICAL_OVER": 100.0, "BREACH": 100.0,
+    }
+    base = sum(status_points.get(str(m.get("status")).upper(), 0.0) for m in metrics) / len(metrics)
 
     ps = PillarScore("sow", base)
     ev = ps.evidence
     pen = 0.0
 
     over = [m for m in metrics
-            if str(m.get("status")).upper() in ("EXCEEDED", "CRITICAL", "OVER", "BREACH")]
+            if str(m.get("status")).upper() in ("EXCEEDED", "CRITICAL", "CRITICAL_OVER", "OVER", "BREACH")]
     if over:
         p = _capped(len(over) * pe_config.FJ_PEN_SOW_PER, pe_config.FJ_PEN_SOW_MAG_CAP)
         pen += p
@@ -726,7 +751,8 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # ── tone / status (window binds; critical findings always block) ──────────
     if (prime is not None and prime < 70.0) or crit_n > 0:
         tone, status = "crit", "NOT READY"
-    elif (prime is not None and prime < 90.0) or sla_brc > 0 or reg_jobs or reg_count \
+    elif (binding == "window" and ((wbd or 0) > 0 or (prime is not None and prime < 100.0))) \
+            or (prime is not None and prime < 90.0) or sla_brc > 0 or reg_jobs or reg_count \
             or (fail_rate is not None and fail_rate > pe_config.BATCH_FAIL_RATE):
         tone, status = "warn", "AT RISK"
     else:
@@ -839,7 +865,7 @@ def build_batch_panel(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         direction = ("No action required — the batch is within both its delivery window "
                      "and every job ceiling. Cleared for sign-off.")
     else:
-        if binding == "window" and (window is not None and window < 90.0) and job_healthy:
+        if binding == "window" and (window is not None and window < 100.0) and job_healthy:
             root = ("Job ceilings are healthy, so the fix is batch ordering / start-time "
                     "scheduling, not per-job tuning.")
         elif job is not None and job < 90.0:

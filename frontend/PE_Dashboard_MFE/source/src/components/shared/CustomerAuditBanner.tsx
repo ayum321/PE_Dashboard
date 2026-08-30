@@ -163,10 +163,12 @@ export function CustomerAuditBanner() {
       : batch?.customer_name
         ? 'Sourced from Ctrl-M identity checks'
         : resource?.customer_name
-          ? 'Sourced from resource utilization data'
+          ? resource.customer_message || 'Sourced from resource utilization data'
           : sow?.customer_name
             ? 'Sourced from SOW contract metadata'
-            : 'No customer tag was supplied; fleet analysis remains valid.';
+            : resource?.customer_message
+              ? resource.customer_message
+              : 'No customer identity evidence was supplied; fleet analysis remains valid.';
 
   const sparkPoints = pulse.vals
     .map((v, i) => {

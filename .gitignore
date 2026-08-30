@@ -89,6 +89,8 @@ backend/PE_Dashboard_API/tests/*
 .pe_report_archive.db-shm
 data/report_archive/
 backend/PE_Dashboard_API/app/data/report_archive/
+data/report_snapshots/
+backend/PE_Dashboard_API/app/data/report_snapshots/
 
 # Impeccable local runtime artifacts (critique reports remain trackable)
 .impeccable/config.local.json

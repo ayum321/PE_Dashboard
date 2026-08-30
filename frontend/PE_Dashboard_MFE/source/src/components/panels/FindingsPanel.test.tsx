@@ -1,7 +1,7 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react';
 import { AppDataProvider } from '../../context/AppDataContext';
-import { FindingsPanel } from './FindingsPanel';
+import { buildWorkflowItems, FindingsPanel } from './FindingsPanel';
 
 describe('FindingsPanel', () => {
   beforeEach(() => {
@@ -20,7 +20,7 @@ describe('FindingsPanel', () => {
     );
 
     expect(getByRole('button', { name: 'Generate Findings' })).toBeDefined();
-    expect(getByText(/Upload batch and resource data first/i)).toBeDefined();
+    expect(getByText(/Upload batch, resource, and SLA data/i)).toBeDefined();
   });
 
   it('renders findings returned from the backend after clicking Generate Findings', async () => {
@@ -33,7 +33,7 @@ describe('FindingsPanel', () => {
       }),
     } as Response);
 
-    const { getByRole, findByText } = render(
+    const { getByRole, findByText, findAllByText } = render(
       <AppDataProvider>
         <FindingsPanel />
       </AppDataProvider>,
@@ -43,11 +43,11 @@ describe('FindingsPanel', () => {
 
     await waitFor(() => expect(global.fetch).toHaveBeenCalled());
     expect(await findByText(/Batch window breached SLA on 3 days/i)).toBeDefined();
-    expect(await findByText(/Immediate PE action/i)).toBeDefined();
-    expect(await findByText(/Resolve the three breached batch days/i)).toBeDefined();
+    expect(await findByText(/Immediate Action Required/i)).toBeDefined();
+    expect((await findAllByText(/Resolve the three breached batch days/i)).length).toBeGreaterThan(0);
   });
 
-  it('keeps informational and healthy evidence collapsed behind the priority findings', async () => {
+  it('keeps all findings available in the searchable ledger', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -61,7 +61,7 @@ describe('FindingsPanel', () => {
       }),
     } as Response);
 
-    const { getByRole, findByText } = render(
+    const { getByRole, findByText, findAllByText } = render(
       <AppDataProvider>
         <FindingsPanel />
       </AppDataProvider>,
@@ -69,11 +69,24 @@ describe('FindingsPanel', () => {
 
     fireEvent.click(getByRole('button', { name: 'Generate Findings' }));
 
-    expect(await findByText(/Priority findings — action required/i)).toBeDefined();
-    const summary = await findByText(/2 supporting observations/i);
-    const details = summary.closest('details') as HTMLDetailsElement;
-    expect(details.open).toBe(false);
-    fireEvent.click(summary);
-    expect(details.open).toBe(true);
+    expect(await findByText(/Findings Ledger/i)).toBeDefined();
+    expect((await findAllByText(/One action-required finding/i)).length).toBeGreaterThan(0);
+    expect(await findByText(/Contract SLA values were loaded/i)).toBeDefined();
+    expect(await findByText(/1 passed checks/i)).toBeDefined();
+    fireEvent.click(await findByText(/1 passed checks/i));
+    expect(await findByText(/All individual jobs remain within SLA/i)).toBeDefined();
+  });
+
+  it('maps the canonical workflow contract without zeroing SLA or names', () => {
+    const [row] = buildWorkflowItems({
+      workflow_summary: [{
+        workflow_name: 'TEST_WEEKLY', runtime_h: 12.5, sla_h: 13,
+        buffer_pct: 3.8, status: 'AT_RISK',
+      }],
+    });
+
+    expect(row).toEqual(expect.objectContaining({
+      name: 'TEST_WEEKLY', runtime_h: 12.5, sla_h: 13, buffer_pct: 3.8,
+    }));
   });
 });

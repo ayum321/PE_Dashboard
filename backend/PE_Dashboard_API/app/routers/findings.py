@@ -94,6 +94,7 @@ class FindingsRequest(BaseModel):
     window:        Optional[List[Dict[str, Any]]] = None
     anomalies:     Optional[List[Dict[str, Any]]] = None
     sub_stats:     Optional[List[Dict[str, Any]]] = None
+    failure_jobs:  Optional[List[Dict[str, Any]]] = None
 
     # Resource data
     resource_kpis: Optional[Dict[str, Any]]       = None
@@ -127,7 +128,7 @@ class Finding(BaseModel):
     text:           str
     sub:            str = ""
     source:         str = ""     # batch | resource | sla | benchmark | sow | issues
-    confidence:     int = 100    # 0-100: how confident we are in this finding
+    confidence:     int = 0      # evidence-quality score; never default to artificial certainty
     impact:         str = ""     # business impact statement
     evidence:       str = ""     # source file / metric / calculation reference
     recommendation: str = ""     # suggested next action
@@ -256,9 +257,18 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     # divergent severity.
     _window_finding_emitted = False
 
-    def add(level, icon, text, sub="", source="", confidence=100,
+    def add(level, icon, text, sub="", source="", confidence=None,
             impact="", evidence="", recommendation="", evidence_class="measured",
             root_cause=""):
+        if confidence is None:
+            confidence = {
+                "measured": 95,
+                "derived": 90,
+                "inferred": 75,
+                "defaulted": 60,
+                "waived": 50,
+                "unavailable": 0,
+            }.get(str(evidence_class).lower(), 0)
         findings.append(Finding(
             level=level, icon=icon, text=text, sub=sub, source=source,
             confidence=confidence, impact=impact, evidence=evidence,
@@ -450,23 +460,25 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
             _has_elapsed = any(_f(w.get("elapsed_hrs")) > 0 for w in window_data)
             _hrs_key = "elapsed_hrs" if _has_elapsed else "total_hrs"
             _breach_days_r1b = [w for w in window_data if _f(w.get(_hrs_key)) > default_sla]
+            _worst_ceil = default_sla
             if _breach_days_r1b:
                 _worst = max(_breach_days_r1b, key=lambda d: _f(d.get(_hrs_key)))
                 _worst_hrs = _f(_worst.get(_hrs_key))
+                _worst_ceil = _f(_worst.get("sla_ceiling") or _worst.get("dominant_ceiling_hrs") or _worst.get("sla_hrs") or default_sla)
                 _worst_day_detail = (f" · Worst day: {_worst.get('run_date','?')} at "
                                     f"{_worst_hrs:.1f}h "
-                                    f"(+{_worst_hrs - default_sla:.1f}h overrun)")
+                                    f"(+{_worst_hrs - _worst_ceil:.1f}h overrun)")
             _win_level = "critical" if window_comp < 75 else "warning"
             add(_win_level, "📅",
                 f"Batch Window Compliance: {window_comp:.1f}% — SLA exceeded on {win_breach}/{win_total} day(s)",
-                f"Aggregate {_sched_label} runtime exceeded {_fmt_hrs(default_sla)}h limit · "
+                f"Aggregate {_sched_label} runtime exceeded {_fmt_hrs(_worst_ceil)}h limit · "
                 f"SLA source: {sla_src_label}. "
                 f"Individual jobs may each be within SLA, but the total batch window is not. "
                 f"(Per sub-app \u00d7 day window: {window_comp_pair:.1f}%.)"
                 f"{_worst_day_detail}",
                 source="batch", confidence=batch_conf,
                 impact=f"Batch window overrun on {win_breach} day(s) blocks PE sign-off",
-                evidence=f"{'Elapsed' if _has_elapsed else 'Summed'} batch window vs {_fmt_hrs(default_sla)}h {_sched_label} SLA · Source: {sla_src_label}",
+                evidence=f"{'Elapsed' if _has_elapsed else 'Summed'} batch window vs {_fmt_hrs(_worst_ceil)}h {_sched_label} SLA · Source: {sla_src_label}",
                 recommendation="Reschedule overlapping jobs or request extended batch window",
                 evidence_class=sla_evidence_class)
             _window_finding_emitted = True
@@ -766,27 +778,34 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         # R7c — Recurring failure patterns (same job failing on multiple dates)
         # Pre-compute here so we can embed into R7a finding's sub-text.
         recurring_fails: dict[str, int] = {}
-        for j in top_jobs:
+        failure_jobs = req.failure_jobs or []
+        for j in failure_jobs or top_jobs:
             fc = _i(j.get("fail_count", 0))
             if fc >= 2:
                 j_name = j.get("Job_Name") or j.get("job_name") or "?"
                 recurring_fails[j_name] = fc
-        _recurring_detail = ""
-        if recurring_fails:
-            sorted_recurring = sorted(recurring_fails.items(), key=lambda x: -x[1])
-            top3 = "; ".join(f"{name} ({cnt}x)" for name, cnt in sorted_recurring[:3])
-            _recurring_detail = (
-                f" · Repeat offenders: {top3}"
-                f"{'…' if len(recurring_fails) > 3 else ''}"
-                " — systemic, not one-off."
+        _failure_detail = ""
+        if failure_jobs:
+            _all_failed = "; ".join(
+                f"{j.get('Job_Name') or j.get('job_name') or '?'} ({_i(j.get('fail_count'))}x)"
+                for j in failure_jobs
             )
+            _failure_detail = f" · Failure attribution ({exec_fail_n}/{exec_fail_n}): {_all_failed}."
+        elif recurring_fails:
+            sorted_recurring = sorted(recurring_fails.items(), key=lambda x: -x[1])
+            attributed = sum(count for _, count in sorted_recurring)
+            remaining = max(0, exec_fail_n - attributed)
+            detail = "; ".join(f"{name} ({cnt}x)" for name, cnt in sorted_recurring)
+            _failure_detail = f" · Repeat offenders: {detail}."
+            if remaining:
+                _failure_detail += f" {remaining} additional failed run(s) are outside the runtime-ranked job list."
 
         if exec_fail_pct > 10:
             add("critical", "💥",
                 f"Execution failure rate: {exec_fail_pct:.2f}% — {exec_fail_n} of {total_runs} runs failed",
                 f"ENDED NOT OK / FAILED / ABENDED. "
                 "Execution failures block downstream dependencies and may not be visible "
-                f"in SLA compliance metrics.{_recurring_detail}",
+                f"in SLA compliance metrics.{_failure_detail}",
                 source="batch",
                 impact="High execution failure rate — systemic scheduler, dependency, or infrastructure issue",
                 recommendation="Review Ctrl-M logs for all FAILED/ABENDED runs. Check dependency chains, "
@@ -795,7 +814,7 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
         elif exec_fail_pct > 1:
             add("warning", "⚠️",
                 f"Execution failure rate: {exec_fail_pct:.2f}% — {exec_fail_n} of {total_runs} runs failed",
-                f"{exec_fail_n} failed run(s) detected.{_recurring_detail}",
+                f"{exec_fail_n} failed run(s) detected.{_failure_detail}",
                 source="batch",
                 root_cause="EXECUTION_FAILURE_RATE")
 
@@ -2198,17 +2217,33 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
                 _at_pct = float(getattr(_pec, "SLA_ATRISK_PCT", 15.0))
                 _lj_pct = float(getattr(_pec, "SLA_LONGJOB_PCT", 40.0))
                 _tier: dict = {}
-                for _w in wf_breaching:
-                    _tier["BREACH"] = _tier.get("BREACH", 0) + 1
-                for _w in wf_low_buffer:
-                    _s = _w.get("status", "AT_RISK")
-                    _tier[_s] = _tier.get(_s, 0) + 1
-                _ok_ct = max(0, total_wfs - len(wf_breaching) - len(wf_low_buffer))
+                # Prefer the canonical workflow summary for the roll-up. Client
+                # triage is intentionally capped and can omit a breached workflow,
+                # which previously made the displayed categories not add to total.
+                _canonical_wfs = (req.sla_matrix or {}).get("workflow_summary") or []
+                if _canonical_wfs:
+                    total_wfs = len(_canonical_wfs)
+                    for _w in _canonical_wfs:
+                        _s = str(_w.get("status") or "UNCLASSIFIED").upper()
+                        if _s in ("NO_BUFFER", "ZERO_BUFFER", "NO BUFFER"):
+                            _s = "AT_RISK"
+                        _tier[_s] = _tier.get(_s, 0) + 1
+                else:
+                    for _w in wf_breaching:
+                        _tier["BREACH"] = _tier.get("BREACH", 0) + 1
+                    for _w in wf_low_buffer:
+                        _s = str(_w.get("status") or "AT_RISK").upper()
+                        if _s in ("NO_BUFFER", "ZERO_BUFFER", "NO BUFFER"):
+                            _s = "AT_RISK"
+                        _tier[_s] = _tier.get(_s, 0) + 1
+                _classified = sum(_tier.values())
+                _ok_ct = _tier.get("OK", 0) + max(0, total_wfs - _classified)
                 _sp = []
                 if _tier.get("BREACH"):    _sp.append(f'{_tier["BREACH"]} BREACH (<0% buffer)')
                 if _tier.get("AT_RISK"):   _sp.append(f'{_tier["AT_RISK"]} AT_RISK (0\u2013{_at_pct:.0f}%)')
                 if _tier.get("LONG_JOB"): _sp.append(f'{_tier["LONG_JOB"]} LONG_JOB ({_at_pct:.0f}\u2013{_lj_pct:.0f}%)')
                 if _ok_ct > 0:             _sp.append(f'{_ok_ct} OK (>{_lj_pct:.0f}% buffer)')
+                if _tier.get("UNCLASSIFIED"): _sp.append(f'{_tier["UNCLASSIFIED"]} UNCLASSIFIED')
                 if _sp:
                     _src = "Ctrl-M canonical" if sla_triage.get("source_active", {}).get("ctrl_m_canonical") else "XLSX snapshot"
                     _slvl = "critical" if _tier.get("BREACH") \
@@ -3515,12 +3550,12 @@ def _generate(req: FindingsRequest) -> tuple[list[Finding], DataCoverage]:
     # Merge findings that share the same root_cause AND level.
     # This prevents future rule additions from creating overlapping findings
     # without needing manual cross-rule coordination.
-    _dedup: dict[tuple[str, str], int] = {}  # (root_cause, level) → first index
+    _dedup: dict[tuple[str, str, str], int] = {}  # (root_cause, level, text) → first index
     _remove_idxs: set[int] = set()
     for i, f in enumerate(findings):
         if not f.root_cause:
             continue  # No root_cause tag — can't dedup
-        key = (f.root_cause, f.level)
+        key = (f.root_cause, f.level, f.text)
         if key in _dedup:
             # Merge sub-text of duplicate into the first occurrence
             first_idx = _dedup[key]

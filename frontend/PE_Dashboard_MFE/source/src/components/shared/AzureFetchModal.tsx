@@ -37,13 +37,26 @@ interface Props {
   /** Complete only after the parent has stored the resolved fleet evidence.
    * This prevents a reviewer from closing the modal and exporting a transient
    * "servers only" snapshot before the shared severity engine returns. */
-  onFetched: (servers: ResourceServer[], meta: { hoursBack: number; customer?: string }) => void | Promise<void>;
+  onFetched: (
+    servers: ResourceServer[],
+    meta: AzureFetchMeta,
+    resolved: DashboardPayload,
+  ) => void | Promise<void>;
   onAuthChanged?: (auth: DashboardPayload) => void;
 }
 
 const TYPE_COLOR: Record<string, string> = { APP: '#10b981', DB: '#3b82f6', SRE: '#f59e0b' };
 const ENV_COLOR: Record<string, string> = { PROD: '#f87171', TEST: '#38bdf8', UAT: '#a78bfa', STG: '#fb923c', DEV: '#2dd4bf' };
 const UNTAGGED = 'Untagged';
+
+export interface AzureFetchMeta {
+  hoursBack: number;
+  customer?: string;
+  customerStatus: 'identified' | 'untagged' | 'mixed';
+  customerMessage: string;
+  taggedVmCount: number;
+  selectedVmCount: number;
+}
 
 /** Ported from _getVmEnv() (app.js): infer environment from tags, then name prefix. */
 function getVmEnv(vm: AzureVm): string {
@@ -63,7 +76,12 @@ function getVmEnv(vm: AzureVm): string {
 }
 
 function customerOf(vm: AzureVm): string {
-  return vm.customer || vm.tags?.CustomerName || vm.tags?.customerName || UNTAGGED;
+  if (vm.customer?.trim()) return vm.customer.trim();
+  const aliases = new Set(['customername', 'customer', 'clientname', 'client']);
+  for (const [key, value] of Object.entries(vm.tags || {})) {
+    if (aliases.has(key.toLowerCase()) && String(value || '').trim()) return String(value).trim();
+  }
+  return UNTAGGED;
 }
 
 function segBtnStyle(active: boolean, accent?: string): React.CSSProperties {
@@ -475,9 +493,26 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         const c = customerOf(v);
         if (c !== UNTAGGED) custCounts.set(c, (custCounts.get(c) || 0) + 1);
       }
-      const topCustomer = Array.from(custCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
+      const identifiedCustomers = Array.from(custCounts.keys());
+      const taggedVmCount = Array.from(custCounts.values()).reduce((sum, count) => sum + count, 0);
+      const customer = identifiedCustomers.length === 1 ? identifiedCustomers[0] : undefined;
+      const customerStatus: AzureFetchMeta['customerStatus'] = customer
+        ? 'identified'
+        : identifiedCustomers.length > 1 ? 'mixed' : 'untagged';
+      const customerMessage = customer
+        ? `Identified from Azure customer tags on ${taggedVmCount}/${selectedVms.length} selected VM(s).`
+        : identifiedCustomers.length > 1
+          ? `Customer was not assigned because the selected VMs contain multiple customer tags: ${identifiedCustomers.sort().join(', ')}.`
+          : 'Customer was not identified because the selected VMs have no Customer, CustomerName, Client, or ClientName tag.';
       setFetchStatus('Resolving fleet health and saving evidence…');
-      await onFetched((result.servers as ResourceServer[]) || [], { hoursBack, customer: topCustomer });
+      await onFetched((result.servers as ResourceServer[]) || [], {
+        hoursBack,
+        customer,
+        customerStatus,
+        customerMessage,
+        taggedVmCount,
+        selectedVmCount: selectedVms.length,
+      }, result);
       onClose();
     } catch (error) {
       setFetchStatus(error instanceof Error ? error.message : 'Azure fetch failed.');

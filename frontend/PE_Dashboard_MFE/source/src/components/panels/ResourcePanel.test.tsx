@@ -197,6 +197,41 @@ describe('ResourcePanel', () => {
     expect(screen.getByRole('button', { name: /Fetch from Azure Monitor/i })).toBeDefined();
   });
 
+  it('uses an already-resolved resource payload without recalculating a second copy', async () => {
+    render(
+      <AppDataProvider>
+        <SeededResourcePanel resource={buildResource()} />
+      </AppDataProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText('Servers')).toBeDefined());
+    expect(mockedProcessResource).not.toHaveBeenCalled();
+  });
+
+  it('restores and explains the exact Azure observation window', async () => {
+    const resource = {
+      ...buildResource(),
+      hours_back: 720,
+      observation_window: {
+        requested_hours: 720,
+        start_utc: '2026-07-31T12:00:00Z',
+        end_utc: '2026-08-30T12:00:00Z',
+        snapshot_grain_hours: 6,
+        cache_ttl_seconds: 300,
+      },
+    };
+    render(
+      <AppDataProvider>
+        <SeededResourcePanel resource={resource} />
+      </AppDataProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText(/Evidence window & calculation basis/i)).toBeDefined());
+    expect(screen.getAllByText(/REQUESTED 30d/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Jul 31, 2026/i)).toBeDefined();
+    expect(screen.getByText(/Peak = highest Azure Maximum bucket/i)).toBeDefined();
+  });
+
   it('restores persisted deep-dive charts and selection after a tab remount', async () => {
     render(
       <AppDataProvider>

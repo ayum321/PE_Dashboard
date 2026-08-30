@@ -13,6 +13,7 @@ export function buildAnalysisPayload(data: AppData): DashboardPayload {
     window: batch.window,
     sub_stats: batch.sub_stats,
     anomalies: batch.anomalies,
+    failure_jobs: batch.failure_jobs,
     resource_kpis: data.resource?.kpis,
     servers: data.resource?.servers,
     sla_matrix: data.slaMatrix,

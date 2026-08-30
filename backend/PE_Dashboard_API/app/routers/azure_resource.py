@@ -24,7 +24,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -56,6 +56,31 @@ from services import baseline_store
 from services import pe_config
 from services.spike_attribution import attribute_spikes
 router = APIRouter()
+
+
+def _snapshot_observation_window(hours_back: int, end_utc: Optional[datetime] = None) -> Dict[str, Any]:
+    """Describe the rolling Azure window used by the snapshot aggregates.
+
+    This is deliberately labelled as the requested window: Azure can omit
+    buckets and the five-minute metric cache may return a nearly-identical
+    earlier pull. The UI can show useful dates without overstating coverage.
+    """
+    end = end_utc or datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours_back)
+    grain_hours = 1 if hours_back <= 72 else 6 if hours_back <= 720 else 12
+    return {
+        "basis": "requested_rolling_window",
+        "requested_hours": hours_back,
+        "start_utc": start.isoformat().replace("+00:00", "Z"),
+        "end_utc": end.isoformat().replace("+00:00", "Z"),
+        "snapshot_grain_hours": grain_hours,
+        "cache_ttl_seconds": 300,
+        "definitions": {
+            "avg": "Arithmetic mean of valid Azure Monitor buckets in the requested window; missing buckets are excluded.",
+            "peak": "Highest Azure Maximum bucket observed in the requested window; role status is governed by this value.",
+            "current": "Most recent returned bucket, falling back to the period average when Azure supplies no recent bucket.",
+        },
+    }
 
 
 def _baseline_ns(resource_id: str, vm_name: str) -> tuple[str, str]:
@@ -703,6 +728,7 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
         cfg = dict(cfg)
         cfg["azure_resource_group"] = body.resource_group.strip()
 
+    observation_window = _snapshot_observation_window(body.hours_back)
     try:
         servers = fetch_vm_metrics(cfg, hours_back=body.hours_back,
                                    vm_ids=body.vm_ids, session_id=sid)
@@ -728,6 +754,7 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
 
     payload["source"] = "azure_monitor"
     payload["hours_back"] = body.hours_back
+    payload["observation_window"] = observation_window
     payload["vm_count"] = len(servers)
     return payload
 
@@ -758,6 +785,7 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
 
     def generate():
         t0 = time.perf_counter()
+        observation_window = _snapshot_observation_window(body.hours_back)
 
         # Phase 1: Resolve VMs
         yield _sse("progress", {"phase": "Resolving VMs", "done": 0, "total": 0})
@@ -940,6 +968,7 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
             payload = build_resource_payload(servers)
             payload["source"] = "azure_monitor"
             payload["hours_back"] = body.hours_back
+            payload["observation_window"] = observation_window
             payload["vm_count"] = len(servers)
 
             elapsed = round(time.perf_counter() - t0, 1)
