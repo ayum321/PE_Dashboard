@@ -59,12 +59,24 @@ jobs:
           case "$agent_name" in
             PEDashboardAgent)
               echo "REPOSITORY_NAME=pedashboard_agent_api" >> $GITHUB_ENV
-              echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
+              if [ -f "backend/PE_Dashboard_API/Dockerfile" ]; then
+                echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
+              elif [ -f "PEDashboard/Dockerfile" ]; then
+                echo "DOCKERFILE_NAME=PEDashboard/Dockerfile" >> $GITHUB_ENV
+              else
+                echo "DOCKERFILE_NAME=Dockerfile" >> $GITHUB_ENV
+              fi
               ;;
             *)
               echo "Unknown agent: $agent_name, defaulting to PEDashboardAgent"
               echo "REPOSITORY_NAME=pedashboard_agent_api" >> $GITHUB_ENV
-              echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
+              if [ -f "backend/PE_Dashboard_API/Dockerfile" ]; then
+                echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
+              elif [ -f "PEDashboard/Dockerfile" ]; then
+                echo "DOCKERFILE_NAME=PEDashboard/Dockerfile" >> $GITHUB_ENV
+              else
+                echo "DOCKERFILE_NAME=Dockerfile" >> $GITHUB_ENV
+              fi
               ;;
           esac
           echo "Set DOCKERFILE_NAME: $DOCKERFILE_NAME"
