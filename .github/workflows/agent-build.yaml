@@ -1,13 +1,11 @@
-name: CI Workflow Agent 
+name: CI Workflow Agent
 permissions:
   contents: read
 on:
-  push:
-    branches:
-      - ayush/pe-dashboard-migration-pr
-      - main
-  pull_request:
-    types: [opened, synchronize]
+  # push:
+
+  # pull_request:
+  #   types: [opened, synchronize]
   workflow_dispatch:
     inputs:
       environment:
