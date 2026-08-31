@@ -43,8 +43,13 @@ def _body() -> dict:
             }],
         },
         "resource": {
-            "kpis": {"total_servers": 1, "n_critical": 0, "n_warning": 1, "fleet_grade": "B", "fleet_score": 84.9},
-            "servers": [{"host": "db-a", "type": "DB", "cpu_used": 92.0, "mem_used": 91.0, "disk_pct": 10.0, "mem_gb": 64.0, "status": "WARNING"}],
+            "kpis": {"total_servers": 2, "n_critical": 0, "n_warning": 1, "fleet_grade": "B", "fleet_score": 84.9},
+            "servers": [
+                {"host": "db-a", "type": "DB", "cpu_used": 92.0, "mem_used": 91.0, "disk_pct": 10.0, "mem_gb": 64.0, "status": "WARNING"},
+                # Reproduces the Nfm defect: a red disk peak on a row the live
+                # grader calls healthy. The row must explain itself, not contradict.
+                {"host": "db-b", "type": "DB", "cpu_used": 5.5, "mem_used": 86.0, "disk_pct": 100.0, "mem_gb": 133.0, "status": "HEALTHY"},
+            ],
             "deep_dive": {
                 "vms": {"db-a": {
                     "series": {
@@ -52,9 +57,19 @@ def _body() -> dict:
                         "Available Memory Percentage": [{"t": "2026-08-24T00:00:00Z", "v": 21}, {"t": "2026-08-24T01:00:00Z", "v": 9}],
                         "OS Disk Bandwidth Consumed Percentage": [{"t": "2026-08-24T00:00:00Z", "v": 1}, {"t": "2026-08-24T01:00:00Z", "v": 10}],
                     },
-                    "spikes": {"Percentage CPU": [{"severity": "critical", "peak": 92.0}]},
+                    "spikes": {"Percentage CPU": [{
+                        "severity": "critical", "peak": 92.0,
+                        "start": "2026-08-24T00:30:00", "end": "2026-08-24T01:00:00",
+                        "peak_time": "2026-08-24T01:00:00", "duration_min": 30,
+                    }]},
                 }},
-                "spike_attribution": {"rows": [{"vm": "db-a", "concurrent_jobs": [{"job": "JDA_PROCESSING_JOB_WKLY_2"}]}]},
+                "spike_attribution": {"rows": [{
+                    "vm": "db-a", "metric": "Percentage CPU", "severity": "critical", "peak": 92.0,
+                    "start": "2026-08-24T00:30:00", "end": "2026-08-24T01:00:00",
+                    "concurrent_jobs": 1, "heaviest": "JDA_PROCESSING_JOB_WKLY_2",
+                    "jobs": [{"job": "JDA_PROCESSING_JOB_WKLY_2", "hrs": 0.5,
+                              "start": "2026-08-24T00:20:00", "end": "2026-08-24T00:50:00"}],
+                }]},
             },
         },
         "sow": {"metrics": [{"label": "Daily DFU", "sow": 9000000, "actual": 7968993, "pct": 88.5, "status": "ACCEPTABLE"}]},
@@ -79,9 +94,29 @@ def main() -> None:
     assert "Per-host trend &amp; Ctrl-M overlap evidence" in html
     assert "Ctrl-M overlap: JDA_PROCESSING_JOB_WKLY_2" in html
     assert "time overlap only, not proof of cause" in html
-    assert html.count("Job cadence &amp; runtime profile") == 1
+    assert html.count("Peak runtime vs SLA ceiling") == 1
     assert "<svg" in html
     assert "Methodology &amp; Lineage" in html
+
+    # The cadence bar is scaled against the job's own ceiling, so its label must
+    # carry the ceiling it was measured against rather than a bare peak.
+    assert "8.13h of 13.00h" in html
+
+    # A row whose live status grades calmer than its own worst cell explains itself.
+    assert "Disk peaked above its critical ceiling" in html
+    assert "live role-aware status is healthy" in html
+
+    # The sign-off banner states what it does and does not clear.
+    assert "It does not clear the findings below" in html
+
+    # SOW utilisation is charted, not only tabulated.
+    assert "Consumption as a share of the contracted ceiling" in html
+
+    # The Ctrl-M overlap is drawn on the trend chart, not only named in prose.
+    assert "Ctrl-M run (1)" in html, "Ctrl-M run lane missing from the chart legend"
+    assert "Spike window" in html, "spike band missing from the chart legend"
+    assert "JDA_PROCESSING_JOB_WKLY_2 (0.50h)" in html, "Ctrl-M run bar has no titled interval"
+    assert "Ctrl-M bars are time coincidence, not proof of cause" in html
     print("legacy baseline report checks passed")
 
 

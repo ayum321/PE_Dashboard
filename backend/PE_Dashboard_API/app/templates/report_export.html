@@ -124,11 +124,23 @@ body::before{
 }
 .chip b{color:var(--ink); font-weight:700;}
 .chip .dot{width:7px; height:7px; border-radius:50%; background:var(--cyan); box-shadow:0 0 8px 1px currentColor;}
-.prod-chips{display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-start; margin-top:2px;}
+.prod-chips{display:flex; gap:5px 6px; flex-wrap:wrap; justify-content:flex-start; flex:1 1 320px; min-width:0;}
 .prod-chip{
-  font-size:var(--fs-1); font-weight:600; padding:3px 9px; border-radius:999px;
+  font-size:var(--fs-1); line-height:1.4; font-weight:600; padding:2px 8px; border-radius:999px;
   background:rgba(168,85,247,.12); border:1px solid rgba(168,85,247,.4); color:#c084fc;
+  max-width:100%; overflow-wrap:anywhere;
 }
+/* Products get a full-width row of their own. Nested in the right-aligned meta
+   column, a 16-product engagement pushed the header past 300px tall. */
+.rhead__products{
+  display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+  margin-top:16px; padding-top:14px; border-top:1px solid var(--border-soft);
+}
+.rhead__products-k{
+  font-size:var(--fs-1); font-weight:700; letter-spacing:1.2px; color:var(--ink-3);
+  text-transform:uppercase; white-space:nowrap; flex:0 0 auto;
+}
+.rhead__products-k b{color:var(--ink-2); font-weight:800;}
 
 /* ── Verdict banner ──────────────────────────────────────── */
 .banner{
@@ -415,25 +427,28 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
 </head>
 <body>
 <div class="page">
-  {# Backward-compatible defaults so both export contexts can render this template safely. #}
-  {% set unknown_pct_w = unknown_pct_w|default(0) %}
-  {% set n_unknown = n_unknown|default(0) %}
-  {% set fleet_resolved = fleet_resolved|default(false) %}
-  {% set fleet_source = fleet_source|default('Dashboard fleet grader') %}
-  {% set fleet_disagreement = fleet_disagreement|default('') %}
-  {% set fleet_graded = fleet_graded|default(n_srv|default(0)) %}
-  {% set sow_ceiling_notice = sow_ceiling_notice|default('') %}
-  {% set mx_available = mx_available|default(false) %}
-  {% set mx_hosts = mx_hosts|default(0) %}
-  {% set mx_tabs = mx_tabs|default('') %}
-  {% set mx_panels = mx_panels|default('') %}
-  {% set mx_summary = mx_summary|default('') %}
-  {% set mx_data = mx_data|default('{}') %}
-  {% set job_cadence_tabs = job_cadence_tabs|default('') %}
-  {% set job_legend = job_legend|default('') %}
-  {% set job_setaside = job_setaside|default('') %}
-  {% set infra_coverage = infra_coverage|default('') %}
-  {% set n_jobs_product = n_jobs_product|default(n_jobs|default(0)) %}
+  {#- Backward-compatible defaults so both export contexts can render this template safely. -#}
+  {%- set unknown_pct_w = unknown_pct_w|default(0) -%}
+  {%- set n_unknown = n_unknown|default(0) -%}
+  {%- set fleet_resolved = fleet_resolved|default(false) -%}
+  {%- set fleet_source = fleet_source|default('Dashboard fleet grader') -%}
+  {%- set fleet_disagreement = fleet_disagreement|default('') -%}
+  {%- set fleet_graded = fleet_graded|default(n_srv|default(0)) -%}
+  {%- set sow_ceiling_notice = sow_ceiling_notice|default('') -%}
+  {%- set sow_chart = sow_chart|default('') -%}
+  {%- set mx_available = mx_available|default(false) -%}
+  {%- set mx_hosts = mx_hosts|default(0) -%}
+  {%- set mx_tabs = mx_tabs|default('') -%}
+  {%- set mx_panels = mx_panels|default('') -%}
+  {%- set mx_summary = mx_summary|default('') -%}
+  {%- set mx_data = mx_data|default('{}') -%}
+  {%- set job_cadence_tabs = job_cadence_tabs|default('') -%}
+  {%- set job_legend = job_legend|default('') -%}
+  {%- set job_setaside = job_setaside|default('') -%}
+  {%- set job_count_note = job_count_note|default('') -%}
+  {%- set checklist_mismatches = checklist_mismatches|default(0) -%}
+  {%- set infra_coverage = infra_coverage|default('') -%}
+  {%- set n_jobs_product = n_jobs_product|default(n_jobs|default(0)) %}
 
   <div class="toolbar">
     <button class="tbtn" onclick="toggleTheme()">◐ Theme</button>
@@ -477,19 +492,20 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         {% if customer and customer != 'Unknown Customer' %}
         <div class="cust-source">Sourced from Ctrl-M filename</div>
         {% endif %}
-        {% if reviewed_product_labels %}
-        <div class="prod-chips">
-          {% for label in reviewed_product_labels %}
-          <span class="prod-chip">{{ label }}</span>
-          {% endfor %}
-        </div>
-        {% endif %}
         <div class="chips">
           <span class="chip"><span class="dot"></span>{{ env }}</span>
           <span class="chip">Generated <b>{{ gen_date }}</b></span>
         </div>
       </div>
     </div>
+    {% if reviewed_product_labels %}
+    <div class="rhead__products">
+      <span class="rhead__products-k">Products in scope <b>{{ reviewed_product_labels|length }}</b></span>
+      <div class="prod-chips">
+        {%- for label in reviewed_product_labels %}<span class="prod-chip">{{ label }}</span>{% endfor -%}
+      </div>
+    </div>
+    {% endif %}
   </header>
 
   <!-- ── Verdict banner ─────────────────────────────────── -->
@@ -498,6 +514,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     <div class="banner__txt">
       <div class="banner__k">Overall Sign-off Verdict</div>
       <div class="banner__v">{{ sign_text }}</div>
+      <div class="micro" style="color:var(--ink-3);">Records the Performance Engineering and customer signatures only. It does not clear the findings below{% if n_issues or checklist_mismatches %} — {% if n_issues %}{{ n_issues }} open issue(s){% endif %}{% if n_issues and checklist_mismatches %} and {% endif %}{% if checklist_mismatches %}{{ checklist_mismatches }} unbacked checklist claim(s){% endif %} remain on this report{% endif %}.</div>
     </div>
     <div class="banner__date">
       <div><b>Customer:</b> {{ customer }}</div>
@@ -593,7 +610,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>{{ n_healthy }}</b></span>
         {% if n_unknown %}<span class="legend__i"><span class="dot dot-unknown"></span>No metrics <b>{{ n_unknown }}</b></span>{% endif %}
       </div>
-      <div class="dim micro">Grade source — {{ fleet_source }}. Bar counts {{ fleet_graded }} graded host row(s) of {{ n_srv }}.</div>
+      <div class="dim micro">Grade source — {{ fleet_source }}. The bar shows all {{ n_srv }} host row(s){% if n_unknown %}; {{ fleet_graded }} of them carry metrics and are graded, the remaining {{ n_unknown }} are shown as No metrics{% endif %}.</div>
     </div>
     {% if fleet_disagreement %}
     <div class="panel__note">⚠ {{ fleet_disagreement }}</div>
@@ -616,7 +633,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     </div>
     <div class="panel__body panel__body--flush">
       <div style="padding:13px 20px 4px;border-bottom:1px solid var(--border-soft);">
-        <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px;">Job cadence &amp; runtime profile</div>
+        <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px;">Peak runtime vs SLA ceiling</div>
         {{ cadence_chart|safe }}
       </div>
       {% if job_cadence_tabs %}
@@ -633,6 +650,9 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="dim" style="padding:10px 20px;">Showing top {{ n_jobs_shown }} of {{ n_jobs_product }} product jobs by peak runtime{% if job_cadence_tabs %} · use the tabs above to narrow by schedule or jump straight to what needs attention{% endif %}.</div>
       {% endif %}
       {{ job_setaside|safe }}
+      {% if job_count_note %}
+      <div class="panel__note">{{ job_count_note|safe }}</div>
+      {% endif %}
     </div>
   </section>
 
@@ -702,6 +722,12 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
         <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
         <tbody>{{ sow_rows|safe }}</tbody>
       </table>
+      {% if sow_chart %}
+      <div style="padding:14px 20px 4px;border-top:1px solid var(--border-soft);">
+        <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;font-size:var(--fs-1);margin-bottom:6px;">Contract utilisation</div>
+        {{ sow_chart|safe }}
+      </div>
+      {% endif %}
       <div style="padding:12px 20px;font-size:var(--fs-2);line-height:1.5;border-top:1px solid var(--border-soft);color:{{ sow_badge_color }};background:color-mix(in srgb,{{ sow_badge_color }} 8%, transparent);">{{ sow_disclaimer }}</div>
       {% if sow_ceiling_notice %}
       <div class="panel__note">{{ sow_ceiling_notice|safe }}</div>

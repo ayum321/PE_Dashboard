@@ -8,6 +8,7 @@ import { PeReviewSummary } from './PeReviewSummary';
 import { FindingsDataGrid, FindingItem } from '../shared/FindingsDataGrid';
 import { WorkflowHeadroomCard } from '../shared/WorkflowHeadroomCard';
 import { SeverityDonutChart } from '../shared/SeverityDonutChart';
+import { KpiStatCard } from '../shared/KpiStatCard';
 
 interface TopAction {
   rank?: number;
@@ -92,6 +93,9 @@ export function FindingsPanel() {
     return buildWorkflowItems(data.slaMatrix);
   }, [data.slaMatrix]);
 
+  // Failure-Resource Correlation Score, sourced from the executive-dashboard endpoint.
+  const rfcs = data.executive?.rfcs as number | undefined;
+
   return (
     <Box p={2} pb={4}>
       {/* ═══ PAGE HEADER ═══ */}
@@ -164,6 +168,14 @@ export function FindingsPanel() {
               {counts.critical} critical · {counts.warning} warning · {counts.info} info · {counts.ok} passed
             </Typography>
           </Box>
+          {rfcs != null && (
+            <KpiStatCard
+              label="RFCS"
+              value={rfcs.toFixed(0)}
+              sub="Failure-resource correlation"
+              accent={rfcs >= 50 ? '#f43f5e' : rfcs >= 25 ? '#f59e0b' : '#10d96e'}
+            />
+          )}
         </Box>
       )}
 

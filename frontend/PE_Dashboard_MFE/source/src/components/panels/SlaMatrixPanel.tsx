@@ -426,6 +426,12 @@ export function SlaMatrixPanel() {
   const explicitSlaMatrix = slaMatrix.explicit_sla_matrix === true;
   const atRiskThreshold = _configuredAtRiskThreshold(slaMatrix);
 
+  // Sourced from the executive-dashboard endpoint (per sub-app SRI/CRS/breach correlation).
+  const subAppMetrics = (data.executive?.sub_app_metrics as Record<string, unknown>[]) || [];
+  const subAppColumns = subAppMetrics.length > 0
+    ? Object.keys(subAppMetrics[0]).filter((key) => typeof subAppMetrics[0][key] === 'number' || typeof subAppMetrics[0][key] === 'string')
+    : [];
+
   // ── Tightest Buffer — the single job closest to its SLA ceiling, ported from
   // #slak-tightbuf (_renderSlaMatrix(), app.js). ──
   const tightestBuffer = useMemo(() => {
@@ -1297,6 +1303,33 @@ export function SlaMatrixPanel() {
                   {outliers.length} mild outlier(s) (z 2{'\u2013'}3, under 25% over baseline) — informational only, no action required.
                 </Typography>
               )}
+            </Box>
+          )}
+
+          {/* ── Sub-Application Metrics — sourced from the executive-dashboard endpoint,
+              which correlates SRI/CRS/breach counts per sub-app. ── */}
+          {subAppMetrics.length > 0 && (
+            <Box className={classes.section}>
+              <Typography variant="subtitle2">Sub-Application Metrics</Typography>
+              <Typography variant="caption" color="textSecondary">Per sub-app SLA risk index (SRI), correlation risk score (CRS), and breach counts.</Typography>
+              <Table size="small" className="pe-table" aria-label="Sub-application metrics" style={{ marginTop: 8 }}>
+                <TableHead>
+                  <TableRow>
+                    {subAppColumns.map((column) => (
+                      <TableCell key={column}>{column.replace(/_/g, ' ')}</TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {subAppMetrics.slice(0, 25).map((row, index) => (
+                    <TableRow key={index}>
+                      {subAppColumns.map((column) => (
+                        <TableCell key={column}>{String(row[column])}</TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </Box>
           )}
         </>

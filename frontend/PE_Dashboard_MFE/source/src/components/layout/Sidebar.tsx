@@ -5,7 +5,6 @@ import {
   ArchiveIcon,
   BatchIcon,
   BenchmarkIcon,
-  ExecutiveIcon,
   FindingsIcon,
   GovernanceIcon,
   ResourceIcon,
@@ -23,7 +22,6 @@ interface NavItem {
 
 const WORKSPACE_ITEMS: NavItem[] = [
   { path: '/upload', label: 'Upload & Intake', icon: UploadIcon },
-  { path: '/executive', label: 'Executive Dashboard', icon: ExecutiveIcon },
 ];
 
 const ANALYSIS_ITEMS: NavItem[] = [

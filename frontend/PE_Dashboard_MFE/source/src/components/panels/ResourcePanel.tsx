@@ -87,6 +87,13 @@ interface ExecutiveSummary {
   summary_line2: string;
 }
 
+interface ServerHeatCell {
+  host: string;
+  cpu: number;
+  mem: number;
+  disk: number;
+}
+
 interface ServerRow {
   host: string;
   server?: string;
@@ -1565,6 +1572,30 @@ export function ResourcePanel() {
     ? `${windowLabel} \u00b7 ${formatUtc(observationWindow.start_utc).split(', ')[0]} \u2192 ${formatUtc(observationWindow.end_utc).split(', ')[0]}`
     : `Requested window \u00b7 ${windowLabel}`;
 
+  // Sourced from the executive-dashboard endpoint, which already ranks/limits the fleet to 25 hosts.
+  const executiveServerHeatmap = ((data.executive?.server_heatmap as ServerHeatCell[]) || []);
+  const executiveHeatmapOptions: Highcharts.Options | null = executiveServerHeatmap.length > 0 ? {
+    chart: { type: 'heatmap', height: Math.max(240, executiveServerHeatmap.length * 22) },
+    title: { text: undefined },
+    xAxis: { categories: ['CPU %', 'Memory %', 'Disk %'] },
+    yAxis: { categories: executiveServerHeatmap.map((s) => s.host), title: { text: undefined }, reversed: true },
+    colorAxis: { min: 0, max: 100, stops: [[0, '#10d96e'], [0.75, '#f59e0b'], [1, '#f43f5e']] },
+    tooltip: {
+      formatter(this: Highcharts.TooltipFormatterContextObject) {
+        const metric = ['CPU', 'Memory', 'Disk'][this.point.x as number];
+        return `<b>${executiveServerHeatmap[this.point.y as number]?.host}</b><br/>${metric}: ${this.point.value}%`;
+      },
+    },
+    series: [{
+      type: 'heatmap',
+      data: executiveServerHeatmap.flatMap((server, y) => [
+        { x: 0, y, value: server.cpu },
+        { x: 1, y, value: server.mem },
+        { x: 2, y, value: server.disk },
+      ]),
+    }],
+  } : null;
+
   return (
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Resource Review</Typography>
@@ -1967,6 +1998,14 @@ export function ResourcePanel() {
           })}
         </TableBody>
       </Table>
+
+      {executiveHeatmapOptions && (
+        <Box className={classes.section}>
+          <Typography variant="subtitle2">Server Heatmap</Typography>
+          <Typography variant="caption" color="textSecondary">CPU / Memory / Disk utilization by server \u2014 from the executive correlation summary</Typography>
+          <HighchartsReact highcharts={Highcharts} options={executiveHeatmapOptions} />
+        </Box>
+      )}
 
       {/* \u2500\u2500 Metrics Deep Dive \u2014 Azure Monitor timeseries, patterns, heatmaps, ported
           from _renderDeepDiveBanner()/_renderDeepDivePatterns()/_renderDeepDiveHeatmap() (app.js).

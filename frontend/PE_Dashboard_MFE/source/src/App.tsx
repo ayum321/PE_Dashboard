@@ -27,7 +27,6 @@ import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
 import { CustomerAuditBanner } from './components/shared/CustomerAuditBanner';
 import { UploadPanel } from './components/panels/UploadPanel';
-import { ExecutivePanel } from './components/panels/ExecutivePanel';
 import { BatchPanel } from './components/panels/BatchPanel';
 import { ResourcePanel } from './components/panels/ResourcePanel';
 import { SlaMatrixPanel } from './components/panels/SlaMatrixPanel';
@@ -59,7 +58,6 @@ function App() {
                 </Box>
                 <Switch>
                   <Route exact path="/upload" component={UploadPanel} />
-                  <Route exact path="/executive" component={ExecutivePanel} />
                   <Route exact path="/batch" component={BatchPanel} />
                   <Route exact path="/resource" component={ResourcePanel} />
                   <Route exact path="/sla-matrix" component={SlaMatrixPanel} />

@@ -219,6 +219,41 @@ def _health_badge(s: dict, cpu: float, mem: float, disk: float, stype: str) -> s
     return _map["healthy"]
 
 
+_STATUS_RANK = (("CRITICAL", 2), ("WARNING", 1), ("HEALTHY", 0))
+_ROLE_TAG = {"DB": "tag-purple", "APP": "tag-blue", "SRE": "tag-cyan"}
+
+
+def _cell_rank(cell_html: str) -> int:
+    """Severity of a rendered metric cell — red 2 · amber 1 · green 0 · none -1."""
+    for cls, rank in (("tag-red", 2), ("tag-amber", 1), ("tag-green", 0)):
+        if cls in cell_html:
+            return rank
+    return -1
+
+
+def _health_reconcile_note(status_html: str, cells: Dict[str, str]) -> str:
+    """Explain a row whose health badge grades calmer than its own worst cell.
+
+    The badge is the live role-aware status; the cells are window peaks. Without
+    this line the same row reads "Disk 100.0%" in red beside a green HEALTHY
+    badge, which a sign-off reader can only take as a defect in the report.
+    """
+    status = next((word for word, _ in _STATUS_RANK if f">{word}<" in status_html), "")
+    if not status:
+        return ""
+    status_rank = dict(_STATUS_RANK)[status]
+    worst_label, worst_rank = "", -1
+    for label, cell in cells.items():
+        rank = _cell_rank(cell)
+        if rank > worst_rank:
+            worst_label, worst_rank = label, rank
+    if worst_rank <= status_rank:
+        return ""
+    band = "above its critical ceiling" if worst_rank == 2 else "into its warning band"
+    return (f'<div class="dim micro">{_esc(worst_label)} peaked {band} during the captured '
+            f'window · live role-aware status is {status.lower()}</div>')
+
+
 def _srv_rows(servers: List[dict], vms_by_host: Dict[str, dict] | None = None) -> str:
     if not servers:
         return ("<tr><td colspan='6' class='empty'>No server data captured "
@@ -247,12 +282,14 @@ def _srv_rows(servers: List[dict], vms_by_host: Dict[str, dict] | None = None) -
             cpu_td = _cpu_cell(cpu, stype)
             mem_td = _mem_cell(mem, stype, s.get("mem_status"))
             dsk_td = _disk_cell(disk, detail)
+            status += _health_reconcile_note(
+                status, {"CPU": cpu_td, "Memory": mem_td, "Disk": dsk_td})
         sub = host if not ram else f"{host} &middot; {ram:.0f} GB RAM"
         jump = (f'<a class="jump" href="#mx-{_host_anchor(host_raw)}">trend &rsaquo;</a>'
                 if detail else "")
         rows.append(f"""<tr id="{_host_anchor(host_raw)}">
           <td class="host-cell"><b>{host.split(".")[0]}</b> {jump}<br><span class="dim">{sub}</span></td>
-          <td><span class="tag tag-blue">{stype_esc}</span></td>
+          <td><span class="tag {_ROLE_TAG.get(stype, 'tag-gray')}">{stype_esc}</span></td>
           <td>{cpu_td}</td><td>{mem_td}</td><td>{dsk_td}</td>
           <td>{status}</td>
         </tr>""")
@@ -617,6 +654,47 @@ def _sow_ceiling_notice(metrics: List[dict]) -> str:
     return ("&#9888; Commitment provenance — " + "; ".join(parts)
             + ". Distinct units sharing one contracted ceiling usually means a single SOW figure was"
               " reused; confirm the per-metric commitment in the contract before quoting it.")
+
+
+def _sow_chart(metrics: List[dict]) -> str:
+    """Contract utilisation per SOW metric, with the status bands drawn in.
+
+    The table gives the percentage but nothing shows where that percentage sits
+    against the under/over bands, so a reader cannot see how far a metric is
+    from tripping a band without doing the arithmetic themselves.
+    """
+    usable = [m for m in metrics if _sow_resolve(m)[0] > 0]
+    if not usable:
+        return ""
+    under = float(pe_config.SOW_UNDER_PCT)
+    over = float(pe_config.SOW_OVER_PCT)
+    over_crit = float(pe_config.SOW_OVER_CRIT_PCT)
+    axis_max = max(over_crit + 10.0, max(_sow_resolve(m)[2] for m in usable) + 10.0)
+    track_x, track_w = 190, 470
+    height = 44 + len(usable) * 26
+    band_color = {"UNDER": "#3b82f6", "CRITICAL_OVER": "var(--red)",
+                  "OVER": "var(--amber)"}
+    pieces = [f"<svg viewBox='0 0 760 {height}' width='100%' height='{height}' role='img' aria-label='SOW contract utilisation by metric'>"]
+    pieces.append("<text x='8' y='13' fill='var(--ink-3)' font-size='11'>Consumption as a share of the contracted ceiling</text>")
+    # Band guides first so the bars read on top of them.
+    for pct, label in ((under, f"{_g(under)}%"), (100.0, "100%"), (over, f"{_g(over)}%"), (over_crit, f"{_g(over_crit)}%")):
+        x = track_x + pct / axis_max * track_w
+        dash = "" if pct == 100.0 else " stroke-dasharray='2 3'"
+        pieces.append(f"<line x1='{x:.1f}' y1='20' x2='{x:.1f}' y2='{height - 18}' stroke='var(--grid)' stroke-width='1'{dash}/>")
+        pieces.append(f"<text x='{x:.1f}' y='{height - 5}' fill='var(--ink-3)' font-size='10' text-anchor='middle'>{label}</text>")
+    for index, metric in enumerate(usable):
+        sow_v, actual, pct, status = _sow_resolve(metric)
+        y = 26 + index * 26
+        label = _esc(str(metric.get("label") or metric.get("key") or "?"))[:26]
+        color = band_color.get(str(status).upper(), "var(--green)")
+        bar_w = max(2.0, min(track_w, pct / axis_max * track_w))
+        pieces.append(f"<text x='8' y='{y + 12}' fill='var(--ink-2)' font-size='11'>{label}</text>")
+        pieces.append(f"<rect x='{track_x}' y='{y + 2}' width='{track_w}' height='14' rx='3' fill='var(--track)'/>")
+        pieces.append(f"<rect x='{track_x}' y='{y + 2}' width='{bar_w:.1f}' height='14' rx='3' fill='{color}' opacity='.85'/>")
+        pieces.append(f"<text x='{track_x + bar_w + 8:.1f}' y='{y + 13}' fill='{color}' font-size='11' font-weight='700'>{pct:.1f}%</text>")
+        pieces.append(f"<title>{label}: {actual:,.0f} of {sow_v:,.0f} contracted ({pct:.1f}%)</title>")
+    pieces.append("</svg>")
+    return "".join(pieces)
 
 
 def _batch_perf_rows(bps: dict) -> str:
@@ -996,8 +1074,78 @@ def _series_segments_with_gap_breaks(metric: str, points: list[tuple[datetime, f
     return [segment for segment in segments if segment], len(segments) > 1
 
 
-def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: float, cpu_warn: float) -> str:
-    """Unified 0–100 % chart across every captured metric for one host."""
+def _align_tz(stamp: datetime, reference: datetime) -> datetime:
+    """Match a stamp to the reference's tz-awareness before comparing them.
+
+    Series points arrive tz-aware from Azure; spike-attribution job runs are
+    serialised naive. Mixing the two raises rather than mis-plots, so every
+    overlap interval is normalised against the axis it will be drawn on.
+    """
+    if reference.tzinfo is None:
+        return stamp.replace(tzinfo=None)
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=reference.tzinfo)
+
+
+def _overlap_intervals(overlaps: list[dict] | None, t0: datetime, t1: datetime
+                       ) -> tuple[list[dict], list[dict]]:
+    """Spike windows and Ctrl-M runs clipped to the visible chart window."""
+    windows: list[dict] = []
+    runs: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _clip(start: Any, end: Any) -> tuple[datetime, datetime] | None:
+        first, last = _parse_ts(start), _parse_ts(end)
+        if first is None or last is None:
+            return None
+        first, last = _align_tz(first, t0), _align_tz(last, t0)
+        if last < first:
+            first, last = last, first
+        if last < t0 or first > t1:
+            return None
+        return max(first, t0), min(last, t1)
+
+    for row in overlaps or []:
+        if not isinstance(row, dict):
+            continue
+        clipped = _clip(row.get("start"), row.get("end"))
+        if clipped:
+            severity = str(row.get("severity") or "").lower()
+            metric = str(row.get("metric") or "").replace("Percentage ", "").replace(" Consumed Percentage", "")
+            peak = _number_or_none(row.get("peak"))
+            label = f"{metric or 'Spike'} {severity.replace('_', ' ').upper()}".strip()
+            if peak is not None:
+                label += f" · peak {peak:.1f}%"
+            windows.append({"start": clipped[0], "end": clipped[1],
+                            "severity": severity, "label": label})
+        for job in (row.get("jobs") or []):
+            if not isinstance(job, dict):
+                continue
+            name = str(job.get("job") or "").strip()
+            if not name:
+                continue
+            key = (name, str(job.get("start")), str(job.get("end")))
+            if key in seen:
+                continue
+            seen.add(key)
+            run = _clip(job.get("start"), job.get("end"))
+            if not run:
+                continue
+            hours = _number_or_none(job.get("hrs"))
+            label = f"{name} ({hours:.2f}h)" if hours is not None else name
+            runs.append({"start": run[0], "end": run[1], "label": label})
+    runs.sort(key=lambda item: item["start"])
+    return windows, runs
+
+
+def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: float, cpu_warn: float,
+                    overlaps: list[dict] | None = None) -> str:
+    """Unified 0–100 % chart across every captured metric for one host.
+
+    Spike windows and the Ctrl-M runs joined to them are drawn on the same time
+    axis. Naming the overlapping jobs in a sentence underneath told the reader
+    that something coincided but never where, so the coincidence the panel
+    exists to show could not actually be seen.
+    """
     populated = {metric: points for metric, points in series.items() if len(points) >= 2}
     if not populated:
         return "<div class='empty'>No plottable time-series in this window.</div>"
@@ -1005,10 +1153,12 @@ def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: flo
     ends = [points[-1][0] for points in populated.values()]
     t0, t1 = min(starts), max(ends)
     span = (t1 - t0).total_seconds() or 1.0
-    width, height = 960, 218
+    windows, runs = _overlap_intervals(overlaps, t0, t1)
+    lane_h = 22 if runs else 0
+    width, height = 960, 218 + lane_h
     # The right gutter is reserved for the CPU threshold labels so they can
     # never sit on top of the plotted line.
-    left, right, top, bottom = 44, 88, 16, 34
+    left, right, top, bottom = 44, 88, 16, 34 + lane_h
     plot_w, plot_h = width - left - right, height - top - bottom
 
     def _x(stamp: datetime) -> float:
@@ -1018,7 +1168,13 @@ def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: flo
         return top + (100 - max(0.0, min(100.0, value))) * plot_h / 100
 
     parts = [f"<svg class='mx-svg' viewBox='0 0 {width} {height}' role='img' "
-             f"aria-label='Unified CPU, memory and disk utilisation time series'>"]
+             f"aria-label='Unified CPU, memory and disk utilisation time series with Ctrl-M overlap'>"]
+    # Spike bands paint first so every line and label stays legible over them.
+    for window in windows:
+        x0, x1 = _x(window["start"]), _x(window["end"])
+        colour = "var(--red)" if window["severity"].startswith("critical") else "var(--amber)"
+        parts.append(f"<rect x='{x0:.1f}' y='{top}' width='{max(1.5, x1 - x0):.1f}' height='{plot_h:.1f}' "
+                     f"fill='{colour}' opacity='.10'><title>{_esc(window['label'])}</title></rect>")
     for level in (0, 25, 50, 75, 100):
         y = _y(level)
         parts.append(f"<line x1='{left}' x2='{width - right}' y1='{y:.1f}' y2='{y:.1f}' "
@@ -1060,15 +1216,32 @@ def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: flo
                 stamp, value = drawn[0]
                 parts.append(f"<circle cx='{_x(stamp):.1f}' cy='{_y(value):.1f}' r='2.2' fill='{colour}' opacity='.95'>"
                              f"<title>{_esc(label)}</title></circle>")
+    if runs:
+        lane_y = top + plot_h + 20
+        parts.append(f"<text x='{left - 7}' y='{lane_y + 8:.1f}' text-anchor='end' fill='var(--ink-3)' "
+                     f"font-size='10'>Ctrl-M</text>")
+        parts.append(f"<line x1='{left}' x2='{line_end}' y1='{lane_y - 3:.1f}' y2='{lane_y - 3:.1f}' "
+                     f"stroke='var(--grid)' stroke-width='1'/>")
+        for run in runs:
+            x0, x1 = _x(run["start"]), _x(run["end"])
+            parts.append(f"<rect x='{x0:.1f}' y='{lane_y:.1f}' width='{max(2.0, x1 - x0):.1f}' height='9' rx='2' "
+                         f"fill='var(--cyan)' opacity='.75'><title>{_esc(run['label'])}</title></rect>")
     parts.append("</svg>")
     legend = "".join(
         f"<span class='mx-key'><i style='background:{colour}'></i>{_esc(label)}</span>"
         for metric, label, colour, _key in _EXPLORER_METRICS if populated.get(metric))
+    if windows:
+        legend += "<span class='mx-key'><i style='background:var(--red);opacity:.35'></i>Spike window</span>"
+    if runs:
+        legend += (f"<span class='mx-key'><i style='background:var(--cyan)'></i>"
+                   f"Ctrl-M run ({len(runs)})</span>")
     notes: list[str] = []
     if sampled:
         notes.append("sampled to the chart width, each point is its bucket maximum")
     if saw_gap:
         notes.append("telemetry gaps shown as line breaks")
+    if runs:
+        notes.append("Ctrl-M bars are time coincidence, not proof of cause")
     note = f" &middot; {' &middot; '.join(notes)}" if notes else ""
     return ("".join(parts)
             + f"<div class='mx-legend'>{legend}<span class='dim micro'>"
@@ -1245,12 +1418,13 @@ def _metrics_explorer(servers: List[dict], resource: dict) -> Dict[str, Any]:
 
         charts: list[str] = []
         range_buttons: list[str] = []
+        host_overlaps = attrs_by_host.get(_host_key(host_raw), [])
         if has_series and latest is not None:
             for index, days in enumerate(reversed(ranges) if ranges else []):
                 cutoff = latest - timedelta(days=days)
                 windowed = {metric: [point for point in points if point[0] >= cutoff]
                             for metric, points in series.items()}
-                chart = _explorer_chart(windowed, thresholds["ok"], thresholds["warn"])
+                chart = _explorer_chart(windowed, thresholds["ok"], thresholds["warn"], host_overlaps)
                 charts.append(f"<div class='mx-chart' data-mx-range='{days}'"
                               f"{'' if index == 0 else ' hidden'}>{chart}</div>")
                 range_buttons.append(
@@ -1274,7 +1448,7 @@ def _metrics_explorer(servers: List[dict], resource: dict) -> Dict[str, Any]:
             f"{_explorer_stats(detail or {}, series)}"
             f"{_explorer_patterns(detail or {})}"
             f"{spike_html}"
-            f"{_explorer_overlap(attrs_by_host.get(_host_key(host_raw), []))}"
+            f"{_explorer_overlap(host_overlaps)}"
             "</div>")
         first_panel = False
 
@@ -1368,27 +1542,48 @@ def _infra_coverage(servers: List[dict], resource: dict, mx: Dict[str, Any]) -> 
 
 
 def _batch_cadence_svg(top_jobs: List[dict]) -> str:
-    """Exactly one cadence/runtime chart, sourced from the table's job rows."""
+    """Exactly one cadence/runtime chart, sourced from the table's job rows.
+
+    Each track is that job's own SLA ceiling and the fill is its peak runtime,
+    so bar length reads as headroom consumed. Scaling to the longest peer
+    instead made the slowest job render as a full bar regardless of how much
+    buffer it actually held — the opposite of what the table said.
+    """
     usable = _split_jobs(top_jobs)[0][:12]
     if not usable:
         return "<div class='empty'>No product batch job evidence was supplied for a cadence profile.</div>"
     cadence_color = {"DAILY": "#10d96e", "WEEKLY": "#3b82f6", "MONTHLY": "#c084fc",
                      "QUARTERLY": "#22d3ee", "OTHER": "#6b7a9c"}
-    maxima = max((_number_or_none(row.get("peak_hrs")) or 0.0 for row in usable), default=0.0) or 1.0
-    height = 34 + len(usable) * 19
-    pieces = [f"<svg viewBox='0 0 760 {height}' width='100%' height='{height}' role='img' aria-label='Job cadence and peak runtime profile'>"]
-    pieces.append("<text x='8' y='14' fill='var(--ink-3)' font-size='11'>Job cadence and peak runtime (hours)</text>")
+    track_x, track_w = 205, 300
+    height = 46 + len(usable) * 19
+    pieces = [f"<svg viewBox='0 0 760 {height}' width='100%' height='{height}' role='img' aria-label='Peak runtime against each job SLA ceiling'>"]
+    pieces.append("<text x='8' y='14' fill='var(--ink-3)' font-size='11'>Peak runtime as a share of each job&#39;s own SLA ceiling — full track = ceiling</text>")
     for index, row in enumerate(usable):
-        y = 28 + index * 19
-        name = _esc(row.get("Job_Name") or row.get("job_name") or "?")[:34]
+        y = 30 + index * 19
+        name = _esc(_job_name_of(row) or "?")[:30]
         cadence = _job_cadence(row)
         peak = _number_or_none(row.get("peak_hrs")) or 0.0
+        sla = _number_or_none(row.get("sla_hrs"))
         color = cadence_color.get(cadence, "#6b7a9c")
-        bar_width = max(2, peak / maxima * 360)
         pieces.append(f"<text x='8' y='{y + 11}' fill='var(--ink-2)' font-size='11'>{name}</text>")
-        pieces.append(f"<rect x='260' y='{y}' width='360' height='12' rx='3' fill='var(--track)'/>")
-        pieces.append(f"<rect x='260' y='{y}' width='{bar_width:.1f}' height='12' rx='3' fill='{color}' opacity='.88'/>")
-        pieces.append(f"<text x='630' y='{y + 10}' fill='{color}' font-size='11' font-weight='700'>{_esc(cadence.title())} · {peak:.2f}h</text>")
+        pieces.append(f"<rect x='{track_x}' y='{y}' width='{track_w}' height='12' rx='3' fill='var(--track)'/>")
+        if sla is None or sla <= 0:
+            pieces.append(f"<text x='{track_x + 6}' y='{y + 10}' fill='var(--ink-3)' font-size='10'>no SLA ceiling resolved</text>")
+            label = f"{cadence.title()} · {peak:.2f}h"
+            label_fill = "var(--ink-3)"
+        else:
+            used = peak / sla * 100.0
+            fill_w = max(2.0, min(track_w, used / 100.0 * track_w))
+            # The fill takes the status colour once headroom is thin, so the
+            # chart and the Status column can never disagree at a glance.
+            fill = ("var(--red)" if used >= 100.0 else
+                    "var(--amber)" if used >= (100.0 - float(pe_config.SLA_LONGJOB_PCT)) else color)
+            pieces.append(f"<rect x='{track_x}' y='{y}' width='{fill_w:.1f}' height='12' rx='3' fill='{fill}' opacity='.88'/>")
+            label = f"{cadence.title()} · {peak:.2f}h of {sla:.2f}h · {used:.0f}%"
+            label_fill = fill
+        pieces.append(f"<text x='{track_x + track_w + 12}' y='{y + 10}' fill='{label_fill}' font-size='11' font-weight='700'>{_esc(label)}</text>")
+    pieces.append(f"<text x='{track_x}' y='{height - 4}' fill='var(--ink-3)' font-size='10'>0</text>")
+    pieces.append(f"<text x='{track_x + track_w - 32}' y='{height - 4}' fill='var(--ink-3)' font-size='10'>ceiling</text>")
     pieces.append("</svg>")
     return "".join(pieces)
 
@@ -1480,10 +1675,36 @@ def _setaside_note(setaside: List[dict]) -> str:
     for family in sorted(by_family):
         names = ", ".join(_esc(n) for n in sorted(set(by_family[family])))
         parts.append(f"<div><span class='setaside__l'>{_esc(family)}:</span> {names}</div>")
-    return (f"<div class='setaside'><b>{len(setaside)} scheduler-housekeeping job(s) "
+    # Count distinct job names, not payload rows. Counting rows printed "9 set
+    # aside" above a list of 7 names, so the disclosure contradicted itself.
+    n_names = _unique_job_count(setaside)
+    return (f"<div class='setaside'><b>{n_names} scheduler-housekeeping job(s) "
             f"set aside</b> so the table reads as product work only. They were measured "
             f"and remain in the Ctrl-M totals — they are excluded from this view, not "
             f"from the analysis.{''.join(parts)}</div>")
+
+
+def _unique_job_count(rows: List[dict]) -> int:
+    """Distinct job names in a partition — the unit every job count must use."""
+    return len({_norm_job(_job_name_of(row)) for row in rows if _job_name_of(row)})
+
+
+def _job_count_note(top_jobs: List[dict], n_jobs: int) -> str:
+    """Disclose it when the KPI job total and the partitioned table disagree.
+
+    `n_jobs` comes from batch_kpis; the table counts come from partitioning the
+    job rows. When the two denominators differ the report otherwise prints
+    "12 product of 17 jobs" beside a set-aside list that cannot make up the
+    difference, and the reader has no way to tell which number to trust.
+    """
+    product, setaside = _split_jobs(top_jobs)
+    partitioned = _unique_job_count(product) + _unique_job_count(setaside)
+    if not partitioned or not n_jobs or partitioned == n_jobs:
+        return ""
+    return (f"&#9888; Job-count provenance — this table partitions {partitioned} distinct job(s) "
+            f"from the supplied run history, while the batch KPI header reports {n_jobs}. "
+            f"The table is authoritative for what is shown; reconcile against Ctrl-M before "
+            f"quoting either total.")
 
 
 def _priority_actions(batch_kpis: dict, servers: List[dict], sow_metrics: List[dict],
@@ -1605,7 +1826,9 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
     try:
         from services import config_store as _cfg_store
         from services.product_taxonomy import labels_for as _labels_for
-        reviewed_product_labels = [_esc(label) for label in _labels_for(_cfg_store.get("reviewed_products") or [])]
+        # Left raw — Jinja autoescapes on render. Pre-escaping here double-encoded
+        # any product carrying an ampersand ("ESP - Manufacturing &amp; Sequencing").
+        reviewed_product_labels = list(_labels_for(_cfg_store.get("reviewed_products") or []))
     except Exception:
         reviewed_product_labels = []
     evidence = {"batch": bool(top_jobs_data), "ctrlm": bool(top_jobs_data), "res": bool(resource_kpis), "res15": bool(resource_kpis), "data": bool(sow_metrics), "sow": bool(sow_metrics), "perf": bool(batch_perf), "ui": bool(bench_rows_data)}
@@ -1617,9 +1840,9 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
         comp_pct=comp_pct, comp_col=comp_col, comp_deg=max(0.0, min(100.0, comp_pct)) * 3.6, n_breach=n_breach, n_ok_jobs=n_ok_jobs, n_jobs=n_jobs, total_hrs=total_hrs, total_runs=total_runs,
         fleet_grade=fleet_grade, fleet_score=fleet_score, score_deg=max(0.0, min(100.0, fleet_score)) * 3.6, grade_color=grade_color, n_srv=n_srv, n_crit=n_crit, n_warn_s=n_warn_s, n_healthy=n_healthy, n_unknown=n_unknown, crit_pct_w=round(n_crit / total_servers * 100, 1), warn_pct_w=round(n_warn_s / total_servers * 100, 1), ok_pct_w=round(n_healthy / total_servers * 100, 1), unknown_pct_w=round(n_unknown / total_servers * 100, 1), n_issues=len(issues),
         fleet_resolved=fleet["resolved"], fleet_source=_esc(fleet["source"]), fleet_disagreement=_esc(fleet["disagreement"]), fleet_graded=fleet["graded"],
-        srv_rows=_srv_rows(servers, vms_by_host), top_rows=_top_rows(top_jobs_data), n_jobs_shown=min(20, len(_split_jobs(top_jobs_data)[0])), n_jobs_product=len(_split_jobs(top_jobs_data)[0]), iss_rows=_iss_rows(issues), checklist_rows=checklist_rows, checklist_mismatches=checklist_mismatches,
+        srv_rows=_srv_rows(servers, vms_by_host), top_rows=_top_rows(top_jobs_data), n_jobs_shown=min(20, len(_split_jobs(top_jobs_data)[0])), n_jobs_product=_unique_job_count(_split_jobs(top_jobs_data)[0]), job_count_note=_job_count_note(top_jobs_data, n_jobs), iss_rows=_iss_rows(issues), checklist_rows=checklist_rows, checklist_mismatches=checklist_mismatches,
         daily_limit=DAILY_LIMIT_HRS, capture_days=pe_config.RESOURCE_CAPTURE_DAYS, cpu_ok_t=cpu_ok_t, cpu_warn_t=cpu_warn_t, mem_ok_t=mem_ok_t, mem_warn_t=mem_warn_t, disk_ok_t=disk_ok_t, disk_warn_t=disk_warn_t, role_cpu_label=role_cpu_label, db_mem_label=db_mem_label,
-        sow_rows=_sow_rows(sow_metrics), n_sow=len(sow_metrics), sow_status=sow_status, sow_summary=_esc(sow.get("summary") or ""), sow_badge_color=sow_badge[0], sow_badge_text=sow_badge[1], sow_disclaimer=_esc(sow_disclaimer), sow_ceiling_notice=_sow_ceiling_notice(sow_metrics), sow_under_t=_g(pe_config.SOW_UNDER_PCT), sow_over_t=_g(pe_config.SOW_OVER_PCT), sow_over_crit_t=_g(pe_config.SOW_OVER_CRIT_PCT),
+        sow_rows=_sow_rows(sow_metrics), n_sow=len(sow_metrics), sow_status=sow_status, sow_summary=_esc(sow.get("summary") or ""), sow_badge_color=sow_badge[0], sow_badge_text=sow_badge[1], sow_disclaimer=_esc(sow_disclaimer), sow_ceiling_notice=_sow_ceiling_notice(sow_metrics), sow_chart=_sow_chart(sow_metrics), sow_under_t=_g(pe_config.SOW_UNDER_PCT), sow_over_t=_g(pe_config.SOW_OVER_PCT), sow_over_crit_t=_g(pe_config.SOW_OVER_CRIT_PCT),
         bench_rows=_bench_rows(bench_rows_data), n_bench=len(bench_rows_data), n_bench_total=n_bench_total, bench_summary=_esc(benchmark.get("summary") or ""), bench_badge_color=bench_badge[0], bench_badge_text=bench_badge[1], has_batch_perf=has_batch_perf, n_batch_perf_regr=n_batch_perf_regr, n_batch_perf_total=int(_f(batch_perf.get("total_jobs", 0))), batch_perf_rows=_batch_perf_rows(batch_perf) if has_batch_perf else "",
         audit_id=_esc(meta.get("audit_id") or ""), audit_window_start=_esc(audit_window.get("start") or "Not available"), audit_window_end=_esc(audit_window.get("end") or "Not available"), sign_off_status=_esc(sign_status), source_badges=[_esc(source) for source in source_badges],
         executive_verdict=_esc(f"Batch SLA {comp_pct:.1f}% ({n_breach} breach(es)); resource fleet Grade {fleet_grade}"

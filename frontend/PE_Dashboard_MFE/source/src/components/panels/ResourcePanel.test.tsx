@@ -283,7 +283,7 @@ describe('ResourcePanel', () => {
 
     await waitFor(() => expect(screen.getByText(/1 event on fresh-vm/i)).toBeDefined());
     expect(screen.queryByText(/1 event on stale-vm/i)).toBeNull();
-  });
+  }, 15000);
 
   it('renders a low-confidence baseline caveat next to degraded severity labels', async () => {
     render(

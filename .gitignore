@@ -14,6 +14,7 @@ server_err.txt
 server_stderr.txt
 server_stdout.txt
 *.txt.bak
+tmp/
 
 # Dev/diag scripts
 _test_*.py
