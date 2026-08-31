@@ -157,19 +157,8 @@ jobs:
       - name: Login to Azure Container Registry
         env:
           CREDS: ${{ secrets.STRATO_SP_ACR_CREDENTIALS }}
-        run: |
-          CLIENT_ID=$(echo "$CREDS" | grep -oP '"clientId"\s*:\s*"\K[^"]+' || echo "$CREDS" | grep -oP '"appId"\s*:\s*"\K[^"]+' || true)
-          CLIENT_SECRET=$(echo "$CREDS" | grep -oP '"clientSecret"\s*:\s*"\K[^"]+' || echo "$CREDS" | grep -oP '"password"\s*:\s*"\K[^"]+' || true)
-          TENANT_ID=$(echo "$CREDS" | grep -oP '"tenantId"\s*:\s*"\K[^"]+' || echo "$CREDS" | grep -oP '"tenant"\s*:\s*"\K[^"]+' || true)
-
-          if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ] && [ -n "$TENANT_ID" ]; then
-            echo "Logging into Azure CLI via Service Principal..."
-            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --allow-no-subscriptions > /dev/null
-          else
-            echo "Attempting standard Azure CLI login..."
-          fi
-          echo "Logging into ACR: ${{ env.STRATO_CONTAINER_REGISTRY }}"
-          az acr login -n ${{ env.STRATO_CONTAINER_REGISTRY }}
+          STRATO_CONTAINER_REGISTRY: ${{ env.STRATO_CONTAINER_REGISTRY }}
+        run: python other/azure_acr_login.py
 
       - name: Tag and Push Image to ACR - development
         run: |
