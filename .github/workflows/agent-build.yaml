@@ -1,0 +1,151 @@
+name: CI Workflow Agent 
+permissions:
+  contents: read
+on:
+  # push:
+
+  # pull_request:
+  #   types: [opened, synchronize]
+  workflow_dispatch:
+   inputs:
+    environment:
+        description: 'Stratosphere Environment'
+        type: choice
+        required: true
+        options:
+        - staging
+        - production
+    agent_name:
+        description: 'Agent name'
+        required: true
+        type: choice
+        options:
+          - PEDashboardAgent
+        default: PEDashboardAgent
+
+env:
+  SNAPSHOT_VERSION: 1.0.0
+
+jobs:
+  build:
+    environment: ${{ github.event.inputs.environment }}
+    runs-on: az-rnd-ubuntu-latest
+    timeout-minutes: 60
+    env:
+        STRATO_CONTAINER_REGISTRY: ${{ vars.STRATO_CONTAINER_REGISTRY }}
+    steps:
+      - name: "PREP - GitHub Context"
+        env:
+          GITHUB_CONTEXT: ${{ toJSON(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name: Triggering the build based on branch selection
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ] && [ "${{ github.ref_name }}" != "main" ]; then
+            echo "Since environment is production, the branch must be main. Failing the workflow."
+            exit 1
+          else
+            echo "Branch and environment check passed."
+          fi        
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: "Set Repository and Dockerfile based on agent name"
+        env:
+          agent_name: ${{ github.event.inputs.agent_name || 'PEDashboardAgent' }}
+        run: |
+          echo "Selected agent: $agent_name"
+          case "$agent_name" in
+            PEDashboardAgent)
+              echo "REPOSITORY_NAME=pedashboard_agent_api" >> $GITHUB_ENV
+              echo "DOCKERFILE_NAME=PEDashboard/Dockerfile" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "Unknown agent: $agent_name, defaulting to PEDashboardAgent"
+              echo "REPOSITORY_NAME=pedashboard_agent_api" >> $GITHUB_ENV
+              echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
+              ;;
+          esac
+          echo "Set DOCKERFILE_NAME: $DOCKERFILE_NAME"
+          echo "Set REPOSITORY_NAME: $REPOSITORY_NAME"
+        shell: bash
+
+      - name: "Get branch names"
+        id: branch-name
+        uses: tj-actions/branch-names@dde14ac574a8b9b1cedc59a1cf312788af43d8d8
+
+      - name: "Current branch name"
+        env:
+          CURRENT_BRANCH: ${{ steps.branch-name.outputs.current_branch }}
+        run: |
+          echo "BRANCH=$CURRENT_BRANCH" >>  $GITHUB_ENV
+          echo "BRANCH_VERSION=`git symbolic-ref HEAD | sed -e 's,.*/\(.*\),\1,'`" >>  $GITHUB_ENV
+
+      # Step: Fetch latest Git tag (defaults to 0.0.0 if none exist)
+      - name: Get latest SemVer tag
+        id: get_tag
+        run: |
+          git fetch --tags
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "1.0.0")
+          echo "LATEST_TAG=$latest_tag" >> $GITHUB_ENV
+          echo "::set-output name=tag::$latest_tag"
+
+      # Step: Bump patch version
+      - name: Bump SemVer patch version
+        id: bump_version
+        run: |
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${{ steps.get_tag.outputs.tag }}"
+          PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "BUILD_VERSION_BASE=$NEW_VERSION" >> $GITHUB_ENV
+          echo "::set-output name=base_version::$NEW_VERSION"
+
+      # Step: Set final BUILD_VERSION with label based on branch
+      - name: Set BUILD_VERSION based on branch type
+        env:
+          BRANCH_NAME: ${{ steps.branch-name.outputs.current_branch }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            # Use GITHUB_HEAD_REF to get the source branch name of the pull request
+            SOURCE_BRANCH=${GITHUB_HEAD_REF}
+            
+            if [[ "$SOURCE_BRANCH" == feature/* ]]; then
+              echo "BUILD_VERSION=${BUILD_VERSION_BASE}-feature-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+            else
+              echo "BUILD_VERSION=${BUILD_VERSION_BASE}-pr-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+            fi
+          elif [[ "$BRANCH_NAME" == "main" ]]; then
+            echo "BUILD_VERSION=${BUILD_VERSION_BASE}-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+          elif [[ "$BRANCH_NAME" == "development" ]]; then
+            echo "BUILD_VERSION=${BUILD_VERSION_BASE}-dev-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+          elif [[ "$BRANCH_NAME" == release/* ]]; then
+            echo "BUILD_VERSION=${BUILD_VERSION_BASE}-rc-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+          
+          else
+            # Use branch name as suffix for all other branches (sanitize for Docker tags)
+            SANITIZED_BRANCH=$(echo "${BRANCH_NAME}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+            echo "BUILD_VERSION=${BUILD_VERSION_BASE}-${SANITIZED_BRANCH}-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.13.5"
+
+      - name: "RUN - Build Docker image"
+        run: |
+          docker build . -f ${{ env.DOCKERFILE_NAME }} --tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} --build-arg POETRY_REPOSITORY="jdasoftware.jfrog.io/artifactory/api/pypi/pypi/simple" --build-arg POETRY_USERNAME=${{secrets.NPD_SRE_ARTIFACTORY_USER}} --build-arg POETRY_PASSWORD=${{secrets.NPD_SRE_ARTIFACTORY_RO_TOKEN}}
+
+          
+      - name: Login to Azure Container Registry
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          creds: ${{ secrets.STRATO_SP_ACR_CREDENTIALS }}
+
+      - run: az acr login -n ${{env.STRATO_CONTAINER_REGISTRY}}
+
+      - name: Tag and Push Image to ACR - development
+        run: |
+          docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}}
+          docker push ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}}
