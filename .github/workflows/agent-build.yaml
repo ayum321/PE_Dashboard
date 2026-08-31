@@ -2,20 +2,23 @@ name: CI Workflow Agent
 permissions:
   contents: read
 on:
-  # push:
-
-  # pull_request:
-  #   types: [opened, synchronize]
+  push:
+    branches:
+      - ayush/pe-dashboard-migration-pr
+      - main
+  pull_request:
+    types: [opened, synchronize]
   workflow_dispatch:
-   inputs:
-    environment:
+    inputs:
+      environment:
         description: 'Stratosphere Environment'
         type: choice
         required: true
         options:
-        - staging
-        - production
-    agent_name:
+          - staging
+          - production
+        default: staging
+      agent_name:
         description: 'Agent name'
         required: true
         type: choice
@@ -28,11 +31,11 @@ env:
 
 jobs:
   build:
-    environment: ${{ github.event.inputs.environment }}
+    environment: ${{ github.event.inputs.environment || 'staging' }}
     runs-on: az-rnd-ubuntu-latest
     timeout-minutes: 60
     env:
-        STRATO_CONTAINER_REGISTRY: ${{ vars.STRATO_CONTAINER_REGISTRY }}
+      STRATO_CONTAINER_REGISTRY: ${{ vars.STRATO_CONTAINER_REGISTRY }}
     steps:
       - name: "PREP - GitHub Context"
         env:
@@ -41,11 +44,12 @@ jobs:
 
       - name: Triggering the build based on branch selection
         run: |
-          if [ "${{ inputs.environment }}" = "production" ] && [ "${{ github.ref_name }}" != "main" ]; then
+          ENV_NAME="${{ github.event.inputs.environment || 'staging' }}"
+          if [ "$ENV_NAME" = "production" ] && [ "${{ github.ref_name }}" != "main" ]; then
             echo "Since environment is production, the branch must be main. Failing the workflow."
             exit 1
           else
-            echo "Branch and environment check passed."
+            echo "Branch and environment check passed: $ENV_NAME on ${{ github.ref_name }}"
           fi        
 
       - name: Checkout Repository
