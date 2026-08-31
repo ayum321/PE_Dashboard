@@ -1,0 +1,5 @@
+name : CodeQL Configuration
+queries:
+  - uses: security-and-quality
+paths:
+  - './src'

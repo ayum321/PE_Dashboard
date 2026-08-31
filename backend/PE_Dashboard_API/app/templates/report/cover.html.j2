@@ -1,0 +1,13 @@
+<section class="panel cover">
+  <div class="kicker">Performance Engineering audit · evidence record</div>
+  <h1>{{ report.meta.customer }}</h1>
+  <div class="grid">
+    <div class="metric"><span class="label">Audit ID</span><strong>{{ report.meta.audit_id }}</strong></div>
+    <div class="metric"><span class="label">Audit window</span><strong>{{ report.meta.audit_window.start or 'Not available' }} → {{ report.meta.audit_window.end or 'Not available' }}</strong></div>
+    <div class="metric"><span class="label">Generated (UTC)</span><strong>{{ report.meta.generated_at }}</strong></div>
+    <div class="metric"><span class="label">Sign-off</span><strong><span class="badge badge-{{ report.meta.sign_off_status }}">{{ report.meta.sign_off_status|replace('_',' ')|upper }}</span></strong></div>
+  </div>
+  <p class="muted">Engine: {{ report.meta.engine_version }} · Sources: {% for source in report.meta.sources if source.loaded %}{{ source.name }}{% if not loop.last %}, {% endif %}{% else %}None{% endfor %}</p>
+  {% if report.validation.warnings %}<div class="notice"><strong>Evidence quality caveats</strong><br>{% for warning in report.validation.warnings %}{{ warning }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>{% endif %}
+  {% if report.validation.errors %}<div class="notice error"><strong>Export validation errors</strong><br>{% for error in report.validation.errors %}{{ error }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>{% endif %}
+</section>

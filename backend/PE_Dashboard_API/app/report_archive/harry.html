@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PE Audit Report — Harry</title>
+<style>
+/* ============================================================
+   PE Audit Report — Grafana / Prometheus observability styling
+   100% self-contained (no CDN, no JS frameworks). Pure CSS +
+   inline SVG so it can be emailed, archived, and printed.
+   ============================================================ */
+:root[data-theme="dark"]{
+  --bg-page:#070b18; --bg-deep:#04060f;
+  --panel:#0e1627; --panel-2:#101a2e; --panel-top:#13203a;
+  --border:#1e2c4f; --border-soft:#16223d;
+  --ink:#eef3ff; --ink-2:#aab8d4; --ink-3:#6b7a9c;
+  --grid:#16213b;
+  --green:#10d96e; --amber:#f59e0b; --red:#f43f5e;
+  --blue:#3b82f6; --purple:#a855f7; --cyan:#22d3ee;
+  --track:rgba(255,255,255,.06);
+  --shadow:0 18px 48px -22px rgba(0,0,0,.85);
+  --glow:0 0 0 1px rgba(59,130,246,.12), 0 8px 30px -12px rgba(7,11,24,.9);
+}
+:root[data-theme="light"]{
+  --bg-page:#eef2f9; --bg-deep:#e3e9f4;
+  --panel:#ffffff; --panel-2:#f7f9fd; --panel-top:#eef3fb;
+  --border:#d4ddee; --border-soft:#e3e9f4;
+  --ink:#0d1730; --ink-2:#41506e; --ink-3:#7888a6;
+  --grid:#e7ecf6;
+  --green:#0a9b54; --amber:#c2790a; --red:#d4304b;
+  --blue:#2563eb; --purple:#8b3fd6; --cyan:#0e9cb8;
+  --track:rgba(13,23,48,.07);
+  --shadow:0 14px 38px -20px rgba(60,80,120,.35);
+  --glow:0 0 0 1px rgba(37,99,235,.10), 0 10px 28px -14px rgba(120,140,180,.4);
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg-page); color:var(--ink);
+  font-size:15px; line-height:1.5; letter-spacing:.1px;
+  -webkit-font-smoothing:antialiased; position:relative;
+}
+/* Ambient observability glow field */
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(59,130,246,.18), transparent 60%),
+    radial-gradient(820px 520px at 96% 4%, rgba(168,85,247,.14), transparent 58%),
+    radial-gradient(1000px 700px at 50% 118%, rgba(34,211,238,.10), transparent 60%),
+    linear-gradient(180deg,var(--bg-page),var(--bg-deep));
+}
+.tabnum{font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1;}
+.page{position:relative; z-index:1; max-width:1180px; margin:0 auto; padding:30px 30px 60px;}
+
+/* ── Toolbar (screen only) ───────────────────────────────── */
+.toolbar{display:flex; gap:10px; justify-content:flex-end; margin-bottom:18px;}
+.tbtn{
+  appearance:none; cursor:pointer; font-size:12.5px; font-weight:600;
+  color:var(--ink-2); background:var(--panel); border:1px solid var(--border);
+  border-radius:9px; padding:8px 14px; letter-spacing:.3px;
+  transition:.15s; display:inline-flex; align-items:center; gap:7px;
+}
+.tbtn:hover{color:var(--ink); border-color:var(--blue); box-shadow:0 0 0 3px rgba(59,130,246,.12);}
+
+/* ── Header ──────────────────────────────────────────────── */
+.rhead{
+  position:relative; overflow:hidden; border:1px solid var(--border);
+  border-radius:18px; padding:26px 28px;
+  background:
+    radial-gradient(540px 220px at 88% -40%, rgba(59,130,246,.28), transparent 62%),
+    linear-gradient(135deg,var(--panel-top),var(--panel));
+  box-shadow:var(--shadow); margin-bottom:18px;
+}
+.rhead::after{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:5px;
+  background:linear-gradient(180deg,var(--blue),var(--purple),var(--cyan));
+  box-shadow:0 0 22px 2px rgba(59,130,246,.55);
+}
+.rhead__row{display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap;}
+.brand{display:flex; align-items:center; gap:13px;}
+.brand__mark{
+  width:46px; height:46px; border-radius:12px; flex:0 0 auto;
+  display:grid; place-items:center; font-size:22px;
+  background:linear-gradient(140deg,rgba(59,130,246,.25),rgba(168,85,247,.22));
+  border:1px solid rgba(99,140,230,.45); box-shadow:inset 0 0 18px rgba(59,130,246,.25);
+}
+.brand__eyebrow{font-size:11px; font-weight:700; letter-spacing:2.4px; color:var(--cyan); text-transform:uppercase;}
+.brand__title{font-size:25px; font-weight:800; letter-spacing:.2px; margin-top:2px; line-height:1.15;}
+.rhead__meta{text-align:right; display:flex; flex-direction:column; gap:9px; align-items:flex-end;}
+.cust-eyebrow{font-size:10px; font-weight:700; letter-spacing:2px; color:var(--ink-3); text-transform:uppercase;}
+.cust-name{
+  font-size:26px; font-weight:800; letter-spacing:-.2px; line-height:1.15;
+  background:linear-gradient(120deg,var(--ink),var(--cyan));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.cust-source{font-size:10.5px; color:var(--ink-3); font-weight:600;}
+.chips{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;}
+.chip{
+  font-size:12px; font-weight:600; letter-spacing:.4px; padding:5px 11px; border-radius:999px;
+  background:var(--panel-2); border:1px solid var(--border); color:var(--ink-2);
+  display:inline-flex; align-items:center; gap:6px;
+}
+.chip b{color:var(--ink); font-weight:700;}
+.chip .dot{width:7px; height:7px; border-radius:50%; background:var(--cyan); box-shadow:0 0 8px 1px currentColor;}
+.prod-chips{display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-start; margin-top:2px;}
+.prod-chip{
+  font-size:10.5px; font-weight:600; padding:3px 9px; border-radius:999px;
+  background:rgba(168,85,247,.12); border:1px solid rgba(168,85,247,.4); color:#c084fc;
+}
+
+/* ── Verdict banner ──────────────────────────────────────── */
+.banner{
+  position:relative; overflow:hidden; margin-bottom:20px;
+  border:1px solid var(--border); border-radius:16px; padding:20px 24px;
+  background:linear-gradient(135deg, color-mix(in srgb, #22c55e 16%, var(--panel)) 0%, var(--panel) 60%);
+  box-shadow:var(--shadow); display:flex; align-items:center; gap:20px; flex-wrap:wrap;
+}
+.banner::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:6px;
+  background:#22c55e; box-shadow:0 0 26px 2px #22c55e;
+}
+.banner__badge{
+  width:58px; height:58px; border-radius:14px; flex:0 0 auto; display:grid; place-items:center;
+  font-size:26px; color:#22c55e;
+  background:color-mix(in srgb, #22c55e 18%, transparent);
+  border:1.5px solid color-mix(in srgb, #22c55e 55%, transparent);
+  box-shadow:inset 0 0 20px color-mix(in srgb, #22c55e 30%, transparent);
+}
+.banner__txt{flex:1 1 280px;}
+.banner__k{font-size:11px; font-weight:700; letter-spacing:2px; color:var(--ink-3); text-transform:uppercase;}
+.banner__v{font-size:23px; font-weight:800; color:#22c55e; margin-top:1px; letter-spacing:.3px;}
+.banner__date{text-align:right; color:var(--ink-3); font-size:12.5px; line-height:1.7;}
+.banner__date b{color:var(--ink-2); font-weight:600;}
+
+/* ── Stat grid (KPI panels) ──────────────────────────────── */
+.grid{display:grid; gap:16px;}
+.stat-grid{grid-template-columns:repeat(4,1fr); margin-bottom:18px;}
+.stat{
+  position:relative; overflow:hidden; border:1px solid var(--border); border-radius:15px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel)); box-shadow:var(--glow);
+  padding:18px 18px 16px; min-height:148px; display:flex; flex-direction:column;
+}
+.stat__top{height:3px; position:absolute; left:0; right:0; top:0; opacity:.95;}
+.stat__label{font-size:11.5px; font-weight:700; letter-spacing:1.4px; color:var(--ink-3); text-transform:uppercase;}
+.stat__body{display:flex; align-items:center; gap:16px; margin-top:auto; padding-top:10px;}
+.stat__value{font-size:42px; font-weight:800; line-height:1; letter-spacing:-.5px;}
+.stat__unit{font-size:18px; font-weight:700; color:var(--ink-3); margin-left:2px;}
+.stat__sub{font-size:12.5px; color:var(--ink-2); margin-top:8px; line-height:1.5;}
+.stat__sub .sep{color:var(--ink-3); margin:0 6px;}
+
+/* Conic-gradient gauge ring (pure CSS) */
+.gauge{
+  --deg:0; --gc:var(--blue);
+  width:108px; height:108px; flex:0 0 auto; border-radius:50%; position:relative;
+  background:conic-gradient(var(--gc) calc(var(--deg)*1deg), var(--track) 0);
+  display:grid; place-items:center;
+  box-shadow:0 0 26px -6px var(--gc), inset 0 0 0 1px rgba(255,255,255,.04);
+}
+.gauge::after{
+  content:""; position:absolute; inset:11px; border-radius:50%;
+  background:radial-gradient(circle at 50% 38%, var(--panel-2), var(--panel));
+  border:1px solid var(--border-soft);
+}
+.gauge__in{position:relative; z-index:1; text-align:center;}
+.gauge__big{font-size:27px; font-weight:800; line-height:1;}
+.gauge__cap{font-size:10.5px; font-weight:700; letter-spacing:.8px; color:var(--ink-3); margin-top:3px; text-transform:uppercase;}
+
+/* ── Section panel ───────────────────────────────────────── */
+.panel{
+  position:relative; border:1px solid var(--border); border-radius:16px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));
+  box-shadow:var(--shadow); margin-bottom:18px; overflow:hidden;
+}
+.panel__head{
+  display:flex; align-items:center; gap:13px; padding:16px 20px;
+  border-bottom:1px solid var(--border-soft);
+  background:linear-gradient(90deg, color-mix(in srgb,var(--accent,#3b82f6) 10%, transparent), transparent 55%);
+}
+.panel__icon{
+  width:38px; height:38px; border-radius:11px; flex:0 0 auto; display:grid; place-items:center; font-size:19px;
+  background:color-mix(in srgb,var(--accent,#3b82f6) 16%, transparent);
+  border:1px solid color-mix(in srgb,var(--accent,#3b82f6) 45%, transparent);
+  color:var(--accent,#3b82f6); box-shadow:inset 0 0 16px color-mix(in srgb,var(--accent,#3b82f6) 22%, transparent);
+}
+.panel__t{font-size:16.5px; font-weight:700; letter-spacing:.2px;}
+.panel__s{font-size:12px; color:var(--ink-3); margin-top:2px;}
+.panel__count{margin-left:auto; font-size:12px; font-weight:700; color:var(--ink-2);
+  background:var(--panel); border:1px solid var(--border); border-radius:999px; padding:5px 12px;}
+.panel__body{padding:18px 20px;}
+
+/* ── Health distribution bar ─────────────────────────────── */
+.hbar{height:30px; border-radius:9px; overflow:hidden; display:flex; background:var(--track);
+  border:1px solid var(--border-soft); box-shadow:inset 0 1px 4px rgba(0,0,0,.3);}
+.hbar__seg{height:100%; display:flex; align-items:center; justify-content:center;
+  font-size:12px; font-weight:800; color:#04060f; letter-spacing:.3px; transition:width .3s; min-width:0;}
+.seg-crit{background:linear-gradient(180deg,#ff5c78,var(--red)); box-shadow:0 0 18px -2px var(--red);}
+.seg-warn{background:linear-gradient(180deg,#ffc34d,var(--amber)); box-shadow:0 0 18px -2px var(--amber);}
+.seg-ok{background:linear-gradient(180deg,#3df59a,var(--green)); box-shadow:0 0 18px -2px var(--green);}
+.legend{display:flex; gap:20px; flex-wrap:wrap; margin-top:14px;}
+.legend__i{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--ink-2);}
+.legend__i b{color:var(--ink); font-weight:800; font-size:15px;}
+.legend .dot{width:11px; height:11px; border-radius:3px; box-shadow:0 0 9px 1px currentColor;}
+.dot-crit{background:var(--red); color:var(--red);}
+.dot-warn{background:var(--amber); color:var(--amber);}
+.dot-ok{background:var(--green); color:var(--green);}
+
+/* ── Tables ──────────────────────────────────────────────── */
+table{width:100%; border-collapse:separate; border-spacing:0; font-size:13.5px;}
+thead th{
+  text-align:left; font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+  color:var(--ink-3); padding:11px 14px; border-bottom:1px solid var(--border);
+  background:var(--panel-top); position:sticky; top:0;
+}
+tbody td{padding:12px 14px; border-bottom:1px solid var(--border-soft); color:var(--ink-2); vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr{transition:background .12s;}
+tbody tr:hover td{background:color-mix(in srgb,var(--blue) 7%, transparent);}
+td b, .host-cell b{color:var(--ink); font-weight:700;}
+.host-cell{line-height:1.35;}
+.dim{color:var(--ink-3); font-size:11.5px;}
+.num{font-variant-numeric:tabular-nums; font-weight:700; color:var(--ink);}
+
+/* Tags / severity pills */
+.tag{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:700;
+  letter-spacing:.3px; padding:4px 10px; border-radius:999px; white-space:nowrap;
+  border:1px solid transparent;}
+.tag::before{content:""; width:6px; height:6px; border-radius:50%; background:currentColor; box-shadow:0 0 7px 1px currentColor;}
+.tag-green{color:var(--green); background:color-mix(in srgb,var(--green) 15%, transparent); border-color:color-mix(in srgb,var(--green) 40%, transparent);}
+.tag-amber{color:var(--amber); background:color-mix(in srgb,var(--amber) 15%, transparent); border-color:color-mix(in srgb,var(--amber) 40%, transparent);}
+.tag-red{color:var(--red); background:color-mix(in srgb,var(--red) 16%, transparent); border-color:color-mix(in srgb,var(--red) 42%, transparent);}
+.tag-blue{color:var(--blue); background:color-mix(in srgb,var(--blue) 15%, transparent); border-color:color-mix(in srgb,var(--blue) 40%, transparent);}
+.tag-cyan{color:var(--cyan); background:color-mix(in srgb,var(--cyan) 15%, transparent); border-color:color-mix(in srgb,var(--cyan) 40%, transparent);}
+.tag-gray{color:var(--ink-3); background:var(--track); border-color:var(--border);}
+.tag::before{display:inline-block;}
+.tag-gray::before{box-shadow:none;}
+
+.empty{padding:26px; text-align:center; color:var(--ink-3); font-size:13.5px;}
+
+/* ── Checklist ───────────────────────────────────────────── */
+.check-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:11px;}
+.check{display:flex; align-items:center; gap:11px; padding:12px 15px; border-radius:11px;
+  background:var(--panel); border:1px solid var(--border-soft); font-size:13.5px; color:var(--ink-2);}
+.check__mark{width:22px; height:22px; border-radius:50%; flex:0 0 auto; display:grid; place-items:center;
+  font-size:12px; font-weight:800;}
+.check--on .check__mark{color:var(--green); background:color-mix(in srgb,var(--green) 18%, transparent);
+  border:1px solid color-mix(in srgb,var(--green) 45%, transparent); box-shadow:0 0 10px -2px var(--green);}
+.check--off .check__mark{color:var(--ink-3); background:var(--track); border:1px solid var(--border);}
+.check--on{color:var(--ink);}
+.check--mismatch{border-color:color-mix(in srgb,var(--amber) 45%, var(--border-soft));}
+.check--mismatch .check__mark{color:var(--amber); background:color-mix(in srgb,var(--amber) 18%, transparent);
+  border:1px solid color-mix(in srgb,var(--amber) 55%, transparent); box-shadow:0 0 10px -2px var(--amber);}
+
+/* ── Approval ────────────────────────────────────────────── */
+.appr-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+.appr{border:1px solid var(--border); border-radius:14px; padding:18px 20px;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));}
+.appr__role{font-size:11px; font-weight:700; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink-3);}
+.appr__name{font-size:18px; font-weight:700; margin-top:7px; color:var(--ink);}
+.appr__status{margin-top:14px; display:flex; align-items:center; gap:9px; font-size:13.5px; font-weight:700;}
+.appr__line{margin-top:16px; border-top:1px dashed var(--border); padding-top:9px;
+  font-size:12px; color:var(--ink-3);}
+.notes{margin-top:16px; border:1px solid var(--border); border-radius:12px; padding:15px 18px;
+  background:var(--panel); font-size:13.5px; color:var(--ink-2); line-height:1.6;}
+.notes b{color:var(--cyan); font-weight:700; letter-spacing:.4px;}
+
+/* ── Footer ──────────────────────────────────────────────── */
+.foot{margin-top:26px; padding-top:18px; border-top:1px solid var(--border);
+  display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap;
+  font-size:11.5px; color:var(--ink-3);}
+.foot code{color:var(--ink-2); background:var(--panel); border:1px solid var(--border-soft);
+  border-radius:5px; padding:2px 7px; font-size:11px;}
+
+@media (max-width:880px){
+  .stat-grid{grid-template-columns:repeat(2,1fr);}
+  .check-grid,.appr-grid{grid-template-columns:1fr;}
+}
+/* ── Print / PDF ─────────────────────────────────────────── */
+@page{size:A4; margin:14mm;}
+@media print{
+  body{background:#fff; color:#0d1730; font-size:11.5px;}
+  body::before{display:none;}
+  .toolbar{display:none !important;}
+  .page{max-width:none; padding:0;}
+  .rhead,.banner,.stat,.panel,.appr{box-shadow:none; break-inside:avoid;}
+  .panel,.stat-grid,.appr-grid{break-inside:avoid;}
+  thead th{position:static;}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="toolbar">
+    <button class="tbtn" onclick="toggleTheme()">◐ Theme</button>
+    <button class="tbtn" onclick="window.print()">⎙ Print / PDF</button>
+  </div>
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header class="rhead">
+    <div class="rhead__row">
+      <div class="brand">
+        <div class="brand__mark">📊</div>
+        <div>
+          <div class="brand__eyebrow">Performance Engineering</div>
+          <div class="brand__title">Audit &amp; Sign-off Report</div>
+        </div>
+      </div>
+      <div class="rhead__meta">
+        <div class="cust-eyebrow">Customer</div>
+        <div class="cust-name">Harry</div>
+        
+        <div class="cust-source">Sourced from Ctrl-M filename</div>
+        
+        
+        <div class="prod-chips">
+          
+          <span class="prod-chip">Demand Classification</span>
+          
+          <span class="prod-chip">Demand</span>
+          
+          <span class="prod-chip">Demand 360</span>
+          
+          <span class="prod-chip">ESP – Manufacturing &amp;amp; Sequencing</span>
+          
+          <span class="prod-chip">ESP – LP Optimization</span>
+          
+          <span class="prod-chip">Platform</span>
+          
+        </div>
+        
+        <div class="chips">
+          <span class="chip"><span class="dot"></span>Mixed (PROD + TEST)</span>
+          <span class="chip">Generated <b>24 Aug 2026, 06:42 PM</b></span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Verdict banner ─────────────────────────────────── -->
+  <section class="banner">
+    <div class="banner__badge">✓</div>
+    <div class="banner__txt">
+      <div class="banner__k">Overall Sign-off Verdict</div>
+      <div class="banner__v">APPROVED</div>
+    </div>
+    <div class="banner__date">
+      <div><b>Customer:</b> Harry</div>
+      <div><b>Environment:</b> Mixed (PROD + TEST)</div>
+      <div><b>Report date:</b> 24 Aug 2026, 06:42 PM</div>
+    </div>
+  </section>
+
+  <!-- ── KPI stat panels ────────────────────────────────── -->
+  <div class="grid stat-grid">
+
+    <div class="stat">
+      <div class="stat__top" style="background:#22c55e;box-shadow:0 0 16px #22c55e;"></div>
+      <div class="stat__label">Batch SLA Compliance</div>
+      <div class="stat__body">
+        <div class="gauge" style="--deg:360.0;--gc:#22c55e;">
+          <div class="gauge__in">
+            <div class="gauge__big tabnum" style="color:#22c55e;">100.0%</div>
+            <div class="gauge__cap">Window</div>
+          </div>
+        </div>
+        <div>
+          <div class="stat__sub"><span class="num">227</span> jobs on-time</div>
+          <div class="stat__sub"><span class="num" style="color:#10d96e;">0</span> breaching</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:var(--blue);box-shadow:0 0 16px var(--blue);"></div>
+      <div class="stat__label">Batch Workload</div>
+      <div class="stat__body">
+        <div>
+          <span class="stat__value tabnum">227</span><span class="stat__unit">jobs</span>
+          <div class="stat__sub"><span class="num">2286</span> runs<span class="sep">•</span><span class="num">59.69</span> h runtime</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:#6b7a99;box-shadow:0 0 16px #6b7a99;"></div>
+      <div class="stat__label">Fleet Health</div>
+      <div class="stat__body">
+        <div class="gauge" style="--deg:0.0;--gc:#6b7a99;">
+          <div class="gauge__in">
+            <div class="gauge__big" style="color:#6b7a99;">?</div>
+            <div class="gauge__cap tabnum">0.0/100</div>
+          </div>
+        </div>
+        <div>
+          <div class="stat__sub"><span class="num">8</span> servers</div>
+          <div class="stat__sub">over 15-day window</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">
+      <div class="stat__top" style="background:#10d96e;box-shadow:0 0 16px #10d96e;"></div>
+      <div class="stat__label">Open Issues</div>
+      <div class="stat__body">
+        <div>
+          <span class="stat__value tabnum" style="color:#10d96e;">0</span>
+          <div class="stat__sub">none outstanding</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Fleet severity distribution ────────────────────── -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">🩺</div>
+      <div>
+        <div class="panel__t">Fleet Severity Distribution</div>
+        <div class="panel__s">8 server(s) graded over the last 15 days</div>
+      </div>
+      <div class="panel__count">Grade ? · 0.0/100</div>
+    </div>
+    <div class="panel__body">
+      <div class="hbar">
+        
+        
+        <div class="hbar__seg seg-ok" style="width:100.0%;">8</div>
+      </div>
+      <div class="legend">
+        <span class="legend__i"><span class="dot dot-crit"></span>Critical <b>0</b></span>
+        <span class="legend__i"><span class="dot dot-warn"></span>Warning <b>0</b></span>
+        <span class="legend__i"><span class="dot dot-ok"></span>Healthy <b>8</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Batch performance ──────────────────────────────── -->
+  <section class="panel" style="--accent:#3b82f6;">
+    <div class="panel__head">
+      <div class="panel__icon">⚙️</div>
+      <div>
+        <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
+        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the 14.0h configured default · buffer = (SLA − runtime) ÷ SLA</div>
+      </div>
+      <div class="panel__count">227 jobs</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <table>
+        <thead><tr>
+          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th>
+        </tr></thead>
+        <tbody><tr>
+          <td><b>ESP_STORE_SKU_PROJ_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.942h</td>
+          <td class="dim">0.162h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>88.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>GATHER_DB_TABLE_STATS_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.427h</td>
+          <td class="dim">0.194h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>94.7%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_IS_GEN_SPARQ_PLAN_1_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.341h</td>
+          <td class="dim">0.162h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>95.7%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_IS_GEN_SPARQ_PLAN_2_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.215h</td>
+          <td class="dim">0.173h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.9%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_IS_GEN_SPARQ_PLAN_2_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.204h</td>
+          <td class="dim">0.166h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.4%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>GATHER_DB_TABLE_STATS_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.183h</td>
+          <td class="dim">0.161h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_IS_GEN_SPARQ_PLAN_1_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.179h</td>
+          <td class="dim">0.154h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PURGE_PROCESS_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.172h</td>
+          <td class="dim">0.150h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>97.8%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PURGE_PROCESS_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.168h</td>
+          <td class="dim">0.158h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.3%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_IS_GEN_SPARQ_PLAN_UC_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.151h</td>
+          <td class="dim">0.105h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.1%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PDC_BOM_TO_SCPO_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.146h</td>
+          <td class="dim">0.130h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>TMP_PDC_BOM_TO_SCPO_D_1</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.143h</td>
+          <td class="dim">0.128h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.2%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PDC_NETWORK_TO_SCPO_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.138h</td>
+          <td class="dim">0.131h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PDC_NETWORK_TO_SCPO_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.137h</td>
+          <td class="dim">0.126h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.3%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>TMP_PDC_NETWORK_TO_SCPO_W_1</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.137h</td>
+          <td class="dim">0.137h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>98.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_PLAN_OUTPUT_BACKUP_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.039h</td>
+          <td class="dim">0.031h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>99.5%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>ESP_PLAN_OUTPUT_BACKUP_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.037h</td>
+          <td class="dim">0.032h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>99.6%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>PDC_FILEWATCHER_1_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.012h</td>
+          <td class="dim">0.006h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>99.9%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>IS_FILE_WATCHER_INBOUND_D</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Daily</span></td>
+          <td >0.006h</td>
+          <td class="dim">0.006h</td>
+          <td class="dim">8.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>99.9%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr><tr>
+          <td><b>IS_DMD_FCST_EXPORT_W</b> <span class="tag tag-blue" style="font-size:9.5px;padding:1px 6px;">Weekly</span></td>
+          <td >0.006h</td>
+          <td class="dim">0.005h</td>
+          <td class="dim">10.00h <span class="tag tag-gray" style="font-size:9.5px;padding:1px 6px;">Contracted</span></td>
+          <td>99.9%</td>
+          <td><span class="tag tag-green">OK</span></td>
+        </tr></tbody>
+      </table>
+      
+      <div class="dim" style="padding:10px 20px;font-size:12px;">Showing top 20 of 227 jobs by peak runtime.</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Infrastructure ─────────────────────────────────── -->
+  <section class="panel" style="--accent:#a855f7;">
+    <div class="panel__head">
+      <div class="panel__icon">🖥️</div>
+      <div>
+        <div class="panel__t">Infrastructure Utilisation</div>
+        <div class="panel__s">Role-aware grading — CPU ceilings APP 60/80 · DB 85/95 · SRE 90/100 (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band 80–92% &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
+      </div>
+      <div class="panel__count">8 servers</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <table>
+        <thead><tr>
+          <th>Host</th><th>Role</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Health</th>
+        </tr></thead>
+        <tbody><tr>
+          <td class="host-cell"><b>prbc631503031</b><br><span class="dim">prbc631503031 &middot; 34 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">5.6%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">89.7%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>prbc631530031</b><br><span class="dim">prbc631530031 &middot; 64 GB RAM</span></td>
+          <td><span class="tag tag-blue">SRE</span></td>
+          <td><span class="tag tag-green">3.8%</span><div class="dim" style="margin-top:3px;font-size:10px">SRE thr 90/100</div></td><td><span class="tag tag-green">30.9%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631503011</b><br><span class="dim">tsbc631503011 &middot; 33 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">3.4%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">81.4%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502031</b><br><span class="dim">tsbc631502031 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">11.7%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">19.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502012</b><br><span class="dim">tsbc631502012 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">2.5%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">23.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631503031</b><br><span class="dim">tsbc631503031 &middot; 34 GB RAM</span></td>
+          <td><span class="tag tag-blue">DB</span></td>
+          <td><span class="tag tag-green">6.2%</span><div class="dim" style="margin-top:3px;font-size:10px">DB thr 85/95</div></td><td><span class="tag tag-green">89.9%</span><div class="dim" style="margin-top:3px;font-size:10px">SGA band 80–92%</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502032</b><br><span class="dim">tsbc631502032 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">6.9%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">19.0%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr><tr>
+          <td class="host-cell"><b>tsbc631502011</b><br><span class="dim">tsbc631502011 &middot; 32 GB RAM</span></td>
+          <td><span class="tag tag-blue">APP</span></td>
+          <td><span class="tag tag-green">2.3%</span><div class="dim" style="margin-top:3px;font-size:10px">APP thr 60/80</div></td><td><span class="tag tag-green">23.7%</span><div class="dim" style="margin-top:3px;font-size:10px">warn 70/80</div></td><td><span class="tag tag-gray">N/A</span></td>
+          <td><span class="tag tag-green">HEALTHY</span></td>
+        </tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── SOW volume compliance ───────────────────────────── -->
+  <section class="panel" style="--accent:#f97316;">
+    <div class="panel__head">
+      <div class="panel__icon">📄</div>
+      <div>
+        <div class="panel__t">SOW Contract &amp; Volume Compliance</div>
+        <div class="panel__s">📉 2/2 metrics below 70% of SOW — outside the 70%–110% standard process window. Findings are validated at the tested volume only, not at full contracted scale.</div>
+      </div>
+      <div class="panel__count" style="color:#3b82f6;">UNDER-UTILISED</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      
+      <table>
+        <thead><tr><th>Metric</th><th>SOW Commitment</th><th>Actual</th><th>% of Contract</th><th>Status</th></tr></thead>
+        <tbody><tr>
+          <td><b>Daily DFU</b></td>
+          <td class="num">888,888</td>
+          <td class="num">455,555</td>
+          <td >51.2%</td>
+          <td><span class="tag tag-blue">UNDER-UTILISED</span></td>
+        </tr><tr>
+          <td><b>Daily SKU Count</b></td>
+          <td class="num">4,444,444</td>
+          <td class="num">2,255,999</td>
+          <td >50.8%</td>
+          <td><span class="tag tag-blue">UNDER-UTILISED</span></td>
+        </tr></tbody>
+      </table>
+      <div style="padding:12px 20px;font-size:12.5px;line-height:1.5;border-top:1px solid var(--border-soft);color:#3b82f6;background:color-mix(in srgb,#3b82f6 8%, transparent);">ℹ Actual volume is below 70% of the contracted SOW ceiling — under-utilised relative to contract. Findings are validated only at the tested volume, not at full contracted scale.</div>
+      <div class="dim" style="padding:8px 20px 14px;font-size:11px;">Status bands — <b style="color:#3b82f6">UNDER-UTILISED</b> &lt;70% &middot; <b style="color:#22c55e">ACCEPTABLE / OPTIMAL</b> 70–110% &middot; <b style="color:#f59e0b">OVER CONTRACT</b> &gt;110% &middot; <b style="color:#ef4444">CRITICAL OVER</b> &gt;120%</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Performance benchmark ──────────────────────────── -->
+  <section class="panel" style="--accent:#eab308;">
+    <div class="panel__head">
+      <div class="panel__icon">📊</div>
+      <div>
+        <div class="panel__t">Performance Benchmark Results</div>
+        <div class="panel__s">Baseline vs. current transaction/runtime comparison</div>
+      </div>
+      <div class="panel__count" style="color:#6b7a99;">NOT ASSESSED</div>
+    </div>
+    <div class="panel__body" style="padding:18px 20px;">
+      
+      <div class="empty">No benchmark data uploaded for this engagement — performance benchmarking not assessed.</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Issues register ────────────────────────────────── -->
+  <section class="panel" style="--accent:#f43f5e;">
+    <div class="panel__head">
+      <div class="panel__icon">🚩</div>
+      <div>
+        <div class="panel__t">Issues Register</div>
+        <div class="panel__s">Open items raised during the audit window</div>
+      </div>
+      <div class="panel__count">0 open</div>
+    </div>
+    <div class="panel__body" style="padding:18px 20px;">
+      
+      <div class="empty">✓ No open issues recorded for this engagement.</div>
+      
+    </div>
+  </section>
+
+  <!-- ── Audit checklist ────────────────────────────────── -->
+  <section class="panel" style="--accent:#10d96e;">
+    <div class="panel__head">
+      <div class="panel__icon">✓</div>
+      <div>
+        <div class="panel__t">PE Audit Coverage Checklist</div>
+        <div class="panel__s">Verification steps completed for this sign-off</div>
+      </div>
+    </div>
+    <div class="panel__body">
+      <div class="check-grid"><div class="check check--on"><span class="check__mark">✓</span><span>Batch SLA validated (daily/weekly/monthly)</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Resource utilization within thresholds — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Data volume (DFU/SKU) vs SOW verified</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Issues &amp; waivers acknowledged</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Batch performance-test report reviewed — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>Ctrl-M 30-day execution history reviewed</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>UI performance benchmarking approved — no supporting data in this export</span></div><div class="check check--on"><span class="check__mark">✓</span><span>SOW service IDs &amp; scenarios confirmed</span></div><div class="check check--mismatch"><span class="check__mark">⚠</span><span>Resource utilization (last 15 days) reviewed — no supporting data in this export</span></div></div>
+    </div>
+  </section>
+
+  <!-- ── Approval / sign-off ────────────────────────────── -->
+  <section class="panel" style="--accent:#22d3ee;">
+    <div class="panel__head">
+      <div class="panel__icon">✍️</div>
+      <div>
+        <div class="panel__t">Approval &amp; Sign-off</div>
+        <div class="panel__s">Performance Engineering and customer acceptance</div>
+      </div>
+    </div>
+    <div class="panel__body">
+      <div class="appr-grid">
+        <div class="appr">
+          <div class="appr__role">Performance Engineer</div>
+          <div class="appr__name">Ayush </div>
+          <div class="appr__status" style="color:#10d96e;">
+            ✅ Approved
+          </div>
+          <div class="appr__line">Signed: 2026-08-24</div>
+          
+        </div>
+        <div class="appr">
+          <div class="appr__role">Customer</div>
+          <div class="appr__name">—</div>
+          <div class="appr__status" style="color:#10d96e;">
+            ✅ Approved
+          </div>
+          <div class="appr__line">Signed: 2026-08-24</div>
+        </div>
+      </div>
+      
+    </div>
+  </section>
+
+  <!-- ── Footer ─────────────────────────────────────────── -->
+  <footer class="foot">
+    <div>PE Audit Dashboard · self-contained report · generated 24 Aug 2026, 06:42 PM</div>
+    <div>
+      Thresholds —
+      CPU <code>APP 60/80 · DB 85/95 · SRE 90/100</code> (role ok/crit)
+      Mem <code>≤70% warn · ≤80% crit · DB SGA 80–92%</code>
+      Disk <code>OK ≤70% · Warn ≤85%</code>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+function toggleTheme(){
+  var r = document.documentElement;
+  r.setAttribute('data-theme', r.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+}
+</script>
+</body>
+</html>

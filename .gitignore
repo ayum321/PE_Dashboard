@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Runtime / cache
+.pe_cache.json
+.pe_config.json
+.pkg_stamp
+.server_pid
+debug.log
+server_err.txt
+server_stderr.txt
+server_stdout.txt
+*.txt.bak
+
+# Dev/diag scripts
+_test_*.py
+!_test_report_archive.py
+!backend/PE_Dashboard_API/app/_test_legacy_report_export.py
+!app/_test_config_deployment_safety.py
+!backend/PE_Dashboard_API/app/_test_sow_state_persistence.py
+_check_*.py
+_diag_*.py
+_audit_*.py
+_bench_*.py
+_time_*.py
+_analyze_*.py
+_inspect_*.py
+_patch_*.py
+_wmi_*.py
+_restore_*.py
+_ingest_*.py
+_pe_audit_*.py
+__diag_*
+
+# Releases / customer data
+PE_Dashboard_Release*.zip
+*.xlsx
+*.csv
+*.docx
+*.pdf
+
+# IDE / editor
+.vscode/
+.claude/*
+.codex/
+.mcp.json
+node_modules/
+
+# The repository's shared Claude operating model is source-controlled. Keep
+# machine-local settings, commands, and generated helpers under .claude ignored.
+!.claude/agents/
+!.claude/agents/*.md
+!.claude/skills/
+!.claude/skills/**/
+!.claude/skills/**/SKILL.md
+!.claude/workflows/
+!.claude/workflows/*.md
+
+# Old versions / release bundles
+0.0.9/
+0.0.9
+
+# Diag / audit text outputs
+_audit_*.txt
+_audit_result*.txt
+
+# OS junk
+desktop.ini
+Thumbs.db
+
+# Machine-specific helpers
+_dev_server.py
+launch_server.bat
+start_debug.bat
+# Test output / scratch
+.cache/
+backend/PE_Dashboard_API/tests/*
+!backend/PE_Dashboard_API/tests/test_sla_header_variants.py
+!backend/PE_Dashboard_API/tests/test_batch_sla_schema_contract.py
+
+.pe_baseline.db
+.pe_baseline.db-wal
+.pe_baseline.db-shm
+.pe_report_archive.db
+.pe_report_archive.db-wal
+.pe_report_archive.db-shm
+data/report_archive/
+backend/PE_Dashboard_API/app/data/report_archive/
+data/report_snapshots/
+backend/PE_Dashboard_API/app/data/report_snapshots/
+
+# Impeccable local runtime artifacts (critique reports remain trackable)
+.impeccable/config.local.json
+.impeccable/screenshots/
+.impeccable/live/
+.impeccable/cache/
+
+# Graphify generated knowledge-graph output (regenerable, not source)
+graphify-out/
+
+# Stray validation-run artifacts
+.server_pid_actual_validation
+server_stdout_actual_validation.txt
+server_stderr_actual_validation.txt

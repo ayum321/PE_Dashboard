@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.log
+.pe_*
+data/
+backend/PE_Dashboard_API/app/data/
+app/_test_*.py
+app/_check_*.py
+.env*
+*.pem
+*.key
+*.pfx

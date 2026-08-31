@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PE Audit — NFM — AUD-20260828T062226Z-4EFA25D1</title>
+  <style>:root{--bg:#070b18;--bg-deep:#04060f;--panel:#0e1627;--panel-2:#101a2e;--panel-top:#13203a;--line:#1e2c4f;--line-soft:#16223d;--ink:#eef3ff;--ink-2:#aab8d4;--ink-3:#6b7a9c;--green:#10d96e;--amber:#f59e0b;--red:#f43f5e;--blue:#3b82f6;--purple:#a855f7;--cyan:#22d3ee}*{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 480px at 11% -4%,rgba(61,31,118,.28),transparent 62%),radial-gradient(760px 460px at 92% 8%,rgba(11,99,168,.16),transparent 62%),var(--bg-deep);color:var(--ink);font:14px Inter,'Segoe UI',Arial,sans-serif;line-height:1.5}.report{max-width:1380px;margin:auto;padding:30px}.panel{position:relative;overflow:hidden;background:linear-gradient(145deg,rgba(19,32,58,.94),rgba(10,17,33,.98) 52%,rgba(9,15,29,.98));border:1px solid var(--line);border-radius:17px;padding:22px;margin:0 0 20px;box-shadow:0 20px 55px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035);break-inside:avoid}.panel:before{content:"";position:absolute;inset:0 auto 0 0;width:2px;background:linear-gradient(var(--cyan),transparent 42%,var(--purple));opacity:.78}.panel-batch{border-color:#213e72}.panel-sow{border-color:#5c3c9b}.panel-resource{border-color:#14586f}.cover{border-top:2px solid var(--cyan);background:linear-gradient(105deg,rgba(59,130,246,.16),rgba(168,85,247,.12) 44%,rgba(8,15,30,.96))}h1{font-size:30px;letter-spacing:-.025em;margin:0 0 6px}h2{font-size:22px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:20px 0 10px}h4{margin:0;color:#dce7ff;font-size:13px;text-transform:uppercase;letter-spacing:.08em}.panel-heading{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;border-bottom:1px solid var(--line-soft);padding-bottom:14px;margin-bottom:14px}.eyebrow,.kicker,.label{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#7f98d2}.muted{color:var(--ink-2)}.strong{font-weight:750;color:#fff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px}.metric{padding:13px 14px;border:1px solid #20345d;border-radius:12px;background:linear-gradient(145deg,rgba(24,39,70,.85),rgba(12,22,42,.95));box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}.metric strong{display:block;margin-top:4px;color:#f3f7ff;font:700 22px 'Cascadia Code',Consolas,monospace}.pill,.badge{display:inline-flex;align-items:center;gap:4px;width:max-content;padding:4px 9px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border:1px solid transparent}.pill-blue{color:#81b3ff;background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.32)}.pill-cyan{color:#5ee7f7;background:rgba(34,211,238,.10);border-color:rgba(34,211,238,.30)}.badge-draft,.badge-not_assessed{background:#1c2941;color:#95a8c9;border-color:#304562}.badge-reviewed{background:rgba(59,130,246,.14);color:#8db8ff;border-color:rgba(59,130,246,.34)}.badge-customer_approved,.badge-healthy,.badge-ok,.badge-acceptable{background:rgba(16,217,110,.12);color:#4ce994;border-color:rgba(16,217,110,.34)}.badge-critical,.badge-critical_sustained,.badge-breach{background:rgba(244,63,94,.14);color:#ff7891;border-color:rgba(244,63,94,.36)}.badge-warning,.badge-at_risk,.badge-long_job,.badge-low{background:rgba(245,158,11,.13);color:#ffbf4f;border-color:rgba(245,158,11,.38)}.notice{border:1px solid rgba(245,158,11,.4);border-left:3px solid var(--amber);border-radius:10px;padding:11px 13px;background:rgba(245,158,11,.07);margin:12px 0}.error{border-color:rgba(244,63,94,.42);border-left-color:var(--red);background:rgba(244,63,94,.08)}.chart{margin:16px 0;overflow-x:auto;border-radius:12px}.chart-hero{box-shadow:0 0 34px rgba(59,130,246,.09)}.report-chart{display:block;min-width:720px;width:100%;height:auto;border:1px solid #20345d;border-radius:12px;background:#0b1324}table{width:100%;border-collapse:separate;border-spacing:0;font-family:'Cascadia Code',Consolas,monospace;font-size:12px;overflow:hidden;border:1px solid #1b3159;border-radius:11px}.data-table{box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}th{background:linear-gradient(90deg,#08101f,#0b1427);font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#87a1d9;text-align:left}th,td{padding:10px 11px;border-bottom:1px solid #192b4c;vertical-align:top}tbody tr:nth-child(even){background:rgba(18,31,55,.36)}tbody tr:hover{background:rgba(35,73,130,.22)}tbody tr:last-child td{border-bottom:0}.numeric{text-align:right;font-variant-numeric:tabular-nums}.negative{color:#ff7b92;font-weight:800}.status-row-breach,.critical-row{background:rgba(244,63,94,.075)!important}.status-row-long_job,.status-row-at_risk,.warning-row{background:rgba(245,158,11,.06)!important}.cadence{font-size:9px;font-weight:800;letter-spacing:.05em;color:#aab8d4}.cadence-daily{color:#5ee7f7}.cadence-weekly{color:#c490ff}.cadence-monthly{color:#ffc657}.actions{padding-left:18px}.actions li{margin:10px 0}.footnote{font-size:11px;color:#7f92b6}.role-group{margin-top:14px;padding:13px;border:1px solid #19365a;border-radius:12px;background:rgba(8,16,32,.42)}.snippet-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:10px;margin-top:10px}.server-snippet{padding:11px;border:1px solid #1d345c;border-radius:10px;background:linear-gradient(145deg,rgba(19,31,56,.95),rgba(9,17,32,.96));box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.snippet-heading{display:flex;justify-content:space-between;gap:9px}.snippet-heading strong{display:block;font-family:'Cascadia Code',Consolas,monospace;font-size:12px}.snippet-heading span:not(.badge){display:block;color:#7890bd;font-size:9px;font-weight:700;letter-spacing:.08em;margin-top:2px}.sparkline{margin:7px 0}.sparkline .report-chart{min-width:0;border:0;background:transparent}.compact{margin:5px 0;color:#aab8d4;font-size:10px;line-height:1.38}.compact b{color:#e0eaff}@media print{body{background:#fff;color:#111}.panel,.metric,.role-group,.server-snippet{background:#fff;border-color:#c6cedd;box-shadow:none}.report{max-width:none;padding:12px}.muted,.kicker,.label,.footnote,.compact{color:#555}.report-chart{min-width:0}.panel{break-inside:avoid}th{background:#edf1f8;color:#243149}.badge{color:#111;background:#eee;border-color:#ccc}}</style>
+</head>
+<body>
+  <main class="report">
+    <section class="panel cover">
+  <div class="kicker">Performance Engineering audit · evidence record</div>
+  <h1>NFM</h1>
+  <div class="grid">
+    <div class="metric"><span class="label">Audit ID</span><strong>AUD-20260828T062226Z-4EFA25D1</strong></div>
+    <div class="metric"><span class="label">Audit window</span><strong>2026-07-26 → 2026-08-24</strong></div>
+    <div class="metric"><span class="label">Generated (UTC)</span><strong>2026-08-28T06:22:26+00:00</strong></div>
+    <div class="metric"><span class="label">Sign-off</span><strong><span class="badge badge-reviewed">REVIEWED</span></strong></div>
+  </div>
+  <p class="muted">Engine: PE Dashboard export 2.0 · Sources: Ctrl-M batch, Azure Monitor, SOW volume</p>
+  <div class="notice"><strong>Evidence quality caveats</strong><br>Resource rows exist but the upstream fleet KPI payload is absent; grade and sign-off are unavailable.<br>Customer-approved sign-off was blocked because the resource fleet summary is missing.<br>Fleet heatmap source evidence is absent; chart was not rendered.<br>Exception hosts exist but their time-series source evidence is absent; chart was not rendered.</div>
+  
+</section>
+    <section class="panel"><h2>Executive decision</h2><p>Evidence has been frozen from the loaded dashboard panels; see the section-level findings and data-quality flags.</p></section>
+    <section class="panel"><h2>Priority action plan</h2><ol class="actions"><li><span class="badge badge-warning">P2</span> <strong>tsbf141403011 is WARNING (health status is not HEALTHY).</strong><br><span class="muted">Likely cause:</span> Validate capacity, workload, and concurrent batch activity.<br><span class="muted">Action:</span> Review tsbf141403011 time-series and owning workload. <span class="footnote">(generated)</span></li><li><span class="badge badge-warning">P2</span> <strong>tsbf141403021 is UNKNOWN (health status is not HEALTHY).</strong><br><span class="muted">Likely cause:</span> Validate capacity, workload, and concurrent batch activity.<br><span class="muted">Action:</span> Review tsbf141403021 time-series and owning workload. <span class="footnote">(generated)</span></li><li><span class="badge badge-warning">P3</span> <strong>SOW volume is outside the expected contract operating band.</strong><br><span class="muted">Likely cause:</span> Observed workload does not represent the contracted operating volume.<br><span class="muted">Action:</span> Confirm expected ramp and validate the performance conclusion at representative volume. <span class="footnote">(generated)</span></li></ol></section>
+    <section class="panel panel-batch">
+  <div class="panel-heading"><div><span class="eyebrow">Batch evidence</span><h2>Batch SLA</h2><p class="muted">Per-job SLA status is the same resolved status used by the dashboard.</p></div><span class="pill pill-blue">21 ranked jobs</span></div>
+  <div class="chart chart-hero"><svg class="report-chart" role="img" aria-label="Job cadence and runtime profile" viewBox="0 0 920 330" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" rx="8" fill="#111827"/><text x="18" y="24" fill="#eef3ff" font-size="14" font-weight="700">Job cadence and runtime profile</text><text x="18" y="41" fill="#8ca1cf" font-size="10">Bars show precomputed average and peak runtime; colour identifies the supplied job cadence.</text><text x="10" y="66.0" fill="#e8eefc" font-size="10">JDA_PROCESSING_JOB_WKLY_2</text><rect x="245" y="54.0" width="615.0" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="54.0" width="462.6" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="866.0" y="65.0" fill="#d6e1f8" font-size="10">avg 6.12h · peak 8.13h</text><text x="912" y="65.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="84.0" fill="#e8eefc" font-size="10">JDA_PROCESSING_JOB_QTRLY_2</text><rect x="245" y="72.0" width="382.4" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="72.0" width="382.4" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="633.4" y="83.0" fill="#d6e1f8" font-size="10">avg 5.06h · peak 5.06h</text><text x="912" y="83.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="102.0" fill="#e8eefc" font-size="10">JDA_PROCESSING_DLY_2</text><rect x="245" y="90.0" width="197.6" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="90.0" width="167.9" height="12" rx="3" fill="#22d3ee" opacity=".92"/><text x="448.6" y="101.0" fill="#d6e1f8" font-size="10">avg 2.22h · peak 2.61h</text><text x="912" y="101.0" text-anchor="end" fill="#22d3ee" font-size="9">Daily</text><text x="10" y="120.0" fill="#e8eefc" font-size="10">DB_Backup_D</text><rect x="245" y="108.0" width="104.7" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="108.0" width="67.8" height="12" rx="3" fill="#22d3ee" opacity=".92"/><text x="355.7" y="119.0" fill="#d6e1f8" font-size="10">avg 0.90h · peak 1.38h</text><text x="912" y="119.0" text-anchor="end" fill="#22d3ee" font-size="9">Daily</text><text x="10" y="138.0" fill="#e8eefc" font-size="10">JDA_PROCESSING_DLY_1</text><rect x="245" y="126.0" width="76.6" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="126.0" width="18.1" height="12" rx="3" fill="#22d3ee" opacity=".92"/><text x="327.6" y="137.0" fill="#d6e1f8" font-size="10">avg 0.24h · peak 1.01h</text><text x="912" y="137.0" text-anchor="end" fill="#22d3ee" font-size="9">Daily</text><text x="10" y="156.0" fill="#e8eefc" font-size="10">DB_Backup_W</text><rect x="245" y="144.0" width="73.3" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="144.0" width="66.5" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="324.3" y="155.0" fill="#d6e1f8" font-size="10">avg 0.88h · peak 0.97h</text><text x="912" y="155.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="174.0" fill="#e8eefc" font-size="10">DB_Backup_M</text><rect x="245" y="162.0" width="73.3" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="162.0" width="73.3" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="324.3" y="173.0" fill="#d6e1f8" font-size="10">avg 0.97h · peak 0.97h</text><text x="912" y="173.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="192.0" fill="#e8eefc" font-size="10">JDA_MAINTENANCE_WKLY</text><rect x="245" y="180.0" width="35.1" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="180.0" width="34.0" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="286.1" y="191.0" fill="#d6e1f8" font-size="10">avg 0.45h · peak 0.46h</text><text x="912" y="191.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="210.0" fill="#e8eefc" font-size="10">JDA_MAINTENANCE_QTRLY</text><rect x="245" y="198.0" width="33.6" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="198.0" width="33.6" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="284.6" y="209.0" fill="#d6e1f8" font-size="10">avg 0.45h · peak 0.45h</text><text x="912" y="209.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="228.0" fill="#e8eefc" font-size="10">JDA_PROCESSING_JOB_WKLY_1</text><rect x="245" y="216.0" width="33.6" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="216.0" width="16.4" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="284.6" y="227.0" fill="#d6e1f8" font-size="10">avg 0.22h · peak 0.44h</text><text x="912" y="227.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="246.0" fill="#e8eefc" font-size="10">JDA_MAINTENANCE_DLY</text><rect x="245" y="234.0" width="30.4" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="234.0" width="15.6" height="12" rx="3" fill="#22d3ee" opacity=".92"/><text x="281.4" y="245.0" fill="#d6e1f8" font-size="10">avg 0.21h · peak 0.40h</text><text x="912" y="245.0" text-anchor="end" fill="#22d3ee" font-size="9">Daily</text><text x="10" y="264.0" fill="#e8eefc" font-size="10">JDA_DATA_JOB_LOAD_WKLY</text><rect x="245" y="252.0" width="28.1" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="252.0" width="26.8" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="279.1" y="263.0" fill="#d6e1f8" font-size="10">avg 0.35h · peak 0.37h</text><text x="912" y="263.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><text x="10" y="282.0" fill="#e8eefc" font-size="10">JDA_DATA_LOAD_DLY</text><rect x="245" y="270.0" width="20.9" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="270.0" width="16.3" height="12" rx="3" fill="#22d3ee" opacity=".92"/><text x="271.9" y="281.0" fill="#d6e1f8" font-size="10">avg 0.21h · peak 0.28h</text><text x="912" y="281.0" text-anchor="end" fill="#22d3ee" font-size="9">Daily</text><text x="10" y="300.0" fill="#e8eefc" font-size="10">JDA_DATA_LOAD_JOB_QTRLY</text><rect x="245" y="288.0" width="16.1" height="12" rx="3" fill="#1b2a45"/><rect x="245" y="288.0" width="16.1" height="12" rx="3" fill="#a855f7" opacity=".92"/><text x="267.1" y="299.0" fill="#d6e1f8" font-size="10">avg 0.21h · peak 0.21h</text><text x="912" y="299.0" text-anchor="end" fill="#a855f7" font-size="9">Weekly</text><rect x="250" y="313" width="9" height="9" rx="2" fill="#22d3ee"/><text x="264" y="321" fill="#8ca1cf" font-size="9">Daily</text><rect x="324" y="313" width="9" height="9" rx="2" fill="#a855f7"/><text x="338" y="321" fill="#8ca1cf" font-size="9">Weekly</text><rect x="398" y="313" width="9" height="9" rx="2" fill="#f59e0b"/><text x="412" y="321" fill="#8ca1cf" font-size="9">Monthly</text><rect x="472" y="313" width="9" height="9" rx="2" fill="#fb7185"/><text x="486" y="321" fill="#8ca1cf" font-size="9">Quarterly</text></svg></div>
+  <h3>Top jobs by peak runtime</h3>
+  <table class="data-table"><thead><tr><th>Job</th><th>Sub-application</th><th>Cadence</th><th class="numeric">Peak hrs</th><th class="numeric">Average hrs</th><th class="numeric">SLA hrs</th><th class="numeric">Buffer %</th><th>Status</th></tr></thead><tbody><tr class="status-row-long_job"><td class="strong">JDA_PROCESSING_JOB_WKLY_2</td><td>TEST_WEEKLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">8.13</td><td class="numeric">6.12</td><td class="numeric">13.00</td><td class="numeric ">37.4%</td><td><span class="badge badge-long_job">LONG JOB</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_PROCESSING_JOB_QTRLY_2</td><td>TEST_MONTHLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">5.06</td><td class="numeric">5.06</td><td class="numeric">13.00</td><td class="numeric ">61.1%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_PROCESSING_DLY_2</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">2.61</td><td class="numeric">2.22</td><td class="numeric">11.00</td><td class="numeric ">76.2%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">DB_Backup_D</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">1.38</td><td class="numeric">0.90</td><td class="numeric">11.00</td><td class="numeric ">87.4%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_PROCESSING_DLY_1</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">1.01</td><td class="numeric">0.24</td><td class="numeric">11.00</td><td class="numeric ">90.8%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">DB_Backup_W</td><td>TEST_WEEKLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.97</td><td class="numeric">0.88</td><td class="numeric">13.00</td><td class="numeric ">92.5%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">DB_Backup_M</td><td>TEST_MONTHLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.97</td><td class="numeric">0.97</td><td class="numeric">13.00</td><td class="numeric ">92.5%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_MAINTENANCE_WKLY</td><td>TEST_WEEKLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.46</td><td class="numeric">0.45</td><td class="numeric">13.00</td><td class="numeric ">96.4%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_MAINTENANCE_QTRLY</td><td>TEST_MONTHLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.45</td><td class="numeric">0.45</td><td class="numeric">13.00</td><td class="numeric ">96.6%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_PROCESSING_JOB_WKLY_1</td><td>TEST_WEEKLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.44</td><td class="numeric">0.22</td><td class="numeric">13.00</td><td class="numeric ">96.6%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_MAINTENANCE_DLY</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">0.40</td><td class="numeric">0.21</td><td class="numeric">11.00</td><td class="numeric ">96.3%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_DATA_JOB_LOAD_WKLY</td><td>TEST_WEEKLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.37</td><td class="numeric">0.35</td><td class="numeric">13.00</td><td class="numeric ">97.1%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_DATA_LOAD_DLY</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">0.28</td><td class="numeric">0.21</td><td class="numeric">11.00</td><td class="numeric ">97.5%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">JDA_DATA_LOAD_JOB_QTRLY</td><td>TEST_MONTHLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.21</td><td class="numeric">0.21</td><td class="numeric">13.00</td><td class="numeric ">98.4%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">PO_EXTRACT_DAILY</td><td>TEST_DAYTIME</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">0.00</td><td class="numeric">0.00</td><td class="numeric">16.00</td><td class="numeric ">100.0%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">Daily_Filewatcher</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">2.32</td><td class="numeric">1.08</td><td class="numeric">11.00</td><td class="numeric ">78.9%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">Weekly_Filewatcher</td><td>TEST_WEEKLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">2.16</td><td class="numeric">0.74</td><td class="numeric">13.00</td><td class="numeric ">83.4%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">Monthly_Filewatcher</td><td>TEST_MONTHLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">1.50</td><td class="numeric">1.50</td><td class="numeric">13.00</td><td class="numeric ">88.5%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">Backup_Zip</td><td>TEST_DAILY</td><td><span class="cadence cadence-daily">DAILY</span></td><td class="numeric">0.00</td><td class="numeric">0.00</td><td class="numeric">11.00</td><td class="numeric ">100.0%</td><td><span class="badge badge-ok">OK</span></td></tr><tr class="status-row-ok"><td class="strong">Backup_Zip</td><td>TEST_MONTHLY</td><td><span class="cadence cadence-weekly_specific_day">WEEKLY SPECIFIC DAY</span></td><td class="numeric">0.00</td><td class="numeric">0.00</td><td class="numeric">13.00</td><td class="numeric ">100.0%</td><td><span class="badge badge-ok">OK</span></td></tr></tbody></table>
+  <p class="footnote">Excluded jobs: 6. See Methodology for the supplied exclusion rationale.</p>
+</section>
+    <section class="panel panel-resource">
+  <div class="panel-heading">
+    <div>
+      <span class="eyebrow">Infrastructure evidence</span>
+      <h2>Resource utilisation</h2>
+    </div>
+    <span class="pill pill-cyan">12 servers</span>
+  </div>
+
+  
+  
+  <div class="notice error">No upstream fleet summary was supplied. This export does not invent a fleet grade or health count.</div>
+  
+
+  
+
+  <h3>Server trend snippets</h3>
+  <p class="footnote">Compact source-backed trends. CPU/disk: higher is more pressure; memory: available %, lower is more pressure.</p>
+  
+    
+    
+    <section class="role-group">
+      <h4>DB servers</h4>
+      <div class="snippet-grid">
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141403001</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141403011</strong><span>TEST</span></div>
+            <span class="badge badge-warning">WARNING</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141403021</strong><span>TEST</span></div>
+            <span class="badge badge-unknown">UNKNOWN</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+      </div>
+    </section>
+    
+  
+    
+    
+    <section class="role-group">
+      <h4>APP servers</h4>
+      <div class="snippet-grid">
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141402001</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141402002</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141402011</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141402012</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+      </div>
+    </section>
+    
+  
+    
+    
+    <section class="role-group">
+      <h4>SRE servers</h4>
+      <div class="snippet-grid">
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141425011</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141430001</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141430011</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141431001</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+        <article class="server-snippet">
+          <div class="snippet-heading">
+            <div><strong>tsbf141431011</strong><span>TEST</span></div>
+            <span class="badge badge-healthy">HEALTHY</span>
+          </div>
+          
+          <p class="muted compact">Time-series evidence unavailable in this export.</p>
+          <p class="compact"><b>Spike:</b> No detected spike was supplied for this host.</p>
+          <p class="compact"><b>Correlation:</b> No Ctrl-M time-overlap evidence was supplied for this host.</p>
+        </article>
+      
+      </div>
+    </section>
+    
+  
+    
+    
+  
+
+  
+
+  <h3>Exception-first host table</h3>
+  <table class="data-table">
+    <thead><tr><th>Host</th><th>Role</th><th>Environment</th><th class="numeric">CPU %</th><th class="numeric">Memory %</th><th class="numeric">Disk %</th><th>Evidence</th><th>Status</th></tr></thead>
+    <tbody>
+    
+      <tr class="warning-row">
+        <td class="strong">tsbf141403011</td><td>DB</td><td>TEST</td>
+        <td class="numeric">5.8</td>
+        <td class="numeric">92.1</td>
+        <td class="numeric">0.0</td>
+        <td>health status is not HEALTHY</td>
+        <td><span class="badge badge-warning">WARNING</span></td>
+      </tr>
+    
+      <tr class="warning-row">
+        <td class="strong">tsbf141403021</td><td>DB</td><td>TEST</td>
+        <td class="numeric">Not emitted</td>
+        <td class="numeric">Not emitted</td>
+        <td class="numeric">Not emitted</td>
+        <td>health status is not HEALTHY</td>
+        <td><span class="badge badge-unknown">UNKNOWN</span></td>
+      </tr>
+    
+    </tbody>
+  </table>
+  <p class="footnote">CPU and disk: higher percentage means more pressure. Memory is available memory percentage: lower means more pressure.</p>
+</section>
+    <section class="panel"><h2>Correlation and root-cause evidence</h2><p class="muted">No correlation events were supplied.</p></section>
+    <section class="panel panel-sow"><div class="panel-heading"><div><span class="eyebrow">Contract context</span><h2>SOW and capacity context</h2></div><span class="badge badge-warning">TESTING COVERAGE RISK</span></div><table class="data-table"><thead><tr><th>Metric</th><th class="numeric">SOW commitment</th><th class="numeric">Actual</th><th class="numeric">% of contract</th><th class="numeric">Capacity buffer</th><th>Status</th></tr></thead><tbody><tr><td class="strong">Daily DFU</td><td class="numeric">9,000,000</td><td class="numeric">7,968,993</td><td class="numeric">88.5%</td><td class="numeric">1,031,007</td><td><span class="badge badge-acceptable">ACCEPTABLE</span></td></tr><tr><td class="strong">Daily SKU Count</td><td class="numeric">9,000,000</td><td class="numeric">5,043,361</td><td class="numeric">56.0%</td><td class="numeric">3,956,639</td><td><span class="badge badge-low">LOW</span></td></tr></tbody></table><p class="footnote">Testing-coverage risk means observed volume is not representative of contracted scale. Commercial review means SOW consumption requires an ownership decision.</p></section>
+    <section class="panel"><h2>Methodology and lineage</h2><p><strong>Job SLA:</strong> Job SLA measures each job run against its resolved ceiling.<br><strong>Window SLA:</strong> Window SLA measures each daily effective batch window against its resolved ceiling.<br><strong>Buffer formula:</strong> buffer_pct = (SLA hours - runtime hours) / SLA hours * 100</p><p><strong>Status bands:</strong> OK >40% buffer · LONG_JOB 15-40% buffer · AT_RISK 0-15% buffer · BREACH <=0% buffer</p><p class="footnote">Source badges: Ctrl-M batch, Azure Monitor, SOW volume.</p></section>
+    <section class="panel"><h2>Change since prior audit</h2><p class="muted">Compared with AUD-20260827T182930Z-09BE3E90 generated 2026-08-27T18:29:30+00:00.</p><div class="grid"><div class="metric"><span class="label">compliance pct</span><strong>0.0</strong></div><div class="metric"><span class="label">breach count</span><strong>0.0</strong></div><div class="metric"><span class="label">worst long pole hrs</span><strong>0.0</strong></div><div class="metric"><span class="label">anomaly count</span><strong>0.0</strong></div><div class="metric"><span class="label">missing coverage</span><strong>0.0</strong></div></div><p class="footnote">Fleet grade: N/A → N/A · SOW interpretation: testing_coverage_risk → testing_coverage_risk</p></section>
+    <section class="panel"><h2>Technical appendix</h2><p class="footnote">The report archive stores this exact versioned JSON payload before rendering HTML. Detailed CPU heatmap data, time-series input, sources, exclusions, and charts above are all traceable to that immutable payload; no calculation is performed by this template.</p><h3>All-server evidence</h3><table><thead><tr><th>Host</th><th>Role</th><th>Environment</th><th class="numeric">CPU %</th><th class="numeric">Memory %</th><th class="numeric">Disk %</th><th>Status</th></tr></thead><tbody><tr><td>tsbf141403001</td><td>DB</td><td>TEST</td><td class="numeric">7.7</td><td class="numeric">86.1</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141403011</td><td>DB</td><td>TEST</td><td class="numeric">5.8</td><td class="numeric">92.1</td><td class="numeric">0</td><td>Warning</td></tr><tr><td>tsbf141403021</td><td>DB</td><td>TEST</td><td class="numeric">Not emitted</td><td class="numeric">Not emitted</td><td class="numeric">Not emitted</td><td>Unknown</td></tr><tr><td>tsbf141425011</td><td>SRE</td><td>TEST</td><td class="numeric">6.4</td><td class="numeric">28.1</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141430001</td><td>SRE</td><td>TEST</td><td class="numeric">2.7</td><td class="numeric">36.2</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141430011</td><td>SRE</td><td>TEST</td><td class="numeric">3.7</td><td class="numeric">21.5</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141431001</td><td>SRE</td><td>TEST</td><td class="numeric">2.3</td><td class="numeric">41.5</td><td class="numeric">0.3</td><td>Healthy</td></tr><tr><td>tsbf141431011</td><td>SRE</td><td>TEST</td><td class="numeric">1.5</td><td class="numeric">26.5</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141402001</td><td>APP</td><td>TEST</td><td class="numeric">2.9</td><td class="numeric">30.6</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141402002</td><td>APP</td><td>TEST</td><td class="numeric">2.5</td><td class="numeric">28.2</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141402011</td><td>APP</td><td>TEST</td><td class="numeric">3.6</td><td class="numeric">41.6</td><td class="numeric">0</td><td>Healthy</td></tr><tr><td>tsbf141402012</td><td>APP</td><td>TEST</td><td class="numeric">3.6</td><td class="numeric">40.8</td><td class="numeric">0</td><td>Healthy</td></tr></tbody></table></section>
+  </main>
+</body>
+</html>

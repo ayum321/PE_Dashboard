@@ -1,0 +1,64 @@
+# Docker and Stratosphere handoff
+## Deployable artifacts
+The repository now exposes explicit deployment definitions for DevOps:
+
+- API: `backend/PE_Dashboard_API/Dockerfile` (source: `backend/PE_Dashboard_API/app/` and `backend/PE_Dashboard_API/configuration/`).
+- Standalone MFE: `frontend/PE_Dashboard_MFE/Dockerfile` (source: `frontend\PE_Dashboard_MFE\source/`, served by Nginx on port `8080`).
+- Split local topology: root `docker-compose.yml`.
+
+Build the split images from the repository root:
+
+```powershell
+docker build -f backend/PE_Dashboard_API/Dockerfile -t pe-dashboard-api:VERSION .
+docker build -f frontend/PE_Dashboard_MFE/Dockerfile -t pe-dashboard-mfe:VERSION .
+```
+
+## Artifacts
+
+- **React MFE**: `frontend\PE_Dashboard_MFE\source` builds to static files. Stratosphere must generate/replace its published `env.js` with the HTTPS FastAPI `API_BASE_URL`; no API URL is hard-coded in the React source. Leave it empty only if DevOps routes `/api` at the same HTTPS portal origin.
+- **API**: `backend/PE_Dashboard_API/Dockerfile` packages the FastAPI service only. The API and MFE remain separately deployable.
+
+The sample MFE workflow under `frontend\PE_Dashboard_MFE\source/.github/workflows/` is a template, not an active root GitHub Actions workflow. DevOps owns the final workflow, registry, Stratosphere variables, and deployment approval.
+
+## Build and health check
+
+```sh
+docker compose build
+docker compose up
+```
+
+The image health check calls `GET /api/health`. The image runs as an unprivileged `peapp` user and stores writable state below `PE_STATE_DIR` (`/data` by default).
+
+Before publishing an image, run:
+
+```sh
+python backend/PE_Dashboard_API/app/_test_config_deployment_safety.py
+python backend/PE_Dashboard_API/app/_test_report_archive.py
+python backend/PE_Dashboard_API/app/_check_pe_config_refs.py
+docker compose build
+```
+
+## Deployment-supplied configuration
+
+Inject all values through the company secret manager or workload identity. Never commit values to Git, Docker build arguments, MFE `env.js`, or Compose files.
+
+| Name | Purpose |
+| --- | --- |
+| `ALLOWED_ORIGINS` | Exact HTTPS Stratosphere/portal origin(s), comma-separated. |
+| `PE_STATE_DIR` | Persistent writable volume path, normally `/data`. |
+| `PE_COOKIE_SECURE=true` | Required behind HTTPS ingress. |
+| `GOOGLE_API_KEY` or `GEMINI_API_KEY` | Optional AI provider secret. |
+| `NVIDIA_API_KEY` or `NIM_API_KEY` | Optional AI provider secret. |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Only when the approved Azure workload-identity/service-principal flow needs them. |
+| `AI_ENABLED` | Enables AI routes only when explicitly set to `true`. |
+
+`GET /api/config` never returns provider keys. UI attempts to save provider keys are rejected unless the explicit local-only override `PE_ALLOW_UI_SECRET_CONFIG=true` is supplied.
+
+## Ingress and operating constraints
+
+- Terminate TLS and enforce company SSO/authorization at the portal or API ingress; CORS alone is not authorization.
+- Keep the MFE and API on the same HTTPS site when using the current `pe_sid` cookie. A truly cross-site MFE/API split needs an approved cookie/session redesign; `SameSite=lax` is intentionally not a cross-site XHR credential policy.
+- Apply an ingress request-body limit of **50 MB or lower**, upload rate limits, and parser CPU/memory limits.
+- Do not publish raw container port 8765 to the internet. The Compose example binds it to loopback for local use only.
+- The current audit cache/configuration is shared within one application process. Deploy one isolated engagement per service instance and keep a single worker/replica until application-level user/engagement isolation is introduced. SQLite/WAL persistence is not a multi-replica shared store. Verify that the mounted state volume is writable by the image's `peapp` user before rollout.
+- Azure interactive browser login is a local-development feature. Hosted Azure access must use the company-approved workload identity or OAuth design.

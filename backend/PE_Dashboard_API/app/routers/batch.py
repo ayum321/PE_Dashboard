@@ -1,0 +1,672 @@
+"""
+Batch (Ctrl-M) processing router.
+
+Two endpoints:
+    POST /api/process-batch
+        multipart file upload (.csv / .xlsx / .xls) — parses the file
+        with services.batch_calculator.load_ctrlm_bytes and returns the
+        KPI + chart-ready JSON payload.
+
+    POST /api/process-batch/json
+        accepts pre-parsed Ctrl-M rows as JSON (list of records with
+        Job_Name / Start_Time / Run_Sec etc.) — useful when the frontend
+        already holds the rows in memory.
+
+Both paths funnel into `batch_calculator.build_batch_payload(df)` which
+returns plain dicts (no DataFrames), per the Phase 3 brief.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from pydantic import BaseModel, ConfigDict, Field
+
+from services.batch_calculator import (
+    DAILY_LIMIT_HRS,
+    build_batch_payload,
+    load_ctrlm_bytes,
+)
+from services.customer_identity import (
+    get_active as get_active_customer,
+    identify as identify_customer,
+    set_active as set_active_customer,
+    verdict_response_fields,
+)
+
+router = APIRouter()
+
+ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_BATCH_FILES = 8
+_SOW_ENGAGEMENT_KEYS = (
+    "sow_baseline",
+    "sow_dfu", "sow_sku", "sow_orders", "sow_batch_jobs",
+    "_sow_sla_windows",
+    "_sow_volume_by_year",
+    "_sow_contract_meta",
+    "customer_name",
+    "customer_name_confidence",
+    "customer_name_source",
+)
+
+
+# ── Pydantic response models ────────────────────────────────────
+class BatchKPIs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    compliance_pct: float = 0.0
+    job_sla_compliance_pct: float = 0.0
+    window_compliance_pct: float = 0.0
+    batch_window_compliance: float = 0.0
+    total_runs: int = 0
+    total_jobs: int = 0
+    total_hrs: float = 0.0
+    jobs_breach: int = 0
+    jobs_at_risk: int = 0
+    jobs_ok: int = 0
+    # Execution-status counts (ENDED OK vs ENDED NOT OK / FAILED / ABENDED) —
+    # separate from SLA breach which is a performance signal.
+    ok_runs:     int = 0
+    failed_runs: int = 0
+    fail_rate_pct: float = 0.0
+    daily_limit_hrs: float = DAILY_LIMIT_HRS
+    # Volume-dominant resolved ceiling for single-number LABELS only; reconciles
+    # the lone "Daily Xh" display strings with per-sub-app compliance. May be None
+    # when no wall-clock windows were measured (falls back to daily_limit_hrs).
+    window_dominant_ceiling_hrs: Optional[float] = None
+    # Distinct in-scope ceiling spread — drives the honest multi-ceiling headline
+    # ("each within its own ceiling, min–max") when count > 1.
+    window_inscope_ceiling_count: Optional[int] = None
+    window_inscope_ceiling_min: Optional[float] = None
+    window_inscope_ceiling_max: Optional[float] = None
+    # Breach traceability — per-breach-day attribution, excluded sub-apps, and the
+    # per-sub-app rollup (with structural/intermittent pattern) so the headline
+    # breach count is auditable down to which sub-app drove it.
+    window_breach_attribution: Optional[List[Dict[str, Any]]] = None
+    window_excluded_sub_apps: Optional[List[Dict[str, Any]]] = None
+    window_sub_app_rollup: Optional[List[Dict[str, Any]]] = None
+    # Structural-vs-intermittent cut-off (config ratio) surfaced for transparency.
+    window_structural_ratio: Optional[float] = None
+    monthly_limit_hrs: float = 8.0
+    fleet_sla_buffer: Optional[Dict[str, Any]] = None
+
+
+class TopJobRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    Job_Name: str = Field(..., alias="Job_Name")
+    peak_hrs: float
+    avg_hrs: float
+    total_hrs: float
+    buffer_pct: Optional[float] = None   # None when SLA quality is INSUFFICIENT
+    sla_used_pct: Optional[float] = None  # None when sla_hrs == 0
+    buffer_status: str
+
+
+class WindowPoint(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    run_date:  str
+    total_hrs: float
+    job_count: int
+    breach:    bool
+    top_job:   Optional[str] = None   # top contributing job for chart annotation
+
+
+class BatchResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    filename: str
+    kpis: BatchKPIs
+    top_jobs: List[TopJobRow]
+    top_breaches: List[TopJobRow]
+    window: List[WindowPoint]
+    sub_stats: List[Dict[str, Any]]
+    anomalies: List[Dict[str, Any]]
+    hourly_counts: Optional[Dict[str, Any]] = None
+    sla_heatmap: Optional[Dict[str, Any]] = None
+    hour_heatmap: Optional[Dict[str, Any]] = None
+    # ── Phase 11 new sections ──
+    elapsed_window: Optional[Dict[str, Any]] = None
+    summed_runtime: Optional[Dict[str, Any]] = None
+    worst_job: Optional[Dict[str, Any]] = None
+    sla_source: Optional[Dict[str, Any]] = None
+    # Full-dataset SLA Matrix (interconnects with /api/generate-findings + /api/red-flags)
+    sla_matrix: Optional[Dict[str, Any]] = None
+    data_coverage: Optional[Dict[str, Any]] = None
+    # ── AI narrative (best-effort, populated by narrator) ──
+    ai_narrative: Optional[str] = None
+    ai_model: Optional[str] = None
+    # Active customer after the shared identity check; mismatches keep the
+    # existing engagement active and return warning metadata alongside it.
+    customer_name: Optional[str] = None
+    # Per-day job timings for the concurrency Gantt chart.
+    daily_jobs: Optional[Dict[str, Any]] = None
+    # Per-sub-app WINDOW rollup (worst daily batch window vs contracted ceiling
+    # + breach days). Drives the Executive at-risk panels from the binding
+    # window metric instead of peak-vs-window-ceiling.
+    window_sub_app: Optional[List[Dict[str, Any]]] = None
+    # Gap A: Sub_Application × run_date execution-failure density grid
+    # (ENDED NOT OK / FAILED counts per sub-app per day). Drives the PE
+    # Findings failure-density heatmap.
+    failure_grid: Optional[Dict[str, Any]] = None
+    failure_jobs: Optional[List[Dict[str, Any]]] = None
+    # Long-pole consistency heatmap: top-N longest jobs × run_date runtime
+    # matrix (longest single run per job per day) + per-job avg/max/window-share.
+    # Drives the "which jobs eat the window, consistently?" heatmap on Batch Review.
+    longpole_matrix: Optional[Dict[str, Any]] = None
+    # Explicit analyst exclusions that define the in-scope batch KPI population.
+    user_excluded_job_names: List[str] = Field(default_factory=list)
+    # Session-only reviewer decision trail; never persisted as configuration.
+    manual_exclusion_audit: List[Dict[str, str]] = Field(default_factory=list)
+    # Concurrent-job evidence: which distinct jobs genuinely overlapped in
+    # clock time, on how many days, and the peak simultaneous-run count.
+    concurrency: Optional[Dict[str, Any]] = None
+    customer_status: Optional[str] = None
+    customer_cross_check: Optional[str] = None
+    customer_conflicts: Optional[List[Dict[str, str]]] = None
+    customer_corroborated_by: Optional[List[str]] = None
+    customer_message: Optional[str] = None
+    customer_active_name: Optional[str] = None
+    customer_candidate_name: Optional[str] = None
+
+
+class BatchJsonRequest(BaseModel):
+    """JSON body for the pre-parsed endpoint."""
+    filename: Optional[str] = None
+    rows: List[Dict[str, Any]]
+
+
+class BatchRefreshRequest(BaseModel):
+    """Session-only reviewer exclusions supplied when Batch Review is refreshed."""
+    manual_exclusions: List[Dict[str, str]] = Field(default_factory=list)
+
+
+# ── Helpers ─────────────────────────────────────────────────────
+def _ext(filename: str) -> str:
+    return os.path.splitext(filename or "")[1].lower()
+
+
+def _clear_sow_engagement_state_for_customer_switch() -> None:
+    from services import config_store, session_cache
+
+    for key in _SOW_ENGAGEMENT_KEYS:
+        if key in ("customer_name", "customer_name_source"):
+            config_store.set(key, "")
+        elif key == "customer_name_confidence":
+            config_store.set(key, 0)
+        else:
+            config_store.set(key, {})
+    session_cache.ac_del("sow_contract")
+    session_cache.ac_del("volume_vs_sow")
+    session_cache.set("last_sow_compare", None)
+
+
+def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    df_sub_app = None
+    if df is not None and "Sub_Application" in df.columns:
+        df_sub_app = df["Sub_Application"].dropna().tolist()
+    verdict = identify_customer(
+        filename=filename,
+        df_sub_app=df_sub_app,
+        auto_adopt=False,
+    )
+    active = get_active_customer()
+    if verdict.name and verdict.status != "mismatch" and active and active != verdict.name:
+        _clear_sow_engagement_state_for_customer_switch()
+    # "corrected" means this upload's evidence was strong enough to
+    # supersede a weaker prior identification (see customer_identity's
+    # SUPERSEDE_MARGIN) — adopt it the same way a first upload is adopted.
+    if verdict.status in ("first_upload", "corrected") and verdict.name:
+        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
+    return verdict_response_fields(verdict)
+
+
+def _payload_to_response(
+    filename: str,
+    payload: Dict[str, Any],
+    df=None,
+    customer_name: Optional[str] = None,
+    customer_fields: Optional[Dict[str, Any]] = None,
+) -> BatchResponse:
+    customer_fields = dict(customer_fields or {})
+    resolved_customer_name = customer_fields.get("customer_name") or customer_name
+    # Compute full-dataset SLA Matrix from the parsed dataframe so PE Findings
+    # + Red Flags + PE Consultant all see ALL runs (not just top_jobs).
+    sla_mx_dict: Optional[Dict[str, Any]] = None
+    if df is not None:
+        try:
+            from routers.sla_matrix import _compute_sla_matrix
+            from services import config_store
+            # Use detected mode as smart default when no explicit user override exists
+            _detected_mode = (payload.get("kpis") or {}).get("sla_detected_mode", "")
+            _user_mode     = config_store.get("sla_mode") or ""
+            sla_mode       = (_user_mode or _detected_mode or "daily").lower()
+            custom   = config_store.get("custom_sla_hrs", 6.0)
+            # Cache hour_heatmap BEFORE computing the matrix so the adaptive
+            # baseline layer can correlate breaches with peak-load hours.
+            try:
+                from services import session_cache
+                session_cache.set("last_hour_heatmap", payload.get("hour_heatmap"))
+                # Publish the batch window scope BEFORE computing the SLA matrix so
+                # the matrix uses the IDENTICAL out-of-scope sub-app set (one shared
+                # windows denominator across both pages).
+                session_cache.ac_set("window_out_of_scope_subs", payload.get("out_of_scope_subs") or [])
+            except Exception:
+                pass
+            # The SLA Matrix must analyze the exact same manually-scoped job set
+            # as Batch Review. build_batch_payload exposes this list after applying
+            # config_store["exclude_jobs"]; using raw cached rows here previously
+            # reintroduced excluded jobs only on the Matrix page after refresh.
+            matrix_df = df
+            excluded_job_names = set(payload.get("user_excluded_job_names") or [])
+            if excluded_job_names and "Job_Name" in matrix_df.columns:
+                matrix_df = matrix_df[
+                    ~matrix_df["Job_Name"].astype(str).isin(excluded_job_names)
+                ].copy()
+            sla_mx_dict = _compute_sla_matrix(
+                matrix_df,
+                sla_mode,
+                custom,
+                user_excluded_job_names=sorted(excluded_job_names),
+            ).model_dump()
+
+            # Keep raw batch rows for Batch Refresh and a separately scoped copy
+            # for SLA Matrix recalculation; their populations serve different KPIs.
+            _SLIM_COLS = ["Job_Name", "Sub_Application", "Status",
+                          "Start_Time", "End_Time", "Run_Sec", "run_time_hrs"]
+            try:
+                from services import session_cache as _sc2
+                _raw_slim = df[[c for c in _SLIM_COLS if c in df.columns]].copy()
+                _matrix_slim = matrix_df[[c for c in _SLIM_COLS if c in matrix_df.columns]].copy()
+                _sc2.set("job_runs_df", _raw_slim.to_dict(orient="records"))
+                _sc2.set("sla_matrix_runs_df", _matrix_slim.to_dict(orient="records"))
+            except Exception:
+                pass
+        except Exception:
+            sla_mx_dict = None
+
+    resp = BatchResponse(
+        filename=filename,
+        kpis=BatchKPIs(**payload.get("kpis", {})),
+        top_jobs=payload.get("top_jobs", []),
+        top_breaches=payload.get("top_breaches", []),
+        window=payload.get("window", []),
+        sub_stats=payload.get("sub_stats", []),
+        anomalies=payload.get("anomalies", []),
+        hourly_counts=payload.get("hourly_counts"),
+        sla_heatmap=payload.get("sla_heatmap"),
+        hour_heatmap=payload.get("hour_heatmap"),
+        elapsed_window=payload.get("elapsed_window"),
+        summed_runtime=payload.get("summed_runtime"),
+        worst_job=payload.get("worst_job"),
+        sla_source=payload.get("sla_source"),
+        data_coverage=payload.get("data_coverage"),
+        sla_matrix=sla_mx_dict,
+        customer_name=resolved_customer_name,
+        daily_jobs=payload.get("daily_jobs"),
+        window_sub_app=payload.get("window_sub_app", []),
+        failure_grid=payload.get("failure_grid"),
+        failure_jobs=payload.get("failure_jobs"),
+        longpole_matrix=payload.get("longpole_matrix"),
+        user_excluded_job_names=payload.get("user_excluded_job_names") or [],
+        manual_exclusion_audit=payload.get("manual_exclusion_audit") or [],
+        concurrency=payload.get("concurrency"),
+        customer_status=customer_fields.get("customer_status"),
+        customer_cross_check=customer_fields.get("customer_cross_check"),
+        customer_conflicts=customer_fields.get("customer_conflicts"),
+        customer_corroborated_by=customer_fields.get("customer_corroborated_by"),
+        customer_message=customer_fields.get("customer_message"),
+        customer_active_name=customer_fields.get("customer_active_name"),
+        customer_candidate_name=customer_fields.get("customer_candidate_name"),
+    )
+
+    # Cache the full batch response so the agent tools can query it
+    # (top_jobs, top_breaches, sla_matrix breakdown, etc.).
+    try:
+        from services import session_cache
+        resp_dict = resp.model_dump()
+        session_cache.set("last_batch", resp_dict)
+        if sla_mx_dict:
+            session_cache.set("last_sla_matrix", sla_mx_dict)
+
+        # ── Audit context: E2 job_runs + E3 workflow rollup + batch KPIs ─
+        kpis_d  = resp_dict.get("kpis") or {}
+        session_cache.ac_set("batch_kpis",      kpis_d)
+        # Persist the auto-detected schedule mode so sla_matrix can default to it
+        if kpis_d.get("sla_detected_mode"):
+            session_cache.ac_set("sla_detected_mode", kpis_d["sla_detected_mode"])
+        session_cache.ac_set("batch_top_jobs",  resp_dict.get("top_jobs") or [])
+        session_cache.ac_set("job_summary",     resp_dict.get("top_jobs") or [])   # canonical merged slot
+        session_cache.ac_set("daily_window_series", resp_dict.get("window") or [])
+        # Exact window scope (out-of-scope sub-apps) so the SLA Matrix page can
+        # publish the IDENTICAL windows denominator for the same dataset.
+        session_cache.ac_set("window_out_of_scope_subs", resp_dict.get("out_of_scope_subs") or [])
+        session_cache.ac_set("regression_df",   resp_dict.get("anomalies") or [])
+        session_cache.ac_set("failure_grid",     resp_dict.get("failure_grid") or {})
+        session_cache.ac_set("longpole_matrix",  resp_dict.get("longpole_matrix") or {})
+        if resolved_customer_name:
+            session_cache.ac_set("customer_name", resolved_customer_name)
+        # sla_matrix slots written by _compute_sla_matrix call (see below)
+        if sla_mx_dict:
+            session_cache.ac_set("sla_resolved",     sla_mx_dict.get("breaches") or [])
+            session_cache.ac_set("sla_job_summary",  sla_mx_dict.get("job_summary") or [])
+            session_cache.ac_set("job_summary",      sla_mx_dict.get("job_summary") or resp_dict.get("top_jobs") or [])
+            session_cache.ac_set("adaptive_sla",     sla_mx_dict.get("job_baselines") or [])
+
+        # ── Smart findings stub: seed a baseline so pe_narrative can
+        #    generate prose even before /api/generate-findings is called. ──
+        if not session_cache.get("last_smart_findings"):
+            top_breaches = resp_dict.get("top_breaches") or []
+            anomalies = resp_dict.get("anomalies") or []
+            stub_findings = []
+            for tb in top_breaches[:5]:
+                if tb.get("buffer_status") == "BREACH":
+                    stub_findings.append({
+                        "level": "critical",
+                        "text": f"{tb.get('Job_Name', '?')} breaches SLA "
+                                f"(peak {tb.get('peak_hrs', 0):.2f}h)",
+                        "source": "batch_upload",
+                        "root_cause": "RUNTIME_BREACH",
+                    })
+            for an in anomalies[:3]:
+                stub_findings.append({
+                    "level": "warning",
+                    "text": str(an.get("finding") or an.get("text", "Anomaly detected")),
+                    "source": "batch_upload",
+                    "root_cause": "ANOMALY",
+                })
+            if stub_findings:
+                session_cache.set("last_smart_findings", {
+                    "kpis": kpis_d,
+                    "findings": stub_findings,
+                    "summary": {
+                        "critical": len([f for f in stub_findings if f["level"] == "critical"]),
+                        "warning":  len([f for f in stub_findings if f["level"] == "warning"]),
+                        "total":    len(stub_findings),
+                    },
+                })
+    except Exception:
+        pass
+
+    return resp
+
+
+# ── Endpoints ───────────────────────────────────────────────────
+@router.post(
+    "/process-batch",
+    response_model=BatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload a Ctrl-M CSV/XLSX file and return batch KPIs + chart data",
+)
+async def process_batch(file: UploadFile = File(...)) -> BatchResponse:
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided.")
+
+    try:
+        from services import session_cache as _sc_reset
+        _sc_reset.ac_clear()
+        _sc_reset.set("last_batch", {})
+        _sc_reset.set("last_sla_matrix", {})
+        _sc_reset.set("job_runs_df", [])
+        _sc_reset.set("sla_matrix_runs_df", [])
+    except Exception:
+        pass
+
+    ext = _ext(file.filename)
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
+        )
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB limit.",
+        )
+
+    try:
+        df = load_ctrlm_bytes(raw, filename=file.filename)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Failed to parse Ctrl-M file: {exc}",
+        ) from exc
+
+    try:
+        payload = build_batch_payload(df)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch metrics computation failed: {exc}",
+        ) from exc
+
+    customer_fields = _resolve_batch_customer(file.filename, df)
+    return _payload_to_response(
+        file.filename,
+        payload,
+        df=df,
+        customer_name=customer_fields.get("customer_name"),
+        customer_fields=customer_fields,
+    )
+
+
+@router.post(
+    "/process-batch/multi",
+    response_model=BatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload up to 8 Ctrl-M CSV/XLSX files and return merged batch KPIs + chart data",
+)
+async def process_batch_multi(
+    files: List[UploadFile] = File(...),
+) -> BatchResponse:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum is {MAX_BATCH_FILES}, got {len(files)}.",
+        )
+
+    try:
+        from services import session_cache as _sc_reset
+        _sc_reset.ac_clear()
+        _sc_reset.set("last_batch", {})
+        _sc_reset.set("last_sla_matrix", {})
+        _sc_reset.set("job_runs_df", [])
+        _sc_reset.set("sla_matrix_runs_df", [])
+    except Exception:
+        pass
+
+    frames: list[pd.DataFrame] = []
+    filenames: list[str] = []
+
+    for f in files:
+        if not f.filename:
+            continue
+        ext = _ext(f.filename)
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported file type '{ext}' in '{f.filename}'. "
+                       f"Allowed: {sorted(ALLOWED_EXTENSIONS)}",
+            )
+
+        raw = await f.read()
+        if not raw:
+            continue  # skip empty files silently
+        if len(raw) > MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{f.filename}' exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB limit.",
+            )
+
+        try:
+            df = load_ctrlm_bytes(raw, filename=f.filename)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Failed to parse '{f.filename}': {exc}",
+            ) from exc
+
+        if not df.empty:
+            df["_source_file"] = f.filename
+            frames.append(df)
+            filenames.append(f.filename)
+
+    if not frames:
+        raise HTTPException(status_code=400, detail="All uploaded files were empty or unparseable.")
+
+    merged = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+    # ── P2 #11: dedup identical job-run rows across multi-file uploads ────────
+    # Uploading the same export twice (or two files that overlap on a date range)
+    # would otherwise double-count every KPI. Hash each row on its natural
+    # identity — (Job_Name, Sub_Application, Start_Time, Run_Sec) — and drop exact
+    # duplicates. Only applied to multi-file merges; single files are untouched.
+    if len(frames) > 1:
+        _dedup_keys = [c for c in ("Job_Name", "Sub_Application", "Start_Time", "Run_Sec")
+                       if c in merged.columns]
+        if _dedup_keys:
+            _before = len(merged)
+            merged = merged.drop_duplicates(subset=_dedup_keys, keep="first").reset_index(drop=True)
+            _removed = _before - len(merged)
+            if _removed > 0:
+                import logging as _logd
+                _logd.getLogger(__name__).info(
+                    "process_batch_multi: dropped %d duplicate job-run row(s) across %d files "
+                    "(dedup keys: %s)", _removed, len(frames), _dedup_keys,
+                )
+
+    try:
+        payload = build_batch_payload(merged)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch metrics computation failed: {exc}",
+        ) from exc
+
+    combined_name = " + ".join(filenames)
+    customer_fields = _resolve_batch_customer(combined_name, merged)
+    return _payload_to_response(
+        combined_name,
+        payload,
+        df=merged,
+        customer_name=customer_fields.get("customer_name"),
+        customer_fields=customer_fields,
+    )
+
+
+@router.post(
+    "/process-batch/json",
+    response_model=BatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Accept pre-parsed Ctrl-M rows as JSON and return batch KPIs + chart data",
+)
+async def process_batch_json(body: BatchJsonRequest) -> BatchResponse:
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="`rows` is empty.")
+    try:
+        from services import session_cache as _sc_reset
+        _sc_reset.ac_clear()
+        _sc_reset.set("last_batch", {})
+        _sc_reset.set("last_sla_matrix", {})
+        _sc_reset.set("job_runs_df", [])
+        _sc_reset.set("sla_matrix_runs_df", [])
+    except Exception:
+        pass
+    try:
+        df = pd.DataFrame(body.rows)
+        # Coerce the expected columns — the frontend may supply raw
+        # Ctrl-M records that haven't been passed through load_ctrlm.
+        if "run_time_hrs" not in df.columns and "Run_Sec" in df.columns:
+            df["run_time_hrs"] = pd.to_numeric(df["Run_Sec"], errors="coerce").fillna(0) / 3600.0
+        if "run_date" not in df.columns and "Start_Time" in df.columns:
+            df["run_date"] = pd.to_datetime(df["Start_Time"], errors="coerce").dt.date
+        if "month" not in df.columns and "Start_Time" in df.columns:
+            df["month"] = pd.to_datetime(df["Start_Time"], errors="coerce").dt.to_period("M").astype(str)
+        if "Sub_Application" not in df.columns:
+            df["Sub_Application"] = "UNKNOWN"
+        df.dropna(subset=["run_date"], inplace=True)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid row payload: {exc}") from exc
+
+    payload = build_batch_payload(df)
+    customer_fields = _resolve_batch_customer(body.filename or "payload.json", df)
+    return _payload_to_response(
+        body.filename or "payload.json",
+        payload,
+        df=df,
+        customer_name=customer_fields.get("customer_name"),
+        customer_fields=customer_fields,
+    )
+
+
+@router.post(
+    "/batch/refresh",
+    response_model=BatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Re-run batch KPIs using cached run data + current SLA config",
+)
+def refresh_batch(body: BatchRefreshRequest | None = None) -> BatchResponse:
+    """Re-compute the batch payload from the job_runs_df stored in session cache.
+
+    Called automatically by the frontend after the SLA matrix is uploaded or
+    removed, so charts immediately reflect the new per-job SLA ceilings without
+    requiring the user to re-upload the batch file.
+    """
+    from services import session_cache as _sc
+
+    raw_rows = _sc.get("job_runs_df")
+    if not raw_rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No cached batch data. Please re-upload the Ctrl-M file.",
+        )
+
+    try:
+        df = pd.DataFrame(raw_rows)
+        # Restore datetime columns
+        for col in ("Start_Time", "End_Time"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        if "Run_Sec" in df.columns:
+            df["Run_Sec"] = pd.to_numeric(df["Run_Sec"], errors="coerce").fillna(0)
+        if "run_time_hrs" not in df.columns and "Run_Sec" in df.columns:
+            df["run_time_hrs"] = df["Run_Sec"] / 3600.0
+        if "run_date" not in df.columns and "Start_Time" in df.columns:
+            df["run_date"] = pd.to_datetime(df["Start_Time"], errors="coerce").dt.date
+        # Derived columns required by compute_metrics — rebuild from Start_Time
+        if "month" not in df.columns and "Start_Time" in df.columns:
+            df["month"] = pd.to_datetime(df["Start_Time"], errors="coerce").dt.to_period("M").astype(str)
+        if "hour" not in df.columns and "Start_Time" in df.columns:
+            df["hour"] = pd.to_datetime(df["Start_Time"], errors="coerce").dt.hour
+        if "Sub_Application" not in df.columns:
+            df["Sub_Application"] = "UNKNOWN"
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error restoring cached data: {exc}") from exc
+
+    # Reviewer exclusions belong to this audit session, never persistent configuration.
+    if body is not None:
+        known_names = {str(name).strip().upper(): str(name).strip() for name in df.get("Job_Name", pd.Series(dtype=str)).dropna().unique() if str(name).strip()}
+        audit: list[dict[str, str]] = []
+        for item in body.manual_exclusions:
+            canonical = known_names.get(str(item.get("name") or "").strip().upper())
+            if canonical:
+                audit.append({"name": canonical, "reason": str(item.get("reason") or "").strip(), "scope": "ALL_BATCH_METRICS", "recorded_at": pd.Timestamp.now(tz="UTC").isoformat()})
+        by_name = {item["name"].upper(): item for item in audit}
+        audit = [by_name[key] for key in sorted(by_name)]
+        _sc.ac_set("batch_manual_exclusion_audit", audit)
+        _sc.ac_set("manual_excluded_jobs", [item["name"] for item in audit])
+
+    payload = build_batch_payload(df)
+    filename = (_sc.get("last_batch") or {}).get("filename") or "cached_batch.csv"
+    customer = _sc.ac_get("customer_name")
+    return _payload_to_response(filename, payload, df=df, customer_name=customer)

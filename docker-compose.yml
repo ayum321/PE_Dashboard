@@ -1,0 +1,27 @@
+services:
+  pe-dashboard-api:
+    build:
+      context: .
+      dockerfile: backend/PE_Dashboard_API/Dockerfile
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8765:8765"
+    environment:
+      PE_STATE_DIR: /data
+      PE_UI_MODE: api
+      PE_COOKIE_SECURE: ${PE_COOKIE_SECURE:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:8080}
+      AI_ENABLED: ${AI_ENABLED:-false}
+    volumes:
+      - pe-dashboard-state:/data
+    restart: unless-stopped
+  pe-dashboard-mfe:
+    build:
+      context: .
+      dockerfile: frontend/PE_Dashboard_MFE/Dockerfile
+    ports:
+      - "${MFE_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    depends_on:
+      - pe-dashboard-api
+    restart: unless-stopped
+volumes:
+  pe-dashboard-state:

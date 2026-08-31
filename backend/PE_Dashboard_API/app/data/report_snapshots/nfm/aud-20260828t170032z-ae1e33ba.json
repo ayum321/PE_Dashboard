@@ -1,0 +1,181 @@
+{
+  "schema_version": "2.0",
+  "meta": {
+    "customer": "NFM",
+    "audit_id": "AUD-20260828T170032Z-AE1E33BA",
+    "audit_window": {
+      "start": null,
+      "end": null
+    },
+    "generated_at": "2026-08-28T17:00:32+00:00",
+    "engine_version": "PE Dashboard export 2.0",
+    "sources": [
+      {
+        "name": "Ctrl-M batch",
+        "loaded": true,
+        "timestamp": null
+      },
+      {
+        "name": "Azure Monitor",
+        "loaded": true,
+        "timestamp": null
+      },
+      {
+        "name": "SOW volume",
+        "loaded": false,
+        "timestamp": null
+      },
+      {
+        "name": "Benchmark",
+        "loaded": false,
+        "timestamp": null
+      }
+    ],
+    "data_coverage_pct": null,
+    "missing_metrics": [
+      "resource fleet summary"
+    ],
+    "sign_off_status": "draft",
+    "issues_logged_count": 0
+  },
+  "executive_verdict": {
+    "headline": "Evidence has been frozen from the loaded dashboard panels; see the section-level findings and data-quality flags.",
+    "confidence_pct": null,
+    "data_quality_flags": [
+      "Resource rows exist but the upstream fleet KPI payload is absent; grade and sign-off are unavailable."
+    ]
+  },
+  "priority_actions": [],
+  "batch_sla": {
+    "window_chart_series": [],
+    "breach_days": [],
+    "tight_days": [],
+    "buffer_summary": {
+      "jobs_breach": 0,
+      "total_jobs": 3,
+      "compliance_pct": 100.0
+    },
+    "long_pole_trend_series": {},
+    "top_jobs_table": [
+      {
+        "job_name": "DB_Backup_D",
+        "sub_app": "—",
+        "schedule_type": "Unclassified",
+        "peak_hrs": 1.4,
+        "avg_hrs": 0.9,
+        "sla_hrs": 11.0,
+        "buffer_pct": 87.4,
+        "sla_used_pct": null,
+        "status": "OK",
+        "sla_source": "Not supplied"
+      },
+      {
+        "job_name": "JDA_PROCESSING_JOB_WKLY_2",
+        "sub_app": "—",
+        "schedule_type": "Unclassified",
+        "peak_hrs": 8.1,
+        "avg_hrs": 6.1,
+        "sla_hrs": 13.0,
+        "buffer_pct": 37.4,
+        "sla_used_pct": null,
+        "status": "LONG_JOB",
+        "sla_source": "Not supplied"
+      }
+    ],
+    "excluded_jobs": []
+  },
+  "resource_review": {
+    "fleet_summary": null,
+    "exception_rule": "status != HEALTHY, with z-score >= 2.0 included as additional anomaly evidence",
+    "exception_table": [],
+    "fleet_heatmap_series": {},
+    "timeseries_by_host": {},
+    "all_servers_table": [
+      {
+        "host": "prbf141403001",
+        "status": "healthy",
+        "type": "DB",
+        "mem_max": 84.2,
+        "cpu_max": 6.0
+      }
+    ],
+    "server_evidence": [
+      {
+        "host": "prbf141403001",
+        "role": "DB",
+        "environment": "UNKNOWN",
+        "status": "HEALTHY",
+        "cpu_pct": null,
+        "memory_pct": null,
+        "disk_pct": null,
+        "has_timeseries": false,
+        "spike_note": "No detected spike was supplied for this host.",
+        "correlation_note": "No Ctrl-M time-overlap evidence was supplied for this host."
+      }
+    ],
+    "unit_semantics": {
+      "cpu": "CPU utilisation % (higher = more pressure)",
+      "memory": "available memory % (lower = more pressure)",
+      "disk": "disk bandwidth consumed % (higher = more pressure)"
+    }
+  },
+  "correlation_rca": [],
+  "sow_capacity": {
+    "metrics": [],
+    "interpretation": "none",
+    "reported_status": ""
+  },
+  "benchmark": {
+    "loaded": false,
+    "total_transactions": null,
+    "sla_breach_count": null,
+    "degraded_count": null,
+    "batch_perf_regression_count": null,
+    "batch_perf_total_jobs": null
+  },
+  "methodology": {
+    "job_sla_def": "Job SLA measures each job run against its resolved ceiling.",
+    "window_sla_def": "Window SLA measures each daily effective batch window against its resolved ceiling.",
+    "buffer_formula": "buffer_pct = (SLA hours - runtime hours) / SLA hours * 100",
+    "status_bands": {
+      "OK": ">40% buffer",
+      "LONG_JOB": "15-40% buffer",
+      "AT_RISK": "0-15% buffer",
+      "BREACH": "<=0% buffer"
+    },
+    "exclusion_rules": [],
+    "source_badges": [
+      "Ctrl-M batch",
+      "Azure Monitor"
+    ]
+  },
+  "prior_audit_ref": {
+    "audit_id": "AUD-20260828T170019Z-41595F85",
+    "generated_at": "2026-08-28T17:00:19+00:00",
+    "audit_window": {
+      "start": null,
+      "end": null
+    }
+  },
+  "deltas": {
+    "compliance_pct": 0.0,
+    "breach_count": 0.0,
+    "worst_long_pole_hrs": -0.033,
+    "anomaly_count": 0.0,
+    "missing_coverage": 0.0,
+    "fleet_grade": {
+      "current": "N/A",
+      "prior": "N/A"
+    },
+    "sow_interpretation": {
+      "current": "none",
+      "prior": "none"
+    }
+  },
+  "validation": {
+    "errors": [],
+    "warnings": [
+      "Resource rows exist but the upstream fleet KPI payload is absent; grade and sign-off are unavailable."
+    ]
+  }
+}

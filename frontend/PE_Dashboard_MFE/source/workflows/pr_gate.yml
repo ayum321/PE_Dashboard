@@ -1,0 +1,87 @@
+name: Pull Request Gate
+
+on: pull_request
+
+jobs:
+  test:
+    name: Run PR formatting, linting, and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        id: node-setup
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.MY_CREDENTIALS }} # Replace with your credentials
+
+      - uses: BY-Product-Development/ds-shared-actions/azure/keyvault-secrets-get@keyvault-secrets-get/2.1.0
+        with:
+          key-vault: 'my-azure-vault' # Replace with your azure vault 
+          fail-on-not-found: true
+          secrets: |
+            artifactoryAuth
+            artifactoryNpmUrl
+            yourGhAppId
+            yourGhAppPrivKey
+          # Replace secret name if needed
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: ~/.npm # npm cache files are stored in `~/.npm` on Linux/macOS
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+
+      - uses: BY-Product-Development/ds-shared-actions/tools/copyright_apply@copyright-applier/1.0.1
+        id: copyright-applier
+
+      - name: Cancel run if the copyright updated which will re-trigger the run
+        if: steps.copyright-applier.outputs.is-updated == 'true'
+        uses: andymckay/cancel-action@0.4
+
+      - name: Set npm config
+        run: |
+          registryPrefix=$(echo "${{ env.artifactoryNpmUrl }}" | sed 's~http[s]*:~~g')
+          npm config set $registryPrefix:_auth="${{env.artifactoryAuth}}"
+          npm config set registry "${{env.artifactoryNpmUrl}}"
+          npm config set @jda:registry "${{env.artifactoryNpmUrl}}"
+          npm config set @by:registry "${{env.artifactoryNpmUrl}}"
+          npm config set $registryPrefix:email no-reply@jda.com
+      - name: Install Dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npm install --prefer-offline --no-audit
+      - name: Check linting
+        run: npm run lint
+      - name: Execute Test Coverage
+        run: npm test
+      - name: Run codacy-coverage-reporter
+        uses: codacy/codacy-coverage-reporter-action@v1
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: coverage/lcov.info
+
+  finalize:
+    name: Finalize run
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - run: echo Done running workflow
