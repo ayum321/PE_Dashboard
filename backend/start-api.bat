@@ -5,25 +5,58 @@ cd /d "%REPO_ROOT%"
 
 rem Local development serves both browser views from one shared API process.
 rem Production Docker explicitly sets PE_UI_MODE=api and never ships legacy assets.
-if "%PE_UI_MODE%"=="" set "PE_UI_MODE=dual"
-
-rem Local API only. This does not open or serve the retired FastAPI dashboard UI.
-if exist ".venv\Scripts\python.exe" (
-  rem Resolve this before changing into the API package below.  A relative
-  rem .venv path works at repository root but fails after the package cd.
-  set "PYTHON_CMD=%CD%\.venv\Scripts\python.exe"
-) else (
-  py -3.14 --version >nul 2>&1
-  if not errorlevel 1 (
-    set "PYTHON_CMD=py -3.14"
+if "%PE_UI_MODE%"=="" (
+  if exist "%REPO_ROOT%\backend\PE_Dashboard_API\app\mfe\index.html" (
+    set "PE_UI_MODE=bundled_mfe"
   ) else (
-    py -3.13 --version >nul 2>&1
-    if not errorlevel 1 set "PYTHON_CMD=py -3.13"
+    set "PE_UI_MODE=dual"
+  )
+)
+
+rem Search for Python across all common environments
+if exist "%REPO_ROOT%\.venv\Scripts\python.exe" (
+  set "PYTHON_CMD=%REPO_ROOT%\.venv\Scripts\python.exe"
+) else (
+  where python >nul 2>nul
+  if not errorlevel 1 (
+    set "PYTHON_CMD=python"
+  ) else (
+    where py >nul 2>nul
+    if not errorlevel 1 (
+      set "PYTHON_CMD=py -3"
+    ) else (
+      where python3 >nul 2>nul
+      if not errorlevel 1 (
+        set "PYTHON_CMD=python3"
+      ) else (
+        py -3.14 --version >nul 2>&1
+        if not errorlevel 1 (
+          set "PYTHON_CMD=py -3.14"
+        ) else (
+          py -3.13 --version >nul 2>&1
+          if not errorlevel 1 (
+            set "PYTHON_CMD=py -3.13"
+          ) else (
+            py -3.12 --version >nul 2>&1
+            if not errorlevel 1 (
+              set "PYTHON_CMD=py -3.12"
+            ) else (
+              py -3.11 --version >nul 2>&1
+              if not errorlevel 1 set "PYTHON_CMD=py -3.11"
+            )
+          )
+        )
+      )
+    )
   )
 )
 
 if not defined PYTHON_CMD (
-  echo ERROR: Python 3.13+ was not found. Install Python or create .venv first.
+  echo.
+  echo [ERROR] Python was not found on your system.
+  echo Please install Python 3.10+ from https://www.python.org/
+  echo Make sure to check 'Add python.exe to PATH' during installation.
+  echo.
   pause
   exit /b 1
 )
