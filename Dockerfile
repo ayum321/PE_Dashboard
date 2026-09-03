@@ -2,7 +2,7 @@
 # Build from repository root: docker build -f backend/PE_Dashboard_API/Dockerfile .
 FROM python:3.12-slim
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PE_STATE_DIR=/data PE_UI_MODE=api PE_COOKIE_SECURE=true HOME=/home/stratosphere XDG_CACHE_HOME=/tmp
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PE_STATE_DIR=/tmp PE_UI_MODE=api PE_COOKIE_SECURE=true HOME=/home/stratosphere XDG_CACHE_HOME=/tmp
 
 COPY backend/PE_Dashboard_API/configuration/requirements.txt /app/configuration/requirements.txt
 
@@ -10,8 +10,9 @@ COPY backend/PE_Dashboard_API/configuration/requirements.txt /app/configuration/
 RUN groupadd --gid 1100 "stratosphere" && \
     useradd --create-home --no-log-init --shell "/bin/bash" --uid 1100 --gid 1100 "stratosphere" && \
     pip install --no-cache-dir -r /app/configuration/requirements.txt && \
-    mkdir -p /data /app && \
-    chown -R 1100:1100 /data /app /home/stratosphere
+    mkdir -p /data /app /tmp/pe_dashboard_state && \
+    chown -R 1100:1100 /data /app /home/stratosphere /tmp/pe_dashboard_state && \
+    chmod 1777 /tmp
 
 COPY --chown=1100:1100 backend/PE_Dashboard_API/app/ /app/app/
 COPY --chown=1100:1100 backend/PE_Dashboard_API/configuration/ /app/configuration/
