@@ -54,7 +54,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # FastAPI remains the processing API for both local experiences.  Only the
 # retired browser UI lives outside it so Portal MFE deployments cannot serve
 # legacy HTML by accident.
-PROJECT_DIR = BASE_DIR.parents[2]
+PROJECT_DIR = BASE_DIR.parents[2] if len(BASE_DIR.parents) > 2 else BASE_DIR.parent
 LEGACY_UI_DIR = Path(
     os.environ.get("PE_LEGACY_UI_DIR", PROJECT_DIR / "backend" / "legacy-ui")
 ).resolve()
