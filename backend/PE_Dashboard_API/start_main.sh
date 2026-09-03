@@ -1,6 +1,6 @@
-﻿#!/bin/bash
+#!/bin/bash
 # ============================================================
-# PE Audit Dashboard Agent API — Startup Script
+# PE Audit Dashboard Agent API - Startup Script
 # ============================================================
 
 set -e
@@ -21,9 +21,4 @@ echo "PE_STATE_DIR: ${PE_STATE_DIR}"
 # Launch uvicorn
 # -------------------------------------------------------
 echo "Starting uvicorn..."
-exec uvicorn main:app \
-    --app-dir /app/app \
-    --host 0.0.0.0 \
-    --port "${PORT}" \
-    --workers 1 \
-    --log-level info
+exec uvicorn main:app     --app-dir /app/app     --host 0.0.0.0     --port "${PORT}"     --workers 1     --log-level info

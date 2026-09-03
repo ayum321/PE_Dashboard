@@ -30,8 +30,9 @@ COPY --chown=1100:1100 backend/PE_Dashboard_API/app/ /app/app/
 COPY --chown=1100:1100 backend/PE_Dashboard_API/configuration/ /app/configuration/
 COPY --chown=1100:1100 backend/PE_Dashboard_API/start_main.sh /app/start_main.sh
 
-# Make startup script executable
-RUN chmod +x /app/start_main.sh
+# Ensure clean Unix format and executable permission
+RUN sed -i -e 's/\r$//' -e '1s/^\xef\xbb\xbf//' /app/start_main.sh && \
+    chmod +x /app/start_main.sh
 
 # Expose the API port
 EXPOSE 8765
@@ -41,4 +42,4 @@ USER 1100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)"]
 
-CMD ["/app/start_main.sh"]
+CMD ["/bin/bash", "/app/start_main.sh"]
