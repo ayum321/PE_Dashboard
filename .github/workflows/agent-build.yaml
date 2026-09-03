@@ -22,6 +22,7 @@ on:
         type: choice
         options:
           - PEDashboardAgent
+          - PEDashboardMFE
         default: PEDashboardAgent
 
 env:
@@ -68,6 +69,10 @@ jobs:
               else
                 echo "DOCKERFILE_NAME=Dockerfile" >> $GITHUB_ENV
               fi
+              ;;
+            PEDashboardMFE)
+              echo "REPOSITORY_NAME=pedashboard_mfe" >> $GITHUB_ENV
+              echo "DOCKERFILE_NAME=frontend/PE_Dashboard_MFE/Dockerfile" >> $GITHUB_ENV
               ;;
             *)
               echo "Unknown agent: $agent_name, defaulting to PEDashboardAgent"
