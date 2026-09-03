@@ -345,7 +345,25 @@ def browser_login(session_id=None) -> dict:
         if existing is not None and existing_info.get("logged_in"):
             return existing_info
 
-        logger.info("Azure auth: launching interactive browser login…")
+        logger.info("Azure auth: checking ambient / interactive Azure credentials…")
+        # In cloud/container environments, DefaultAzureCredential can authenticate immediately
+        try:
+            from azure.identity import DefaultAzureCredential
+            def_cred = DefaultAzureCredential()
+            token = def_cred.get_token("https://management.azure.com/.default")
+            logger.info("Azure auth: successfully authenticated via DefaultAzureCredential / ambient identity")
+            info = {
+                "logged_in": True,
+                "name": "Azure Managed Identity / Environment",
+                "display_name": "Azure Service Identity",
+                "tenant_id": "",
+                "method": "browser",
+            }
+            _set_session(session_id, def_cred, info)
+            return info
+        except Exception as def_exc:
+            logger.info("DefaultAzureCredential not available (%s), proceeding to interactive browser login", def_exc)
+
         try:
             # Bound the interactive wait so a stalled loopback redirect fails
             # fast instead of hanging on the SDK's 300s default. Do not attach a
