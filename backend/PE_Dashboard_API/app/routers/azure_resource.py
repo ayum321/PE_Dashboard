@@ -279,9 +279,10 @@ def _populate_sub_cache(session_id=None) -> None:
 
     with _sub_cache_lock:
         entry = _sub_cache_entry(session_id)
-        entry["subs"] = rows if rows else None
+        entry["subs"] = rows
         entry["ts"] = time.time()
         entry["fetching"] = False
+        entry["completed"] = True
 
 
 def _subscriptions_via_sdk(session_id=None) -> list[Dict[str, Any]]:
@@ -416,6 +417,9 @@ def azure_browser_login(request: Request, response: Response) -> Dict[str, Any]:
                 detail=str(exc),
             ) from exc
 
+        if info.get("device_code_required"):
+            return info
+
         # New identity signed in — drop any subscription list cached for a
         # previous user so the dropdown reflects THIS user's access.
         _reset_sub_cache(sid)
@@ -482,25 +486,28 @@ def azure_browser_logout(request: Request, response: Response) -> Dict[str, Any]
     """Clear cached browser credential for this session."""
     sid = _session_id(request, response)
     clear_browser_credential(sid)
+    from services.azure_monitor import clear_device_code_state
+    clear_device_code_state(sid)
     _reset_sub_cache(sid)
     return {"ok": True, "message": "Browser credential cleared."}
 
 
 @router.get("/azure/auth-status")
 def azure_auth_status(request: Request, response: Response) -> Dict[str, Any]:
-    """Return which auth method is active — always instant (no network call).
-
-    Checks in this order, all O(1)/disk-read only:
-    1. In-memory credential (already loaded this server session)
-    2. Saved JSON identity file on disk (survives server restart)
-    The actual credential object is restored lazily in the background
-    when it is first needed for a real API call.
-    """
+    """Return which auth method is active — always instant (no network call)."""
     sid = _session_id(request, response)
-    # In-memory only — persistent token caches are deliberately disabled.
-    # Use the same public credential lookup as every protected Azure endpoint;
-    # returning a browser identity that subscriptions/search cannot use creates
-    # a misleading "signed in" state in the React MFE.
+
+    from services.azure_monitor import get_device_code_state
+    dev_state = get_device_code_state(sid)
+    if dev_state.get("device_code_required") and dev_state.get("status") == "waiting_for_user":
+        return {
+            "method": "none",
+            "device_code_required": True,
+            "verification_uri": dev_state.get("verification_uri", "https://microsoft.com/devicelogin"),
+            "user_code": dev_state.get("user_code", ""),
+            "message": dev_state.get("message", ""),
+        }
+
     mem_info = dict(get_browser_credential_info(sid) or {})
     if get_browser_credential(sid) is not None and mem_info.get("logged_in"):
         return {
@@ -519,6 +526,7 @@ def azure_subscriptions(request: Request, response: Response) -> Dict[str, Any]:
     sid = _session_id(request, response)
     with _sub_cache_lock:
         entry = _sub_cache_entry(sid)
+        is_completed = entry.get("completed", False)
         cache_fresh = (
             entry["subs"] is not None
             and (time.time() - entry["ts"]) < _SUB_CACHE_TTL
@@ -526,11 +534,11 @@ def azure_subscriptions(request: Request, response: Response) -> Dict[str, Any]:
         already_fetching = entry["fetching"]
 
     # ── Serve from cache if available ───────────────────────────────────────
-    if cache_fresh:
-        return {"ok": True, "subscriptions": entry["subs"]}
+    if cache_fresh or (is_completed and entry["subs"] is not None):
+        return {"ok": True, "subscriptions": entry["subs"] or [], "_cache_warming": False}
 
     # ── Kick off background fetch if not already running ────────────────────
-    if not already_fetching:
+    if not already_fetching and not is_completed:
         with _sub_cache_lock:
             _sub_cache_entry(sid)["fetching"] = True
         threading.Thread(target=_populate_sub_cache, args=(sid,), daemon=True).start()
@@ -543,18 +551,15 @@ def azure_subscriptions(request: Request, response: Response) -> Dict[str, Any]:
             "ok": True,
             "subscriptions": [{"id": saved_id, "name": saved_id,
                                 "state": "Enabled", "is_default": True, "tenant_id": ""}],
-            "_cache_warming": True,   # hint to client: full list loading in background
+            "_cache_warming": not is_completed,
         }
 
-    # Signed in but no saved subscription yet — the background worker is still
-    # enumerating. Tell the client to keep polling instead of reporting a false
-    # "not signed in" (which would make the dropdown give up prematurely).
     from services.azure_monitor import _get_cred as _az_get_cred
     signed_in = _az_get_cred(sid) is not None
     if signed_in:
-        return {"ok": True, "subscriptions": [], "_cache_warming": True}
+        return {"ok": True, "subscriptions": entry.get("subs") or [], "_cache_warming": not is_completed}
 
-    return {"ok": False, "error": "Not signed in — use Sign in with Browser first.", "subscriptions": []}
+    return {"ok": False, "error": "Not signed in — use Sign in with Azure first.", "subscriptions": []}
 
 
 @router.get("/azure/resource-groups")

@@ -102,6 +102,7 @@ const chipStyle: React.CSSProperties = { fontSize: 9, opacity: 0.8, marginLeft: 
 export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetched, onAuthChanged }: Props) {
   const [authInfo, setAuthInfo] = useState<DashboardPayload | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [deviceCodeInfo, setDeviceCodeInfo] = useState<{ verification_uri: string; user_code: string; message: string } | null>(null);
   // State updates are asynchronous. A ref closes the small gap in which two
   // clicks can both enter handleSignIn before React re-renders the button.
   const signInInFlight = useRef(false);
@@ -235,6 +236,16 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     try {
       const result = await connectAzure();
       if (modalToken !== modalGeneration.current) return;
+      if (result.device_code_required) {
+        setDeviceCodeInfo({
+          verification_uri: String(result.verification_uri || 'https://microsoft.com/devicelogin'),
+          user_code: String(result.user_code || ''),
+          message: String(result.message || ''),
+        });
+        setDiscoverStatus({ text: 'Please complete login on the Microsoft page using the code above.', tone: 'muted' });
+        return;
+      }
+      setDeviceCodeInfo(null);
       setAuthInfo(result);
       onAuthChanged?.(result);
       await loadSubscriptions(modalToken);
@@ -260,9 +271,29 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     }
   }, [open, autoStartAuth, authInfo?.method, handleSignIn]);
 
+  // Poll for Device Code sign-in completion
+  useEffect(() => {
+    if (!open || !deviceCodeInfo) return;
+    const modalToken = modalGeneration.current;
+    const interval = window.setInterval(async () => {
+      try {
+        const status = await getAzureAuthStatus();
+        if (modalToken !== modalGeneration.current) return;
+        if (status.method === 'browser') {
+          setDeviceCodeInfo(null);
+          setAuthInfo(status);
+          onAuthChanged?.(status);
+          await loadSubscriptions(modalToken);
+        }
+      } catch {}
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [open, deviceCodeInfo, loadSubscriptions, onAuthChanged]);
+
   const handleSignOut = async () => {
     setAuthBusy(true);
     cancelSubscriptionLoads();
+    setDeviceCodeInfo(null);
     try {
       await disconnectAzure();
       setAuthInfo({ method: 'none' });
@@ -307,9 +338,13 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
       return;
     }
     setSearchBusy(true);
-    setDiscoverStatus({ text: `Searching across all subscriptions for "${searchQuery}"\u2026`, tone: 'muted' });
+    const scopeMsg = selectedSub ? `in subscription ${selectedSub}` : 'across accessible subscriptions';
+    setDiscoverStatus({ text: `Searching ${scopeMsg} for "${searchQuery}"\u2026`, tone: 'muted' });
     try {
-      const data = await searchAzureVms({ query: searchQuery });
+      const data = await searchAzureVms({
+        query: searchQuery,
+        subscription_ids: selectedSub ? [selectedSub] : undefined,
+      });
       onDiscovered(data, `Found ${data.total} VMs matching "${searchQuery}"`);
     } catch (error) {
       setDiscoverStatus({ text: error instanceof Error ? error.message : 'Search failed.', tone: 'red' });
@@ -557,10 +592,28 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
             <Button size="small" onClick={handleSignOut} disabled={authBusy} style={{ fontSize: 10, color: '#6b7db3' }}>Sign out</Button>
           ) : (
             <Button size="small" variant="outlined" onClick={handleSignIn} disabled={authBusy} style={{ fontSize: 10 }}>
-              {authBusy ? <CircularProgress size={14} /> : 'Sign in with Browser'}
+              {authBusy ? <CircularProgress size={14} /> : 'Sign in with Azure'}
             </Button>
           )}
         </Box>
+
+        {/* Device Code Instructions Banner */}
+        {deviceCodeInfo && (
+          <Box style={{ borderRadius: 8, border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Typography variant="body2" style={{ color: '#93c5fd', fontWeight: 800 }}>
+              Action Required: Complete Azure Corporate Sign-In
+            </Typography>
+            <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
+              1. Open <a href={deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin'} target="_blank" rel="noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', fontWeight: 700 }}>{deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin'}</a> in a new tab.
+            </Typography>
+            <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
+              2. Enter code: <strong style={{ background: '#1e293b', padding: '3px 10px', borderRadius: 4, letterSpacing: '0.12em', fontSize: 14, color: '#38bdf8', border: '1px solid #38bdf8' }}>{deviceCodeInfo.user_code}</strong>
+            </Typography>
+            <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <CircularProgress size={12} color="inherit" /> Waiting for Azure login to complete in your browser...
+            </Typography>
+          </Box>
+        )}
 
         {connected && step === 1 && (
           <Box style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -612,6 +665,18 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               <Button variant="outlined" onClick={handleBrowse} disabled={browseBusy || !selectedSub}>
                 {browseBusy ? <CircularProgress size={16} /> : 'Browse'}
               </Button>
+            </Box>
+
+            <Box display="flex" alignItems="center" style={{ gap: 8, marginTop: -4 }}>
+              <Typography variant="caption" style={{ color: '#6b7db3', fontSize: 11, whiteSpace: 'nowrap' }}>
+                Or enter Subscription ID manually:
+              </Typography>
+              <input
+                value={selectedSub}
+                onChange={(e) => handleSubscriptionChange(e.target.value.trim())}
+                placeholder="e.g. 00000000-0000-0000-0000-000000000000"
+                style={{ flex: 1, background: 'rgba(0,0,0,.4)', border: '1px solid #213060', borderRadius: 6, padding: '6px 10px', color: '#e2e8f0', fontSize: 12, outline: 'none' }}
+              />
             </Box>
             {discoverStatus && <Typography variant="caption" style={{ color: statusColor[discoverStatus.tone] }}>{discoverStatus.text}</Typography>}
           </Box>

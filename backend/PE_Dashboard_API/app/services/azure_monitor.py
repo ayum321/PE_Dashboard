@@ -320,61 +320,115 @@ def _preflight_auth_network(timeout: float = 6.0) -> None:
         ) from exc
 
 
+_device_flow_lock = _threading.RLock()
+_device_flow_state: dict = {}  # sid -> dict
+
+
+def get_device_code_state(session_id=None) -> dict:
+    sid = _sid_norm(session_id)
+    with _device_flow_lock:
+        return dict(_device_flow_state.get(sid) or {})
+
+
+def clear_device_code_state(session_id=None) -> None:
+    sid = _sid_norm(session_id)
+    with _device_flow_lock:
+        _device_flow_state.pop(sid, None)
+
+
+def start_device_code_auth(session_id=None) -> dict:
+    _require_sdk()
+    from azure.identity import DeviceCodeCredential
+    import json as _json, base64
+
+    sid = _sid_norm(session_id)
+    with _device_flow_lock:
+        existing = _device_flow_state.get(sid)
+        if existing and existing.get("status") == "waiting_for_user":
+            return existing
+        _device_flow_state[sid] = {"status": "starting", "device_code_required": True}
+
+    ready = _threading.Event()
+
+    def _prompt_callback(verification_uri: str, user_code: str, expires_on):
+        logger.info("Azure device code generated: %s code: %s", verification_uri, user_code)
+        with _device_flow_lock:
+            _device_flow_state[sid] = {
+                "status": "waiting_for_user",
+                "device_code_required": True,
+                "verification_uri": verification_uri,
+                "user_code": user_code,
+                "expires_on": str(expires_on),
+                "message": f"To sign in, open {verification_uri} and enter code: {user_code}",
+            }
+        ready.set()
+
+    def _worker():
+        try:
+            cred = DeviceCodeCredential(prompt_callback=_prompt_callback, timeout=600)
+            token = cred.get_token("https://management.azure.com/.default")
+            payload_b64 = token.token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            user_name = claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or "Azure User"
+            info = {
+                "logged_in": True,
+                "name": user_name,
+                "display_name": claims.get("name", user_name),
+                "tenant_id": claims.get("tid", ""),
+                "method": "browser",
+            }
+            _set_session(sid, cred, info)
+            with _device_flow_lock:
+                _device_flow_state[sid] = {"status": "completed", "info": info}
+            logger.info("Azure Device Code authentication succeeded for %s", user_name)
+        except Exception as exc:
+            logger.error("Azure Device Code authentication failed: %s", exc)
+            with _device_flow_lock:
+                _device_flow_state[sid] = {"status": "error", "error": str(exc)}
+        finally:
+            ready.set()
+
+    _threading.Thread(target=_worker, daemon=True).start()
+    ready.wait(timeout=4)
+
+    with _device_flow_lock:
+        return dict(_device_flow_state.get(sid) or {"status": "starting", "device_code_required": True})
+
+
 def browser_login(session_id=None) -> dict:
-    """Launch interactive browser login and cache the credential for THIS process/session.
+    """Launch interactive browser login or Device Code flow and cache the credential.
 
-    Opens the Microsoft "Pick an account" page in the user's default
-    browser. After successful sign-in the credential is held only in process
-    under this session id; persistent token caches are intentionally disabled.
-
-    Returns a dict with identity info (name, tenant, etc.).
+    On desktop environments, opens Microsoft 'Pick an account' page.
+    On container/headless environments, provides Device Code flow so analysts
+    can authenticate with their corporate Azure account from their own browser.
     """
     _require_sdk()
-    from azure.identity import InteractiveBrowserCredential
     import json as _json, base64
 
     # Fix 5: network preflight — fail fast (6s) instead of 180s timeout
     _preflight_auth_network()
 
-    # Two browser clicks can arrive on separate FastAPI worker threads. Without
-    # this single-flight lock both calls open an account-picker window. The
-    # follower waits for the bounded first attempt, then reuses its credential.
     with _login_lock(session_id):
         existing = _get_cred(session_id)
         existing_info = _get_info(session_id)
         if existing is not None and existing_info.get("logged_in"):
             return existing_info
 
-        logger.info("Azure auth: checking ambient / interactive Azure credentials…")
-        # In cloud/container environments, DefaultAzureCredential can authenticate immediately
-        try:
-            from azure.identity import DefaultAzureCredential
-            def_cred = DefaultAzureCredential()
-            token = def_cred.get_token("https://management.azure.com/.default")
-            logger.info("Azure auth: successfully authenticated via DefaultAzureCredential / ambient identity")
-            info = {
-                "logged_in": True,
-                "name": "Azure Managed Identity / Environment",
-                "display_name": "Azure Service Identity",
-                "tenant_id": "",
-                "method": "browser",
-            }
-            _set_session(session_id, def_cred, info)
-            return info
-        except Exception as def_exc:
-            logger.info("DefaultAzureCredential not available (%s), proceeding to interactive browser login", def_exc)
+        # In container / headless Linux, launch Device Code flow so user can sign in on their laptop
+        is_headless = os.path.exists("/app") or os.environ.get("KUBERNETES_SERVICE_HOST") is not None or not os.environ.get("DISPLAY")
+        if is_headless and sys.platform != "win32":
+            return start_device_code_auth(session_id)
 
+        logger.info("Azure auth: launching interactive browser login…")
         try:
-            # Bound the interactive wait so a stalled loopback redirect fails
-            # fast instead of hanging on the SDK's 300s default. Do not attach a
-            # persistent token cache: DPAPI can hang on this supported build.
+            from azure.identity import InteractiveBrowserCredential
             cred = InteractiveBrowserCredential(timeout=_BROWSER_AUTH_TIMEOUT_S)
             cred.authenticate(scopes=["https://management.azure.com/.default"])
             token = cred.get_token("https://management.azure.com/.default")
         except Exception as exc:
-            raise AzureConfigError(
-                f"Browser login failed or was cancelled. Error: {exc}"
-            ) from exc
+            logger.warning("Interactive browser login failed (%s); falling back to Device Code flow", exc)
+            return start_device_code_auth(session_id)
 
         # Decode JWT to extract identity.
         try:
@@ -415,28 +469,26 @@ def clear_browser_credential(session_id=None) -> None:
 
 
 def _build_credential(cfg: dict, session_id=None):
-    """Return the explicitly authenticated browser credential for this session,
-    or ambient Azure credentials (Managed Identity / Service Principal) in container environments."""
-    # Try this session's in-memory credential first
+    """Return the explicitly authenticated credential for this session."""
     cred = _get_cred(session_id)
     if cred is not None:
-        logger.info("Azure auth: reusing cached browser credential")
+        logger.info("Azure auth: reusing cached session credential")
         return cred
 
-    # Check for ambient / container credentials via DefaultAzureCredential
-    try:
-        from azure.identity import DefaultAzureCredential
-        default_cred = DefaultAzureCredential()
-        # Ensure it can actually acquire a token
-        default_cred.get_token("https://management.azure.com/.default")
-        logger.info("Azure auth: authenticated via DefaultAzureCredential / ambient identity")
-        _set_session(session_id, default_cred, {"logged_in": True, "name": "Ambient Identity", "method": "browser"})
-        return default_cred
-    except Exception:
-        pass
+    # Check if explicit Service Principal environment variables are configured
+    if os.environ.get("AZURE_CLIENT_ID") and os.environ.get("AZURE_CLIENT_SECRET"):
+        try:
+            from azure.identity import DefaultAzureCredential
+            default_cred = DefaultAzureCredential()
+            default_cred.get_token("https://management.azure.com/.default")
+            logger.info("Azure auth: authenticated via environment Service Principal")
+            _set_session(session_id, default_cred, {"logged_in": True, "name": "Service Principal", "method": "browser"})
+            return default_cred
+        except Exception:
+            pass
 
     raise AzureConfigError(
-        "Not authenticated. Go to Settings → Sign in with Browser first."
+        "Not authenticated. Click 'Sign in with Azure' to authenticate."
     )
 
 
@@ -2693,10 +2745,62 @@ def search_vms(credential, query: str,
     try:
         response = client.resources(request)
     except Exception as exc:
-        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+        err_msg = str(exc)
+        if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
             raise AzureTimeoutError(
                 "Azure Resource Graph search timed out. Narrow the subscription scope and try again."
             ) from exc
+
+        # Check if AccessDenied (tenant-wide query rejected by Azure RBAC)
+        if "accessdenied" in err_msg.lower() or "authorizationfailed" in err_msg.lower():
+            from services import config_store as _cs
+            cfg_sub = _cs.get("azure_subscription_id", "").strip()
+            fallback_subs = [s for s in (subscription_ids or ([cfg_sub] if cfg_sub else [])) if s]
+            if fallback_subs:
+                logger.info("Resource Graph query denied; falling back to ARM Compute VM enumeration on %s", fallback_subs)
+                arm_results = []
+                q_lower = query.lower()
+                for sub in fallback_subs:
+                    try:
+                        vms = _list_vms(credential, sub, None)
+                        for vm in vms:
+                            tags = vm.get("tags") or {}
+                            tags_str = " ".join(f"{k} {v}" for k, v in tags.items()).lower()
+                            vm_name = vm.get("name", "")
+                            vm_rg = vm.get("rg", "")
+                            if q_lower in vm_name.lower() or q_lower in vm_rg.lower() or q_lower in tags_str:
+                                arm_results.append({
+                                    "resource_id": vm["resource_id"],
+                                    "name": vm_name,
+                                    "type": _infer_server_type(vm_name, tags, vm_rg),
+                                    "location": vm.get("location", ""),
+                                    "vm_size": vm.get("vm_size", ""),
+                                    "resource_group": vm_rg,
+                                    "subscription_id": sub,
+                                    "tags": tags,
+                                    "product_group": _extract_product_group(tags),
+                                    "customer": (
+                                        tags.get("CustomerName") or tags.get("customerName")
+                                        or tags.get("Customer") or tags.get("customer")
+                                        or tags.get("ClientName") or tags.get("clientName")
+                                        or tags.get("Client") or tags.get("client") or ""
+                                    ),
+                                    "application": tags.get("Application") or tags.get("application") or "",
+                                    "environment": tags.get("Environment_Type") or tags.get("environment_type")
+                                                  or tags.get("Environment") or "",
+                                })
+                    except Exception as arm_err:
+                        logger.warning("ARM VM list fallback failed for subscription %s: %s", sub, arm_err)
+                if arm_results:
+                    arm_results.sort(key=lambda v: ({"DB": 0, "SRE": 1, "APP": 2}.get(v["type"], 9), v["name"]))
+                    logger.info("ARM fallback found %d VMs matching '%s'", len(arm_results), query)
+                    return arm_results
+
+            raise AzureFetchError(
+                "Tenant-wide search was denied (requires Tenant Root Reader permissions). "
+                "Please enter your Azure Subscription ID below and browse or search directly."
+            ) from exc
+
         raise AzureFetchError(f"Resource Graph query failed: {exc}") from exc
 
     results: List[Dict[str, Any]] = []
