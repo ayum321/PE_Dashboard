@@ -162,3 +162,5 @@ jobs:
         run: |
           docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}}
           docker push ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}}
+          docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:latest
+          docker push ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:latest
