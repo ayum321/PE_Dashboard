@@ -110,7 +110,12 @@ def _secure_cookie() -> bool:
 
     Local FastAPI/React development remains HTTP unless explicitly opted in.
     """
-    return os.environ.get("PE_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    val = os.environ.get("PE_COOKIE_SECURE", "").strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return os.path.exists("/app") or bool(os.environ.get("KUBERNETES_SERVICE_HOST"))
 
 
 def _cookie_samesite() -> str:
@@ -121,10 +126,10 @@ def _cookie_samesite() -> str:
     ``PE_COOKIE_SECURE=true`` and ``PE_COOKIE_SAMESITE=none``; browsers reject
     SameSite=None cookies without Secure.
     """
-    value = os.environ.get("PE_COOKIE_SAMESITE", "lax").strip().lower()
-    if value not in {"lax", "strict", "none"}:
-        return "lax"
-    return value if value != "none" or _secure_cookie() else "lax"
+    value = os.environ.get("PE_COOKIE_SAMESITE", "").strip().lower()
+    if value in {"lax", "strict", "none"}:
+        return value if value != "none" or _secure_cookie() else "lax"
+    return "none" if _secure_cookie() else "lax"
 
 
 def _session_id(request: Request, response: Optional[Response] = None) -> str:

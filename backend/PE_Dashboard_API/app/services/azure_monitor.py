@@ -397,12 +397,26 @@ def clear_browser_credential(session_id=None) -> None:
 
 
 def _build_credential(cfg: dict, session_id=None):
-    """Return the explicitly authenticated browser credential for this session."""
+    """Return the explicitly authenticated browser credential for this session,
+    or ambient Azure credentials (Managed Identity / Service Principal) in container environments."""
     # Try this session's in-memory credential first
     cred = _get_cred(session_id)
     if cred is not None:
         logger.info("Azure auth: reusing cached browser credential")
         return cred
+
+    # Check for ambient / container credentials via DefaultAzureCredential
+    try:
+        from azure.identity import DefaultAzureCredential
+        default_cred = DefaultAzureCredential()
+        # Ensure it can actually acquire a token
+        default_cred.get_token("https://management.azure.com/.default")
+        logger.info("Azure auth: authenticated via DefaultAzureCredential / ambient identity")
+        _set_session(session_id, default_cred, {"logged_in": True, "name": "Ambient Identity", "method": "browser"})
+        return default_cred
+    except Exception:
+        pass
+
     raise AzureConfigError(
         "Not authenticated. Go to Settings → Sign in with Browser first."
     )
