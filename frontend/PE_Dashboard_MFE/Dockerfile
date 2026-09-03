@@ -1,28 +1,17 @@
 ﻿# PE Dashboard React MFE image
 # Build from repository root: docker build -f frontend/PE_Dashboard_MFE/Dockerfile .
-FROM node:18-alpine AS build
-
-WORKDIR /workspace/react-dashboard
-
-COPY frontend/PE_Dashboard_MFE/source/package*.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
-
-COPY frontend/PE_Dashboard_MFE/source/ ./
-RUN npm run build
-
-# Final runtime image
 FROM nginx:1.27-alpine
 
 # Create stratosphere non-root user matching Blue Yonder standard (UID 1100)
 RUN addgroup -g 1100 -S stratosphere && \
     adduser -u 1100 -S -G stratosphere -s /bin/sh stratosphere
 
-# Copy build artifacts and config
-COPY --from=build --chown=1100:1100 /workspace/react-dashboard/build /usr/share/nginx/html
+# Copy pre-built React static assets directly (no private npm/artifactory dependency needed)
+COPY --chown=1100:1100 frontend/PE_Dashboard_MFE/build/ /usr/share/nginx/html/
 COPY --chown=1100:1100 frontend/PE_Dashboard_MFE/nginx.conf /etc/nginx/nginx.conf
 COPY --chown=1100:1100 frontend/PE_Dashboard_MFE/start_mfe.sh /app/start_mfe.sh
 
-# Ensure permissions for non-root execution
+# Ensure permissions for non-root execution and clean line endings
 RUN mkdir -p /tmp /usr/share/nginx/html && \
     sed -i -e 's/\r$//' -e '1s/^\xef\xbb\xbf//' /app/start_mfe.sh && \
     chmod +x /app/start_mfe.sh && \
