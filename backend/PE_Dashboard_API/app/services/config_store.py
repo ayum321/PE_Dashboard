@@ -21,18 +21,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from services.state_paths import get_state_file
+
 logger = logging.getLogger("pe_dashboard.config_store")
 
-_LOCAL_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".pe_config.json"
+
+_CONFIG_PATH: Path = get_state_file(".pe_config.json")
 
 
-def _state_path(filename: str, local_default: Path) -> Path:
-    """Resolve persisted state into the deployment-owned state volume when set."""
-    state_dir = os.environ.get("PE_STATE_DIR", "").strip()
-    return Path(state_dir).expanduser() / filename if state_dir else local_default
-
-
-_CONFIG_PATH = _state_path(".pe_config.json", _LOCAL_CONFIG_PATH)
+def _config_path() -> Path:
+    return _CONFIG_PATH
 
 # Thread lock — prevents concurrent writes from corrupting the JSON file
 _lock = threading.Lock()
@@ -98,9 +96,10 @@ def _load() -> dict:
     if _cache is not None and (now - _cache_ts) < _CACHE_TTL:
         return _cache
 
-    if _CONFIG_PATH.exists():
+    cfg_file = _config_path()
+    if cfg_file.exists():
         try:
-            with open(_CONFIG_PATH, encoding="utf-8") as f:
+            with open(cfg_file, encoding="utf-8") as f:
                 data = json.load(f)
             # Merge any keys added in a newer version
             for k, v in _DEFAULTS.items():
@@ -121,7 +120,7 @@ def _load() -> dict:
             _cache_ts = now
             return data
         except Exception as exc:
-            logger.warning("config_store: failed to read %s — %s", _CONFIG_PATH, exc)
+            logger.warning("config_store: failed to read %s — %s", cfg_file, exc)
 
     result = dict(_DEFAULTS)
     _cache = result
@@ -132,14 +131,15 @@ def _load() -> dict:
 def _save(data: dict) -> None:
     """Write config to disk and update the in-memory cache atomically."""
     global _cache, _cache_ts
+    _cache = data
+    _cache_ts = time.monotonic()
+    cfg_file = _config_path()
     try:
-        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        _cache = data
-        _cache_ts = time.monotonic()
     except Exception as exc:
-        logger.error("config_store: failed to write %s — %s", _CONFIG_PATH, exc)
+        logger.warning("config_store: failed to write %s (kept in-memory) — %s", cfg_file, exc)
 
 
 def get(key: str, default: Any = None) -> Any:
@@ -186,5 +186,5 @@ def set_nvidia_key(key: str) -> None:
 
 
 # Bootstrap: write defaults if config file doesn't exist
-if not _CONFIG_PATH.exists():
+if not _config_path().exists():
     _save(_DEFAULTS)

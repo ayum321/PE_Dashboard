@@ -20,11 +20,10 @@ from typing import Optional
 
 from services import pe_config
 from services.spike_schema import make_spike_record
+from services.state_paths import get_state_file
 
 logger = logging.getLogger("pe_dashboard.baseline_store")
 
-_STATE_DIR = Path(os.environ.get("PE_STATE_DIR", Path(__file__).resolve().parent.parent))
-_DB_PATH = _STATE_DIR / ".pe_baseline.db"
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 
@@ -38,10 +37,15 @@ def _connect() -> sqlite3.Connection:
     global _conn
     if _conn is not None:
         return _conn
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-    _conn.execute("PRAGMA journal_mode=WAL")
-    _conn.execute("PRAGMA synchronous=NORMAL")
+    db_path = get_state_file(".pe_baseline.db")
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        _conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception as exc:
+        logger.warning("baseline_store: could not open %s (%s) — falling back to :memory:", db_path, exc)
+        _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _init_schema(_conn)
     return _conn
 

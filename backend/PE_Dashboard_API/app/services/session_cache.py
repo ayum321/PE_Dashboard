@@ -65,16 +65,13 @@ _PERSIST_AC_SLOTS = {
     "sla_resolved",
     "resource_summary", "regression_df", "adaptive_sla", "sla_matrix_kpis",
 } - {"customer_name"}
-_LOCAL_CACHE_FILE = Path(__file__).resolve().parent.parent / ".pe_cache.json"
+from services.state_paths import get_state_file
+
+_CACHE_FILE: Path = get_state_file(".pe_cache.json")
 
 
 def _cache_path() -> Path:
-    """Use the mounted deployment state directory when PE_STATE_DIR is set."""
-    state_dir = os.environ.get("PE_STATE_DIR", "").strip()
-    return Path(state_dir).expanduser() / ".pe_cache.json" if state_dir else _LOCAL_CACHE_FILE
-
-
-_CACHE_FILE = _cache_path()
+    return _CACHE_FILE
 
 # These must be defined before _flush() and _load_from_disk() use them
 _AC_KEY    = "__audit_context__"
@@ -99,8 +96,9 @@ def _flush() -> None:
 
     def _write():
         try:
-            _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(_CACHE_FILE, "w", encoding="utf-8") as fh:
+            cache_file = _cache_path()
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, "w", encoding="utf-8") as fh:
                 json.dump(snapshot, fh, default=str)
         except Exception:
             pass  # never crash the caller due to disk I/O failure
@@ -115,9 +113,10 @@ def _flush() -> None:
 def _load_from_disk() -> None:
     """Load persisted snapshot on module init."""
     try:
-        if not os.path.exists(_CACHE_FILE):
+        cache_file = _cache_path()
+        if not os.path.exists(cache_file):
             return
-        with open(_CACHE_FILE, "r", encoding="utf-8") as fh:
+        with open(cache_file, "r", encoding="utf-8") as fh:
             snap = json.load(fh)
         for k, v in snap.get("__plain__", {}).items():
             # Only restore keys still in the persist set — prevents removed

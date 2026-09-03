@@ -36,11 +36,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from services.state_paths import get_state_dir, get_state_file
+
 logger = logging.getLogger("pe_dashboard.report_archive")
 
-_ROOT       = Path(os.environ.get("PE_STATE_DIR", Path(__file__).resolve().parent.parent))
-_DB_PATH    = _ROOT / ".pe_report_archive.db"
-_FILES_DIR  = _ROOT / "data" / "report_archive"
+
+_ROOT: Path = get_state_dir()
+_DB_PATH: Path = get_state_file(".pe_report_archive.db")
+_FILES_DIR: Path = _ROOT / "data" / "report_archive"
+
+
+def _db_path() -> Path:
+    return _DB_PATH
+
+
+def _files_dir() -> Path:
+    return _FILES_DIR
+
+
+def _snapshots_dir() -> Path:
+    return _ROOT / "data" / "report_snapshots"
+
 
 _lock: threading.Lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
@@ -102,11 +118,17 @@ def _connect() -> sqlite3.Connection:
     global _conn
     if _conn is not None:
         return _conn
-    _FILES_DIR.mkdir(parents=True, exist_ok=True)
-    _snapshots_dir().mkdir(parents=True, exist_ok=True)
-    _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-    _conn.execute("PRAGMA journal_mode=WAL")
-    _conn.execute("PRAGMA synchronous=NORMAL")
+    db_path = _db_path()
+    try:
+        _files_dir().mkdir(parents=True, exist_ok=True)
+        _snapshots_dir().mkdir(parents=True, exist_ok=True)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        _conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception as exc:
+        logger.warning("report_archive: could not open %s (%s) — falling back to :memory:", db_path, exc)
+        _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _init_schema(_conn)
     return _conn
 
@@ -182,16 +204,14 @@ def _slugify(customer: str) -> str:
     return slug or "unknown"
 
 
-def _snapshots_dir() -> Path:
-    """Resolve dynamically so test suites can redirect ``_ROOT`` safely."""
-    return _ROOT / "data" / "report_snapshots"
-
-
 def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(content, encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception as exc:
+        logger.warning("report_archive: failed to write text to %s — %s", path, exc)
 
 
 def _snapshot_paths(customer_slug: str, audit_id: str) -> tuple[Path, Path]:
@@ -340,9 +360,10 @@ def save(customer: str, html: str, meta: dict[str, Any]) -> dict[str, Any]:
     """
     try:
         slug = _slugify(customer)
-        _FILES_DIR.mkdir(parents=True, exist_ok=True)
-        file_path = _FILES_DIR / f"{slug}.html"
-        tmp_path  = _FILES_DIR / f".{slug}.html.tmp"
+        files_dir = _files_dir()
+        files_dir.mkdir(parents=True, exist_ok=True)
+        file_path = files_dir / f"{slug}.html"
+        tmp_path  = files_dir / f".{slug}.html.tmp"
 
         html_bytes = html.encode("utf-8")
         file_hash  = hashlib.sha256(html_bytes).hexdigest()
