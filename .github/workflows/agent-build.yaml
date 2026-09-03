@@ -17,13 +17,14 @@ on:
           - production
         default: staging
       agent_name:
-        description: 'Agent name'
+        description: 'Agent / Component to build'
         required: true
         type: choice
         options:
+          - Both
           - PEDashboardAgent
           - PEDashboardUI
-        default: PEDashboardAgent
+        default: Both
 
 env:
   SNAPSHOT_VERSION: 1.0.0
@@ -54,40 +55,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "Set Repository and Dockerfile based on agent name"
+      - name: "Set Build Targets"
         env:
-          agent_name: ${{ github.event.inputs.agent_name || 'PEDashboardAgent' }}
+          agent_name: ${{ github.event.inputs.agent_name || 'Both' }}
         run: |
-          echo "Selected agent: $agent_name"
-          case "$agent_name" in
-            PEDashboardAgent)
-              echo "REPOSITORY_NAME=pedashboard_agent_api" >> $GITHUB_ENV
-              if [ -f "backend/PE_Dashboard_API/Dockerfile" ]; then
-                echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
-              elif [ -f "PEDashboard/Dockerfile" ]; then
-                echo "DOCKERFILE_NAME=PEDashboard/Dockerfile" >> $GITHUB_ENV
-              else
-                echo "DOCKERFILE_NAME=Dockerfile" >> $GITHUB_ENV
-              fi
-              ;;
-            PEDashboardUI)
-              echo "REPOSITORY_NAME=pedashboard_ui" >> $GITHUB_ENV
-              echo "DOCKERFILE_NAME=frontend/PE_Dashboard_MFE/Dockerfile" >> $GITHUB_ENV
-              ;;
-            *)
-              echo "Unknown agent: $agent_name, defaulting to PEDashboardAgent"
-              echo "REPOSITORY_NAME=pedashboard_agent_api" >> $GITHUB_ENV
-              if [ -f "backend/PE_Dashboard_API/Dockerfile" ]; then
-                echo "DOCKERFILE_NAME=backend/PE_Dashboard_API/Dockerfile" >> $GITHUB_ENV
-              elif [ -f "PEDashboard/Dockerfile" ]; then
-                echo "DOCKERFILE_NAME=PEDashboard/Dockerfile" >> $GITHUB_ENV
-              else
-                echo "DOCKERFILE_NAME=Dockerfile" >> $GITHUB_ENV
-              fi
-              ;;
-          esac
-          echo "Set DOCKERFILE_NAME: $DOCKERFILE_NAME"
-          echo "Set REPOSITORY_NAME: $REPOSITORY_NAME"
+          echo "Selected build target: $agent_name"
+          echo "BUILD_TARGET=$agent_name" >> $GITHUB_ENV
         shell: bash
 
       - name: "Get branch names"
@@ -152,20 +125,46 @@ jobs:
         with:
           python-version: "3.13.5"
 
-      - name: "RUN - Build Docker image"
+      - name: "RUN - Build Docker image(s)"
         run: |
-          docker build . -f ${{ env.DOCKERFILE_NAME }} --tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} --build-arg POETRY_REPOSITORY="jdasoftware.jfrog.io/artifactory/api/pypi/pypi/simple" --build-arg POETRY_USERNAME=${{secrets.NPD_SRE_ARTIFACTORY_USER}} --build-arg POETRY_PASSWORD=${{secrets.NPD_SRE_ARTIFACTORY_RO_TOKEN}}
+          TARGET="${BUILD_TARGET:-Both}"
+          echo "Building target: $TARGET"
 
-          
+          if [ "$TARGET" = "Both" ] || [ "$TARGET" = "PEDashboardAgent" ]; then
+            echo "=== Building PEDashboardAgent (pedashboard_agent_api) ==="
+            docker build . -f backend/PE_Dashboard_API/Dockerfile \
+              --tag ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_agent_api:${{env.BUILD_VERSION}}-${{github.run_number}} \
+              --build-arg POETRY_REPOSITORY="jdasoftware.jfrog.io/artifactory/api/pypi/pypi/simple" \
+              --build-arg POETRY_USERNAME=${{secrets.NPD_SRE_ARTIFACTORY_USER}} \
+              --build-arg POETRY_PASSWORD=${{secrets.NPD_SRE_ARTIFACTORY_RO_TOKEN}}
+          fi
+
+          if [ "$TARGET" = "Both" ] || [ "$TARGET" = "PEDashboardUI" ]; then
+            echo "=== Building PEDashboardUI (pedashboard_ui) ==="
+            docker build . -f frontend/PE_Dashboard_MFE/Dockerfile \
+              --tag ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_ui:${{env.BUILD_VERSION}}-${{github.run_number}}
+          fi
+
       - name: Login to Azure Container Registry
         env:
           CREDS: ${{ secrets.STRATO_SP_ACR_CREDENTIALS }}
           STRATO_CONTAINER_REGISTRY: ${{ env.STRATO_CONTAINER_REGISTRY }}
         run: python other/azure_acr_login.py
 
-      - name: Tag and Push Image to ACR - development
+      - name: Tag and Push Image(s) to ACR - development
         run: |
-          docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}}
-          docker push ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}}
-          docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:latest
-          docker push ${{env.STRATO_CONTAINER_REGISTRY}}/${{env.REPOSITORY_NAME}}:latest
+          TARGET="${BUILD_TARGET:-Both}"
+
+          if [ "$TARGET" = "Both" ] || [ "$TARGET" = "PEDashboardAgent" ]; then
+            echo "=== Pushing pedashboard_agent_api ==="
+            docker push ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_agent_api:${{env.BUILD_VERSION}}-${{github.run_number}}
+            docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_agent_api:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_agent_api:latest
+            docker push ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_agent_api:latest
+          fi
+
+          if [ "$TARGET" = "Both" ] || [ "$TARGET" = "PEDashboardUI" ]; then
+            echo "=== Pushing pedashboard_ui ==="
+            docker push ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_ui:${{env.BUILD_VERSION}}-${{github.run_number}}
+            docker tag ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_ui:${{env.BUILD_VERSION}}-${{github.run_number}} ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_ui:latest
+            docker push ${{env.STRATO_CONTAINER_REGISTRY}}/pedashboard_ui:latest
+          fi
