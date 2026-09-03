@@ -51,6 +51,57 @@ interface Overconsumption {
 interface TaxonomyItem { value: string; label: string }
 interface TaxonomyGroup { key: string; label: string; items: TaxonomyItem[] }
 
+const DEFAULT_PRODUCT_TAXONOMY: TaxonomyGroup[] = [
+  {
+    key: 'DEMAND',
+    label: 'Demand',
+    items: [
+      { value: 'DEMAND', label: 'Demand' },
+      { value: 'DEMAND_360', label: 'Demand 360' },
+      { value: 'DEMAND_CLASSIFICATION', label: 'Demand Classification' },
+      { value: 'FLOWCASTING', label: 'Flowcasting' },
+      { value: 'CONSENSUS_DEMAND_PLANNING', label: 'Consensus Demand Planning' },
+      { value: 'STATISTICAL_FORECAST', label: 'Statistical Forecast Roll-out' },
+    ],
+  },
+  {
+    key: 'ESP',
+    label: 'Enterprise Supply Planning (ESP)',
+    items: [
+      { value: 'ESP', label: 'Enterprise Supply Planning (ESP)' },
+      { value: 'ESP_MANUFACTURING_SEQ', label: 'ESP – Manufacturing & Sequencing' },
+      { value: 'ESP_DEPLOYMENT', label: 'ESP – Deployment' },
+      { value: 'ESP_LPOPT', label: 'ESP – LP Optimization' },
+      { value: 'MANUFACTURING_PLANNING', label: 'Manufacturing Planning' },
+      { value: 'SEQUENCING', label: 'Sequencing' },
+      { value: 'SNOP', label: 'S&OP (Sales & Operations Planning)' },
+    ],
+  },
+  {
+    key: 'FULFILLMENT',
+    label: 'Fulfillment',
+    items: [
+      { value: 'FULFILLMENT', label: 'Fulfillment' },
+      { value: 'ORDER_OPTIMIZATION', label: 'Order Optimization' },
+      { value: 'ORDER_PROMISER', label: 'Order Promiser' },
+      { value: 'DYNAMIC_ALLOCATION', label: 'Dynamic Allocation' },
+      { value: 'REPLENISHMENT_INTERVAL_OPT', label: 'Replenishment Interval Optimization' },
+      { value: 'FORWARD_BUY', label: 'Forward Buy' },
+      { value: 'INVENTORY_OPTIMIZATION', label: 'Inventory Optimization' },
+    ],
+  },
+  {
+    key: 'PLATFORM',
+    label: 'Platform / Foundation',
+    items: [
+      { value: 'SUPPLY_CHAIN_PLANNING_FOUNDATION', label: 'Supply Chain Planning Foundation' },
+      { value: 'PLATFORM', label: 'Platform' },
+      { value: 'ENTERPRISE_KNOWLEDGE_BASE', label: 'Enterprise Knowledge Base' },
+      { value: 'ENTERPRISE_PLANNING_SERVER', label: 'Enterprise Planning Server Edition' },
+    ],
+  },
+];
+
 const SOW_FIELDS: Array<{ key: string; label: string; sub: string; icon: string; placeholder: string }> = [
   { key: 'daily_dfu', label: 'Daily DFU', sub: 'Demand Forecast Units', icon: '\u{1F4E6}', placeholder: 'e.g. 500000' },
   { key: 'daily_sku', label: 'Daily SKU Count', sub: 'Stock Keeping Units', icon: '\u{1F3F7}\uFE0F', placeholder: 'e.g. 80000' },
@@ -189,7 +240,7 @@ export function SowPanel() {
     ...initialDraft.volumeUnits,
   });
 
-  const [taxonomy, setTaxonomy] = useState<TaxonomyGroup[]>([]);
+  const [taxonomy, setTaxonomy] = useState<TaxonomyGroup[]>(DEFAULT_PRODUCT_TAXONOMY);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [draftSelected, setDraftSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
@@ -224,7 +275,11 @@ export function SowPanel() {
       })
       .catch(() => undefined);
     getSowProductTaxonomy()
-      .then((res) => setTaxonomy((res.groups as TaxonomyGroup[]) || []))
+      .then((res) => {
+        if (Array.isArray(res?.groups) && res.groups.length > 0) {
+          setTaxonomy(res.groups as TaxonomyGroup[]);
+        }
+      })
       .catch(() => undefined);
     getReviewedProducts()
       .then((res) => setReviewedProducts((res.products as string[]) || []))

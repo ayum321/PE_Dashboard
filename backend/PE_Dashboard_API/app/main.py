@@ -113,27 +113,27 @@ app = FastAPI(
 )
 
 # CORS — origins controlled via ALLOWED_ORIGINS env var (comma-separated).
-# Defaults to localhost only for safety; set ALLOWED_ORIGINS='*' only for
-# isolated local dev that never faces a network.
+# Defaults to localhost + permissive regex for *.byp.ai / container deployments.
 _raw_origins = os.environ.get(
     "ALLOWED_ORIGINS",
-    "http://127.0.0.1:3000,http://localhost:3000",
+    "",
 )
-_CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_CORS_ORIGINS: list[str] = [
+    o.strip() for o in _raw_origins.split(",") if o.strip()
+] + [
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+    "http://127.0.0.1:8765",
+    "http://localhost:8765",
+]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    # Must be True (with explicit, non-wildcard origins above) so the React
-    # MFE's cross-origin fetches carry the pe_sid session cookie — without
-    # this, every Azure/session-scoped call from the MFE looks like a brand
-    # new anonymous session and "Connect Azure" never appears connected.
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
-    # The React MFE reads these response headers after an HTML export.  CORS
-    # hides non-safelisted headers unless they are explicitly exposed, which
-    # previously made a successful archive save look "unknown" in Governance.
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["Content-Disposition", "X-Archive-Status", "X-Audit-Id"],
 )
 
