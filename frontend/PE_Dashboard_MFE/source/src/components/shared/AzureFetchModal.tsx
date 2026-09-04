@@ -125,6 +125,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const [discoveredVms, setDiscoveredVms] = useState<AzureVm[]>([]);
   const [selectedVmIds, setSelectedVmIds] = useState<Set<string>>(new Set());
   const [collapsedCustomers, setCollapsedCustomers] = useState<Set<string>>(new Set());
+  const [customerFilter, setCustomerFilter] = useState('ALL');
   const [typeFilters, setTypeFilters] = useState<Set<string>>(new Set()); // empty = ALL
   const [envFilter, setEnvFilter] = useState('ALL');
   const [regionFilter, setRegionFilter] = useState('ALL');
@@ -323,6 +324,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setDiscoveredVms(deduped);
     setSelectedVmIds(new Set());
     setCollapsedCustomers(new Set());
+    setCustomerFilter('ALL');
     setTypeFilters(new Set());
     setEnvFilter('ALL');
     setRegionFilter('ALL');
@@ -408,10 +410,24 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     return c;
   }, [discoveredVms]);
   const productGroups = useMemo(() => Object.keys(pgCounts).sort(), [pgCounts]);
+  const customerCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    discoveredVms.forEach((v) => {
+      const cust = customerOf(v);
+      c[cust] = (c[cust] || 0) + 1;
+    });
+    return c;
+  }, [discoveredVms]);
+  const customerList = useMemo(() => Object.keys(customerCounts).sort((a, b) => {
+    if (a === UNTAGGED) return 1;
+    if (b === UNTAGGED) return -1;
+    return a.localeCompare(b);
+  }), [customerCounts]);
   const customerSet = useMemo(() => new Set(discoveredVms.map(customerOf)), [discoveredVms]);
 
   const filteredVms = useMemo(() => {
     let list = discoveredVms;
+    if (customerFilter !== 'ALL') list = list.filter((v) => customerOf(v) === customerFilter);
     if (typeFilters.size > 0) list = list.filter((v) => typeFilters.has(v.type));
     if (envFilter !== 'ALL') list = list.filter((v) => getVmEnv(v) === envFilter);
     if (regionFilter !== 'ALL') list = list.filter((v) => (v.location || 'unknown').trim() === regionFilter);
@@ -424,7 +440,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         customerOf(v).toLowerCase().includes(q));
     }
     return list;
-  }, [discoveredVms, typeFilters, envFilter, regionFilter, pgFilter, vmSearch]);
+  }, [discoveredVms, customerFilter, typeFilters, envFilter, regionFilter, pgFilter, vmSearch]);
 
   const { customerOrder, groupedFiltered, multiCustomer } = useMemo(() => {
     const map = new Map<string, AzureVm[]>();
@@ -492,6 +508,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setCollapsedCustomers(expand ? new Set() : new Set(discoveredVms.map(customerOf)));
   };
   const resetFilters = () => {
+    setCustomerFilter('ALL');
     setTypeFilters(new Set());
     setEnvFilter('ALL');
     setRegionFilter('ALL');
@@ -643,7 +660,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') void handleSearch(); }}
-                  placeholder={'Search any customer (e.g. Target, Walmart, NFM, Kroger, DHL, PepsiCo), server, or tag\u2026'}
+                  placeholder={'Search any customer (e.g. Target, Walmart, Costco, DHL, PepsiCo, Tesco), region (e.g. westeurope, uksouth, australiaeast), server, or tag\u2026'}
                   style={{ flex: 1, background: 'rgba(0,0,0,.4)', border: '1px solid #213060', borderRadius: 6, padding: '10px 14px', color: '#e2e8f0', fontSize: 13, outline: 'none' }}
                 />
                 <Button variant="contained" color="primary" onClick={() => handleSearch()} disabled={searchBusy}>
@@ -654,14 +671,19 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 <Typography variant="caption" style={{ color: '#6b7db3', fontSize: 10, fontWeight: 600 }}>Quick select:</Typography>
                 {[
                   { label: 'All Customers', q: '*' },
-                  { label: 'NFM', q: 'nfm' },
                   { label: 'Target', q: 'target' },
                   { label: 'Walmart', q: 'walmart' },
                   { label: 'Kroger', q: 'kroger' },
+                  { label: 'Costco', q: 'costco' },
                   { label: 'DHL', q: 'dhl' },
                   { label: 'PepsiCo', q: 'pepsi' },
                   { label: 'Home Depot', q: 'homedepot' },
-                  { label: 'Demo', q: 'example' },
+                  { label: 'Tesco', q: 'tesco' },
+                  { label: 'Unilever', q: 'unilever' },
+                  { label: 'Woolworths', q: 'woolworths' },
+                  { label: 'NFM', q: 'nfm' },
+                  { label: 'Europe', q: 'europe' },
+                  { label: 'APAC', q: 'southeastasia' },
                 ].map((item) => (
                   <button
                     key={item.label}
@@ -752,6 +774,11 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               </Box>
               <Box display="flex" style={{ gap: 8, marginLeft: 'auto' }} alignItems="center">
                 <Button size="small" variant="outlined" onClick={selectAllVms} style={{ fontSize: 10 }}>Select all VMs</Button>
+                {filteredVms.length !== discoveredVms.length && (
+                  <Button size="small" variant="outlined" onClick={() => toggleVisibleVms(true)} style={{ fontSize: 10, borderColor: '#3b82f6', color: '#93c5fd' }}>
+                    Select visible ({filteredVms.length})
+                  </Button>
+                )}
                 <Button size="small" onClick={clearSelection} style={{ fontSize: 10, color: '#6b7db3' }}>Clear selection</Button>
                 {multiCustomer && (
                   <>
@@ -771,6 +798,20 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 </Typography>
                 <Button size="small" onClick={resetFilters} style={{ fontSize: 9, color: '#6b7db3' }}>Reset filters</Button>
               </Box>
+
+              {customerList.length > 1 && (
+                <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                  <span style={filterLabelStyle}>Customer</span>
+                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap', maxHeight: 60, overflowY: 'auto' }}>
+                    <button onClick={() => singleSelect(customerFilter, setCustomerFilter, 'ALL')} style={segBtnStyle(customerFilter === 'ALL')}>All</button>
+                    {customerList.map((c) => (
+                      <button key={c} onClick={() => singleSelect(customerFilter, setCustomerFilter, c)} style={segBtnStyle(customerFilter === c)}>
+                        {c}<span style={chipStyle}>{customerCounts[c]}</span>
+                      </button>
+                    ))}
+                  </Box>
+                </Box>
+              )}
 
               <Box display="flex" alignItems="center" style={{ gap: 8 }}>
                 <span style={filterLabelStyle}>Type</span>
@@ -797,9 +838,9 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               </Box>
 
               {regions.length > 1 && (
-                <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <Box display="flex" alignItems="center" style={{ gap: 8 }}>
                   <span style={filterLabelStyle}>Region</span>
-                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap', maxHeight: 60, overflowY: 'auto' }}>
                     <button onClick={() => singleSelect(regionFilter, setRegionFilter, 'ALL')} style={segBtnStyle(regionFilter === 'ALL')}>All</button>
                     {regions.map((r) => (
                       <button key={r} onClick={() => singleSelect(regionFilter, setRegionFilter, r)} style={segBtnStyle(regionFilter === r)}>

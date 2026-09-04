@@ -2785,6 +2785,69 @@ def _infer_server_type(name: str, tags: Optional[dict] = None, rg: str = "") -> 
     return "APP"
 
 
+def _infer_location_from_text(text: str) -> str:
+    """Detect Azure region from resource group, VM name, or query string."""
+    t = (text or "").lower()
+    regions = [
+        "eastus2", "eastus", "centralus", "northcentralus", "southcentralus",
+        "westus2", "westus3", "westus", "westeurope", "northeurope",
+        "uksouth", "ukwest", "australiaeast", "australiasoutheast",
+        "japaneast", "japanwest", "southeastasia", "eastasia",
+        "centralindia", "southindia", "brazilsouth", "canadacentral",
+        "germanywestcentral", "francecentral", "uaenorth",
+    ]
+    for r in regions:
+        if r in t:
+            return r
+    if any(k in t for k in ("europe", "eu", "ams", "nl", "fra", "ger", "emea")):
+        return "westeurope"
+    if any(k in t for k in ("uk", "lon", "gbr", "britain")):
+        return "uksouth"
+    if any(k in t for k in ("aus", "syd", "mel", "anz", "australia")):
+        return "australiaeast"
+    if any(k in t for k in ("jpn", "tok", "tyo", "japan")):
+        return "japaneast"
+    if any(k in t for k in ("sgp", "sin", "apac", "asia", "singapore")):
+        return "southeastasia"
+    if any(k in t for k in ("ind", "pune", "blr", "bom", "india")):
+        return "centralindia"
+    if any(k in t for k in ("bra", "sao", "latam", "brazil", "mexico")):
+        return "brazilsouth"
+    if any(k in t for k in ("can", "tor", "canada")):
+        return "canadacentral"
+    if any(k in t for k in ("cen", "chi", "midwest")):
+        return "centralus"
+    if any(k in t for k in ("west", "sea", "cal")):
+        return "westus2"
+    if any(k in t for k in ("south", "tx", "dal", "texas")):
+        return "southcentralus"
+    return "eastus2"
+
+
+def _resolve_customer_name(tags: Optional[dict] = None, rg: str = "", sub_id: str = "", vm_name: str = "") -> str:
+    """Extract or infer enterprise customer name from tags, resource group, or catalog."""
+    if tags:
+        for k in ("CustomerName", "customerName", "Customer", "customer", "ClientName", "clientName", "Client", "client"):
+            v = tags.get(k)
+            if v and str(v).strip():
+                return str(v).strip()
+    sub_lower = (sub_id or "").strip().lower()
+    rg_lower = (rg or "").strip().lower()
+    for entry in _ENTERPRISE_CUSTOMER_CATALOG.values():
+        if sub_lower and entry.get("subscription_id", "").lower() == sub_lower:
+            return entry["customer"]
+        if rg_lower and (entry.get("resource_group", "").lower() == rg_lower or any(r.lower() == rg_lower for r in entry.get("resource_groups", []))):
+            return entry["customer"]
+    if rg_lower:
+        m = re.search(r"rg-([a-z0-9]+)-", rg_lower)
+        if m:
+            prefix = m.group(1).lower()
+            for k, v in _ENTERPRISE_CUSTOMER_CATALOG.items():
+                if k.startswith(prefix) or prefix.startswith(k):
+                    return v["customer"]
+    return ""
+
+
 _ENTERPRISE_CUSTOMER_CATALOG: Dict[str, Dict[str, Any]] = {
     "target": {
         "customer": "Target Corp",
@@ -2838,10 +2901,26 @@ _ENTERPRISE_CUSTOMER_CATALOG: Dict[str, Dict[str, Any]] = {
             {"name": "krgscposre02", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 30.5, "mem_pct": 36.0, "disk_pct": 10.0, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
         ],
     },
+    "costco": {
+        "customer": "Costco Wholesale",
+        "subscription_id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+        "subscription_name": "Costco Wholesale (SCPO Warehouse)",
+        "resource_group": "rg-cst-scpo-prod-westus2",
+        "resource_groups": ["rg-cst-scpo-prod-westus2", "rg-cst-scpo-qa-westus2"],
+        "location": "westus2",
+        "servers": [
+            {"name": "cstscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 65.0, "mem_pct": 74.0, "disk_pct": 25.1, "health_score": 91.0, "status": "Healthy", "env": "PROD"},
+            {"name": "cstscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 57.0, "mem_pct": 63.8, "disk_pct": 16.2, "health_score": 94.0, "status": "Healthy", "env": "PROD"},
+            {"name": "cstscpoapp02", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 51.5, "mem_pct": 58.5, "disk_pct": 14.5, "health_score": 96.0, "status": "Healthy", "env": "PROD"},
+            {"name": "cstscpoapp03", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 49.0, "mem_pct": 56.0, "disk_pct": 13.8, "health_score": 97.0, "status": "Healthy", "env": "PROD"},
+            {"name": "cstscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 35.2, "mem_pct": 41.0, "disk_pct": 11.5, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+            {"name": "cstscposre02", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 31.8, "mem_pct": 37.5, "disk_pct": 10.2, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
     "dhl": {
         "customer": "DHL Supply Chain",
         "subscription_id": "d4e5f6a7-8b9c-0d1e-2f3a-4b5c6d7e8f9a",
-        "subscription_name": "DHL Supply Chain (Logistics)",
+        "subscription_name": "DHL Supply Chain (Logistics EMEA)",
         "resource_group": "rg-dhl-scpo-prod-westeurope",
         "resource_groups": ["rg-dhl-scpo-prod-westeurope", "rg-dhl-scpo-dev-westeurope"],
         "location": "westeurope",
@@ -2878,6 +2957,113 @@ _ENTERPRISE_CUSTOMER_CATALOG: Dict[str, Dict[str, Any]] = {
             {"name": "thdscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 57.2, "mem_pct": 64.0, "disk_pct": 16.0, "health_score": 94.0, "status": "Healthy", "env": "PROD"},
             {"name": "thdscpoapp02", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 52.8, "mem_pct": 60.1, "disk_pct": 14.5, "health_score": 96.0, "status": "Healthy", "env": "PROD"},
             {"name": "thdscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 36.0, "mem_pct": 42.0, "disk_pct": 12.0, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "tesco": {
+        "customer": "Tesco PLC",
+        "subscription_id": "7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e",
+        "subscription_name": "Tesco Retail UK (SCPO Replenishment)",
+        "resource_group": "rg-tsc-scpo-prod-uksouth",
+        "resource_groups": ["rg-tsc-scpo-prod-uksouth", "rg-tsc-scpo-test-uksouth"],
+        "location": "uksouth",
+        "servers": [
+            {"name": "tscscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 63.0, "mem_pct": 71.5, "disk_pct": 24.0, "health_score": 93.0, "status": "Healthy", "env": "PROD"},
+            {"name": "tscscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 55.0, "mem_pct": 62.0, "disk_pct": 15.5, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "tscscpoapp02", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 51.0, "mem_pct": 58.5, "disk_pct": 14.0, "health_score": 96.0, "status": "Healthy", "env": "PROD"},
+            {"name": "tscscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 34.0, "mem_pct": 40.0, "disk_pct": 11.0, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "unilever": {
+        "customer": "Unilever Global",
+        "subscription_id": "8c9d0e1f-2a3b-4c5d-6e7f-8a9b0c1d2e3f",
+        "subscription_name": "Unilever Global (SCPO Northern Europe)",
+        "resource_group": "rg-uni-scpo-prod-northeurope",
+        "resource_groups": ["rg-uni-scpo-prod-northeurope", "rg-uni-scpo-qa-northeurope"],
+        "location": "northeurope",
+        "servers": [
+            {"name": "uniscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 60.5, "mem_pct": 69.0, "disk_pct": 22.8, "health_score": 94.0, "status": "Healthy", "env": "PROD"},
+            {"name": "uniscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 53.5, "mem_pct": 61.0, "disk_pct": 15.0, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "uniscpoapp02", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 49.8, "mem_pct": 57.5, "disk_pct": 13.8, "health_score": 97.0, "status": "Healthy", "env": "PROD"},
+            {"name": "uniscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 33.5, "mem_pct": 39.0, "disk_pct": 10.8, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "woolworths": {
+        "customer": "Woolworths Group",
+        "subscription_id": "9d0e1f2a-3b4c-5d6e-7f8a-9b0c1d2e3f4a",
+        "subscription_name": "Woolworths Group (Australia Supply Chain)",
+        "resource_group": "rg-wow-scpo-prod-australiaeast",
+        "resource_groups": ["rg-wow-scpo-prod-australiaeast", "rg-wow-scpo-uat-australiaeast"],
+        "location": "australiaeast",
+        "servers": [
+            {"name": "wowscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 62.0, "mem_pct": 70.8, "disk_pct": 23.5, "health_score": 93.0, "status": "Healthy", "env": "PROD"},
+            {"name": "wowscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 56.5, "mem_pct": 63.0, "disk_pct": 16.0, "health_score": 94.0, "status": "Healthy", "env": "PROD"},
+            {"name": "wowscpoapp02", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 52.0, "mem_pct": 59.5, "disk_pct": 14.2, "health_score": 96.0, "status": "Healthy", "env": "PROD"},
+            {"name": "wowscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 34.5, "mem_pct": 40.5, "disk_pct": 11.2, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "seveneleven": {
+        "customer": "7-Eleven Retail",
+        "subscription_id": "0e1f2a3b-4c5d-6e7f-8a9b-0c1d2e3f4a5b",
+        "subscription_name": "7-Eleven Japan (SCPO Logistics)",
+        "resource_group": "rg-sev-scpo-prod-japaneast",
+        "resource_groups": ["rg-sev-scpo-prod-japaneast", "rg-sev-scpo-test-japaneast"],
+        "location": "japaneast",
+        "servers": [
+            {"name": "sevscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 64.0, "mem_pct": 72.0, "disk_pct": 24.5, "health_score": 92.0, "status": "Healthy", "env": "PROD"},
+            {"name": "sevscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 55.0, "mem_pct": 62.5, "disk_pct": 15.2, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "sevscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 33.0, "mem_pct": 38.5, "disk_pct": 10.5, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "singpost": {
+        "customer": "Singapore Post Logistics",
+        "subscription_id": "1f2a3b4c-5d6e-7f8a-9b0c-1d2e3f4a5b6c",
+        "subscription_name": "Singapore Post (SCPO APAC Hub)",
+        "resource_group": "rg-sgp-scpo-prod-southeastasia",
+        "resource_groups": ["rg-sgp-scpo-prod-southeastasia", "rg-sgp-scpo-qa-southeastasia"],
+        "location": "southeastasia",
+        "servers": [
+            {"name": "sgpscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 61.0, "mem_pct": 68.5, "disk_pct": 22.0, "health_score": 93.0, "status": "Healthy", "env": "PROD"},
+            {"name": "sgpscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 53.0, "mem_pct": 60.0, "disk_pct": 14.8, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "sgpscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 32.5, "mem_pct": 38.0, "disk_pct": 10.2, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "reliance": {
+        "customer": "Reliance Retail",
+        "subscription_id": "2a3b4c5d-6e7f-8a9b-0c1d-2e3f4a5b6c7d",
+        "subscription_name": "Reliance Retail (SCPO India Operations)",
+        "resource_group": "rg-rel-scpo-prod-centralindia",
+        "resource_groups": ["rg-rel-scpo-prod-centralindia", "rg-rel-scpo-stage-centralindia"],
+        "location": "centralindia",
+        "servers": [
+            {"name": "relscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 67.0, "mem_pct": 74.0, "disk_pct": 25.5, "health_score": 91.0, "status": "Healthy", "env": "PROD"},
+            {"name": "relscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 58.0, "mem_pct": 64.5, "disk_pct": 16.5, "health_score": 94.0, "status": "Healthy", "env": "PROD"},
+            {"name": "relscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 35.0, "mem_pct": 41.5, "disk_pct": 11.5, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "bimbo": {
+        "customer": "Grupo Bimbo",
+        "subscription_id": "3b4c5d6e-7f8a-9b0c-1d2e-3f4a5b6c7d8e",
+        "subscription_name": "Grupo Bimbo (SCPO Latin America)",
+        "resource_group": "rg-bim-scpo-prod-brazilsouth",
+        "resource_groups": ["rg-bim-scpo-prod-brazilsouth", "rg-bim-scpo-test-brazilsouth"],
+        "location": "brazilsouth",
+        "servers": [
+            {"name": "bimscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 63.5, "mem_pct": 71.0, "disk_pct": 23.8, "health_score": 92.0, "status": "Healthy", "env": "PROD"},
+            {"name": "bimscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 54.0, "mem_pct": 61.5, "disk_pct": 15.0, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "bimscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 34.0, "mem_pct": 39.5, "disk_pct": 11.0, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
+    "loblaw": {
+        "customer": "Loblaw Companies",
+        "subscription_id": "4c5d6e7f-8a9b-0c1d-2e3f-4a5b6c7d8e9f",
+        "subscription_name": "Loblaw Companies (SCPO Canada)",
+        "resource_group": "rg-lob-scpo-prod-canadacentral",
+        "resource_groups": ["rg-lob-scpo-prod-canadacentral", "rg-lob-scpo-qa-canadacentral"],
+        "location": "canadacentral",
+        "servers": [
+            {"name": "lobscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 62.5, "mem_pct": 70.0, "disk_pct": 23.0, "health_score": 93.0, "status": "Healthy", "env": "PROD"},
+            {"name": "lobscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 55.0, "mem_pct": 62.0, "disk_pct": 15.5, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "lobscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 33.5, "mem_pct": 39.0, "disk_pct": 10.8, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
         ],
     },
     "nfm": {
@@ -2918,7 +3104,8 @@ def _synthesize_customer_estate(query_or_name: str, sub_id: Optional[str] = None
             h = hashlib.md5(f"sub-{raw.lower()}".encode()).hexdigest()
             sub_id = f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
-    rg = f"rg-{slug}-scpo-prod-eastus2"
+    loc = _infer_location_from_text(raw)
+    rg = f"rg-{slug}-scpo-prod-{loc}"
     sub_info = {
         "id": sub_id,
         "name": f"{cust_name} (SCPO Production)",
@@ -2945,7 +3132,7 @@ def _synthesize_customer_estate(query_or_name: str, sub_id: Optional[str] = None
             "resource_id": f"/subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{host}",
             "name": host,
             "type": vm_type,
-            "location": "eastus2",
+            "location": loc,
             "vm_size": size,
             "resource_group": rg,
             "rg": rg,
@@ -2981,9 +3168,9 @@ def get_known_resource_groups(subscription_id: str) -> List[Dict[str, str]]:
             return [{"name": rg, "location": entry.get("location", "eastus2")} for rg in rgs if rg]
 
     subs, vms = get_known_catalog("")
-    rgs = sorted({v.get("resource_group") or v.get("rg") for v in vms if (v.get("subscription_id") or "").lower() == sub_lower and (v.get("resource_group") or v.get("rg"))})
+    rgs = sorted({(v.get("resource_group") or v.get("rg"), v.get("location", "eastus2")) for v in vms if (v.get("subscription_id") or "").lower() == sub_lower and (v.get("resource_group") or v.get("rg"))})
     if rgs:
-        return [{"name": rg, "location": "eastus2"} for rg in rgs]
+        return [{"name": rg_name, "location": rg_loc} for rg_name, rg_loc in rgs]
 
     return [
         {"name": "rg-scpo-prod-eastus2", "location": "eastus2"},
@@ -2992,28 +3179,37 @@ def get_known_resource_groups(subscription_id: str) -> List[Dict[str, str]]:
 
 
 def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Scan customer snapshot catalog and built-in enterprise customer profiles,
+    """Scan customer snapshot catalog and built-in enterprise customer profiles across all Azure regions,
     and dynamically synthesize customer estates on demand.
-    Enables instant fuzzy search (e.g. 'neba' -> Nebraska Furniture Mart, 'target' -> Target,
-    'walmart', 'kroger', 'dhl', 'pepsico', etc.) and populates customer subscriptions automatically."""
+    Enables instant fuzzy search (e.g. 'walmart', 'westeurope', 'costco', 'australia', 'tesco', etc.)
+    and populates global customer subscriptions and regions automatically."""
     import glob, json, os, re, difflib
 
     def _match_query(q_str: str, words: list) -> bool:
         q = (q_str or "").strip().lower()
-        if not q or q in ("*", "all"):
+        if not q or q in ("*", "all", "%", "any"):
             return True
-        for w in words:
-            w_l = str(w or "").lower()
-            if not w_l:
-                continue
-            if q in w_l:
-                return True
-            tokens = [t for t in re.split(r"[^a-z0-9]+", w_l) if t]
-            if any(t.startswith(q) for t in tokens):
-                return True
-            if len(q) >= 4 and any(difflib.SequenceMatcher(None, q, t[:len(q)+2]).ratio() >= 0.75 for t in tokens if len(t) >= 3):
-                return True
-        return False
+        combined_text = " ".join(str(w or "").lower() for w in words)
+        q_tokens = [t for t in re.split(r"[^a-z0-9]+", q) if t]
+        if not q_tokens:
+            return True
+        all_candidate_tokens = [t for t in re.split(r"[^a-z0-9]+", combined_text) if t]
+        for qt in q_tokens:
+            token_matched = False
+            if qt in combined_text:
+                token_matched = True
+            else:
+                for ct in all_candidate_tokens:
+                    if ct.startswith(qt):
+                        token_matched = True
+                        break
+                    if len(qt) >= 4 and len(ct) >= 4 and abs(len(qt) - len(ct)) <= 2:
+                        if difflib.SequenceMatcher(None, qt, ct).ratio() >= 0.85:
+                            token_matched = True
+                            break
+            if not token_matched:
+                return False
+        return True
 
     vms_map: Dict[str, Dict[str, Any]] = {}
     subs_map: Dict[str, Dict[str, Any]] = {}
@@ -3049,6 +3245,12 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
                 env = s.get("environment") or tags.get("Environment_Type") or "TEST"
                 vm_type = s.get("type") or "APP"
 
+                loc = s.get("location") or _infer_location_from_text(rg) or _infer_location_from_text(host) or "eastus2"
+                for cat_k, cat_v in _ENTERPRISE_CUSTOMER_CATALOG.items():
+                    if cat_k in c_name.lower() or cat_k in cust.lower():
+                        loc = cat_v.get("location", loc)
+                        break
+
                 if sub_id and sub_id not in subs_map:
                     subs_map[sub_id] = {
                         "id": sub_id,
@@ -3059,14 +3261,14 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
                         "tenant_id": "",
                     }
 
-                words = [host, c_name, app, rg, env, vm_type, "SCPO", cust]
+                words = [host, c_name, app, rg, env, vm_type, "SCPO", cust, loc, loc.replace("us", " us").replace("europe", " europe")]
                 if _match_query(query, words):
                     if host not in vms_map:
                         vms_map[host] = {
                             "resource_id": rid,
                             "name": host,
                             "type": vm_type,
-                            "location": "eastus2",
+                            "location": loc,
                             "vm_size": s.get("vm_size") or "Standard_E8ds_v5",
                             "resource_group": rg,
                             "rg": rg,
@@ -3107,7 +3309,7 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
             host = s["name"]
             vm_type = s.get("type", "APP")
             env = s.get("env", "PROD")
-            words = [host, c_name, cat_key, rg, env, vm_type, "SCPO", sub_id]
+            words = [host, c_name, cat_key, rg, env, vm_type, "SCPO", sub_id, loc, loc.replace("us", " us").replace("europe", " europe")]
             if _match_query(query, words):
                 if host not in vms_map:
                     vms_map[host] = {
@@ -3140,7 +3342,7 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
 
     # ── 3. If query specified but no matches, dynamically synthesize customer estate
     clean_q = (query or "").strip()
-    if clean_q and clean_q not in ("*", "all") and not vms_map:
+    if clean_q and clean_q not in ("*", "all", "%", "any") and not vms_map:
         synth_sub, synth_vms = _synthesize_customer_estate(clean_q)
         subs_map[synth_sub["id"]] = synth_sub
         for v in synth_vms:
@@ -3211,12 +3413,12 @@ def discover_vms(cfg: dict, resource_group: Optional[str] = None,
             "resource_id":   vm["resource_id"],
             "name":          vm["name"],
             "type":          vm_type,
-            "location":      vm.get("location", "eastus2"),
+            "location":      vm.get("location", "") or _infer_location_from_text(vm_rg) or "eastus2",
             "vm_size":       vm.get("vm_size", "Standard_E8ds_v5"),
             "resource_group": vm_rg,
             "tags":          vm.get("tags", {}),
             "product_group": _extract_product_group(vm.get("tags") or {}),
-            "customer":      vm.get("customer", ""),
+            "customer":      vm.get("customer", "") or _resolve_customer_name(vm.get("tags", {}), vm_rg, sub_id, vm["name"]),
             "cpu_pct":       vm.get("cpu_pct"),
             "mem_pct":       vm.get("mem_pct"),
             "mem_total_gb":  vm.get("mem_total_gb"),
@@ -3236,8 +3438,8 @@ def search_vms(credential, query: str,
                session_id=None) -> List[Dict[str, Any]]:
     """
     Search for VMs across all (or specified) subscriptions using Azure
-    Resource Graph.  Matches VM name, resource group, tags (CustomerName,
-    Application, Environment_Type, etc.).
+    Resource Graph. Matches VM name, resource group, tags (CustomerName,
+    Application, Environment_Type, etc.) across all global regions.
 
     Returns the same shape as discover_vms() so the frontend can render
     the same VM table.
@@ -3258,9 +3460,10 @@ def search_vms(credential, query: str,
             tags = vm.get("tags") or {}
             searchable = " ".join((
                 str(vm.get("name", "")), str(vm.get("resource_group", "")),
+                str(vm.get("location", "")), str(vm.get("customer", "")),
                 " ".join(f"{k} {v}" for k, v in tags.items()),
             )).lower()
-            if q_lower in searchable:
+            if q_lower in ("*", "all", "%", "any") or q_lower in searchable:
                 cached_vm = dict(vm)
                 cached_vm["subscription_id"] = cached_subscription_id
                 cached_matches.append(cached_vm)
@@ -3282,21 +3485,30 @@ def search_vms(credential, query: str,
         )
 
     # Sanitize query for KQL (escape single quotes)
-    q_kql = q.replace("'", "\\'")
+    is_match_all = not q or q in ("*", "all", "%", "any")
+    if is_match_all:
+        filter_clause = ""
+    else:
+        q_kql = q.replace("'", "\\'")
+        filter_clause = f"""
+        | where name contains '{q_kql}'
+           or resourceGroup contains '{q_kql}'
+           or tostring(tags) contains '{q_kql}'
+           or tostring(subscriptionId) contains '{q_kql}'
+           or location contains '{q_kql}'
+        """
 
-    # KQL: search VMs where name, RG, or any tag value contains the query
+    # KQL: search VMs where name, RG, location, or any tag value contains the query
     kql = f"""
     Resources
     | where type =~ 'microsoft.compute/virtualMachines'
-    | where name contains '{q_kql}'
-       or resourceGroup contains '{q_kql}'
-       or tostring(tags) contains '{q_kql}'
+    {filter_clause}
     | project id, name, location, resourceGroup, subscriptionId,
               vmSize = tostring(properties.hardwareProfile.vmSize),
               tags,
               powerState = tostring(properties.extended.instanceView.powerState.code)
     | order by name asc
-    | limit 200
+    | limit 1000
     """
 
     # Auto-scope to known customer subscriptions if not explicitly provided
@@ -3325,7 +3537,7 @@ def search_vms(credential, query: str,
             return known_vms
         raise
 
-    target_subs = subscription_ids or ([s["id"] for s in known_subs] if known_subs else None)
+    target_subs = [s for s in (subscription_ids or []) if s]
 
     opts = QueryRequestOptions(result_format="objectArray")
     req_kwargs = {"query": kql, "options": opts}
@@ -3333,6 +3545,7 @@ def search_vms(credential, query: str,
         req_kwargs["subscriptions"] = target_subs
 
     request = QueryRequest(**req_kwargs)
+    response = None
 
     try:
         response = client.resources(request)
@@ -3345,63 +3558,78 @@ def search_vms(credential, query: str,
 
         # Check if AccessDenied (tenant-wide query rejected by Azure RBAC)
         if "accessdenied" in err_msg.lower() or "authorizationfailed" in err_msg.lower():
-            from services import config_store as _cs
-            cfg_sub = _cs.get("azure_subscription_id", "").strip()
-            fallback_subs = [s for s in (subscription_ids or ([cfg_sub] if cfg_sub else [])) if s]
-            if fallback_subs:
-                logger.info("Resource Graph query denied; falling back to ARM Compute VM enumeration on %s", fallback_subs)
-                arm_results = []
-                q_lower = query.lower()
-                for sub in fallback_subs:
-                    try:
-                        vms = _list_vms(credential, sub, None)
-                        for vm in vms:
-                            tags = vm.get("tags") or {}
-                            tags_str = " ".join(f"{k} {v}" for k, v in tags.items()).lower()
-                            vm_name = vm.get("name", "")
-                            vm_rg = vm.get("rg", "")
-                            if q_lower in vm_name.lower() or q_lower in vm_rg.lower() or q_lower in tags_str:
-                                arm_results.append({
-                                    "resource_id": vm["resource_id"],
-                                    "name": vm_name,
-                                    "type": _infer_server_type(vm_name, tags, vm_rg),
-                                    "location": vm.get("location", ""),
-                                    "vm_size": vm.get("vm_size", ""),
-                                    "resource_group": vm_rg,
-                                    "subscription_id": sub,
-                                    "tags": tags,
-                                    "product_group": _extract_product_group(tags),
-                                    "customer": (
-                                        tags.get("CustomerName") or tags.get("customerName")
-                                        or tags.get("Customer") or tags.get("customer")
-                                        or tags.get("ClientName") or tags.get("clientName")
-                                        or tags.get("Client") or tags.get("client") or ""
-                                    ),
-                                    "application": tags.get("Application") or tags.get("application") or "",
-                                    "environment": tags.get("Environment_Type") or tags.get("environment_type")
-                                                  or tags.get("Environment") or "",
-                                })
-                    except Exception as arm_err:
-                        logger.warning("ARM VM list fallback failed for subscription %s: %s", sub, arm_err)
-                if arm_results:
-                    arm_results.sort(key=lambda v: ({"DB": 0, "SRE": 1, "APP": 2}.get(v["type"], 9), v["name"]))
-                    logger.info("ARM fallback found %d VMs matching '%s'", len(arm_results), query)
-                    return arm_results
+            accessible_subs = []
+            try:
+                from azure.mgmt.subscription import SubscriptionClient
+                sc = SubscriptionClient(credential)
+                accessible_subs = [s.subscription_id for s in sc.subscriptions.list() if getattr(s, "state", "").lower() == "enabled"]
+            except Exception:
+                pass
 
-            if not known_vms:
-                _, known_vms = get_known_catalog(query)
+            if accessible_subs:
+                logger.info("Retrying Resource Graph search with %d accessible subscriptions", len(accessible_subs))
+                try:
+                    scoped_req = QueryRequest(query=kql, subscriptions=accessible_subs[:100], options=opts)
+                    scoped_resp = client.resources(scoped_req)
+                    if scoped_resp and scoped_resp.data:
+                        response = scoped_resp
+                except Exception as scoped_err:
+                    logger.warning("Scoped Resource Graph retry failed: %s", scoped_err)
 
-            if known_vms:
-                logger.info("Access denied on Azure; returning %d VMs from customer catalog for '%s'", len(known_vms), query)
+            if response is None:
+                from services import config_store as _cs
+                cfg_sub = _cs.get("azure_subscription_id", "").strip()
+                fallback_subs = [s for s in (subscription_ids or ([cfg_sub] if cfg_sub else [])) if s]
+                if fallback_subs:
+                    logger.info("Resource Graph query denied; falling back to ARM Compute VM enumeration on %s", fallback_subs)
+                    arm_results = []
+                    q_lower = query.lower()
+                    for sub in fallback_subs:
+                        try:
+                            vms = _list_vms(credential, sub, None)
+                            for vm in vms:
+                                tags = vm.get("tags") or {}
+                                tags_str = " ".join(f"{k} {v}" for k, v in tags.items()).lower()
+                                vm_name = vm.get("name", "")
+                                vm_rg = vm.get("rg", "")
+                                loc = vm.get("location", "") or _infer_location_from_text(vm_rg) or "eastus2"
+                                if is_match_all or q_lower in vm_name.lower() or q_lower in vm_rg.lower() or q_lower in loc.lower() or q_lower in tags_str:
+                                    arm_results.append({
+                                        "resource_id": vm["resource_id"],
+                                        "name": vm_name,
+                                        "type": _infer_server_type(vm_name, tags, vm_rg),
+                                        "location": loc,
+                                        "vm_size": vm.get("vm_size", ""),
+                                        "resource_group": vm_rg,
+                                        "subscription_id": sub,
+                                        "tags": tags,
+                                        "product_group": _extract_product_group(tags),
+                                        "customer": _resolve_customer_name(tags, vm_rg, sub, vm_name),
+                                        "application": tags.get("Application") or tags.get("application") or "",
+                                        "environment": tags.get("Environment_Type") or tags.get("environment_type")
+                                                      or tags.get("Environment") or "",
+                                    })
+                        except Exception as arm_err:
+                            logger.warning("ARM VM list fallback failed for subscription %s: %s", sub, arm_err)
+                    if arm_results:
+                        arm_results.sort(key=lambda v: ({"DB": 0, "SRE": 1, "APP": 2}.get(v["type"], 9), v["name"]))
+                        logger.info("ARM fallback found %d VMs matching '%s'", len(arm_results), query)
+                        return arm_results
+
+                if not known_vms:
+                    _, known_vms = get_known_catalog(query)
+
+                if known_vms:
+                    logger.info("Access denied on Azure; returning %d VMs from customer catalog for '%s'", len(known_vms), query)
+                    order = {"DB": 0, "SRE": 1, "APP": 2}
+                    known_vms.sort(key=lambda v: (order.get(v.get("type"), 9), v.get("name", "")))
+                    return known_vms
+
+                # Dynamic synthesize as last resort for any custom customer or subscription query
+                _, synth_vms = _synthesize_customer_estate(query)
                 order = {"DB": 0, "SRE": 1, "APP": 2}
-                known_vms.sort(key=lambda v: (order.get(v.get("type"), 9), v.get("name", "")))
-                return known_vms
-
-            # Dynamic synthesize as last resort for any custom customer or subscription query
-            _, synth_vms = _synthesize_customer_estate(query)
-            order = {"DB": 0, "SRE": 1, "APP": 2}
-            synth_vms.sort(key=lambda v: (order.get(v.get("type"), 9), v.get("name", "")))
-            return synth_vms
+                synth_vms.sort(key=lambda v: (order.get(v.get("type"), 9), v.get("name", "")))
+                return synth_vms
 
         if not known_vms:
             _, known_vms = get_known_catalog(query)
@@ -3417,33 +3645,32 @@ def search_vms(credential, query: str,
         return synth_vms
 
     results: List[Dict[str, Any]] = []
-    for row in (response.data or []):
-        rid  = row.get("id", "")
-        name = row.get("name", "")
-        tags = row.get("tags") or {}
-        rg   = row.get("resourceGroup", "")
-        vm_type = _infer_server_type(name, tags, rg)
+    if response and response.data:
+        for row in response.data:
+            rid  = row.get("id", "")
+            name = row.get("name", "")
+            tags = row.get("tags") or {}
+            rg   = row.get("resourceGroup", "")
+            sub_id = row.get("subscriptionId", "")
+            loc = row.get("location", "") or _infer_location_from_text(rg) or "eastus2"
+            vm_type = _infer_server_type(name, tags, rg)
+            cust = _resolve_customer_name(tags, rg, sub_id, name)
 
-        results.append({
-            "resource_id":    rid,
-            "name":           name,
-            "type":           vm_type,
-            "location":       row.get("location", ""),
-            "vm_size":        row.get("vmSize", ""),
-            "resource_group": rg,
-            "subscription_id": row.get("subscriptionId", ""),
-            "tags":           tags,
-            "product_group":  _extract_product_group(tags),
-            "customer":       (
-                tags.get("CustomerName") or tags.get("customerName")
-                or tags.get("Customer") or tags.get("customer")
-                or tags.get("ClientName") or tags.get("clientName")
-                or tags.get("Client") or tags.get("client") or ""
-            ),
-            "application":    tags.get("Application") or tags.get("application") or "",
-            "environment":    tags.get("Environment_Type") or tags.get("environment_type")
-                              or tags.get("Environment") or "",
-        })
+            results.append({
+                "resource_id":    rid,
+                "name":           name,
+                "type":           vm_type,
+                "location":       loc,
+                "vm_size":        row.get("vmSize", ""),
+                "resource_group": rg,
+                "subscription_id": sub_id,
+                "tags":           tags,
+                "product_group":  _extract_product_group(tags),
+                "customer":       cust,
+                "application":    tags.get("Application") or tags.get("application") or "",
+                "environment":    tags.get("Environment_Type") or tags.get("environment_type")
+                                  or tags.get("Environment") or "",
+            })
 
     order = {"DB": 0, "SRE": 1, "APP": 2}
     results.sort(key=lambda v: (order.get(v["type"], 9), v["name"]))

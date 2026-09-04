@@ -48,11 +48,18 @@ class MultiCustomerCatalogTests(unittest.TestCase):
         self.assertTrue(all(v.get('customer') == 'PepsiCo Global' for v in vms))
 
     def test_dynamic_synthesis_arbitrary_customer(self):
-        subs, vms = get_known_catalog('Costco')
+        subs, vms = get_known_catalog('FedEx Logistics')
         self.assertEqual(len(vms), 8)
-        self.assertEqual(vms[0].get('customer'), 'Costco')
+        self.assertEqual(vms[0].get('customer'), 'Fedex Logistics')
         roles = {v.get('type') for v in vms}
         self.assertEqual(roles, {'APP', 'DB', 'SRE'})
+
+    def test_catalog_region_search(self):
+        subs, vms = get_known_catalog('westeurope')
+        self.assertTrue(vms)
+        self.assertTrue(all(v.get('location') == 'westeurope' for v in vms))
+        customers = {v.get('customer') for v in vms}
+        self.assertIn('DHL Supply Chain', customers)
 
     def test_resource_groups_lookup(self):
         rgs = get_known_resource_groups('4a1e9b23-7c10-4f32-bb19-d830182410a1')
