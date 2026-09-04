@@ -136,9 +136,17 @@ describe('AzureFetchModal', () => {
       expect(getByText('3 VMs · 2 customers')).toBeDefined();
     });
 
-    // Master header checkbox toggles all visible
+    // Master header checkbox starts unchecked because initial selection is empty (0 selected by default)
     const masterCheckbox = getByLabelText('Select all visible VMs') as HTMLInputElement;
-    expect(masterCheckbox.checked).toBe(true);
+    expect(masterCheckbox.checked).toBe(false);
+    expect(getByText('0 of 3')).toBeDefined();
+
+    // Click "Select all VMs" button to select all 3
+    fireEvent.click(getByText('Select all VMs'));
+    await waitFor(() => {
+      expect(masterCheckbox.checked).toBe(true);
+      expect(getByText('3 of 3')).toBeDefined();
+    });
 
     // Filter to Costco Wholesale
     fireEvent.click(getAllByText('Costco Wholesale')[0]);
@@ -147,7 +155,7 @@ describe('AzureFetchModal', () => {
       expect(getByText(/selected \(3 of 3 total\)/)).toBeDefined();
     });
 
-    // Toggle the customer group checkbox for Costco
+    // Toggle the customer group checkbox for Costco to unselect it
     const costcoGroupCheckbox = getByLabelText('Select all Costco Wholesale VMs') as HTMLInputElement;
     expect(costcoGroupCheckbox.checked).toBe(true);
 
@@ -155,13 +163,19 @@ describe('AzureFetchModal', () => {
     await waitFor(() => {
       expect(getByText('0 of 1 visible')).toBeDefined();
       expect(getByText(/selected \(2 of 3 total\)/)).toBeDefined();
+      expect(getByText('Clear 2 hidden')).toBeDefined();
     });
+
+    // Fetch button should be disabled when 0 visible are selected under active filter
+    const fetchButton = getByText('Fetch Metrics').closest('button');
+    expect(fetchButton).toBeDisabled();
 
     // Toggle back on via master visible checkbox
     fireEvent.click(masterCheckbox);
     await waitFor(() => {
       expect(getByText('1 of 1 visible')).toBeDefined();
       expect(getByText(/selected \(3 of 3 total\)/)).toBeDefined();
+      expect(fetchButton).not.toBeDisabled();
     });
   });
 });

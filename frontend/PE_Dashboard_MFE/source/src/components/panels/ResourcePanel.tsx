@@ -2218,79 +2218,6 @@ export function ResourcePanel() {
                 </Box>
               )}
 
-              {/* Heatmap */}
-              {deepDive.heatmap && (
-                <Box style={{ marginTop: 12 }}>
-                  <Box display="flex" alignItems="center" justifyContent="space-between">
-                    <Typography variant="subtitle2">Fleet Heatmap</Typography>
-                    <Box display="flex" style={{ gap: 4 }}>
-                      {(['cpu', 'memory', 'disk'] as HeatmapMetric[]).map((m) => (
-                        <Button key={m} size="small" variant={heatmapMetric === m ? 'contained' : 'outlined'} onClick={() => setHeatmapMetric(m)}>{m.toUpperCase()}</Button>
-                      ))}
-                    </Box>
-                  </Box>
-                  {fleetHeatmapView ? (
-                    <>
-                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, fontSize: 9 }}>
-                        {heatmapMetric === 'memory'
-                          ? 'Memory is Azure available % (not used %). Each cell shows the lowest available-memory value in its time bucket; lower availability is higher risk.'
-                          : 'Each cell shows the highest observed value in its time bucket; higher utilization is higher risk.'}
-                        {' Outlined hatched cells mean this metric was not emitted by Azure Monitor; they are not healthy samples.'}
-                        {fleetHeatmapView.bucketSize > 1 ? ` ${fleetHeatmapView.bucketSize} Monitor samples are combined per visible cell for readability.` : ''}
-                      </Typography>
-                      <Box className="pe-table-shell pe-heatmap-shell" style={{ marginTop: 8, maxHeight: 360, overflow: 'auto' }}>
-                        <table className="pe-heatmap-table" aria-label={`Fleet ${heatmapMetric} heatmap`} style={{ borderCollapse: 'separate', borderSpacing: 2, minWidth: Math.max(680, 170 + fleetHeatmapView.columns.length * 18) }}>
-                          <thead>
-                            <tr>
-                              <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#111d36', minWidth: 150, textAlign: 'left' }}>Server</th>
-                                  {/* Keep every coloured bucket while showing only about a dozen
-                                      horizontal labels; the remaining columns stay available by hover. */}
-                                  {fleetHeatmapView.columns.map((column, index) => {
-                                    const labelStride = Math.max(1, Math.ceil(fleetHeatmapView.columns.length / 12));
-                                    const showLabel = index % labelStride === 0 || index === fleetHeatmapView.columns.length - 1;
-                                    return (
-                                      <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: showLabel ? 58 : 18, padding: '4px 3px', fontSize: 8, whiteSpace: 'nowrap', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '·'}</th>
-                                    );
-                                  })}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {fleetHeatmapView.rows.map((row) => (
-                              <tr key={row.name}>
-                                <td style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', padding: '3px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{row.name}</td>
-                                {row.values.map((value, index) => {
-                                  const state = fleetHeatmapCellLabel(value, heatmapMetric);
-                                  return (
-                                    <td
-                                      key={index}
-                                      aria-label={`${row.name}, ${fleetHeatmapView.columns[index].title}: ${state}`}
-                                      title={`${row.name}\n${fleetHeatmapView.columns[index].title}\n${state}`}
-                                      style={{ width: 18, minWidth: 18, height: 20, padding: 0, background: fleetHeatmapCellColor(value, heatmapMetric), border: value == null ? '1px solid rgba(148,163,184,.72)' : '1px solid rgba(255,255,255,.16)' }}
-                                    />
-                                  );
-                                })}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </Box>
-                      <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
-                        <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Legend:</Typography>
-                        {/* Distinct glyph per band, not just a recoloured square:
-                            severity was previously encoded by colour alone, which
-                            disappears in greyscale print and for red-green CVD. */}
-                        <Typography variant="caption" style={{ fontSize: 9, color: '#10d96e' }}>{'\u25cf healthy'}</Typography>
-                        <Typography variant="caption" style={{ fontSize: 9, color: '#f59e0b' }}>{'\u25b2 watch'}</Typography>
-                        <Typography variant="caption" style={{ fontSize: 9, color: '#f43f5e' }}>{'\u25a0 pressure'}</Typography>
-                        <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}><span style={{ display: 'inline-block', width: 10, height: 10, marginRight: 3, verticalAlign: '-1px', border: '1px solid rgba(148,163,184,.9)', background: 'repeating-linear-gradient(135deg, rgba(100,116,139,.45) 0, rgba(100,116,139,.45) 2px, rgba(15,23,42,.92) 2px, rgba(15,23,42,.92) 5px)' }} />metric not emitted</Typography>
-                      </Box>
-                    </>
-                  ) : (
-                    <Typography variant="caption" color="textSecondary">No {heatmapMetric} metric was emitted by the selected VMs in this window.</Typography>
-                  )}
-                </Box>
-              )}
-
               {/* Requires Investigation — critical VM card grid, ported from
                   _renderDeepDiveCharts()/_renderVmServerCard() (app.js). */}
               {ddCards.critical.length > 0 && (
@@ -2403,48 +2330,6 @@ export function ResourcePanel() {
                       );
                     })}
                   </Box>
-                </Box>
-              )}
-
-              {/* Healthy VMs — compact clickable table, ported from the "clean VMs" branch of _renderDeepDiveCharts() (app.js) */}
-              {ddCards.clean.length > 0 && (
-                <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(16,217,110,.2)', background: 'rgba(16,217,110,.05)', padding: 12 }}>
-                  <Box display="flex" alignItems="center" style={{ gap: 8 }}>
-                    <span>{'\u2705'}</span>
-                    <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal</Typography>
-                    <span style={{ fontSize: 9, color: '#6b7db3', marginLeft: 8 }}>click a row to inspect time-series</span>
-                  </Box>
-                  <Table size="small" className="pe-table" aria-label="Healthy servers" style={{ marginTop: 6 }}>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Server</TableCell>
-                        <TableCell>CPU</TableCell>
-                        <TableCell>Memory</TableCell>
-                        <TableCell>Status</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {ddCards.clean.map(({ vmName, vmData }) => {
-                        const cpuS = vmData.stats?.['Percentage CPU'];
-                        const memS = vmData.stats?.['Available Memory Percentage'];
-                        const isSelected = deepDiveVm === vmName;
-                        return (
-                          <TableRow
-                            key={vmName}
-                            hover
-                            onClick={() => { setDeepDiveVm(vmName); setCorrelatedVms(new Set()); }}
-                            selected={isSelected}
-                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(59,130,246,.15)' : undefined }}
-                          >
-                            <TableCell style={{ fontFamily: 'monospace', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#60a5fa' : undefined }}>{vmName}</TableCell>
-                            <TableCell style={{ color: '#3b82f6', fontSize: 11 }}>{cpuS ? `avg ${cpuS.mean}% \u00b7 max ${cpuS.max}%` : '\u2014'}</TableCell>
-                            <TableCell style={{ color: '#22d3ee', fontSize: 11 }}>{memS ? `avail ${memS.mean}% \u00b7 min ${memS.min}%` : '\u2014'}</TableCell>
-                            <TableCell style={{ color: '#10d96e', fontSize: 11 }}>{'\u2713'} Normal</TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
                 </Box>
               )}
 
@@ -2613,6 +2498,121 @@ export function ResourcePanel() {
                       })()}
                       <HighchartsReact highcharts={Highcharts} options={deepDiveVmChart} />
                     </Box>
+                  )}
+                </Box>
+              )}
+
+              {/* Healthy VMs — compact clickable table, ported from the "clean VMs" branch of _renderDeepDiveCharts() (app.js) */}
+              {ddCards.clean.length > 0 && (
+                <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(16,217,110,.2)', background: 'rgba(16,217,110,.05)', padding: 12 }}>
+                  <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                    <span>{'\u2705'}</span>
+                    <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal</Typography>
+                    <span style={{ fontSize: 9, color: '#6b7db3', marginLeft: 8 }}>click a row to inspect time-series</span>
+                  </Box>
+                  <Table size="small" className="pe-table" aria-label="Healthy servers" style={{ marginTop: 6 }}>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Server</TableCell>
+                        <TableCell>CPU</TableCell>
+                        <TableCell>Memory</TableCell>
+                        <TableCell>Status</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {ddCards.clean.map(({ vmName, vmData }) => {
+                        const cpuS = vmData.stats?.['Percentage CPU'];
+                        const memS = vmData.stats?.['Available Memory Percentage'];
+                        const isSelected = deepDiveVm === vmName;
+                        return (
+                          <TableRow
+                            key={vmName}
+                            hover
+                            onClick={() => { setDeepDiveVm(vmName); setCorrelatedVms(new Set()); }}
+                            selected={isSelected}
+                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(59,130,246,.15)' : undefined }}
+                          >
+                            <TableCell style={{ fontFamily: 'monospace', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#60a5fa' : undefined }}>{vmName}</TableCell>
+                            <TableCell style={{ color: '#3b82f6', fontSize: 11 }}>{cpuS ? `avg ${cpuS.mean}% \u00b7 max ${cpuS.max}%` : '\u2014'}</TableCell>
+                            <TableCell style={{ color: '#22d3ee', fontSize: 11 }}>{memS ? `avail ${memS.mean}% \u00b7 min ${memS.min}%` : '\u2014'}</TableCell>
+                            <TableCell style={{ color: '#10d96e', fontSize: 11 }}>{'\u2713'} Normal</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </Box>
+              )}
+
+              {/* Heatmap */}
+              {deepDive.heatmap && (
+                <Box style={{ marginTop: 12 }}>
+                  <Box display="flex" alignItems="center" justifyContent="space-between">
+                    <Typography variant="subtitle2">Fleet Heatmap</Typography>
+                    <Box display="flex" style={{ gap: 4 }}>
+                      {(['cpu', 'memory', 'disk'] as HeatmapMetric[]).map((m) => (
+                        <Button key={m} size="small" variant={heatmapMetric === m ? 'contained' : 'outlined'} onClick={() => setHeatmapMetric(m)}>{m.toUpperCase()}</Button>
+                      ))}
+                    </Box>
+                  </Box>
+                  {fleetHeatmapView ? (
+                    <>
+                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4, fontSize: 9 }}>
+                        {heatmapMetric === 'memory'
+                          ? 'Memory is Azure available % (not used %). Each cell shows the lowest available-memory value in its time bucket; lower availability is higher risk.'
+                          : 'Each cell shows the highest observed value in its time bucket; higher utilization is higher risk.'}
+                        {' Outlined hatched cells mean this metric was not emitted by Azure Monitor; they are not healthy samples.'}
+                        {fleetHeatmapView.bucketSize > 1 ? ` ${fleetHeatmapView.bucketSize} Monitor samples are combined per visible cell for readability.` : ''}
+                      </Typography>
+                      <Box className="pe-table-shell pe-heatmap-shell" style={{ marginTop: 8, maxHeight: 360, overflow: 'auto' }}>
+                        <table className="pe-heatmap-table" aria-label={`Fleet ${heatmapMetric} heatmap`} style={{ borderCollapse: 'separate', borderSpacing: 2, minWidth: Math.max(680, 170 + fleetHeatmapView.columns.length * 18) }}>
+                          <thead>
+                            <tr>
+                              <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#111d36', minWidth: 150, textAlign: 'left' }}>Server</th>
+                                  {/* Keep every coloured bucket while showing only about a dozen
+                                      horizontal labels; the remaining columns stay available by hover. */}
+                                  {fleetHeatmapView.columns.map((column, index) => {
+                                    const labelStride = Math.max(1, Math.ceil(fleetHeatmapView.columns.length / 12));
+                                    const showLabel = index % labelStride === 0 || index === fleetHeatmapView.columns.length - 1;
+                                    return (
+                                      <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: showLabel ? 58 : 18, padding: '4px 3px', fontSize: 8, whiteSpace: 'nowrap', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '·'}</th>
+                                    );
+                                  })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {fleetHeatmapView.rows.map((row) => (
+                              <tr key={row.name}>
+                                <td style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', padding: '3px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{row.name}</td>
+                                {row.values.map((value, index) => {
+                                  const state = fleetHeatmapCellLabel(value, heatmapMetric);
+                                  return (
+                                    <td
+                                      key={index}
+                                      aria-label={`${row.name}, ${fleetHeatmapView.columns[index].title}: ${state}`}
+                                      title={`${row.name}\n${fleetHeatmapView.columns[index].title}\n${state}`}
+                                      style={{ width: 18, minWidth: 18, height: 20, padding: 0, background: fleetHeatmapCellColor(value, heatmapMetric), border: value == null ? '1px solid rgba(148,163,184,.72)' : '1px solid rgba(255,255,255,.16)' }}
+                                    />
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </Box>
+                      <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
+                        <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Legend:</Typography>
+                        {/* Distinct glyph per band, not just a recoloured square:
+                            severity was previously encoded by colour alone, which
+                            disappears in greyscale print and for red-green CVD. */}
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#10d96e' }}>{'\u25cf healthy'}</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#f59e0b' }}>{'\u25b2 watch'}</Typography>
+                        <Typography variant="caption" style={{ fontSize: 9, color: '#f43f5e' }}>{'\u25a0 pressure'}</Typography>
+                        <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}><span style={{ display: 'inline-block', width: 10, height: 10, marginRight: 3, verticalAlign: '-1px', border: '1px solid rgba(148,163,184,.9)', background: 'repeating-linear-gradient(135deg, rgba(100,116,139,.45) 0, rgba(100,116,139,.45) 2px, rgba(15,23,42,.92) 2px, rgba(15,23,42,.92) 5px)' }} />metric not emitted</Typography>
+                      </Box>
+                    </>
+                  ) : (
+                    <Typography variant="caption" color="textSecondary">No {heatmapMetric} metric was emitted by the selected VMs in this window.</Typography>
                   )}
                 </Box>
               )}

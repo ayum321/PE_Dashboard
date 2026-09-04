@@ -368,7 +368,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
       return;
     }
     setDiscoveredVms(deduped);
-    setSelectedVmIds(new Set(deduped.map((v) => v.resource_id)));
+    setSelectedVmIds(new Set());
     setCollapsedCustomers(new Set());
     setCustomerFilter('ALL');
     setTypeFilters(new Set());
@@ -542,6 +542,17 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     });
   };
 
+  const clearHiddenSelection = () => {
+    const visibleIds = new Set(filteredVms.map((v) => v.resource_id));
+    setSelectedVmIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (visibleIds.has(id)) next.add(id);
+      });
+      return next;
+    });
+  };
+
   const toggleCustomerSelection = (customer: string, forceSelect?: boolean) => {
     const vmsInGroup = groupedFiltered.get(customer) || [];
     if (!vmsInGroup.length) return;
@@ -576,16 +587,21 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   };
 
   const handleFetch = async () => {
-    if (!selectedVmIds.size) {
-      setFetchStatus('Select at least one VM to fetch metrics for.');
+    const hasFilter = filteredVms.length !== discoveredVms.length;
+    const selectedVms = hasFilter
+      ? filteredVms.filter((v) => selectedVmIds.has(v.resource_id))
+      : discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
+
+    if (!selectedVms.length) {
+      setFetchStatus(hasFilter ? 'No visible VMs selected. Select at least one visible VM or reset filters.' : 'Select at least one VM to fetch metrics for.');
       return;
     }
+    const targetIds = selectedVms.map((v) => v.resource_id);
     setFetchBusy(true);
-    setFetchStatus(`Pulling last ${hoursBack}h of CPU / Memory / Disk metrics for ${selectedVmIds.size} VM(s)\u2026`);
+    setFetchStatus(`Pulling last ${hoursBack}h of CPU / Memory / Disk metrics for ${selectedVms.length} VM(s)\u2026`);
     try {
-      const selectedVms = discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
       const result = await fetchAzureResourcesWithProgress(
-        { hours_back: hoursBack, vm_ids: Array.from(selectedVmIds), vm_meta: selectedVms },
+        { hours_back: hoursBack, vm_ids: targetIds, vm_meta: selectedVms },
         ({ phase, done, total }) => {
           const count = total && total > 0 ? ` ${done || 0}/${total}` : '';
           setFetchStatus(`${phase || 'Querying Azure Monitor'}${count}\u2026`);
@@ -1031,26 +1047,48 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               {(() => {
                 const visibleSelectedCount = filteredVms.filter((v) => selectedVmIds.has(v.resource_id)).length;
                 const hasFilter = filteredVms.length !== discoveredVms.length;
+                const hiddenSelectedCount = Math.max(0, selectedVmIds.size - visibleSelectedCount);
+                const disableFetch = fetchBusy || !selectedVmIds.size || (hasFilter && visibleSelectedCount === 0);
                 return (
-                  <Typography variant="caption" color="textSecondary">
-                    {hasFilter ? (
-                      <>
-                        <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{visibleSelectedCount} of {filteredVms.length} visible</span> selected ({selectedVmIds.size} of {discoveredVms.length} total)
-                      </>
-                    ) : (
-                      <>
-                        <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{selectedVmIds.size} of {discoveredVms.length}</span> selected
-                      </>
-                    )}
-                  </Typography>
+                  <>
+                    <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                      <Typography variant="caption" color="textSecondary">
+                        {hasFilter ? (
+                          <>
+                            <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{visibleSelectedCount} of {filteredVms.length} visible</span> selected ({selectedVmIds.size} of {discoveredVms.length} total)
+                          </>
+                        ) : (
+                          <>
+                            <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{selectedVmIds.size} of {discoveredVms.length}</span> selected
+                          </>
+                        )}
+                      </Typography>
+                      {hasFilter && hiddenSelectedCount > 0 && (
+                        <Button
+                          size="small"
+                          onClick={clearHiddenSelection}
+                          style={{ fontSize: 9, color: '#f87171', padding: '1px 6px', textTransform: 'none', border: '1px solid rgba(248,113,113,.3)', borderRadius: 4 }}
+                          title="Remove selected VMs that are hidden by active filters"
+                        >
+                          Clear {hiddenSelectedCount} hidden
+                        </Button>
+                      )}
+                    </Box>
+                    <Box display="flex" style={{ marginLeft: 'auto', gap: 8 }}>
+                      <Button
+                        variant="contained"
+                        color="primary"
+                        onClick={handleFetch}
+                        disabled={disableFetch}
+                        title={hasFilter && visibleSelectedCount === 0 && selectedVmIds.size > 0 ? 'Select at least one visible VM to fetch, or reset filters.' : undefined}
+                      >
+                        {fetchBusy ? <CircularProgress size={16} color="inherit" /> : 'Fetch Metrics'}
+                      </Button>
+                      <Button variant="outlined" onClick={onClose}>Cancel</Button>
+                    </Box>
+                  </>
                 );
               })()}
-              <Box display="flex" style={{ marginLeft: 'auto', gap: 8 }}>
-                <Button variant="contained" color="primary" onClick={handleFetch} disabled={fetchBusy || !selectedVmIds.size}>
-                  {fetchBusy ? <CircularProgress size={16} color="inherit" /> : 'Fetch Metrics'}
-                </Button>
-                <Button variant="outlined" onClick={onClose}>Cancel</Button>
-              </Box>
             </Box>
             {fetchStatus && <Typography variant="caption" color="textSecondary">{fetchStatus}</Typography>}
           </Box>
