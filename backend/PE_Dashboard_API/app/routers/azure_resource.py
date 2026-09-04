@@ -528,27 +528,16 @@ def azure_auth_status(request: Request, response: Response) -> Dict[str, Any]:
             "tenant_id": mem_info.get("tenant_id", ""),
         }
 
-    # In cloud / container environment, check ambient Managed Identity
-    try:
-        from azure.identity import DefaultAzureCredential
-        default_cred = DefaultAzureCredential()
-        default_cred.get_token("https://management.azure.com/.default")
-        info = {
-            "logged_in": True,
-            "name": "Azure Service Identity",
-            "display_name": "Azure Service Identity",
-            "method": "browser",
-        }
-        from services.azure_monitor import _set_session
-        _set_session(sid, default_cred, info)
+    # Attempt silent restore from local user token cache (no browser popup if already cached)
+    from services.azure_monitor import restore_cached_user_credential
+    restored = restore_cached_user_credential(sid)
+    if restored and restored.get("logged_in"):
         return {
             "method": "browser",
-            "name": "Azure Service Identity",
-            "display_name": "Azure Service Identity",
-            "tenant_id": "",
+            "name": restored.get("name", ""),
+            "display_name": restored.get("display_name", ""),
+            "tenant_id": restored.get("tenant_id", ""),
         }
-    except Exception:
-        pass
 
     return {"method": "none", "name": ""}
 

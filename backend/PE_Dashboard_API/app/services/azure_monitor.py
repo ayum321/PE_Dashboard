@@ -391,10 +391,80 @@ def start_device_code_auth(session_id=None) -> dict:
         return dict(_device_flow_state.get(sid) or {"status": "starting", "device_code_required": True})
 
 
+_AUTH_RECORD_FILE = os.path.join(os.path.expanduser("~"), ".pe_azure_auth_record.json")
+
+
+def _save_auth_record(info: dict) -> None:
+    try:
+        import json as _json
+        with open(_AUTH_RECORD_FILE, "w", encoding="utf-8") as f:
+            _json.dump(info, f)
+    except Exception:
+        pass
+
+
+def _load_auth_record() -> Optional[dict]:
+    try:
+        import json as _json
+        if os.path.exists(_AUTH_RECORD_FILE):
+            with open(_AUTH_RECORD_FILE, "r", encoding="utf-8") as f:
+                return _json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _clear_auth_record() -> None:
+    try:
+        if os.path.exists(_AUTH_RECORD_FILE):
+            os.remove(_AUTH_RECORD_FILE)
+    except Exception:
+        pass
+
+
+def restore_cached_user_credential(session_id=None) -> Optional[dict]:
+    """Attempt silent restore of previously authenticated Azure user from local token cache."""
+    import json as _json, base64
+
+    auth_record = _load_auth_record()
+    if not auth_record or not auth_record.get("logged_in"):
+        return None
+
+    try:
+        from azure.identity import InteractiveBrowserCredential, TokenCachePersistenceOptions
+        cache_opts = TokenCachePersistenceOptions(name="pe_dashboard_user_cache")
+        cred = InteractiveBrowserCredential(cache_persistence_options=cache_opts)
+        token = cred.get_token("https://management.azure.com/.default")
+        if token:
+            payload_b64 = token.token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            user_name = claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or claims.get("email") or auth_record.get("name", "")
+            display_name = claims.get("name") or auth_record.get("display_name") or user_name
+            tenant_id = claims.get("tid") or auth_record.get("tenant_id", "")
+            info = {
+                "logged_in": True,
+                "name": user_name,
+                "display_name": display_name,
+                "tenant_id": tenant_id,
+                "method": "browser",
+            }
+            _set_session(session_id, cred, info)
+            logger.info("Silently restored Azure user credential for %s (%s)", user_name, display_name)
+            return info
+    except Exception as exc:
+        logger.info("Silent token restore not available: %s", exc)
+        _clear_auth_record()
+
+    return None
+
+
 def browser_login(session_id=None) -> dict:
     """Launch interactive browser login or Device Code flow and cache the credential.
 
-    On desktop environments, opens Microsoft 'Pick an account' page.
+    On desktop environments, opens Microsoft 'Pick an account' page in the
+    analyst's default browser so they authenticate with their corporate Azure AD
+    account. Every data pull is tied to the user's authentic Azure AD identity.
     On container/headless environments, provides Device Code flow so analysts
     can authenticate with their corporate Azure account from their own browser.
     """
@@ -410,55 +480,48 @@ def browser_login(session_id=None) -> dict:
         if existing is not None and existing_info.get("logged_in"):
             return existing_info
 
-        # 1. In container / cloud environment, check ambient Managed Identity first
-        try:
-            from azure.identity import DefaultAzureCredential
-            def_cred = DefaultAzureCredential()
-            def_cred.get_token("https://management.azure.com/.default")
-            logger.info("Azure auth: successfully authenticated via DefaultAzureCredential / ambient identity")
-            info = {
-                "logged_in": True,
-                "name": "Azure Service Identity",
-                "display_name": "Azure Service Identity",
-                "tenant_id": "",
-                "method": "browser",
-            }
-            _set_session(session_id, def_cred, info)
-            return info
-        except Exception as def_exc:
-            logger.info("Ambient DefaultAzureCredential not available: %s", def_exc)
+        # Check if silent restore from local user token cache succeeds
+        restored = restore_cached_user_credential(session_id)
+        if restored and restored.get("logged_in"):
+            return restored
 
-        # 2. In container / headless Linux, launch Device Code flow so user can sign in on their laptop
+        # In container / headless Linux, launch Device Code flow so user can sign in on their laptop
         is_headless = os.path.exists("/app") or os.environ.get("KUBERNETES_SERVICE_HOST") is not None or not os.environ.get("DISPLAY")
         if is_headless and sys.platform != "win32":
             return start_device_code_auth(session_id)
 
-        logger.info("Azure auth: launching interactive browser login…")
+        logger.info("Azure auth: launching interactive browser login for analyst user…")
         try:
-            from azure.identity import InteractiveBrowserCredential
-            cred = InteractiveBrowserCredential(timeout=_BROWSER_AUTH_TIMEOUT_S)
+            from azure.identity import InteractiveBrowserCredential, TokenCachePersistenceOptions
+            cache_opts = TokenCachePersistenceOptions(name="pe_dashboard_user_cache")
+            cred = InteractiveBrowserCredential(cache_persistence_options=cache_opts, timeout=_BROWSER_AUTH_TIMEOUT_S)
             cred.authenticate(scopes=["https://management.azure.com/.default"])
             token = cred.get_token("https://management.azure.com/.default")
         except Exception as exc:
             logger.warning("Interactive browser login failed (%s); falling back to Device Code flow", exc)
             return start_device_code_auth(session_id)
 
-        # Decode JWT to extract identity.
+        # Decode JWT to extract user's actual corporate identity
         try:
             payload_b64 = token.token.split(".")[1]
             payload_b64 += "=" * (4 - len(payload_b64) % 4)
             claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            user_name = claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or claims.get("email") or ""
+            display_name = claims.get("name") or user_name
+            tenant_id = claims.get("tid", "")
             info = {
                 "logged_in": True,
-                "name":  claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or "",
-                "display_name": claims.get("name", ""),
-                "tenant_id": claims.get("tid", ""),
+                "name":  user_name,
+                "display_name": display_name,
+                "tenant_id": tenant_id,
                 "method": "browser",
             }
         except Exception:
-            info = {"logged_in": True, "name": "unknown", "method": "browser"}
+            info = {"logged_in": True, "name": "Azure User", "method": "browser"}
+
         _set_session(session_id, cred, info)
-        logger.info("Browser login succeeded: %s", info.get("name", "?"))
+        _save_auth_record(info)
+        logger.info("Browser login succeeded: %s (%s)", user_name, display_name)
         return info
 
 
@@ -473,51 +536,27 @@ def get_browser_credential(session_id=None):
 
 
 def clear_browser_credential(session_id=None) -> None:
-    """Clear this session's in-memory browser credential on sign-out.
-
-    Other sessions are unaffected. Browser credentials deliberately do not
-    persist to disk, so a server restart requires an explicit new sign-in.
-    """
+    """Clear this session's in-memory browser credential on sign-out and delete saved auth record."""
     _clear_session(session_id)
+    _clear_auth_record()
 
 
 def _build_credential(cfg: dict, session_id=None):
-    """Return the explicitly authenticated credential for this session."""
+    """Return the explicitly authenticated user credential for this session."""
     cred = _get_cred(session_id)
     if cred is not None:
         logger.info("Azure auth: reusing cached session credential")
         return cred
 
-    # Check if explicit Service Principal environment variables are configured
-    if os.environ.get("AZURE_CLIENT_ID") and os.environ.get("AZURE_CLIENT_SECRET"):
-        try:
-            from azure.identity import DefaultAzureCredential
-            default_cred = DefaultAzureCredential()
-            default_cred.get_token("https://management.azure.com/.default")
-            logger.info("Azure auth: authenticated via environment Service Principal")
-            _set_session(session_id, default_cred, {"logged_in": True, "name": "Service Principal", "method": "browser"})
-            return default_cred
-        except Exception:
-            pass
-
-    # Check for ambient Managed Identity (AKS / container environment)
-    try:
-        from azure.identity import DefaultAzureCredential
-        default_cred = DefaultAzureCredential()
-        default_cred.get_token("https://management.azure.com/.default")
-        logger.info("Azure auth: authenticated via ambient identity")
-        _set_session(session_id, default_cred, {
-            "logged_in": True,
-            "name": "Azure Service Identity",
-            "display_name": "Azure Service Identity",
-            "method": "browser"
-        })
-        return default_cred
-    except Exception:
-        pass
+    # Check if silent restore from persistent user token cache succeeds
+    restored_info = restore_cached_user_credential(session_id)
+    if restored_info and restored_info.get("logged_in"):
+        cred = _get_cred(session_id)
+        if cred is not None:
+            return cred
 
     raise AzureConfigError(
-        "Not authenticated. Enter your Subscription ID below or sign in."
+        "Not authenticated. Please click 'Connect Azure' to sign in with your Azure account."
     )
 
 
@@ -3403,12 +3442,11 @@ def discover_vms(cfg: dict, resource_group: Optional[str] = None,
         )
 
     rg = (resource_group or cfg.get("azure_resource_group") or "").strip() or None
-    credential = _build_credential(cfg, session_id)
-
     try:
+        credential = _build_credential(cfg, session_id)
         vms = _list_vms(credential, sub_id, rg)
     except Exception as exc:
-        logger.warning("Live ARM _list_vms failed (%s); checking catalog for subscription %s", exc, sub_id)
+        logger.warning("Live ARM discovery failed (%s); checking catalog for subscription %s", exc, sub_id)
         _, cat_vms = get_known_catalog("")
         vms = [
             v for v in cat_vms
