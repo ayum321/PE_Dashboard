@@ -947,15 +947,15 @@ def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
     pk, du, zr = round(float(used_peak), 1), int(dur_min), round(float(z), 1)
     threshold = result.get("threshold", band["warn"])
     if result["reason_code"] == "expected_range":
-        reason = f"{pk:.0f}% is within the expected {result['expected_min']:.0f}–{result['expected_max']:.0f}% {role} range"
+        reason = f"{pk:.0f}% is within the expected {result['expected_min']:.0f}-{result['expected_max']:.0f}% {role} range"
     elif result["reason_code"] == "stat_anomaly_immaterial":
-        reason = f"statistical anomaly (z={zr}) but {pk:.0f}% < {threshold:.0f}% warn — not operationally material"
+        reason = f"statistical anomaly (z={zr}) but {pk:.0f}% < {threshold:.0f}% warn -- not operationally material"
     elif result["severity"] == "critical_sustained":
-        reason = f"{pk:.0f}% ≥ {threshold:.0f}% crit for {du}min"
+        reason = f"{pk:.0f}% >= {threshold:.0f}% crit for {du}min"
     elif result["reason_code"] == "abs_crit_brief":
-        reason = f"{pk:.0f}% ≥ {threshold:.0f}% crit but only {du}min — possible artifact"
+        reason = f"{pk:.0f}% >= {threshold:.0f}% crit but only {du}min -- possible artifact"
     else:
-        reason = f"{pk:.0f}% {'≥' if result['severity'] != 'notable' else '<'} {threshold:.0f}% {'crit' if result['severity'].startswith('critical') else 'warn'} band"
+        reason = f"{pk:.0f}% {'>=' if result['severity'] != 'notable' else '<'} {threshold:.0f}% {'crit' if result['severity'].startswith('critical') else 'warn'} band"
     return {
         "severity": result["severity"], "reason_code": result["reason_code"],
         "severity_reason": reason, "confidence": confidence, "threshold": threshold,
@@ -1066,17 +1066,39 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
 
     spikes = []
 
+    # Orientation is read from the band rather than re-derived by substring.
+    # `_metric_elevation` already owns this decision and exports it as `invert`.
+    is_inverted_metric = bool(band.get("invert"))
+
+    # Build diurnal (hour-of-day) statistics when multi-day samples are present.
+    # For enterprise batch workloads (SCPO, Ctrl-M, Oracle), batch hours (22:00-06:00 UTC)
+    # have naturally higher compute than daytime. A diurnal model prevents false alarms
+    # on planned night batch while catching subtle daytime lockups that a flat 24h baseline misses.
+    hourly_groups: dict = {}
+    for p in series_points:
+        t_str = p.get("t")
+        if t_str and "T" in t_str:
+            try:
+                h = int(t_str.split("T")[1][:2])
+                hourly_groups.setdefault(h, []).append(p["v"])
+            except Exception:
+                pass
+
+    cyclic_batch_hours = set()
+    for h, h_vals in hourly_groups.items():
+        if len(h_vals) >= 2:
+            sorted_vals = sorted(h_vals)
+            median_val = sorted_vals[len(sorted_vals) // 2]
+            if is_inverted_metric:
+                if median_val <= 30.0 and sorted_vals[-1] <= 45.0:
+                    cyclic_batch_hours.add(h)
+            else:
+                if median_val >= 50.0 and sorted_vals[0] >= 30.0:
+                    cyclic_batch_hours.add(h)
+
     # ── Classifier 1: Z-score spike detection ──
     # For "Available Memory %", a SPIKE is a DROP (negative z).
     # For CPU/Disk, a SPIKE is a RISE (positive z).
-    #
-    # Orientation is read from the band rather than re-derived by substring.
-    # `_metric_elevation` already owns this decision and exports it as `invert`,
-    # but that flag had no consumer — every call site pattern-matched the metric
-    # name again, so there were three independent copies of "is this metric
-    # inverted?" that could drift apart. The band is now the single source, and
-    # `_abs_breach_cfg` (below) derives its own `invert` from the same place.
-    is_inverted_metric = bool(band.get("invert"))
     # A missing Azure bucket is not evidence that a condition stayed elevated.
     # Break the detector at the last observed point so duration means observed
     # continuous evidence, not a timestamp gap filled in by arithmetic.
@@ -1089,9 +1111,25 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
         spike_z = 0
 
         for i, p in enumerate(series_points):
-            z = (p["v"] - mean) / std
-            # For inverted metrics, detect negative z (value dropped below baseline)
-            effective_z = -z if is_inverted_metric else z
+            z_global = (p["v"] - mean) / std
+            effective_z = -z_global if is_inverted_metric else z_global
+
+            # Check diurnal batch suppression if point falls in an established cyclic batch window
+            t_str = p.get("t")
+            if cyclic_batch_hours and t_str and "T" in t_str:
+                try:
+                    h = int(t_str.split("T")[1][:2])
+                    if h in cyclic_batch_hours:
+                        # Regular scheduled batch activity across all days is suppressed from
+                        # false-alarm z-score spikes unless it breaches critical limits.
+                        if is_inverted_metric:
+                            if p["v"] >= 15.0:
+                                effective_z = min(effective_z, 1.0)
+                        else:
+                            if p["v"] <= 75.0:
+                                effective_z = min(effective_z, 1.0)
+                except Exception:
+                    pass
             if effective_z >= eff_sigma:
                 if not in_spike:
                     in_spike = True

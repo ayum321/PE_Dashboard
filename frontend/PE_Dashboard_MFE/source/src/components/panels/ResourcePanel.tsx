@@ -169,6 +169,8 @@ interface DeepDiveSpike {
   z_score?: number;
   mean?: number;
   std?: number;
+  vm?: string;
+  metric?: string;
 }
 
 interface DeepDiveStat {
@@ -233,7 +235,7 @@ interface DeepDiveResponse {
   patterns?: DeepDivePattern[];
   baseline?: { days_observed?: number };
   spike_attribution?: {
-    rows: { vm: string; metric: string; start?: string; end?: string; peak?: number; peak_time?: string; duration_min?: number; severity?: string; concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }[];
+    rows: { vm: string; metric: string; start?: string; end?: string; peak?: number; peak_time?: string; duration_min?: number; severity?: string; concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number; start?: string; end?: string }[] }[];
     summary: { spikes_total: number; spikes_attributed: number; attribution_rate: number; runs_loaded: number; caveat: string };
   };
   window?: { timezone?: string; start_utc?: string; end_utc?: string; grain?: string; data_points?: number; is_custom?: boolean };
@@ -508,7 +510,7 @@ function humanizeDurationMin(min: number): string {
 type HeatmapMetric = 'cpu' | 'memory' | 'disk';
 
 interface FleetHeatmapView {
-  columns: { label: string; title: string }[];
+  columns: { label: string; title: string; startUtc?: string }[];
   rows: { name: string; values: (number | null)[] }[];
   bucketSize: number;
 }
@@ -547,7 +549,11 @@ export function buildFleetHeatmapView(
     const end = Math.min(timestamps.length, start + bucketSize);
     const first = formatHeatmapTimestamp(timestamps[start]);
     const last = formatHeatmapTimestamp(timestamps[end - 1]);
-    columns.push({ label: bucketSize === 1 ? first : `${first}–${last}`, title: bucketSize === 1 ? first : `${first} to ${last}` });
+    columns.push({
+      label: bucketSize === 1 ? first : `${first}–${last}`,
+      title: bucketSize === 1 ? first : `${first} to ${last}`,
+      startUtc: timestamps[start],
+    });
   }
 
   const rows = sourceRows.map((row) => {
@@ -805,6 +811,57 @@ export function ResourcePanel() {
   const [ddShowMinOverlay, setDdShowMinOverlay] = useState(false);
   const [correlatedVms, setCorrelatedVms] = useState<Set<string>>(new Set());
   const [correlationSort, setCorrelationSort] = useState<'servers' | 'events' | 'time'>('servers');
+  const chartRef = useRef<HighchartsReact.RefObject>(null);
+  const [inspectedSpike, setInspectedSpike] = useState<DeepDiveSpike | null>(null);
+  const [hideHealthyServers, setHideHealthyServers] = useState<boolean>(false);
+  const [activeScopeTab, setActiveScopeTab] = useState<'all' | 'investigation' | 'healthy'>('all');
+  const [headroomGrowth, setHeadroomGrowth] = useState<number>(1.0);
+  const [showBatchOverlay, setShowBatchOverlay] = useState<boolean>(true);
+
+  const handleInspectSpike = (spike: DeepDiveSpike) => {
+    setInspectedSpike(spike);
+    if (spike.start && spike.end && chartRef.current?.chart) {
+      const fromTs = new Date(spike.start).getTime() - 25 * 60 * 1000;
+      const toTs = new Date(spike.end).getTime() + 25 * 60 * 1000;
+      if (!isNaN(fromTs) && !isNaN(toTs) && toTs > fromTs) {
+        chartRef.current.chart.xAxis[0].setExtremes(fromTs, toTs);
+      }
+    }
+  };
+
+  const handleResetChartZoom = () => {
+    setInspectedSpike(null);
+    if (chartRef.current?.chart) {
+      chartRef.current.chart.xAxis[0].setExtremes(undefined as any, undefined as any);
+    }
+  };
+
+  const handleHeatmapCellClick = (vmName: string, startUtc: string | undefined, value: number | null) => {
+    setDeepDiveVm(vmName);
+    setCorrelatedVms(new Set());
+    if (startUtc) {
+      const cellTs = new Date(startUtc).getTime();
+      if (!isNaN(cellTs)) {
+        const windowPadding = 2 * 60 * 60 * 1000;
+        setInspectedSpike({
+          vm: vmName,
+          metric: heatmapMetric === 'cpu' ? 'Percentage CPU' : heatmapMetric === 'memory' ? 'Available Memory Percentage' : 'Disk',
+          peak: value ?? undefined,
+          start: startUtc,
+          end: new Date(cellTs + 3600 * 1000).toISOString(),
+          peak_time: startUtc,
+          severity: value != null && (heatmapMetric === 'memory' ? value < 15 : value > 80) ? 'critical' : 'warning',
+        });
+        setTimeout(() => {
+          if (chartRef.current?.chart) {
+            chartRef.current.chart.xAxis[0].setExtremes(cellTs - windowPadding, cellTs + windowPadding);
+            chartRef.current.chart.container?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 150);
+      }
+    }
+  };
+
   // ── Custom absolute time range, ported from toggleDeepDiveCustomPicker()/
   // setDeepDiveCustomRange() (app.js) — scope the deep dive to one batch
   // night or one incident instead of a rolling preset window. ──
@@ -822,6 +879,7 @@ export function ResourcePanel() {
     setDeepDive(null);
     setDeepDiveVm('');
     setCorrelatedVms(new Set<string>());
+    setInspectedSpike(null);
     if (clearPersisted && resourceWithDeepDive?.deep_dive) {
       setResource(stripPersistedDeepDive(resourceWithDeepDive) as Parameters<typeof setResource>[0]);
     }
@@ -1229,17 +1287,87 @@ export function ResourcePanel() {
         borderColor: `${SEVERITY_COLOR[(spike.severity || 'CRITICAL').toUpperCase().replace('_', ' ')] || '#f43f5e'}66`,
         borderWidth: 1,
       })));
+
+    // Ctrl-M concurrent batch jobs overlay on Highcharts timeline
+    const batchBands: Highcharts.XAxisPlotBandsOptions[] = [];
+    if (showBatchOverlay) {
+      const attributionRows = deepDive?.spike_attribution?.rows || [];
+      const seenJobs = new Set<string>();
+      for (const r of attributionRows) {
+        if (r.vm === deepDiveVm && r.jobs) {
+          for (const j of r.jobs) {
+            const key = `${j.job}-${j.start}`;
+            if (seenJobs.has(key)) continue;
+            seenJobs.add(key);
+            if (j.start && j.end) {
+              const js = new Date(j.start).getTime();
+              const je = new Date(j.end).getTime();
+              if (!isNaN(js) && !isNaN(je) && je > js) {
+                batchBands.push({
+                  from: js,
+                  to: je,
+                  color: 'rgba(99,102,241,0.08)',
+                  borderColor: 'rgba(99,102,241,0.35)',
+                  borderWidth: 1,
+                  label: {
+                    text: `${j.job} (${j.hrs != null ? `${j.hrs}h` : ''})`,
+                    style: { color: '#a5b4fc', fontSize: '9px', fontWeight: '600' },
+                    align: 'left',
+                    y: 12,
+                  },
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
     return {
       chart: { type: 'line', height: 320, zooming: { type: 'x' }, backgroundColor: 'transparent' },
       title: { text: undefined },
-      xAxis: { type: 'datetime', plotBands: spikeBands, labels: { style: { color: '#94a3b8', fontSize: '10px' } } },
+      xAxis: { type: 'datetime', plotBands: [...spikeBands, ...batchBands], labels: { style: { color: '#94a3b8', fontSize: '10px' } } },
       yAxis: { title: { text: 'Utilization (%)', style: { color: '#94a3b8', fontSize: '10px' } }, min: 0, max: 100, gridLineColor: 'rgba(71,85,105,.34)', gridLineDashStyle: 'Dash' },
       legend: { itemStyle: { color: '#cbd5e1', fontSize: '10px', fontWeight: '500' } },
-      tooltip: { shared: true, valueDecimals: 1, backgroundColor: 'rgba(9,14,31,.98)', borderColor: 'rgba(96,165,250,.42)', style: { color: '#e2e8f0' } },
+      tooltip: {
+        shared: true,
+        valueDecimals: 1,
+        backgroundColor: 'rgba(9,14,31,.98)',
+        borderColor: 'rgba(96,165,250,.42)',
+        style: { color: '#e2e8f0' },
+        formatter(this: Highcharts.TooltipFormatterContextObject) {
+          let s = `<b>${Highcharts.dateFormat('%b %e, %Y %H:%M UTC', this.x as number)}</b><br/>`;
+          if (this.points) {
+            for (const p of this.points) {
+              s += `<span style="color:${p.color}">●</span> ${p.series.name}: <b>${p.y?.toFixed(1)}%</b><br/>`;
+            }
+          }
+          const attributionRows = deepDive?.spike_attribution?.rows || [];
+          const curTime = this.x as number;
+          const runningJobs: string[] = [];
+          for (const r of attributionRows) {
+            if (r.vm === deepDiveVm && r.jobs) {
+              for (const j of r.jobs) {
+                if (j.start && j.end) {
+                  const js = new Date(j.start).getTime();
+                  const je = new Date(j.end).getTime();
+                  if (curTime >= js && curTime <= je) {
+                    runningJobs.push(`${j.job} (${j.hrs != null ? `${j.hrs}h` : ''})`);
+                  }
+                }
+              }
+            }
+          }
+          if (runningJobs.length > 0) {
+            s += `<span style="color:#a5b4fc;font-size:9px;">⚙️ <b>Active Batch:</b> ${runningJobs.slice(0, 2).join(', ')}${runningJobs.length > 2 ? ` +${runningJobs.length - 2} more` : ''}</span>`;
+          }
+          return s;
+        },
+      },
       series,
       _hadGap: hadGap,
     } as Highcharts.Options & { _hadGap: boolean };
-  }, [deepDive, deepDiveVm, ddShowMaxOverlay, ddShowMinOverlay]);
+  }, [deepDive, deepDiveVm, ddShowMaxOverlay, ddShowMinOverlay, showBatchOverlay]);
 
   // ── Requires Investigation card grid data, ported from _renderVmServerCard()
   // + renderFilteredGrid() (app.js). Groups deep-dive VMs into "has spikes"
@@ -1447,6 +1575,39 @@ export function ResourcePanel() {
       return next;
     });
   };
+
+  const simulatedStress = useMemo(() => {
+    if (!servers || servers.length === 0) return null;
+    let breachingCount = 0;
+    const recommendations: { host: string; sku?: string; currentCpu: number; projectedCpu: number; advice: string }[] = [];
+
+    for (const s of servers) {
+      const currentCpu = s.cpu_used ?? s.cpu_avg_pct ?? 0;
+      const projectedCpu = Math.min(100, Math.round(currentCpu * headroomGrowth));
+      const roleWarn = s.role_cpu_warn ?? 70;
+
+      if (projectedCpu >= roleWarn) {
+        breachingCount++;
+        let advice = 'Rightsize vCPUs';
+        const isDb = (s.type || '').toUpperCase() === 'DB';
+        if (isDb) {
+          advice = 'Scale up to Standard_E-series (Memory & IOPS optimized for DB)';
+        } else if (projectedCpu >= 90) {
+          advice = 'Scale up to Compute-Optimized Standard_F-series';
+        } else {
+          advice = 'Scale up SKU vCPUs +30%';
+        }
+        recommendations.push({ host: s.host, sku: s.vm_size, currentCpu, projectedCpu, advice });
+      }
+    }
+
+    return {
+      breachingCount,
+      totalCount: servers.length,
+      multiplier: headroomGrowth,
+      recommendations: recommendations.slice(0, 4),
+    };
+  }, [servers, headroomGrowth]);
 
   // ── Selected VM's spike-detail rows + header/insight text, ported from
   // _renderVmDeepDiveCard() (app.js), simplified (no cross-day recurrence grouping). ──
@@ -2025,7 +2186,7 @@ export function ResourcePanel() {
         </TableBody>
       </Table>
 
-      {executiveHeatmapOptions && (
+      {!isAzureSource && executiveHeatmapOptions && (
         <Box className={classes.section}>
           <Typography variant="subtitle2">Server Heatmap</Typography>
           <Typography variant="caption" color="textSecondary">CPU / Memory / Disk utilization by server \u2014 from the executive correlation summary</Typography>
@@ -2218,9 +2379,100 @@ export function ResourcePanel() {
                 </Box>
               )}
 
+              {/* Proactive Headroom & Growth Simulator */}
+              {simulatedStress && (
+                <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(59,130,246,.3)', background: 'linear-gradient(135deg, rgba(30,58,138,.18) 0%, rgba(15,23,42,.4) 100%)', padding: '12px 14px' }}>
+                  <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
+                    <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                      <span>⚡</span>
+                      <Typography variant="subtitle2" style={{ color: '#60a5fa', fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+                        Proactive Headroom &amp; Sizing Simulator
+                      </Typography>
+                    </Box>
+                    <Box display="flex" alignItems="center" style={{ gap: 6 }}>
+                      <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 10 }}>Model Batch Growth:</Typography>
+                      {([1.0, 1.2, 1.5, 2.0] as const).map((mult) => (
+                        <button
+                          key={mult}
+                          onClick={() => setHeadroomGrowth(mult)}
+                          style={ddPillStyle(headroomGrowth === mult)}
+                        >
+                          {mult === 1.0 ? 'Baseline (1.0x)' : mult === 1.2 ? '+20%' : mult === 1.5 ? '+50%' : '2.0x Scale'}
+                        </button>
+                      ))}
+                    </Box>
+                  </Box>
+                  <Box display="flex" alignItems="center" style={{ gap: 12, marginTop: 8, flexWrap: 'wrap' }}>
+                    <Typography variant="caption" style={{ color: simulatedStress.breachingCount > 0 ? '#f59e0b' : '#10d96e', fontWeight: 700, fontSize: 11 }}>
+                      {simulatedStress.breachingCount > 0
+                        ? `⚠️ ${simulatedStress.breachingCount} of ${simulatedStress.totalCount} server${simulatedStress.totalCount > 1 ? 's' : ''} breach warning bands under ${simulatedStress.multiplier}x workload`
+                        : `✓ Full estate within healthy headroom under ${simulatedStress.multiplier}x modeled workload`}
+                    </Typography>
+                    {simulatedStress.recommendations.length > 0 && (
+                      <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+                        {simulatedStress.recommendations.map((rec) => (
+                          <span
+                            key={rec.host}
+                            className="metric-badge"
+                            style={{ fontSize: 9, color: '#f59e0b', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.35)' }}
+                            title={`${rec.host} (${rec.sku || 'SKU n/a'}): ${rec.currentCpu}% → projected ${rec.projectedCpu}% under ${simulatedStress.multiplier}x batch load. Action: ${rec.advice}`}
+                          >
+                            {rec.host.split('.')[0]}: {rec.projectedCpu}% ({rec.advice.split(' ')[0]})
+                          </span>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                </Box>
+              )}
+
+              {/* Investigation Scope Tabs & Dedicated Hide Normal Servers Toggle */}
+              <Box display="flex" alignItems="center" justifyContent="space-between" style={{ marginTop: 14, borderBottom: '1px solid #213060', paddingBottom: 6, flexWrap: 'wrap', gap: 8 }}>
+                <Box display="flex" alignItems="center" style={{ gap: 6 }}>
+                  <button
+                    onClick={() => setActiveScopeTab('all')}
+                    style={ddPillStyle(activeScopeTab === 'all')}
+                  >
+                    All Servers ({ddCards.critical.length + ddCards.clean.length})
+                  </button>
+                  <button
+                    onClick={() => setActiveScopeTab('investigation')}
+                    style={ddPillStyle(activeScopeTab === 'investigation')}
+                  >
+                    🚨 Requires Investigation ({ddCards.critical.length})
+                  </button>
+                  <button
+                    onClick={() => setActiveScopeTab('healthy')}
+                    style={ddPillStyle(activeScopeTab === 'healthy')}
+                  >
+                    ✅ Normal Servers ({ddCards.clean.length})
+                  </button>
+                </Box>
+                <button
+                  onClick={() => setHideHealthyServers((prev) => !prev)}
+                  className="pe-pill-btn"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    fontSize: 10,
+                    fontWeight: 700,
+                    background: hideHealthyServers ? 'rgba(59,130,246,.15)' : 'rgba(16,217,110,.12)',
+                    border: `1px solid ${hideHealthyServers ? 'rgba(59,130,246,.4)' : 'rgba(16,217,110,.35)'}`,
+                    color: hideHealthyServers ? '#93c5fd' : '#10d96e',
+                    cursor: 'pointer',
+                  }}
+                  title={hideHealthyServers ? 'Expand healthy servers table' : 'Hide healthy servers to focus exclusively on anomalies'}
+                >
+                  {hideHealthyServers ? '👁️ Show Healthy Servers' : '👁️‍🗨️ Hide Healthy Servers'}
+                </button>
+              </Box>
+
               {/* Requires Investigation — critical VM card grid, ported from
                   _renderDeepDiveCharts()/_renderVmServerCard() (app.js). */}
-              {ddCards.critical.length > 0 && (
+              {activeScopeTab !== 'healthy' && ddCards.critical.length > 0 && (
                 <Box style={{ marginTop: 12 }}>
                   <Box display="flex" alignItems="center" style={{ gap: 8 }}>
                     <span>{'\ud83d\udea8'}</span>
@@ -2401,8 +2653,19 @@ export function ResourcePanel() {
                               ? `${count} events · durations ${durations.map(humanizeDurationMin).join(', ')}${s.severity_reason ? ` · representative event: ${s.severity_reason}` : ''}`
                               : s.severity_reason || '\u2014';
                             const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
+                            const isInspected = inspectedSpike === s || (inspectedSpike?.peak === s.peak && inspectedSpike?.start === s.start);
                             return (
-                              <TableRow key={i}>
+                              <TableRow
+                                key={i}
+                                hover
+                                onClick={() => handleInspectSpike(s)}
+                                style={{
+                                  cursor: 'pointer',
+                                  background: isInspected ? 'rgba(244,63,94,.16)' : undefined,
+                                  borderLeft: isInspected ? '3px solid #f43f5e' : undefined,
+                                }}
+                                title="Click to zoom time-series chart directly to this anomaly"
+                              >
                                 <TableCell>
                                   <span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>
                                   {s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}
@@ -2457,6 +2720,10 @@ export function ResourcePanel() {
                       <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
                         <Typography variant="subtitle2">Unified Time-Series {'\u2014'} All Metrics ({deepDiveVm})</Typography>
                         <Box display="flex" alignItems="center" style={{ gap: 12 }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows active Ctrl-M batch job execution windows on the timeline.">
+                            <input type="checkbox" checked={showBatchOverlay} onChange={(e) => setShowBatchOverlay(e.target.checked)} style={{ accentColor: '#6366f1' }} />
+                            <Typography variant="caption" style={{ fontWeight: 700, color: '#a5b4fc' }}>⚙️ Batch Runs Overlay</Typography>
+                          </label>
                           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows Azure Monitor's timestamp-aligned Maximum aggregation beside the Average series, exposing short peaks that average values can hide.">
                             <input type="checkbox" checked={ddShowMaxOverlay} onChange={(e) => setDdShowMaxOverlay(e.target.checked)} style={{ accentColor: '#3b82f6' }} />
                             <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Avg + Max</Typography>
@@ -2467,6 +2734,19 @@ export function ResourcePanel() {
                           </label>
                         </Box>
                       </Box>
+                      {inspectedSpike && (
+                        <Box display="flex" alignItems="center" justifyContent="space-between" style={{ marginTop: 8, marginBottom: 8, padding: '6px 12px', borderRadius: 8, background: 'rgba(244,63,94,.12)', border: '1px solid rgba(244,63,94,.4)' }}>
+                          <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                            <span>🎯</span>
+                            <Typography variant="caption" style={{ color: '#f43f5e', fontWeight: 700 }}>
+                              Focused on Anomaly: {inspectedSpike.peak != null ? `${inspectedSpike.peak}%` : ''} peak ({formatUtc(inspectedSpike.peak_time || inspectedSpike.start)})
+                            </Typography>
+                          </Box>
+                          <Button size="small" variant="outlined" onClick={handleResetChartZoom} style={{ color: '#f43f5e', borderColor: 'rgba(244,63,94,.5)', fontSize: 10, padding: '2px 8px', textTransform: 'none' }}>
+                            Reset Zoom ✕
+                          </Button>
+                        </Box>
+                      )}
                       <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginBottom: 4 }}>
                         Shaded windows are detected anomaly events. Dotted lines are Azure bucket peaks; average lines remain the primary time series.
                         {(deepDiveVmChart as (Highcharts.Options & { _hadGap?: boolean }) | null)?._hadGap && ' A broken line marks a bucket Azure did not report \u2014 it is a gap, not interpolated data.'}
@@ -2496,59 +2776,194 @@ export function ResourcePanel() {
                           </Box>
                         );
                       })()}
-                      <HighchartsReact highcharts={Highcharts} options={deepDiveVmChart} />
+                      <HighchartsReact ref={chartRef} highcharts={Highcharts} options={deepDiveVmChart} />
                     </Box>
                   )}
                 </Box>
               )}
 
-              {/* Healthy VMs — compact clickable table, ported from the "clean VMs" branch of _renderDeepDiveCharts() (app.js) */}
-              {ddCards.clean.length > 0 && (
-                <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(16,217,110,.2)', background: 'rgba(16,217,110,.05)', padding: 12 }}>
-                  <Box display="flex" alignItems="center" style={{ gap: 8 }}>
-                    <span>{'\u2705'}</span>
-                    <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal</Typography>
-                    <span style={{ fontSize: 9, color: '#6b7db3', marginLeft: 8 }}>click a row to inspect time-series</span>
-                  </Box>
-                  <Table size="small" className="pe-table" aria-label="Healthy servers" style={{ marginTop: 6 }}>
+              {/* Spike attribution — placed directly under Telemetry & Time-Series */}
+              {deepDive.spike_attribution && deepDive.spike_attribution.rows.length > 0 && (() => {
+                const attrRows = deepDive.spike_attribution.rows;
+                const linked = attrRows.filter((r) => r.concurrent_jobs > 0);
+                const unlinked = attrRows.filter((r) => !r.concurrent_jobs);
+                const ordered = [...linked, ...unlinked].slice(0, 20);
+                const fmtWindow = (row: typeof attrRows[number]) => {
+                  const range = formatSpikeWindow(row.start, row.end);
+                  if (range !== '—') return range;
+                  return row.peak_time ? `${formatUtcDateTime(row.peak_time)} UTC` : '—';
+                };
+                return (
+                <Box style={{ marginTop: 12 }}>
+                  <Typography variant="subtitle2">{'Spike \u2192 Batch Job Attribution'}</Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>{deepDive.spike_attribution.summary.caveat}</Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 2, fontSize: 9 }}>
+                    {`One row per detected spike, newest evidence first. ${linked.length} of ${attrRows.length} spike(s) had a Ctrl-M job running in the same window; ${unlinked.length} had none and are listed last. Click any row to jump to that server and time window in the chart.`}
+                  </Typography>
+                  <Table size="small" className="pe-table" aria-label="Spike attribution table" style={{ marginTop: 8 }}>
                     <TableHead>
                       <TableRow>
-                        <TableCell>Server</TableCell>
-                        <TableCell>CPU</TableCell>
-                        <TableCell>Memory</TableCell>
-                        <TableCell>Status</TableCell>
+                        <TableCell>VM</TableCell>
+                        <TableCell>Metric</TableCell>
+                        <TableCell>Spike Window (UTC)</TableCell>
+                        <TableCell align="right">Peak</TableCell>
+                        <TableCell>Severity</TableCell>
+                        <TableCell align="right">Concurrent Jobs</TableCell>
+                        <TableCell>Heaviest Job</TableCell>
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {ddCards.clean.map(({ vmName, vmData }) => {
-                        const cpuS = vmData.stats?.['Percentage CPU'];
-                        const memS = vmData.stats?.['Available Memory Percentage'];
-                        const isSelected = deepDiveVm === vmName;
+                      {ordered.map((row, index) => {
+                        const isLinked = row.concurrent_jobs > 0;
                         return (
-                          <TableRow
-                            key={vmName}
-                            hover
-                            onClick={() => { setDeepDiveVm(vmName); setCorrelatedVms(new Set()); }}
-                            selected={isSelected}
-                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(59,130,246,.15)' : undefined }}
-                          >
-                            <TableCell style={{ fontFamily: 'monospace', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#60a5fa' : undefined }}>{vmName}</TableCell>
-                            <TableCell style={{ color: '#3b82f6', fontSize: 11 }}>{cpuS ? `avg ${cpuS.mean}% \u00b7 max ${cpuS.max}%` : '\u2014'}</TableCell>
-                            <TableCell style={{ color: '#22d3ee', fontSize: 11 }}>{memS ? `avail ${memS.mean}% \u00b7 min ${memS.min}%` : '\u2014'}</TableCell>
-                            <TableCell style={{ color: '#10d96e', fontSize: 11 }}>{'\u2713'} Normal</TableCell>
-                          </TableRow>
+                        <TableRow
+                          key={`${row.vm}-${row.metric}-${row.peak_time || index}`}
+                          hover
+                          onClick={() => {
+                            setDeepDiveVm(row.vm);
+                            setCorrelatedVms(new Set());
+                            handleInspectSpike({
+                              vm: row.vm,
+                              metric: row.metric,
+                              peak: row.peak,
+                              start: row.start,
+                              end: row.end,
+                              peak_time: row.peak_time,
+                              severity: row.severity,
+                            });
+                            setTimeout(() => {
+                              chartRef.current?.chart?.container?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }, 150);
+                          }}
+                          style={{
+                            cursor: 'pointer',
+                            opacity: isLinked ? 1 : 0.65,
+                            background: deepDiveVm === row.vm && inspectedSpike?.start === row.start ? 'rgba(59,130,246,.15)' : undefined,
+                          }}
+                          title="Click to jump to this server and zoom chart to this spike window"
+                        >
+                          <TableCell>{renderHostId(row.vm)}</TableCell>
+                          <TableCell>{shortMetric(row.metric)}</TableCell>
+                          <TableCell style={{ fontFamily: 'monospace', fontSize: 11 }}>{fmtWindow(row)}</TableCell>
+                          <TableCell align="right">{row.peak != null ? row.peak.toFixed(1) : '\u2014'}</TableCell>
+                          <TableCell><span className="metric-badge" style={{ color: (row.severity || '').startsWith('critical') ? '#f43f5e' : '#f59e0b' }}>{row.severity}</span></TableCell>
+                          <TableCell align="right">{row.concurrent_jobs}</TableCell>
+                          <TableCell>
+                            {row.heaviest
+                              ? `${row.heaviest} (${(row.heaviest_hrs || 0).toFixed(1)}h)`
+                              : <span style={{ color: '#6b7db3', fontStyle: 'italic' }}>no Ctrl-M job overlapped</span>}
+                          </TableCell>
+                        </TableRow>
                         );
                       })}
                     </TableBody>
                   </Table>
                 </Box>
+                );
+              })()}
+
+              {/* Healthy VMs — compact clickable table with toggle to hide */}
+              {activeScopeTab !== 'investigation' && ddCards.clean.length > 0 && (
+                hideHealthyServers ? (
+                  <Box
+                    display="flex"
+                    alignItems="center"
+                    justifyContent="space-between"
+                    style={{
+                      marginTop: 12,
+                      borderRadius: 8,
+                      border: '1px solid rgba(16,217,110,.25)',
+                      background: 'rgba(16,217,110,.05)',
+                      padding: '8px 14px',
+                    }}
+                  >
+                    <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                      <span>{'✅'}</span>
+                      <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 11, fontWeight: 700 }}>
+                        Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal (Hidden)
+                      </Typography>
+                      <Typography variant="caption" color="textSecondary" style={{ fontSize: 10 }}>
+                        All metrics operating within nominal baseline
+                      </Typography>
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setHideHealthyServers(false)}
+                      style={{ color: '#10d96e', borderColor: 'rgba(16,217,110,.4)', fontSize: 10, textTransform: 'none', padding: '2px 10px' }}
+                    >
+                      Show Healthy Servers ({ddCards.clean.length}) ▾
+                    </Button>
+                  </Box>
+                ) : (
+                  <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(16,217,110,.2)', background: 'rgba(16,217,110,.05)', padding: 12 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                        <span>{'✅'}</span>
+                        <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>
+                          Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal
+                        </Typography>
+                        <span style={{ fontSize: 9, color: '#6b7db3', marginLeft: 8 }}>click a row to inspect time-series</span>
+                      </Box>
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={() => setHideHealthyServers(true)}
+                        style={{ color: '#6b7db3', fontSize: 10, textTransform: 'none', padding: '2px 8px' }}
+                        title="Collapse healthy servers table"
+                      >
+                        Hide ✕
+                      </Button>
+                    </Box>
+                    <Table size="small" className="pe-table" aria-label="Healthy servers" style={{ marginTop: 6 }}>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Server</TableCell>
+                          <TableCell>CPU</TableCell>
+                          <TableCell>Memory</TableCell>
+                          <TableCell>Status</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {ddCards.clean.map(({ vmName, vmData }) => {
+                          const cpuS = vmData.stats?.['Percentage CPU'];
+                          const memS = vmData.stats?.['Available Memory Percentage'];
+                          const isSelected = deepDiveVm === vmName;
+                          return (
+                            <TableRow
+                              key={vmName}
+                              hover
+                              onClick={() => {
+                                setDeepDiveVm(vmName);
+                                setCorrelatedVms(new Set());
+                                setTimeout(() => {
+                                  chartRef.current?.chart?.container?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                }, 150);
+                              }}
+                              selected={isSelected}
+                              style={{ cursor: 'pointer', background: isSelected ? 'rgba(59,130,246,.15)' : undefined }}
+                            >
+                              <TableCell style={{ fontFamily: 'monospace', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#60a5fa' : undefined }}>{vmName}</TableCell>
+                              <TableCell style={{ color: '#3b82f6', fontSize: 11 }}>{cpuS ? `avg ${cpuS.mean}% \u00b7 max ${cpuS.max}%` : '\u2014'}</TableCell>
+                              <TableCell style={{ color: '#22d3ee', fontSize: 11 }}>{memS ? `avail ${memS.mean}% \u00b7 min ${memS.min}%` : '\u2014'}</TableCell>
+                              <TableCell style={{ color: '#10d96e', fontSize: 11 }}>{'\u2713'} Normal</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </Box>
+                )
               )}
 
-              {/* Heatmap */}
+              {/* Fleet Heatmap — placed at the bottom of the deep dive */}
               {deepDive.heatmap && (
                 <Box style={{ marginTop: 12 }}>
                   <Box display="flex" alignItems="center" justifyContent="space-between">
-                    <Typography variant="subtitle2">Fleet Heatmap</Typography>
+                    <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                      <Typography variant="subtitle2">Fleet Heatmap</Typography>
+                      <span className="metric-badge metric-badge-teal" style={{ fontSize: 9 }}>Interactive: click any cell to jump to that server &amp; time</span>
+                    </Box>
                     <Box display="flex" style={{ gap: 4 }}>
                       {(['cpu', 'memory', 'disk'] as HeatmapMetric[]).map((m) => (
                         <Button key={m} size="small" variant={heatmapMetric === m ? 'contained' : 'outlined'} onClick={() => setHeatmapMetric(m)}>{m.toUpperCase()}</Button>
@@ -2569,15 +2984,15 @@ export function ResourcePanel() {
                           <thead>
                             <tr>
                               <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#111d36', minWidth: 150, textAlign: 'left' }}>Server</th>
-                                  {/* Keep every coloured bucket while showing only about a dozen
-                                      horizontal labels; the remaining columns stay available by hover. */}
-                                  {fleetHeatmapView.columns.map((column, index) => {
-                                    const labelStride = Math.max(1, Math.ceil(fleetHeatmapView.columns.length / 12));
-                                    const showLabel = index % labelStride === 0 || index === fleetHeatmapView.columns.length - 1;
-                                    return (
-                                      <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: showLabel ? 58 : 18, padding: '4px 3px', fontSize: 8, whiteSpace: 'nowrap', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '·'}</th>
-                                    );
-                                  })}
+                              {/* Keep every coloured bucket while showing only about a dozen
+                                  horizontal labels; the remaining columns stay available by hover. */}
+                              {fleetHeatmapView.columns.map((column, index) => {
+                                const labelStride = Math.max(1, Math.ceil(fleetHeatmapView.columns.length / 12));
+                                const showLabel = index % labelStride === 0 || index === fleetHeatmapView.columns.length - 1;
+                                return (
+                                  <th key={`${column.title}-${index}`} title={column.title} style={{ minWidth: showLabel ? 58 : 18, padding: '4px 3px', fontSize: 8, whiteSpace: 'nowrap', color: showLabel ? '#94a3b8' : 'transparent' }}>{showLabel ? column.label : '·'}</th>
+                                );
+                              })}
                             </tr>
                           </thead>
                           <tbody>
@@ -2586,12 +3001,30 @@ export function ResourcePanel() {
                                 <td style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', padding: '3px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{row.name}</td>
                                 {row.values.map((value, index) => {
                                   const state = fleetHeatmapCellLabel(value, heatmapMetric);
+                                  const colStart = fleetHeatmapView.columns[index]?.startUtc;
+                                  const isInspected = inspectedSpike?.vm === row.name && inspectedSpike?.start === colStart;
                                   return (
                                     <td
                                       key={index}
+                                      onClick={() => handleHeatmapCellClick(row.name, colStart, value)}
                                       aria-label={`${row.name}, ${fleetHeatmapView.columns[index].title}: ${state}`}
-                                      title={`${row.name}\n${fleetHeatmapView.columns[index].title}\n${state}`}
-                                      style={{ width: 18, minWidth: 18, height: 20, padding: 0, background: fleetHeatmapCellColor(value, heatmapMetric), border: value == null ? '1px solid rgba(148,163,184,.72)' : '1px solid rgba(255,255,255,.16)' }}
+                                      title={`${row.name}\n${fleetHeatmapView.columns[index].title}\n${state}\n(Click to jump to this server and time in chart)`}
+                                      style={{
+                                        width: 18,
+                                        minWidth: 18,
+                                        height: 20,
+                                        padding: 0,
+                                        cursor: 'pointer',
+                                        background: fleetHeatmapCellColor(value, heatmapMetric),
+                                        border: isInspected
+                                          ? '2px solid #f43f5e'
+                                          : value == null
+                                            ? '1px solid rgba(148,163,184,.72)'
+                                            : '1px solid rgba(255,255,255,.16)',
+                                        outline: isInspected ? '1px solid #f43f5e' : undefined,
+                                        transform: isInspected ? 'scale(1.15)' : undefined,
+                                        zIndex: isInspected ? 2 : undefined,
+                                      }}
                                     />
                                   );
                                 })}
@@ -2602,9 +3035,6 @@ export function ResourcePanel() {
                       </Box>
                       <Box display="flex" alignItems="center" style={{ gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
                         <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Legend:</Typography>
-                        {/* Distinct glyph per band, not just a recoloured square:
-                            severity was previously encoded by colour alone, which
-                            disappears in greyscale print and for red-green CVD. */}
                         <Typography variant="caption" style={{ fontSize: 9, color: '#10d96e' }}>{'\u25cf healthy'}</Typography>
                         <Typography variant="caption" style={{ fontSize: 9, color: '#f59e0b' }}>{'\u25b2 watch'}</Typography>
                         <Typography variant="caption" style={{ fontSize: 9, color: '#f43f5e' }}>{'\u25a0 pressure'}</Typography>
@@ -2617,64 +3047,6 @@ export function ResourcePanel() {
                 </Box>
               )}
 
-              {/* Spike attribution */}
-              {deepDive.spike_attribution && deepDive.spike_attribution.rows.length > 0 && (() => {
-                const attrRows = deepDive.spike_attribution.rows;
-                const linked = attrRows.filter((r) => r.concurrent_jobs > 0);
-                const unlinked = attrRows.filter((r) => !r.concurrent_jobs);
-                // Attributed spikes first. An unattributed spike is still a real
-                // spike worth seeing, but interleaving it with attributed ones in
-                // a table titled "Attribution" implied a job link that the row
-                // explicitly does not have.
-                const ordered = [...linked, ...unlinked].slice(0, 20);
-                const fmtWindow = (row: typeof attrRows[number]) => {
-                  const range = formatSpikeWindow(row.start, row.end);
-                  if (range !== '—') return range;
-                  return row.peak_time ? `${formatUtcDateTime(row.peak_time)} UTC` : '—';
-                };
-                return (
-                <Box style={{ marginTop: 12 }}>
-                  <Typography variant="subtitle2">{'Spike \u2192 Batch Job Attribution'}</Typography>
-                  <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>{deepDive.spike_attribution.summary.caveat}</Typography>
-                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 2, fontSize: 9 }}>
-                    {`One row per detected spike, newest evidence first. ${linked.length} of ${attrRows.length} spike(s) had a Ctrl-M job running in the same window; ${unlinked.length} had none and are listed last. A host that saturates its CPU repeats a near-identical peak on every spike \u2014 read the Spike Window column to tell them apart.`}
-                  </Typography>
-                  <Table size="small" className="pe-table" aria-label="Spike attribution table" style={{ marginTop: 8 }}>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>VM</TableCell>
-                        <TableCell>Metric</TableCell>
-                        <TableCell>Spike Window (UTC)</TableCell>
-                        <TableCell align="right">Peak</TableCell>
-                        <TableCell>Severity</TableCell>
-                        <TableCell align="right">Concurrent Jobs</TableCell>
-                        <TableCell>Heaviest Job</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {ordered.map((row, index) => {
-                        const isLinked = row.concurrent_jobs > 0;
-                        return (
-                        <TableRow key={`${row.vm}-${row.metric}-${row.peak_time || index}`} style={isLinked ? undefined : { opacity: 0.62 }}>
-                          <TableCell>{renderHostId(row.vm)}</TableCell>
-                          <TableCell>{shortMetric(row.metric)}</TableCell>
-                          <TableCell style={{ fontFamily: 'monospace', fontSize: 11 }}>{fmtWindow(row)}</TableCell>
-                          <TableCell align="right">{row.peak != null ? row.peak.toFixed(1) : '\u2014'}</TableCell>
-                          <TableCell><span className="metric-badge" style={{ color: (row.severity || '').startsWith('critical') ? '#f43f5e' : '#f59e0b' }}>{row.severity}</span></TableCell>
-                          <TableCell align="right">{row.concurrent_jobs}</TableCell>
-                          <TableCell>
-                            {row.heaviest
-                              ? `${row.heaviest} (${(row.heaviest_hrs || 0).toFixed(1)}h)`
-                              : <span style={{ color: '#6b7db3', fontStyle: 'italic' }}>no Ctrl-M job overlapped</span>}
-                          </TableCell>
-                        </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </Box>
-                );
-              })()}
             </>
           )}
         </Box>
