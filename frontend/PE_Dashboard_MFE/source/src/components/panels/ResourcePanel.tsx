@@ -2377,151 +2377,6 @@ export function ResourcePanel() {
                       );
                     })}
                   </Box>
-
-                  {/* Detail panel for the selected card */}
-                  {ddDetail && (
-                    <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(244,63,94,.25)', background: 'rgba(244,63,94,.04)', padding: 12 }}>
-                      <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
-                        <span>{'\u26a1'}</span>
-                        <Typography variant="subtitle2" style={{ color: '#f43f5e' }}>ANOMALY &amp; SPIKE EVENTS</Typography>
-                        <Typography variant="caption" color="textSecondary">{ddDetail.rows.length} event{ddDetail.rows.length !== 1 ? 's' : ''} on {deepDiveVm}</Typography>
-                        {ddDetail.ctrlMActive ? (
-                          <span className="metric-badge metric-badge-teal" style={{ fontSize: 8 }} title="Ctrl-M batch job runs are loaded — each spike below is time-joined against overlapping job windows.">{'\ud83d\udd17'} Ctrl-M correlation active</span>
-                        ) : (
-                          <span className="metric-badge" style={{ fontSize: 8, color: '#6b7db3' }} title="Upload a Ctrl-M execution history file in Upload & Intake to correlate these spikes with concurrently-running batch jobs.">Ctrl-M correlation off — no batch data loaded</span>
-                        )}
-                      </Box>
-                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 2 }}>
-                        Source: Azure Monitor {'\u00b7'} Aggregation: Average {'\u00b7'} Grain: {ddDetail.grainLabel} {'\u00b7'} Datapoints: {ddDetail.datapoints}
-                      </Typography>
-                      {ddDetail.ctrlMActive && (
-                        <Typography variant="caption" style={{ display: 'block', fontSize: 9, marginTop: 2, color: '#2dd4bf' }}>
-                          Ctrl-M matches show time overlap only; they do not prove job-to-host causation.
-                        </Typography>
-                      )}
-
-                      {ddDetail.insight && (
-                        <Box style={{ marginTop: 8, borderRadius: 6, border: '1px solid rgba(34,211,238,.25)', background: 'rgba(34,211,238,.08)', padding: '6px 10px' }}>
-                          <Typography variant="caption" style={{ color: '#22d3ee' }}><b style={{ textTransform: 'uppercase', fontSize: 9 }}>Insight</b> {ddDetail.insight}</Typography>
-                        </Box>
-                      )}
-
-                      {ddDetail.rows.length > 0 ? (
-                        <>
-                          <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 8 }}>
-                            Severity rules: <span style={{ color: SEVERITY_COLOR['CRITICAL SUSTAINED'] }}>CRITICAL SUSTAINED</span> {'\u00b7'} <span style={{ color: SEVERITY_COLOR.CRITICAL }}>CRITICAL</span> {'\u00b7'} <span style={{ color: SEVERITY_COLOR.WARNING }}>WARNING</span>
-                          </Typography>
-                          <Table size="small" className="pe-table" aria-label="Anomaly spike events" style={{ marginTop: 6 }}>
-                            <TableHead>
-                              <TableRow>
-                                <TableCell>Severity</TableCell>
-                                <TableCell>Metric</TableCell>
-                                <TableCell>Peak</TableCell>
-                                <TableCell>Window</TableCell>
-                                <TableCell>Duration</TableCell>
-                                <TableCell>Pattern</TableCell>
-                                <TableCell>Detail</TableCell>
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {ddDetail.groupedRows.slice(0, 30).map(({ row: s, recurring, count, days, durations, maxPeak, ctrlM }, i) => {
-                                const sevLabel = (s.severity || 'critical').toUpperCase().replace('_', ' ');
-                                const sevColor = SEVERITY_COLOR[sevLabel] || '#f43f5e';
-                                const start = formatUtcDateTime(s.start);
-                                const end = formatUtcDateTime(s.end);
-                                const durationText = recurring ? formatRecurringDurations(durations) : humanizeDurationMin(durationMinutesFromBounds(s.start, s.end) ?? s.duration_min ?? 0);
-                                const detailText = recurring
-                                  ? `${count} events · durations ${durations.map(humanizeDurationMin).join(', ')}${s.severity_reason ? ` · representative event: ${s.severity_reason}` : ''}`
-                                  : s.severity_reason || '\u2014';
-                                const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
-                                return (
-                                  <TableRow key={i}>
-                                    <TableCell>
-                                      <span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>
-                                      {s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}
-                                      {selectedBaselineConfidence?.degraded && (
-                                        <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }} title={lowConfidenceBaselineTitle(selectedBaselineConfidence)}>
-                                          {'⚠'} low-confidence baseline
-                                        </span>
-                                      )}
-                                    </TableCell>
-                                    <TableCell>{shortMetric(s.metric)}</TableCell>
-                                    <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }}>{count}x</span>}</TableCell>
-                                    <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : `${start} → ${end} UTC`}</TableCell>
-                                    <TableCell style={{ fontSize: 10 }}>{durationText}</TableCell>
-                                    <TableCell style={{ fontSize: 10, color: recurring ? '#f59e0b' : undefined }}>{pattern}</TableCell>
-                                    <TableCell style={{ fontSize: 10 }}>
-                                      <span title={detailText}>{detailText}</span>
-                                      {ctrlM && ctrlM.concurrent_jobs > 0 && (
-                                        <Box style={{ marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
-                                          <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf' }}>
-                                            {'\ud83d\udd17'} {ctrlM.heaviest} ({(ctrlM.heaviest_hrs || 0).toFixed(1)}h) running · {ctrlM.concurrent_jobs} job(s) overlapped · time overlap only
-                                          </Typography>
-                                          {ctrlM.jobs && ctrlM.jobs.length > 1 && (
-                                            <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 2 }}>
-                                              Jobs: {ctrlM.jobs.map((job) => `${job.job} (${(job.hrs || 0).toFixed(1)}h)`).join(' · ')}
-                                            </Typography>
-                                          )}
-                                        </Box>
-                                      )}
-                                    </TableCell>
-                                  </TableRow>
-                                );
-                              })}
-                            </TableBody>
-                          </Table>
-                          {ddDetail.normalMetrics.length > 0 && (
-                            <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 6 }}>
-                              {'\u2713 '}{ddDetail.normalMetrics.length} other graded metric{ddDetail.normalMetrics.length > 1 ? 's' : ''} with no detected anomaly: {ddDetail.normalMetrics.join(', ')}
-                            </Typography>
-                          )}
-                        </>
-                      ) : (
-                        <Box style={{ marginTop: 8, borderRadius: 6, border: '1px solid rgba(16,217,110,.3)', background: 'rgba(16,217,110,.06)', padding: '8px 10px' }}>
-                          <Typography variant="caption" style={{ color: '#10d96e', fontWeight: 700 }}>{'\u2713'} ALL PATTERNS NORMAL</Typography>
-                          {ddDetail.normalMetrics.length > 0 && (
-                            <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9 }}>{ddDetail.normalMetrics.length} graded metrics with no detected anomaly: {ddDetail.normalMetrics.join(', ')}</Typography>
-                          )}
-                        </Box>
-                      )}
-
-                      {deepDiveVmChart && (
-                        <Box style={{ marginTop: 12 }}>
-                          <Typography variant="subtitle2">Unified Time-Series {'\u2014'} All Metrics</Typography>
-                          <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginBottom: 4 }}>
-                            Shaded windows are detected anomaly events. Dotted lines are Azure bucket peaks; average lines remain the primary time series.
-                            {(deepDiveVmChart as (Highcharts.Options & { _hadGap?: boolean }) | null)?._hadGap && ' A broken line marks a bucket Azure did not report \u2014 it is a gap, not interpolated data.'}
-                          </Typography>
-                          {(() => {
-                            const waveforms = deepDive?.vms?.[deepDiveVm]?.waveforms;
-                            if (!waveforms || !Object.keys(waveforms).length) return null;
-                            const riskColor: Record<string, string> = { none: '#10d96e', low: '#22d3ee', medium: '#f59e0b', high: '#f43f5e', critical: '#a855f7' };
-                            return (
-                              <Box style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                <Typography variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 9, color: '#6b7db3' }}>Signal Pattern {'\u2014'} what shape is this metric drawing?</Typography>
-                                <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
-                                  {Object.entries(waveforms).map(([metric, wf]) => {
-                                    const color = riskColor[wf.risk || 'low'] || '#6b7db3';
-                                    return (
-                                      <span
-                                        key={metric}
-                                        className="metric-badge"
-                                        style={{ fontSize: 9, color, borderColor: `${color}40`, background: `${color}1a`, cursor: 'help' }}
-                                        title={`${wf.meaning || ''}${wf.action ? ` \u2192 ${wf.action}` : ''}${wf.confidence_label ? ` (${wf.confidence_label} signal)` : ''}`}
-                                      >
-                                        {wf.icon} {shortMetric(metric)}: {wf.label}
-                                      </span>
-                                    );
-                                  })}
-                                </Box>
-                              </Box>
-                            );
-                          })()}
-                          <HighchartsReact highcharts={Highcharts} options={deepDiveVmChart} />
-                        </Box>
-                      )}
-                    </Box>
-                  )}
                 </Box>
               )}
 
@@ -2531,6 +2386,7 @@ export function ResourcePanel() {
                   <Box display="flex" alignItems="center" style={{ gap: 8 }}>
                     <span>{'\u2705'}</span>
                     <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal</Typography>
+                    <span style={{ fontSize: 9, color: '#6b7db3', marginLeft: 8 }}>click a row to inspect time-series</span>
                   </Box>
                   <Table size="small" className="pe-table" aria-label="Healthy servers" style={{ marginTop: 6 }}>
                     <TableHead>
@@ -2545,9 +2401,16 @@ export function ResourcePanel() {
                       {ddCards.clean.map(({ vmName, vmData }) => {
                         const cpuS = vmData.stats?.['Percentage CPU'];
                         const memS = vmData.stats?.['Available Memory Percentage'];
+                        const isSelected = deepDiveVm === vmName;
                         return (
-                          <TableRow key={vmName} hover onClick={() => setDeepDiveVm(vmName)} style={{ cursor: 'pointer' }}>
-                            <TableCell style={{ fontFamily: 'monospace' }}>{vmName}</TableCell>
+                          <TableRow
+                            key={vmName}
+                            hover
+                            onClick={() => { setDeepDiveVm(vmName); setCorrelatedVms(new Set()); }}
+                            selected={isSelected}
+                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(59,130,246,.15)' : undefined }}
+                          >
+                            <TableCell style={{ fontFamily: 'monospace', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#60a5fa' : undefined }}>{vmName}</TableCell>
                             <TableCell style={{ color: '#3b82f6', fontSize: 11 }}>{cpuS ? `avg ${cpuS.mean}% \u00b7 max ${cpuS.max}%` : '\u2014'}</TableCell>
                             <TableCell style={{ color: '#22d3ee', fontSize: 11 }}>{memS ? `avail ${memS.mean}% \u00b7 min ${memS.min}%` : '\u2014'}</TableCell>
                             <TableCell style={{ color: '#10d96e', fontSize: 11 }}>{'\u2713'} Normal</TableCell>
@@ -2556,6 +2419,175 @@ export function ResourcePanel() {
                       })}
                     </TableBody>
                   </Table>
+                </Box>
+              )}
+
+              {/* Detail panel for the selected card or selected clean VM */}
+              {ddDetail && (
+                <Box style={{
+                  marginTop: 12,
+                  borderRadius: 10,
+                  border: ddDetail.rows.length > 0 ? '1px solid rgba(244,63,94,.25)' : '1px solid rgba(59,130,246,.25)',
+                  background: ddDetail.rows.length > 0 ? 'rgba(244,63,94,.04)' : 'rgba(59,130,246,.04)',
+                  padding: 12
+                }}>
+                  <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                    <span>{ddDetail.rows.length > 0 ? '\u26a1' : '\u2705'}</span>
+                    <Typography variant="subtitle2" style={{ color: ddDetail.rows.length > 0 ? '#f43f5e' : '#38bdf8' }}>
+                      {ddDetail.rows.length > 0 ? 'ANOMALY & SPIKE EVENTS' : 'TELEMETRY & TIME-SERIES'}
+                    </Typography>
+                    <Typography variant="caption" color="textSecondary">
+                      {ddDetail.rows.length > 0
+                        ? `${ddDetail.rows.length} event${ddDetail.rows.length !== 1 ? 's' : ''} on ${deepDiveVm}`
+                        : `Normal baseline on ${deepDiveVm}`}
+                    </Typography>
+                    {ddDetail.ctrlMActive ? (
+                      <span className="metric-badge metric-badge-teal" style={{ fontSize: 8 }} title="Ctrl-M batch job runs are loaded — each spike below is time-joined against overlapping job windows.">{'\ud83d\udd17'} Ctrl-M correlation active</span>
+                    ) : (
+                      <span className="metric-badge" style={{ fontSize: 8, color: '#6b7db3' }} title="Upload a Ctrl-M execution history file in Upload & Intake to correlate these spikes with concurrently-running batch jobs.">Ctrl-M correlation off — no batch data loaded</span>
+                    )}
+                  </Box>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 2 }}>
+                    Source: Azure Monitor {'\u00b7'} Aggregation: Average {'\u00b7'} Grain: {ddDetail.grainLabel} {'\u00b7'} Datapoints: {ddDetail.datapoints}
+                  </Typography>
+                  {ddDetail.ctrlMActive && (
+                    <Typography variant="caption" style={{ display: 'block', fontSize: 9, marginTop: 2, color: '#2dd4bf' }}>
+                      Ctrl-M matches show time overlap only; they do not prove job-to-host causation.
+                    </Typography>
+                  )}
+
+                  {ddDetail.insight && (
+                    <Box style={{ marginTop: 8, borderRadius: 6, border: '1px solid rgba(34,211,238,.25)', background: 'rgba(34,211,238,.08)', padding: '6px 10px' }}>
+                      <Typography variant="caption" style={{ color: '#22d3ee' }}><b style={{ textTransform: 'uppercase', fontSize: 9 }}>Insight</b> {ddDetail.insight}</Typography>
+                    </Box>
+                  )}
+
+                  {ddDetail.rows.length > 0 ? (
+                    <>
+                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 8 }}>
+                        Severity rules: <span style={{ color: SEVERITY_COLOR['CRITICAL SUSTAINED'] }}>CRITICAL SUSTAINED</span> {'\u00b7'} <span style={{ color: SEVERITY_COLOR.CRITICAL }}>CRITICAL</span> {'\u00b7'} <span style={{ color: SEVERITY_COLOR.WARNING }}>WARNING</span>
+                      </Typography>
+                      <Table size="small" className="pe-table" aria-label="Anomaly spike events" style={{ marginTop: 6 }}>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Severity</TableCell>
+                            <TableCell>Metric</TableCell>
+                            <TableCell>Peak</TableCell>
+                            <TableCell>Window</TableCell>
+                            <TableCell>Duration</TableCell>
+                            <TableCell>Pattern</TableCell>
+                            <TableCell>Detail</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {ddDetail.groupedRows.slice(0, 30).map(({ row: s, recurring, count, days, durations, maxPeak, ctrlM }, i) => {
+                            const sevLabel = (s.severity || 'critical').toUpperCase().replace('_', ' ');
+                            const sevColor = SEVERITY_COLOR[sevLabel] || '#f43f5e';
+                            const start = formatUtcDateTime(s.start);
+                            const end = formatUtcDateTime(s.end);
+                            const durationText = recurring ? formatRecurringDurations(durations) : humanizeDurationMin(durationMinutesFromBounds(s.start, s.end) ?? s.duration_min ?? 0);
+                            const detailText = recurring
+                              ? `${count} events · durations ${durations.map(humanizeDurationMin).join(', ')}${s.severity_reason ? ` · representative event: ${s.severity_reason}` : ''}`
+                              : s.severity_reason || '\u2014';
+                            const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
+                            return (
+                              <TableRow key={i}>
+                                <TableCell>
+                                  <span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>
+                                  {s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}
+                                  {selectedBaselineConfidence?.degraded && (
+                                    <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }} title={lowConfidenceBaselineTitle(selectedBaselineConfidence)}>
+                                      {'⚠'} low-confidence baseline
+                                    </span>
+                                  )}
+                                </TableCell>
+                                <TableCell>{shortMetric(s.metric)}</TableCell>
+                                <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }}>{count}x</span>}</TableCell>
+                                <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : `${start} → ${end} UTC`}</TableCell>
+                                <TableCell style={{ fontSize: 10 }}>{durationText}</TableCell>
+                                <TableCell style={{ fontSize: 10, color: recurring ? '#f59e0b' : undefined }}>{pattern}</TableCell>
+                                <TableCell style={{ fontSize: 10 }}>
+                                  <span title={detailText}>{detailText}</span>
+                                  {ctrlM && ctrlM.concurrent_jobs > 0 && (
+                                    <Box style={{ marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
+                                      <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf' }}>
+                                        {'\ud83d\udd17'} {ctrlM.heaviest} ({(ctrlM.heaviest_hrs || 0).toFixed(1)}h) running · {ctrlM.concurrent_jobs} job(s) overlapped · time overlap only
+                                      </Typography>
+                                      {ctrlM.jobs && ctrlM.jobs.length > 1 && (
+                                        <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 2 }}>
+                                          Jobs: {ctrlM.jobs.map((job) => `${job.job} (${(job.hrs || 0).toFixed(1)}h)`).join(' · ')}
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                      {ddDetail.normalMetrics.length > 0 && (
+                        <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 6 }}>
+                          {'\u2713 '}{ddDetail.normalMetrics.length} other graded metric{ddDetail.normalMetrics.length > 1 ? 's' : ''} with no detected anomaly: {ddDetail.normalMetrics.join(', ')}
+                        </Typography>
+                      )}
+                    </>
+                  ) : (
+                    <Box style={{ marginTop: 8, borderRadius: 6, border: '1px solid rgba(16,217,110,.3)', background: 'rgba(16,217,110,.06)', padding: '8px 10px' }}>
+                      <Typography variant="caption" style={{ color: '#10d96e', fontWeight: 700 }}>{'\u2713'} ALL PATTERNS NORMAL</Typography>
+                      {ddDetail.normalMetrics.length > 0 && (
+                        <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9 }}>{ddDetail.normalMetrics.length} graded metrics with no detected anomaly: {ddDetail.normalMetrics.join(', ')}</Typography>
+                      )}
+                    </Box>
+                  )}
+
+                  {deepDiveVmChart && (
+                    <Box style={{ marginTop: 12 }}>
+                      <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
+                        <Typography variant="subtitle2">Unified Time-Series {'\u2014'} All Metrics ({deepDiveVm})</Typography>
+                        <Box display="flex" alignItems="center" style={{ gap: 12 }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows Azure Monitor's timestamp-aligned Maximum aggregation beside the Average series, exposing short peaks that average values can hide.">
+                            <input type="checkbox" checked={ddShowMaxOverlay} onChange={(e) => setDdShowMaxOverlay(e.target.checked)} style={{ accentColor: '#3b82f6' }} />
+                            <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Avg + Max</Typography>
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows the lowest observed Average sample in this window.">
+                            <input type="checkbox" checked={ddShowMinOverlay} onChange={(e) => setDdShowMinOverlay(e.target.checked)} style={{ accentColor: '#3b82f6' }} />
+                            <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>Show low-water mark</Typography>
+                          </label>
+                        </Box>
+                      </Box>
+                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginBottom: 4 }}>
+                        Shaded windows are detected anomaly events. Dotted lines are Azure bucket peaks; average lines remain the primary time series.
+                        {(deepDiveVmChart as (Highcharts.Options & { _hadGap?: boolean }) | null)?._hadGap && ' A broken line marks a bucket Azure did not report \u2014 it is a gap, not interpolated data.'}
+                      </Typography>
+                      {(() => {
+                        const waveforms = deepDive?.vms?.[deepDiveVm]?.waveforms;
+                        if (!waveforms || !Object.keys(waveforms).length) return null;
+                        const riskColor: Record<string, string> = { none: '#10d96e', low: '#22d3ee', medium: '#f59e0b', high: '#f43f5e', critical: '#a855f7' };
+                        return (
+                          <Box style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <Typography variant="caption" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 9, color: '#6b7db3' }}>Signal Pattern {'\u2014'} what shape is this metric drawing?</Typography>
+                            <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+                              {Object.entries(waveforms).map(([metric, wf]) => {
+                                const color = riskColor[wf.risk || 'low'] || '#6b7db3';
+                                return (
+                                  <span
+                                    key={metric}
+                                    className="metric-badge"
+                                    style={{ fontSize: 9, color, borderColor: `${color}40`, background: `${color}1a`, cursor: 'help' }}
+                                    title={`${wf.meaning || ''}${wf.action ? ` \u2192 ${wf.action}` : ''}${wf.confidence_label ? ` (${wf.confidence_label} signal)` : ''}`}
+                                  >
+                                    {wf.icon} {shortMetric(metric)}: {wf.label}
+                                  </span>
+                                );
+                              })}
+                            </Box>
+                          </Box>
+                        );
+                      })()}
+                      <HighchartsReact highcharts={Highcharts} options={deepDiveVmChart} />
+                    </Box>
+                  )}
                 </Box>
               )}
 

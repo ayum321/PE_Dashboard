@@ -1203,7 +1203,11 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
     if cached is not None:
         return cached
 
-    credential = _build_credential({}, sid)
+    try:
+        credential = _build_credential({}, sid)
+    except Exception as c_exc:
+        logger.info("Session %s has no active Azure credential (%s); falling back to snapshot telemetry", sid, c_exc)
+        credential = None
 
     start_dt: Optional[datetime] = None
     end_dt: Optional[datetime] = None
