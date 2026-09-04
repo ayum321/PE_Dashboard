@@ -100,6 +100,9 @@ interface ServerRow {
   type?: string;
   environment?: string;
   product_group?: string;
+  customer?: string;
+  application?: string;
+  resource_group?: string;
   vm_size?: string;
   vcpus?: number | null;
   vcpu_source?: string;
@@ -766,6 +769,7 @@ export function ResourcePanel() {
   const deepDiveRefreshId = useRef(0);
   const derivedResourceRefreshId = useRef(0);
   const [filter, setFilter] = useState('');
+  const [customerFilter, setCustomerFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [envFilter, setEnvFilter] = useState('');
   const [productGroupFilter, setProductGroupFilter] = useState('');
@@ -964,14 +968,25 @@ export function ResourcePanel() {
 
   const filtered = useMemo(() => {
     return servers.filter((server) => {
-      if (filter && !server.host.toLowerCase().includes(filter.toLowerCase())) return false;
+      if (filter) {
+        const q = filter.toLowerCase().trim();
+        const matches = (server.host || '').toLowerCase().includes(q) ||
+          (server.server || '').toLowerCase().includes(q) ||
+          (server.customer || '').toLowerCase().includes(q) ||
+          (server.application || '').toLowerCase().includes(q) ||
+          (server.location || '').toLowerCase().includes(q) ||
+          (server.resource_group || '').toLowerCase().includes(q);
+        if (!matches) return false;
+      }
+      if (customerFilter && (server.customer || '') !== customerFilter) return false;
       if (typeFilter && (server.type || 'APP').toUpperCase() !== typeFilter) return false;
       if (envFilter && (server.environment || '').toUpperCase() !== envFilter) return false;
       if (productGroupFilter && (server.product_group || '') !== productGroupFilter) return false;
       if (statusFilter && (server.status || 'Unknown') !== statusFilter) return false;
       return true;
     });
-  }, [servers, filter, typeFilter, envFilter, productGroupFilter, statusFilter]);
+  }, [servers, filter, customerFilter, typeFilter, envFilter, productGroupFilter, statusFilter]);
+  const customers = useMemo(() => Array.from(new Set(servers.map((s) => s.customer).filter(Boolean))) as string[], [servers]);
   const productGroups = useMemo(() => Array.from(new Set(servers.map((s) => s.product_group).filter(Boolean))) as string[], [servers]);
   const sorted = useMemo(() => {
     const rows = [...filtered];
@@ -1867,7 +1882,13 @@ export function ResourcePanel() {
       )}
 
       <Box className={classes.controls}>
-        <TextField size="small" label="Filter by host" value={filter} onChange={(event) => setFilter(event.target.value)} />
+        <TextField size="small" label="Filter host / customer" value={filter} onChange={(event) => setFilter(event.target.value)} />
+        {customers.length > 1 && (
+          <TextField size="small" select label="Customer" value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }} style={{ minWidth: 140 }}>
+            <option value="">All</option>
+            {customers.map((c) => <option key={c} value={c}>{c}</option>)}
+          </TextField>
+        )}
         <TextField size="small" select label="Type" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }} style={{ minWidth: 100 }}>
           <option value="">All</option>
           <option value="APP">APP</option>
@@ -1949,6 +1970,11 @@ export function ResourcePanel() {
               <TableCell style={{ fontFamily: 'monospace' }} title={server.host}>
                 {server.server || server.host}
                 {server.dual_pressure && <span className="metric-badge metric-badge-red" style={{ fontSize: 8, marginLeft: 4 }} title={'DUAL PRESSURE: CPU \u226580% + Memory \u226585% \u2014 severe resource exhaustion'}>DUAL</span>}
+                {(server.customer || server.application) && (
+                  <Typography variant="caption" style={{ display: 'block', fontSize: 8, color: '#93c5fd', opacity: 0.9 }}>
+                    {server.customer ? `${server.customer}` : ''}{server.customer && server.application ? ' \u00b7 ' : ''}{server.application || ''}
+                  </Typography>
+                )}
               </TableCell>
               <TableCell>{server.type || '\u2014'}</TableCell>
               <TableCell>

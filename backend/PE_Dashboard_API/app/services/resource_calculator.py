@@ -425,6 +425,10 @@ def normalize_server(s: dict) -> Dict[str, Any]:
         "vcpu_source":   s.get("vcpu_source") or "",
         "tags":          s.get("tags") or {},
         "product_group": s.get("product_group") or "",
+        "customer":      s.get("customer") or (s.get("tags") or {}).get("CustomerName") or (s.get("tags") or {}).get("Customer") or "",
+        "application":   s.get("application") or (s.get("tags") or {}).get("Application") or "",
+        "location":      s.get("location") or "",
+        "resource_group":s.get("resource_group") or s.get("rg") or "",
     }
 
 

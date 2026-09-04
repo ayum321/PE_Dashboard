@@ -77,8 +77,15 @@ function getVmEnv(vm: AzureVm): string {
 
 function customerOf(vm: AzureVm): string {
   if (vm.customer?.trim()) return vm.customer.trim();
-  const aliases = new Set(['customername', 'customer', 'clientname', 'client']);
-  for (const [key, value] of Object.entries(vm.tags || {})) {
+  const tags = vm.tags || {};
+  for (const k of ['CustomerName', 'customerName', 'ClientName', 'clientName']) {
+    if (tags[k]?.trim()) return tags[k].trim();
+  }
+  for (const k of ['Customer', 'customer', 'Client', 'client']) {
+    if (tags[k]?.trim() && isNaN(Number(tags[k].trim()))) return tags[k].trim();
+  }
+  const aliases = new Set(['customername', 'clientname']);
+  for (const [key, value] of Object.entries(tags)) {
     if (aliases.has(key.toLowerCase()) && String(value || '').trim()) return String(value).trim();
   }
   return UNTAGGED;
@@ -322,7 +329,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
       return;
     }
     setDiscoveredVms(deduped);
-    setSelectedVmIds(new Set());
+    setSelectedVmIds(new Set(deduped.map((v) => v.resource_id)));
     setCollapsedCustomers(new Set());
     setCustomerFilter('ALL');
     setTypeFilters(new Set());

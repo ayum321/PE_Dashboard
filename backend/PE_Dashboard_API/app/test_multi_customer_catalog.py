@@ -78,6 +78,37 @@ class MultiCustomerCatalogTests(unittest.TestCase):
         self.assertTrue(vms)
         self.assertEqual(vms[0]['customer'], 'Target Corp')
 
+    def test_search_vms_unscoped_fallback_returns_catalog(self):
+        vms, expanded = search_vms_with_fallback(None, 'nfm', subscription_ids=[])
+        self.assertTrue(vms)
+        self.assertIn('Nebraska Furniture Mart', vms[0]['customer'])
+
+    def test_build_server_records_and_payload_preserves_server_details(self):
+        from services.azure_monitor import _build_server_records
+        from services.resource_calculator import build_resource_payload
+        subs, vms = get_known_catalog('dhl')
+        self.assertTrue(vms)
+        records = _build_server_records(None, vms, 24)
+        self.assertTrue(records)
+        s0 = records[0]
+        self.assertEqual(s0['customer'], 'DHL Supply Chain')
+        self.assertEqual(s0['application'], 'SCPO')
+        self.assertEqual(s0['environment'], 'PROD')
+        self.assertEqual(s0['location'], 'westeurope')
+        self.assertGreater(s0['cpu_used'], 0.0)
+        self.assertGreater(s0['mem_used'], 0.0)
+        self.assertGreater(s0['mem_total_gb'], 0.0)
+
+        payload = build_resource_payload(records)
+        p_servers = payload.get('servers', [])
+        self.assertTrue(p_servers)
+        p0 = p_servers[0]
+        self.assertEqual(p0['customer'], 'DHL Supply Chain')
+        self.assertEqual(p0['application'], 'SCPO')
+        self.assertEqual(p0['location'], 'westeurope')
+        self.assertGreater(p0['cpu_used'], 0.0)
+        self.assertGreater(p0['mem_used'], 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()
