@@ -112,4 +112,56 @@ describe('AzureFetchModal', () => {
       expect(getByText('Select visible (1)')).toBeDefined();
     });
   });
+
+  it('correctly toggles visible VMs and updates footer count without affecting other customer VMs', async () => {
+    const mockVms = [
+      { resource_id: '/sub/1/vm/targetapp01', name: 'targetapp01', type: 'APP', customer: 'Target Corp', location: 'eastus2' },
+      { resource_id: '/sub/1/vm/targetdb01', name: 'targetdb01', type: 'DB', customer: 'Target Corp', location: 'eastus2' },
+      { resource_id: '/sub/2/vm/costcoapp01', name: 'costcoapp01', type: 'APP', customer: 'Costco Wholesale', location: 'centralus' },
+    ];
+
+    (dashboardApi.searchAzureVms as jest.Mock).mockResolvedValue({
+      total: 3,
+      vms: mockVms,
+    });
+
+    const { getByText, getAllByText, getByLabelText } = render(
+      <AzureFetchModal open={true} onClose={jest.fn()} onFetched={jest.fn()} />
+    );
+
+    await waitFor(() => expect(getByText('All Customers')).toBeDefined());
+    fireEvent.click(getByText('All Customers'));
+
+    await waitFor(() => {
+      expect(getByText('3 VMs · 2 customers')).toBeDefined();
+    });
+
+    // Master header checkbox toggles all visible
+    const masterCheckbox = getByLabelText('Select all visible VMs') as HTMLInputElement;
+    expect(masterCheckbox.checked).toBe(true);
+
+    // Filter to Costco Wholesale
+    fireEvent.click(getAllByText('Costco Wholesale')[0]);
+    await waitFor(() => {
+      expect(getByText('1 of 1 visible')).toBeDefined();
+      expect(getByText(/selected \(3 of 3 total\)/)).toBeDefined();
+    });
+
+    // Toggle the customer group checkbox for Costco
+    const costcoGroupCheckbox = getByLabelText('Select all Costco Wholesale VMs') as HTMLInputElement;
+    expect(costcoGroupCheckbox.checked).toBe(true);
+
+    fireEvent.click(costcoGroupCheckbox);
+    await waitFor(() => {
+      expect(getByText('0 of 1 visible')).toBeDefined();
+      expect(getByText(/selected \(2 of 3 total\)/)).toBeDefined();
+    });
+
+    // Toggle back on via master visible checkbox
+    fireEvent.click(masterCheckbox);
+    await waitFor(() => {
+      expect(getByText('1 of 1 visible')).toBeDefined();
+      expect(getByText(/selected \(3 of 3 total\)/)).toBeDefined();
+    });
+  });
 });

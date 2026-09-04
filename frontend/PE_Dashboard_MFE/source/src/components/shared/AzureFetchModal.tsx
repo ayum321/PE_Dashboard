@@ -103,6 +103,45 @@ function segBtnStyle(active: boolean, accent?: string): React.CSSProperties {
 
 const chipStyle: React.CSSProperties = { fontSize: 9, opacity: 0.8, marginLeft: 2 };
 
+function IndeterminateCheckbox({
+  checked,
+  indeterminate,
+  onChange,
+  title,
+  ariaLabel,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  onChange: () => void;
+  title?: string;
+  ariaLabel?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = Boolean(indeterminate);
+    }
+  }, [indeterminate]);
+
+  return (
+    <input
+      type="checkbox"
+      ref={ref}
+      checked={checked}
+      onChange={onChange}
+      title={title}
+      aria-label={ariaLabel}
+      style={{
+        cursor: 'pointer',
+        accentColor: '#3b82f6',
+        width: 15,
+        height: 15,
+        verticalAlign: 'middle',
+      }}
+    />
+  );
+}
+
 /** Full "Fetch from Azure Monitor" workflow — search/browse → discover → fleet
  * filters (type/env/region/product group) → customer-grouped VM selection →
  * fetch. Ported from the #azure-fetch-modal two-step dialog (index.html/app.js). */
@@ -488,19 +527,32 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   };
   const selectAllVms = () => setSelectedVmIds(new Set(discoveredVms.map((v) => v.resource_id)));
   const clearSelection = () => setSelectedVmIds(new Set());
-  const toggleVisibleVms = (checked: boolean) => {
+  const allVisibleSelected = filteredVms.length > 0 && filteredVms.every((v) => selectedVmIds.has(v.resource_id));
+  const someVisibleSelected = filteredVms.some((v) => selectedVmIds.has(v.resource_id));
+
+  const toggleVisibleVms = (forceSelect?: boolean) => {
+    const shouldSelect = forceSelect !== undefined ? forceSelect : !allVisibleSelected;
     setSelectedVmIds((prev) => {
       const next = new Set(prev);
-      filteredVms.forEach((v) => { if (checked) next.add(v.resource_id); else next.delete(v.resource_id); });
+      filteredVms.forEach((v) => {
+        if (shouldSelect) next.add(v.resource_id);
+        else next.delete(v.resource_id);
+      });
       return next;
     });
   };
-  const customerAllVms = (customer: string) => discoveredVms.filter((v) => customerOf(v) === customer);
-  const toggleCustomerSelection = (customer: string, checked: boolean) => {
+
+  const toggleCustomerSelection = (customer: string, forceSelect?: boolean) => {
     const vmsInGroup = groupedFiltered.get(customer) || [];
+    if (!vmsInGroup.length) return;
+    const allSelected = vmsInGroup.every((v) => selectedVmIds.has(v.resource_id));
+    const shouldSelect = forceSelect !== undefined ? forceSelect : !allSelected;
     setSelectedVmIds((prev) => {
       const next = new Set(prev);
-      vmsInGroup.forEach((v) => { if (checked) next.add(v.resource_id); else next.delete(v.resource_id); });
+      vmsInGroup.forEach((v) => {
+        if (shouldSelect) next.add(v.resource_id);
+        else next.delete(v.resource_id);
+      });
       return next;
     });
   };
@@ -522,9 +574,6 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setPgFilter('ALL');
     setVmSearch('');
   };
-
-  const allVisibleSelected = filteredVms.length > 0 && filteredVms.every((v) => selectedVmIds.has(v.resource_id));
-  const someVisibleSelected = filteredVms.some((v) => selectedVmIds.has(v.resource_id));
 
   const handleFetch = async () => {
     if (!selectedVmIds.size) {
@@ -782,7 +831,12 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               <Box display="flex" style={{ gap: 8, marginLeft: 'auto' }} alignItems="center">
                 <Button size="small" variant="outlined" onClick={selectAllVms} style={{ fontSize: 10 }}>Select all VMs</Button>
                 {filteredVms.length !== discoveredVms.length && (
-                  <Button size="small" variant="outlined" onClick={() => toggleVisibleVms(true)} style={{ fontSize: 10, borderColor: '#3b82f6', color: '#93c5fd' }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => toggleVisibleVms(true)}
+                    style={{ fontSize: 10, borderColor: '#3b82f6', color: '#93c5fd' }}
+                  >
                     Select visible ({filteredVms.length})
                   </Button>
                 )}
@@ -809,7 +863,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               {customerList.length > 1 && (
                 <Box display="flex" alignItems="center" style={{ gap: 8 }}>
                   <span style={filterLabelStyle}>Customer</span>
-                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap', maxHeight: 60, overflowY: 'auto' }}>
+                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap', maxHeight: 110, overflowY: 'auto' }}>
                     <button onClick={() => singleSelect(customerFilter, setCustomerFilter, 'ALL')} style={segBtnStyle(customerFilter === 'ALL')}>All</button>
                     {customerList.map((c) => (
                       <button key={c} onClick={() => singleSelect(customerFilter, setCustomerFilter, c)} style={segBtnStyle(customerFilter === c)}>
@@ -886,7 +940,13 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 <thead style={{ position: 'sticky', top: 0, background: '#0a0f1e', zIndex: 1 }}>
                   <tr>
                     <th style={{ padding: '6px 8px', width: 28 }}>
-                      <input type="checkbox" checked={allVisibleSelected} ref={(el) => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected; }} onChange={(e) => toggleVisibleVms(e.target.checked)} />
+                      <IndeterminateCheckbox
+                        checked={allVisibleSelected}
+                        indeterminate={!allVisibleSelected && someVisibleSelected}
+                        onChange={() => toggleVisibleVms()}
+                        title={allVisibleSelected ? 'Unselect all visible VMs' : 'Select all visible VMs'}
+                        ariaLabel="Select all visible VMs"
+                      />
                     </th>
                     {['VM Name', 'Type', 'Env', 'App', 'Customer', 'Region'].map((h) => (
                       <th key={h} style={thStyle}>{h}</th>
@@ -897,24 +957,30 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   {customerOrder.map((cust) => {
                     const vmsInGroup = groupedFiltered.get(cust) || [];
                     const collapsed = collapsedCustomers.has(cust);
-                    const allCustVms = customerAllVms(cust);
-                    const allSel = allCustVms.every((v) => selectedVmIds.has(v.resource_id));
-                    const anySel = allCustVms.some((v) => selectedVmIds.has(v.resource_id));
+                    const groupSelectedCount = vmsInGroup.filter((v) => selectedVmIds.has(v.resource_id)).length;
+                    const groupAllSel = vmsInGroup.length > 0 && groupSelectedCount === vmsInGroup.length;
+                    const groupAnySel = groupSelectedCount > 0 && groupSelectedCount < vmsInGroup.length;
                     const typeBreakdown: Record<string, number> = {};
                     vmsInGroup.forEach((v) => { typeBreakdown[v.type] = (typeBreakdown[v.type] || 0) + 1; });
                     return (
                       <React.Fragment key={cust}>
                         {multiCustomer && (
                           <tr style={{ background: 'rgba(59,130,246,.05)', borderTop: '2px solid #213060' }}>
-                            <td style={{ padding: '6px 8px' }}>
-                              <input type="checkbox" checked={allSel} ref={(el) => { if (el) el.indeterminate = !allSel && anySel; }} onChange={(e) => toggleCustomerSelection(cust, e.target.checked)} />
+                            <td style={{ padding: '6px 8px', width: 28 }}>
+                              <IndeterminateCheckbox
+                                checked={groupAllSel}
+                                indeterminate={groupAnySel}
+                                onChange={() => toggleCustomerSelection(cust)}
+                                title={groupAllSel ? `Unselect all visible ${cust} VMs` : `Select all visible ${cust} VMs`}
+                                ariaLabel={`Select all ${cust} VMs`}
+                              />
                             </td>
                             <td colSpan={6} style={{ padding: '6px 8px' }}>
                               <button onClick={() => toggleCustomerGroup(cust)} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6, color: '#f0f4ff' }}>
                                 <span style={{ display: 'inline-block', transform: collapsed ? 'rotate(-90deg)' : 'none', fontSize: 9 }}>&#9660;</span>
                                 <span style={{ fontWeight: 700, fontSize: 11 }}>{cust}</span>
                                 <span style={{ color: '#6b7db3', fontSize: 10 }}>
-                                  {vmsInGroup.length} VM{vmsInGroup.length !== 1 ? 's' : ''} {'\u00b7'} {Object.entries(typeBreakdown).map(([t, c]) => `${t}:${c}`).join(' \u00b7 ')}
+                                  {vmsInGroup.length} VM{vmsInGroup.length !== 1 ? 's' : ''} ({groupSelectedCount} selected) {'\u00b7'} {Object.entries(typeBreakdown).map(([t, c]) => `${t}:${c}`).join(' \u00b7 ')}
                                 </span>
                               </button>
                             </td>
@@ -924,8 +990,13 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                           const env = getVmEnv(vm);
                           return (
                             <tr key={vm.resource_id} style={{ borderTop: '1px solid rgba(33,48,96,.3)' }}>
-                              <td style={{ padding: '5px 8px' }}>
-                                <input type="checkbox" checked={selectedVmIds.has(vm.resource_id)} onChange={() => toggleVm(vm.resource_id)} />
+                              <td style={{ padding: '5px 8px', width: 28 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedVmIds.has(vm.resource_id)}
+                                  onChange={() => toggleVm(vm.resource_id)}
+                                  style={{ cursor: 'pointer', accentColor: '#3b82f6', width: 15, height: 15, verticalAlign: 'middle' }}
+                                />
                               </td>
                               <td style={{ padding: '5px 8px', fontFamily: 'monospace', color: '#f0f4ff' }}>{vm.name}</td>
                               <td style={{ padding: '5px 8px' }}><span style={{ color: TYPE_COLOR[vm.type] || '#6b7db3', fontWeight: 700, fontSize: 10 }}>{vm.type}</span></td>
@@ -957,7 +1028,23 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   <option value="720">30d</option>
                 </select>
               </Box>
-              <Typography variant="caption" color="textSecondary">{selectedVmIds.size} of {discoveredVms.length} selected</Typography>
+              {(() => {
+                const visibleSelectedCount = filteredVms.filter((v) => selectedVmIds.has(v.resource_id)).length;
+                const hasFilter = filteredVms.length !== discoveredVms.length;
+                return (
+                  <Typography variant="caption" color="textSecondary">
+                    {hasFilter ? (
+                      <>
+                        <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{visibleSelectedCount} of {filteredVms.length} visible</span> selected ({selectedVmIds.size} of {discoveredVms.length} total)
+                      </>
+                    ) : (
+                      <>
+                        <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{selectedVmIds.size} of {discoveredVms.length}</span> selected
+                      </>
+                    )}
+                  </Typography>
+                );
+              })()}
               <Box display="flex" style={{ marginLeft: 'auto', gap: 8 }}>
                 <Button variant="contained" color="primary" onClick={handleFetch} disabled={fetchBusy || !selectedVmIds.size}>
                   {fetchBusy ? <CircularProgress size={16} color="inherit" /> : 'Fetch Metrics'}
