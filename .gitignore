@@ -107,3 +107,6 @@ graphify-out/
 .server_pid_actual_validation
 server_stdout_actual_validation.txt
 server_stderr_actual_validation.txt
+
+output/
+

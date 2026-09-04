@@ -138,6 +138,17 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    import logging
+    logging.getLogger("pe_dashboard.api").exception("Unhandled exception on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {exc}"},
+    )
+
+
+
 # ── Static files with cache-busting headers ─────────────────────
 # StaticFiles as a mounted sub-app bypasses parent middleware,
 # so we serve static files through a catch-all route instead.

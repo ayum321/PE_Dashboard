@@ -209,17 +209,27 @@ const readError = async (response: Response): Promise<string> => {
 };
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
-    ...init,
-    // Required so the pe_sid session cookie (Azure credential cache, batch
-    // session cache, etc.) is sent on cross-origin requests from the MFE
-    // dev server to its same-host local API (for example localhost:8765).
-    credentials: 'include',
-    headers: {
-      Accept: 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${getApiBaseUrl()}${path}`, {
+      ...init,
+      // Required so the pe_sid session cookie (Azure credential cache, batch
+      // session cache, etc.) is sent on cross-origin requests from the MFE
+      // dev server to its same-host local API (for example localhost:8765).
+      credentials: 'include',
+      headers: {
+        Accept: 'application/json',
+        ...(init?.headers || {}),
+      },
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && /NetworkError|Failed to fetch/i.test(err.message)) {
+      throw new Error(
+        `Cannot connect to local API server (${getApiBaseUrl()}). Please ensure the backend is running on port 8765 (start-api.bat).`
+      );
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     throw new Error(await readError(response));

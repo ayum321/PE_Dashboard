@@ -427,6 +427,12 @@ def azure_browser_login(request: Request, response: Response) -> Dict[str, Any]:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=str(exc),
             ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during Azure browser sign-in: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Azure sign-in failed: {exc}",
+            ) from exc
 
         if info.get("device_code_required"):
             return info
