@@ -300,24 +300,19 @@ def _login_lock(session_id=None):
         return _login_locks.setdefault(sid, _threading.Lock())
 
 
-def _preflight_auth_network(timeout: float = 6.0) -> None:
-    """Quick DNS + TCP check for login.microsoftonline.com (IPv4, port 443).
-    Raises AzureConfigError fast if network is down — avoids 180s SDK timeout."""
+def _preflight_auth_network(timeout: float = 3.0) -> None:
+    """Quick non-blocking DNS + TCP check for login.microsoftonline.com."""
     import socket as _s
     try:
         addrs = _s.getaddrinfo("login.microsoftonline.com", 443,
                                _s.AF_INET, _s.SOCK_STREAM)
         if not addrs:
-            raise AzureNetworkError("DNS lookup for login.microsoftonline.com returned no IPv4 addresses.")
+            return
         ip = addrs[0][4][0]
         sock = _s.create_connection((ip, 443), timeout=timeout)
         sock.close()
-    except AzureNetworkError:
-        raise
-    except OSError as exc:
-        raise AzureNetworkError(
-            f"Cannot reach login.microsoftonline.com — check network/VPN. ({exc})"
-        ) from exc
+    except Exception as exc:
+        logger.warning("Preflight TCP check to login.microsoftonline.com (non-fatal): %s", exc)
 
 
 _device_flow_lock = _threading.RLock()
@@ -415,7 +410,25 @@ def browser_login(session_id=None) -> dict:
         if existing is not None and existing_info.get("logged_in"):
             return existing_info
 
-        # In container / headless Linux, launch Device Code flow so user can sign in on their laptop
+        # 1. In container / cloud environment, check ambient Managed Identity first
+        try:
+            from azure.identity import DefaultAzureCredential
+            def_cred = DefaultAzureCredential()
+            def_cred.get_token("https://management.azure.com/.default")
+            logger.info("Azure auth: successfully authenticated via DefaultAzureCredential / ambient identity")
+            info = {
+                "logged_in": True,
+                "name": "Azure Service Identity",
+                "display_name": "Azure Service Identity",
+                "tenant_id": "",
+                "method": "browser",
+            }
+            _set_session(session_id, def_cred, info)
+            return info
+        except Exception as def_exc:
+            logger.info("Ambient DefaultAzureCredential not available: %s", def_exc)
+
+        # 2. In container / headless Linux, launch Device Code flow so user can sign in on their laptop
         is_headless = os.path.exists("/app") or os.environ.get("KUBERNETES_SERVICE_HOST") is not None or not os.environ.get("DISPLAY")
         if is_headless and sys.platform != "win32":
             return start_device_code_auth(session_id)
@@ -487,8 +500,24 @@ def _build_credential(cfg: dict, session_id=None):
         except Exception:
             pass
 
+    # Check for ambient Managed Identity (AKS / container environment)
+    try:
+        from azure.identity import DefaultAzureCredential
+        default_cred = DefaultAzureCredential()
+        default_cred.get_token("https://management.azure.com/.default")
+        logger.info("Azure auth: authenticated via ambient identity")
+        _set_session(session_id, default_cred, {
+            "logged_in": True,
+            "name": "Azure Service Identity",
+            "display_name": "Azure Service Identity",
+            "method": "browser"
+        })
+        return default_cred
+    except Exception:
+        pass
+
     raise AzureConfigError(
-        "Not authenticated. Click 'Sign in with Azure' to authenticate."
+        "Not authenticated. Enter your Subscription ID below or sign in."
     )
 
 

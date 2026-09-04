@@ -13,7 +13,7 @@
  * ===============================================================================================================
  */
 
-import React, { useContext } from 'react';
+import React, { useContext, useEffect } from 'react';
 import { Redirect, Route, Switch } from 'react-router-dom';
 import { Box, ThemeProvider } from '@material-ui/core';
 import { LuiBackground } from '@jda/lui-common-component-library';
@@ -40,6 +40,10 @@ import { SettingsPanel } from './components/panels/SettingsPanel';
 function App() {
   useDomHistoryMonitor();
   const { theme } = useContext(EventContext);
+
+  useEffect(() => {
+    document.title = 'PE Audit Dashboard';
+  }, []);
 
   return (
     <div className="app">

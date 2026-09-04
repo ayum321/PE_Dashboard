@@ -232,7 +232,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     const modalToken = modalGeneration.current;
     signInInFlight.current = true;
     setAuthBusy(true);
-    setDiscoverStatus({ text: 'Waiting for Azure browser sign-in to complete\u2026', tone: 'muted' });
+    setDiscoverStatus({ text: 'Connecting to Azure\u2026', tone: 'muted' });
     try {
       const result = await connectAzure();
       if (modalToken !== modalGeneration.current) return;
@@ -558,7 +558,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
 
   if (!open) return null;
 
-  const connected = authInfo?.method === 'browser';
+  const connected = Boolean(authInfo?.method === 'browser' || authInfo?.logged_in || (authInfo?.name && authInfo?.name !== ''));
   const statusColor = { muted: '#6b7db3', amber: '#f59e0b', red: '#f87171', green: '#10d96e' };
 
   return (
@@ -597,6 +597,26 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
           )}
         </Box>
 
+        {/* Status notification banner (always visible when present) */}
+        {discoverStatus && (
+          <Box style={{
+            borderRadius: 8,
+            padding: '8px 14px',
+            background: discoverStatus.tone === 'red' ? 'rgba(239, 68, 68, 0.15)' :
+                        discoverStatus.tone === 'amber' ? 'rgba(245, 158, 11, 0.15)' :
+                        discoverStatus.tone === 'green' ? 'rgba(16, 217, 110, 0.15)' : 'rgba(59, 130, 246, 0.15)',
+            border: `1px solid ${statusColor[discoverStatus.tone]}`,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor[discoverStatus.tone], display: 'inline-block' }} />
+            <Typography variant="caption" style={{ color: statusColor[discoverStatus.tone], fontWeight: 600, fontSize: 12 }}>
+              {discoverStatus.text}
+            </Typography>
+          </Box>
+        )}
+
         {/* Device Code Instructions Banner */}
         {deviceCodeInfo && (
           <Box style={{ borderRadius: 8, border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -615,7 +635,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
           </Box>
         )}
 
-        {connected && step === 1 && (
+        {step === 1 && (
           <Box style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
             <Box style={{ borderRadius: 10, border: '1px solid #213060', padding: 16 }}>
               <Typography variant="caption" style={{ display: 'block', color: '#6b7db3', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', fontSize: 9, marginBottom: 8 }}>
@@ -626,7 +646,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-                  placeholder={'e.g. ShopRite, tsbh731403001, Oracle DB\u2026'}
+                  placeholder={'e.g. Nebraska Furniture Mart, Nfm, tsbh731403001, Oracle DB\u2026'}
                   style={{ flex: 1, background: 'rgba(0,0,0,.4)', border: '1px solid #213060', borderRadius: 6, padding: '10px 14px', color: '#e2e8f0', fontSize: 13, outline: 'none' }}
                 />
                 <Button variant="contained" color="primary" onClick={handleSearch} disabled={searchBusy}>
@@ -650,7 +670,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                       ? 'Select subscription'
                       : subscriptionsWarming
                         ? 'Loading subscriptions\u2026'
-                        : 'No accessible subscriptions found'}
+                        : 'Select or paste subscription ID below'}
                   </option>
                   {subscriptions.map((sub) => <option key={sub.id} value={sub.id}>{sub.name || sub.id}</option>)}
                 </select>
@@ -678,11 +698,10 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 style={{ flex: 1, background: 'rgba(0,0,0,.4)', border: '1px solid #213060', borderRadius: 6, padding: '6px 10px', color: '#e2e8f0', fontSize: 12, outline: 'none' }}
               />
             </Box>
-            {discoverStatus && <Typography variant="caption" style={{ color: statusColor[discoverStatus.tone] }}>{discoverStatus.text}</Typography>}
           </Box>
         )}
 
-        {connected && step === 2 && (
+        {step === 2 && (
           <Box style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10, overflow: 'hidden' }}>
             {/* Summary strip */}
             <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -870,11 +889,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
           </Box>
         )}
 
-        {!connected && (
-          <Box style={{ padding: 24, textAlign: 'center' }}>
-            <Typography variant="body2" color="textSecondary">Sign in with Browser to discover and fetch live Azure VM metrics.</Typography>
-          </Box>
-        )}
+
       </Box>
     </Box>
   );
