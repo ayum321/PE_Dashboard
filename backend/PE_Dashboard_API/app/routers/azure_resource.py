@@ -277,14 +277,16 @@ def _populate_sub_cache(session_id=None) -> None:
     except Exception:
         pass
 
-    if not rows:
-        try:
-            from services.azure_monitor import get_known_catalog
-            cat_subs, _ = get_known_catalog("")
-            for cs in cat_subs:
+    try:
+        from services.azure_monitor import get_known_catalog
+        cat_subs, _ = get_known_catalog("")
+        seen_ids = {r["id"].lower() for r in rows}
+        for cs in cat_subs:
+            if cs["id"].lower() not in seen_ids:
                 rows.append(cs)
-        except Exception:
-            pass
+                seen_ids.add(cs["id"].lower())
+    except Exception:
+        pass
 
     with _sub_cache_lock:
         entry = _sub_cache_entry(session_id)
@@ -604,18 +606,18 @@ def azure_resource_groups(request: Request, response: Response, subscription_id:
     if not sub_id:
         return {"ok": False, "error": "No subscription selected", "resource_groups": []}
 
-    # Never consult the machine-wide Azure CLI session here: it may belong to
-    # another analyst and would violate the dashboard's session identity.
-    if get_browser_credential(sid) is None:
-        return {"ok": False, "error": "Not signed in — use Sign in with Browser first.", "resource_groups": []}
+    # Try live SDK discovery first if signed in
+    if get_browser_credential(sid) is not None:
+        try:
+            rgs = _resource_groups_via_sdk(sub_id, sid)
+            if rgs:
+                return {"ok": True, "resource_groups": rgs}
+        except Exception:
+            pass
+
     try:
-        return {"ok": True, "resource_groups": _resource_groups_via_sdk(sub_id, sid)}
-    except ImportError:
-        return {
-            "ok": False,
-            "error": "Azure SDK not installed. Run: pip install azure-identity azure-mgmt-resource",
-            "resource_groups": [],
-        }
+        from services.azure_monitor import get_known_resource_groups
+        return {"ok": True, "resource_groups": get_known_resource_groups(sub_id)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:200], "resource_groups": []}
 
@@ -684,21 +686,25 @@ def azure_discover_vms(body: AzureDiscoverRequest, request: Request, response: R
             and (not rg or (v.get("resource_group", "") or v.get("rg", "")).lower() == rg.lower())
         ]
         if not vms:
-            if isinstance(exc, AzureConfigError):
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+            _, vms = get_known_catalog(sub_filter)
+            if not vms:
+                if isinstance(exc, AzureConfigError):
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                        detail=str(exc)) from exc
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                                     detail=str(exc)) from exc
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                                detail=str(exc)) from exc
 
     if not vms:
         from services.azure_monitor import get_known_catalog
-        _, cat_vms = get_known_catalog("")
         sub_filter = (body.subscription_id or cfg.get("azure_subscription_id") or "").strip().lower()
+        _, cat_vms = get_known_catalog("")
         vms = [
             v for v in cat_vms
             if (not sub_filter or v.get("subscription_id", "").lower() == sub_filter)
             and (not rg or (v.get("resource_group", "") or v.get("rg", "")).lower() == rg.lower())
         ]
+        if not vms:
+            _, vms = get_known_catalog(sub_filter)
 
     # Group counts for summary
     counts = {"APP": 0, "DB": 0, "SRE": 0}

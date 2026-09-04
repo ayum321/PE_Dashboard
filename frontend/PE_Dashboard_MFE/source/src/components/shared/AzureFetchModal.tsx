@@ -332,20 +332,17 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setDiscoverStatus({ text: statusMsg, tone: 'green' });
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) {
-      setDiscoverStatus({ text: 'Enter a search term (customer name, server name, tag\u2026).', tone: 'amber' });
-      return;
-    }
+  const handleSearch = async (overrideQuery?: string) => {
+    const q = (overrideQuery !== undefined ? overrideQuery : searchQuery).trim() || '*';
     setSearchBusy(true);
     const scopeMsg = selectedSub ? `in subscription ${selectedSub}` : 'across accessible subscriptions';
-    setDiscoverStatus({ text: `Searching ${scopeMsg} for "${searchQuery}"\u2026`, tone: 'muted' });
+    setDiscoverStatus({ text: `Searching ${scopeMsg} for "${q === '*' ? 'all customers' : q}"\u2026`, tone: 'muted' });
     try {
       const data = await searchAzureVms({
-        query: searchQuery,
+        query: q,
         subscription_ids: selectedSub ? [selectedSub] : undefined,
       });
-      onDiscovered(data, `Found ${data.total} VMs matching "${searchQuery}"`);
+      onDiscovered(data, `Found ${data.total} VMs${q !== '*' ? ` matching "${q}"` : ''}`);
     } catch (error) {
       setDiscoverStatus({ text: error instanceof Error ? error.message : 'Search failed.', tone: 'red' });
     } finally {
@@ -645,13 +642,48 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 <input
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-                  placeholder={'e.g. Nebraska Furniture Mart, Nfm, tsbh731403001, Oracle DB\u2026'}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void handleSearch(); }}
+                  placeholder={'Search any customer (e.g. Target, Walmart, NFM, Kroger, DHL, PepsiCo), server, or tag\u2026'}
                   style={{ flex: 1, background: 'rgba(0,0,0,.4)', border: '1px solid #213060', borderRadius: 6, padding: '10px 14px', color: '#e2e8f0', fontSize: 13, outline: 'none' }}
                 />
-                <Button variant="contained" color="primary" onClick={handleSearch} disabled={searchBusy}>
+                <Button variant="contained" color="primary" onClick={() => handleSearch()} disabled={searchBusy}>
                   {searchBusy ? <CircularProgress size={16} color="inherit" /> : 'Search'}
                 </Button>
+              </Box>
+              <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                <Typography variant="caption" style={{ color: '#6b7db3', fontSize: 10, fontWeight: 600 }}>Quick select:</Typography>
+                {[
+                  { label: 'All Customers', q: '*' },
+                  { label: 'NFM', q: 'nfm' },
+                  { label: 'Target', q: 'target' },
+                  { label: 'Walmart', q: 'walmart' },
+                  { label: 'Kroger', q: 'kroger' },
+                  { label: 'DHL', q: 'dhl' },
+                  { label: 'PepsiCo', q: 'pepsi' },
+                  { label: 'Home Depot', q: 'homedepot' },
+                  { label: 'Demo', q: 'example' },
+                ].map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery(item.q === '*' ? '' : item.label);
+                      void handleSearch(item.q);
+                    }}
+                    style={{
+                      background: 'rgba(59, 130, 246, 0.12)',
+                      border: '1px solid rgba(59, 130, 246, 0.35)',
+                      borderRadius: 12,
+                      padding: '3px 10px',
+                      color: '#93c5fd',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
               </Box>
             </Box>
 
