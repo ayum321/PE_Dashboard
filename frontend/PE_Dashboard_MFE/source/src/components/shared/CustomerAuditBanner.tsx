@@ -49,7 +49,7 @@ function shortHash(s: string): string {
  * deterministic audit id tile, matching the real dashboard's header hero.
  */
 export function CustomerAuditBanner() {
-  const { data } = useAppData();
+  const { data, lastSyncTime, isLiveSyncing } = useAppData();
   const batch = data.batch as CustomerIdentityPayload | null;
   const resource = data.resource as CustomerIdentityPayload | null;
   const sow = data.sowBaseline as CustomerIdentityPayload | null;
@@ -212,6 +212,14 @@ export function CustomerAuditBanner() {
               {envBadge && <span className="metric-badge" style={{ fontSize: 8 }}>{envBadge}</span>}
               {mismatch && <span className="metric-badge metric-badge-red" style={{ fontSize: 8 }}>CUSTOMER MISMATCH</span>}
               {corrected && !mismatch && <span className="metric-badge metric-badge-green" style={{ fontSize: 8 }}>IDENTITY CORRECTED</span>}
+              <span
+                className="metric-badge metric-badge-green"
+                style={{ fontSize: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                title={lastSyncTime ? `Live synchronized at ${new Date(lastSyncTime).toLocaleTimeString()}` : 'Live synchronized session'}
+              >
+                <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#10d96e', display: 'inline-block' }} />
+                {isLiveSyncing ? 'SYNCING…' : 'LIVE · AUTO-UPDATED'}
+              </span>
             </Box>
           </Box>
         </Box>
@@ -244,7 +252,7 @@ export function CustomerAuditBanner() {
               </Box>
               <Typography variant="body2" style={{ fontFamily: 'monospace', fontWeight: 700, color: '#f0f4ff' }}>{`#${pulse.auditId}`}</Typography>
               <Typography variant="caption" style={{ color: '#6b7db3', fontSize: 10 }}>
-                {`live \u00b7 ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
+                {`live \u00b7 ${lastSyncTime ? new Date(lastSyncTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
               </Typography>
             </Box>
           </Box>

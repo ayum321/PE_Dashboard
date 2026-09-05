@@ -86,8 +86,23 @@ const normalizeStringList = (value: unknown): string[] =>
       .filter(Boolean)
     : [];
 
+export const normalizeCustomer = (name: unknown): string => {
+  if (typeof name !== 'string') return '';
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+};
+
+export const isCustomerChange = (current: string | null | undefined, incoming: string | null | undefined): boolean => {
+  const normCurrent = normalizeCustomer(current);
+  const normIncoming = normalizeCustomer(incoming);
+  if (!normCurrent || !normIncoming) return false;
+  return normCurrent !== normIncoming;
+};
+
 interface AppDataContextValue {
   data: AppData;
+  lastSyncTime: number | null;
+  isLiveSyncing: boolean;
+  syncLiveState: () => Promise<void>;
   setBatch: (value: DashboardPayload | null) => void;
   setResource: (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => void;
   setSlaMatrix: (value: DashboardPayload | null) => void;
@@ -120,111 +135,293 @@ const settle = <T,>(promise: Promise<T>): Promise<Settled<T>> =>
 
 export const AppDataProvider = ({ children }: { children: React.ReactNode }) => {
   const [data, setData] = useState<AppData>(EMPTY_APP_DATA);
+  const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
+  const [isLiveSyncing, setIsLiveSyncing] = useState<boolean>(false);
+  const isSyncingRef = React.useRef(false);
 
-  // The provider is recreated by a browser refresh and can be bypassed by a
-  // direct route. Restore saved SOW, cached dashboard payloads, and reviewed
-  // products once so refreshes do not blank analysis screens that the backend
-  // already holds for the active session.
-  useEffect(() => {
-    let active = true;
-    Promise.all([settle(getSowState()), settle(getSessionRestore()), settle(getReviewedProducts())])
-      .then(([sowResult, sessionRestoreResult, reviewedProductsResult]) => {
-        if (!active) return;
-        setData((prev) => {
-          const updates: Partial<AppData> = {};
+  const syncLiveState = useCallback(async () => {
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+    setIsLiveSyncing(true);
+    try {
+      const [sowResult, sessionRestoreResult, reviewedProductsResult] = await Promise.all([
+        settle(getSowState()),
+        settle(getSessionRestore()),
+        settle(getReviewedProducts()),
+      ]);
 
-          if (sowResult.status === 'fulfilled') {
-            const baseline = sowResult.value.baseline;
-            const comparison = sowResult.value.compare;
-            if (isEmptyDashboardPayload(prev.sowBaseline) && hasDashboardPayload(baseline)) updates.sowBaseline = baseline;
-            if (isEmptyDashboardPayload(prev.sowCompare) && hasDashboardPayload(comparison)) updates.sowCompare = comparison;
+      setData((prev) => {
+        let current = prev;
+        const restored = sessionRestoreResult.status === 'fulfilled' ? sessionRestoreResult.value : null;
+        const sow = sowResult.status === 'fulfilled' ? sowResult.value : null;
+        const reviewed = reviewedProductsResult.status === 'fulfilled' ? reviewedProductsResult.value : null;
+
+        const restoredCustomer = typeof restored?.customer_name === 'string' && restored.customer_name.trim()
+          ? restored.customer_name.trim()
+          : null;
+
+        // Check if the backend customer changed from what frontend holds
+        const customerSwitched = Boolean(restoredCustomer && isCustomerChange(current.customerName, restoredCustomer));
+        if (customerSwitched && restoredCustomer) {
+          // Complete customer data isolation: wipe old customer state
+          current = {
+            ...EMPTY_APP_DATA,
+            customerName: restoredCustomer,
+          };
+        }
+
+        const updates: Partial<AppData> = {};
+
+        if (sow) {
+          const baseline = sow.baseline;
+          const comparison = sow.compare;
+          if (hasDashboardPayload(baseline)) {
+            if (customerSwitched || isEmptyDashboardPayload(current.sowBaseline)) updates.sowBaseline = baseline;
+          }
+          if (hasDashboardPayload(comparison)) {
+            if (customerSwitched || isEmptyDashboardPayload(current.sowCompare)) updates.sowCompare = comparison;
+          }
+        }
+
+        if (restored) {
+          if (customerSwitched) {
+            // When customer switched, adopt exactly what backend currently holds
+            updates.batch = hasDashboardPayload(restored.batch) ? restored.batch : null;
+            updates.resource = hasDashboardPayload(restored.resource) ? (restored.resource as AppData['resource']) : null;
+            updates.slaMatrix = hasDashboardPayload(restored.sla_matrix) ? restored.sla_matrix : null;
+            updates.benchmark = hasDashboardPayload(restored.benchmark) ? restored.benchmark : null;
+            updates.findings = hasDashboardPayload(restored.findings) ? restored.findings : null;
+            updates.redFlags = hasDashboardPayload(restored.red_flags) ? restored.red_flags : null;
+            updates.peNarrative = hasDashboardPayload(restored.pe_narrative) ? restored.pe_narrative : null;
+            updates.executive = hasDashboardPayload(restored.executive) ? restored.executive : null;
+            updates.finalJudgment = hasDashboardPayload(restored.final_judgment) ? restored.final_judgment : null;
+            updates.customerName = restoredCustomer;
+          } else {
+            // Normal sync without customer switch: fill missing or update
+            if (isEmptyDashboardPayload(current.batch) && hasDashboardPayload(restored.batch)) updates.batch = restored.batch;
+            if (isEmptyDashboardPayload(current.resource) && hasDashboardPayload(restored.resource)) updates.resource = restored.resource as AppData['resource'];
+            if (isEmptyDashboardPayload(current.slaMatrix) && hasDashboardPayload(restored.sla_matrix)) updates.slaMatrix = restored.sla_matrix;
+            if (isEmptyDashboardPayload(current.benchmark) && hasDashboardPayload(restored.benchmark)) updates.benchmark = restored.benchmark;
+            if (isEmptyDashboardPayload(current.findings) && hasDashboardPayload(restored.findings)) updates.findings = restored.findings;
+            if (isEmptyDashboardPayload(current.redFlags) && hasDashboardPayload(restored.red_flags)) updates.redFlags = restored.red_flags;
+            if (isEmptyDashboardPayload(current.peNarrative) && hasDashboardPayload(restored.pe_narrative)) updates.peNarrative = restored.pe_narrative;
+            if (isEmptyDashboardPayload(current.executive) && hasDashboardPayload(restored.executive)) updates.executive = restored.executive;
+            if (isEmptyDashboardPayload(current.finalJudgment) && hasDashboardPayload(restored.final_judgment)) updates.finalJudgment = restored.final_judgment;
+            if ((!current.customerName || !current.customerName.trim()) && restoredCustomer) {
+              updates.customerName = restoredCustomer;
+            }
           }
 
-          if (sessionRestoreResult.status === 'fulfilled') {
-            const restored = sessionRestoreResult.value;
-            if (isEmptyDashboardPayload(prev.batch) && hasDashboardPayload(restored.batch)) updates.batch = restored.batch;
-            if (isEmptyDashboardPayload(prev.resource) && hasDashboardPayload(restored.resource)) updates.resource = restored.resource as AppData['resource'];
-            if (isEmptyDashboardPayload(prev.slaMatrix) && hasDashboardPayload(restored.sla_matrix)) updates.slaMatrix = restored.sla_matrix;
-            if (isEmptyDashboardPayload(prev.benchmark) && hasDashboardPayload(restored.benchmark)) updates.benchmark = restored.benchmark;
-            if (isEmptyDashboardPayload(prev.findings) && hasDashboardPayload(restored.findings)) updates.findings = restored.findings;
-            if (isEmptyDashboardPayload(prev.redFlags) && hasDashboardPayload(restored.red_flags)) updates.redFlags = restored.red_flags;
-            if (isEmptyDashboardPayload(prev.peNarrative) && hasDashboardPayload(restored.pe_narrative)) updates.peNarrative = restored.pe_narrative;
-            if (isEmptyDashboardPayload(prev.executive) && hasDashboardPayload(restored.executive)) updates.executive = restored.executive;
-            if (isEmptyDashboardPayload(prev.finalJudgment) && hasDashboardPayload(restored.final_judgment)) updates.finalJudgment = restored.final_judgment;
-            if ((!prev.customerName || !prev.customerName.trim()) && typeof restored.customer_name === 'string' && restored.customer_name.trim()) {
-              updates.customerName = restored.customer_name.trim();
-            }
-            if (prev.reviewedProducts.length === 0) {
-              const restoredProducts = normalizeStringList(restored.reviewed_products);
-              if (restoredProducts.length) updates.reviewedProducts = restoredProducts;
-            }
-          }
-
-          if (reviewedProductsResult.status === 'fulfilled' && prev.reviewedProducts.length === 0 && !updates.reviewedProducts?.length) {
-            const restoredProducts = normalizeStringList(reviewedProductsResult.value.products);
+          if (current.reviewedProducts.length === 0) {
+            const restoredProducts = normalizeStringList(restored.reviewed_products);
             if (restoredProducts.length) updates.reviewedProducts = restoredProducts;
           }
+        }
 
-          return Object.keys(updates).length ? { ...prev, ...updates } : prev;
-        });
-      })
-      .catch(() => undefined);
-    return () => { active = false; };
+        if (reviewed && current.reviewedProducts.length === 0 && !updates.reviewedProducts?.length) {
+          const restoredProducts = normalizeStringList(reviewed.products);
+          if (restoredProducts.length) updates.reviewedProducts = restoredProducts;
+        }
+
+        return Object.keys(updates).length ? { ...current, ...updates } : current;
+      });
+
+      setLastSyncTime(Date.now());
+    } catch {
+      // Non-blocking sync
+    } finally {
+      isSyncingRef.current = false;
+      setIsLiveSyncing(false);
+    }
   }, []);
 
-  const setBatch = useCallback((value: DashboardPayload | null) => setData((prev) => ({ ...prev, batch: value })), []);
+  useEffect(() => {
+    // Initial sync
+    void syncLiveState();
+
+    // Periodic live web sync every 10s
+    const timer = setInterval(() => {
+      void syncLiveState();
+    }, 10000);
+
+    // Sync when returning to window or tab
+    const handleFocus = () => {
+      void syncLiveState();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void syncLiveState();
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [syncLiveState]);
+
+  const setBatch = useCallback((value: DashboardPayload | null) => {
+    setData((prev) => {
+      const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+        ? (value as any).customer_name.trim()
+        : null;
+
+      if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
+        return {
+          ...EMPTY_APP_DATA,
+          customerName: incomingCustomer,
+          batch: value,
+        };
+      }
+
+      return {
+        ...prev,
+        batch: value,
+        customerName: prev.customerName || incomingCustomer,
+      };
+    });
+  }, []);
+
   const setResource = useCallback(
-    (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => setData((prev) => ({ ...prev, resource: value })),
+    (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => {
+      setData((prev) => {
+        const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+          ? (value as any).customer_name.trim()
+          : (value as any)?.servers?.[0]?.customer?.trim() || null;
+
+        if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
+          return {
+            ...EMPTY_APP_DATA,
+            customerName: incomingCustomer,
+            resource: value,
+          };
+        }
+
+        return {
+          ...prev,
+          resource: value,
+          customerName: prev.customerName || incomingCustomer,
+        };
+      });
+    },
     [],
   );
+
   const setSlaMatrix = useCallback(
-    (value: DashboardPayload | null) => setData((prev) => ({ ...prev, slaMatrix: value })),
+    (value: DashboardPayload | null) => {
+      setData((prev) => {
+        const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+          ? (value as any).customer_name.trim()
+          : null;
+
+        if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
+          return {
+            ...EMPTY_APP_DATA,
+            customerName: incomingCustomer,
+            slaMatrix: value,
+          };
+        }
+
+        return {
+          ...prev,
+          slaMatrix: value,
+          customerName: prev.customerName || incomingCustomer,
+        };
+      });
+    },
     [],
   );
+
   const setBenchmark = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, benchmark: value })),
     [],
   );
+
   const setSowBaseline = useCallback(
-    (value: DashboardPayload | null) => setData((prev) => ({ ...prev, sowBaseline: value })),
+    (value: DashboardPayload | null) => {
+      setData((prev) => {
+        const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+          ? (value as any).customer_name.trim()
+          : null;
+
+        if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
+          return {
+            ...EMPTY_APP_DATA,
+            customerName: incomingCustomer,
+            sowBaseline: value,
+          };
+        }
+
+        return {
+          ...prev,
+          sowBaseline: value,
+          customerName: prev.customerName || incomingCustomer,
+        };
+      });
+    },
     [],
   );
+
   const setSowCompare = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, sowCompare: value })),
     [],
   );
+
   const setFindings = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, findings: value })),
     [],
   );
+
   const setRedFlags = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, redFlags: value })),
     [],
   );
+
   const setPeNarrative = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, peNarrative: value })),
     [],
   );
+
   const setExecutive = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, executive: value })),
     [],
   );
+
   const setFinalJudgment = useCallback(
     (value: DashboardPayload | null) => setData((prev) => ({ ...prev, finalJudgment: value })),
     [],
   );
+
   const setCustomerName = useCallback(
-    (value: string | null) => setData((prev) => ({ ...prev, customerName: value })),
+    (value: string | null) => {
+      setData((prev) => {
+        const newCustomer = value?.trim() || null;
+        if (newCustomer && isCustomerChange(prev.customerName, newCustomer)) {
+          return {
+            ...EMPTY_APP_DATA,
+            customerName: newCustomer,
+          };
+        }
+        return { ...prev, customerName: newCustomer ?? prev.customerName };
+      });
+    },
     [],
   );
+
   const setIssues = useCallback(
     (value: IssueRecord[]) => setData((prev) => ({ ...prev, issues: value })),
     [],
   );
+
   const setApprovals = useCallback(
     (value: ApprovalsState) => setData((prev) => ({ ...prev, approvals: value })),
     [],
   );
+
   const setReviewedProducts = useCallback(
     (value: string[]) => setData((prev) => ({ ...prev, reviewedProducts: value })),
     [],
@@ -245,6 +442,9 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   const value = useMemo<AppDataContextValue>(
     () => ({
       data,
+      lastSyncTime,
+      isLiveSyncing,
+      syncLiveState,
       setBatch,
       setResource,
       setSlaMatrix,
@@ -264,6 +464,9 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     }),
     [
       data,
+      lastSyncTime,
+      isLiveSyncing,
+      syncLiveState,
       setBatch,
       setResource,
       setSlaMatrix,

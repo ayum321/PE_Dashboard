@@ -497,6 +497,7 @@ def set_active(canonical: str, raw: Optional[str] = None, *,
     config_store.set(_ACTIVE_SRC_KEY, src_val)
     try:
         from services import session_cache
+        session_cache.ensure_customer(display)
         session_cache.ac_set("customer_name", display)
         session_cache.ac_set(_ACTIVE_CONF_KEY, conf_val)
         session_cache.ac_set(_ACTIVE_SRC_KEY, src_val)
@@ -645,7 +646,12 @@ def identify(
     active_tier = SOURCE_TRUST_TIER.get(active_source or "", 4)
     new_tier = SOURCE_TRUST_TIER.get(best.source, 2)
 
-    if new_tier < active_tier:
+    # When a user uploads a new document with an identified customer (confidence >= 35),
+    # treat it as an explicit customer switch rather than blocking it as an unyielding mismatch.
+    if best.confidence >= 35:
+        can_supersede = True
+        supersede_reason = f"uploaded {best.source} identified customer '{display_name(best.name)}'"
+    elif new_tier < active_tier:
         can_supersede = best.confidence >= TIER_OVERRIDE_MIN_CONFIDENCE
         supersede_reason = (
             f"'{best.source}' identification is a more reliable source type "
@@ -674,7 +680,7 @@ def identify(
             candidates=cands, status="corrected", active=best.name,
             previous_name=active, previous_display=display_name(active),
             previous_confidence=active_conf, previous_source=active_source,
-            message=(f"Customer identity corrected: '{display_name(active)}' → "
+            message=(f"Customer identity updated: '{display_name(active)}' → "
                      f"'{display_name(best.name)}'. {supersede_reason}."
                      f"{corr_msg}"),
         )

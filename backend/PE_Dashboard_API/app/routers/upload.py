@@ -115,9 +115,15 @@ def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
 
 
 def _resolve_customer_identity(**kwargs: Any) -> Dict[str, Any]:
-    verdict = identify_customer(auto_adopt=False, **kwargs)
-    if verdict.status in ("first_upload", "corrected") and verdict.name:
-        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
+    verdict = identify_customer(auto_adopt=True, **kwargs)
+    target_name = verdict.display or verdict.name
+    if target_name:
+        set_active_customer(target_name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
+        try:
+            from services import session_cache
+            session_cache.ensure_customer(target_name)
+        except Exception:
+            pass
     return verdict_response_fields(verdict)
 
 
@@ -257,19 +263,28 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
 
     # Cache the last resource snapshot so cross-pillar engines (SLA matrix
     # adaptive baselines, correlation) can read it without an extra request.
+    target_customer = detected_customer or customer_name
     try:
         from services import session_cache
+        switched = session_cache.ensure_customer(target_customer) if target_customer else False
         existing_res = session_cache.get("last_resource") or {}
-        existing_servers = existing_res.get("servers", [])
-        prev_cust = session_cache.ac_get("customer_name")
-        curr_cust = detected_customer or customer_name
+        existing_servers = existing_res.get("servers", []) if not switched else []
 
-        if prev_cust and curr_cust and prev_cust.lower() != curr_cust.lower():
-            server_map = {}
-        else:
-            server_map = {s.get("host"): s for s in existing_servers if s.get("host")}
+        import re
+        norm_target = re.sub(r'[^a-zA-Z0-9]', '', str(target_customer or '')).lower()
+        server_map = {}
+        for s in existing_servers:
+            s_cust = s.get("customer")
+            if s_cust and norm_target:
+                norm_s = re.sub(r'[^a-zA-Z0-9]', '', str(s_cust)).lower()
+                if norm_s != norm_target:
+                    continue  # drop servers from a different customer
+            if s.get("host"):
+                server_map[s["host"]] = s
 
         for s in enriched:
+            if target_customer and not s.get("customer"):
+                s["customer"] = target_customer
             h = s.get("host")
             if h:
                 server_map[h] = s
@@ -277,7 +292,7 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
                 server_map[str(id(s))] = s
 
         merged_servers = list(server_map.values())
-        res_payload = {"servers": merged_servers}
+        res_payload = {"servers": merged_servers, "customer_name": target_customer}
         session_cache.set("last_resource", res_payload)
         # ── Audit context E4: resource_summary ────────────────────────
         session_cache.ac_set("resource_summary", res_payload)
@@ -352,6 +367,16 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 df_sub_app=df["Sub_Application"].dropna().tolist() if "Sub_Application" in df.columns else None,
             )
             data.update(customer_fields)
+            cust_name = customer_fields.get("customer_name") or customer_fields.get("customer_candidate_name")
+            try:
+                from services import session_cache
+                if cust_name:
+                    session_cache.ensure_customer(cust_name)
+                session_cache.set("last_batch", data)
+                if data.get("kpis"):
+                    session_cache.ac_set("batch_kpis", data["kpis"])
+            except Exception:
+                pass
 
         elif file_type == "resource":
             # RULE 4 — single entry point; detect_resource_mode + session clear inside
@@ -365,8 +390,42 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 filename=file.filename,
                 servers=servers_raw,
             )
+            cust_name = customer_fields.get("customer_name") or customer_fields.get("customer_candidate_name")
 
             enriched = [_enrich(dict(s), img_only) for s in (servers_raw or [])]
+            for s in enriched:
+                if cust_name and not s.get("customer"):
+                    s["customer"] = cust_name
+
+            try:
+                from services import session_cache
+                switched = session_cache.ensure_customer(cust_name) if cust_name else False
+                existing_res = session_cache.get("last_resource") or {}
+                existing_servers = existing_res.get("servers", []) if not switched else []
+                import re
+                norm_target = re.sub(r'[^a-zA-Z0-9]', '', str(cust_name or '')).lower()
+                server_map = {}
+                for s in existing_servers:
+                    s_cust = s.get("customer")
+                    if s_cust and norm_target:
+                        norm_s = re.sub(r'[^a-zA-Z0-9]', '', str(s_cust)).lower()
+                        if norm_s != norm_target:
+                            continue
+                    if s.get("host"):
+                        server_map[s["host"]] = s
+                for s in enriched:
+                    h = s.get("host")
+                    if h:
+                        server_map[h] = s
+                    else:
+                        server_map[str(id(s))] = s
+                merged_servers = list(server_map.values())
+                res_payload = {"servers": merged_servers, "customer_name": cust_name}
+                session_cache.set("last_resource", res_payload)
+                session_cache.ac_set("resource_summary", res_payload)
+            except Exception:
+                pass
+
             data = {
                 "filename": file.filename,
                 "file_type": ext.lstrip("."),

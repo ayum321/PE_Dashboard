@@ -322,12 +322,12 @@ export function UploadPanel() {
       // path (handleFetched in ResourcePanel.tsx) — so it never silently
       // overrides an engagement already established from Ctrl-M/SOW.
       const resourceCustomer = (result.data as { customer_name?: string }).customer_name;
-      if (!data.customerName && resourceCustomer) setCustomerName(resourceCustomer);
+      if (resourceCustomer) setCustomerName(resourceCustomer);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
         resource,
-        customerName: data.customerName || resourceCustomer || null,
+        customerName: resourceCustomer || data.customerName,
         findings: null,
         redFlags: null,
         peNarrative: null,
@@ -430,10 +430,13 @@ export function UploadPanel() {
       const result = await parseSow(files[0], trackProgress('sow'));
       markProcessing('sow');
       setSowBaseline(result);
+      const sowCustomer = (result as { customer_name?: string }).customer_name;
+      if (sowCustomer) setCustomerName(sowCustomer);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
         sowBaseline: result,
+        customerName: sowCustomer || data.customerName,
         findings: null,
         redFlags: null,
         peNarrative: null,
@@ -452,9 +455,13 @@ export function UploadPanel() {
   };
 
   const handleAzureFetched = (servers: ResourceServer[], meta: AzureFetchMeta, resolved: DashboardPayload) => {
+    const customerServers = servers.map((s) => ({
+      ...s,
+      customer: meta.customer || s.customer,
+    }));
     const resource = {
       ...resolved,
-      servers,
+      servers: customerServers,
       hours_back: resolved.hours_back ?? meta.hoursBack,
       customer_name: meta.customer,
       customer_status: meta.customerStatus,
@@ -462,7 +469,7 @@ export function UploadPanel() {
       customer_source: meta.customer ? 'azure_vm_tags' : undefined,
     };
     setResource(resource);
-    if (!data.customerName && meta.customer) setCustomerName(meta.customer);
+    if (meta.customer) setCustomerName(meta.customer);
     setAzureMessage(`Live Azure Monitor metrics fetched for ${servers.length} server(s).`);
     // Matches vanilla's runAzureFetch(): jump straight to Resource Review so
     // the fetch result is immediately visible instead of sitting on Upload.

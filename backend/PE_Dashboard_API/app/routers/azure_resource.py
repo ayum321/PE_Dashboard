@@ -833,9 +833,26 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
     payload["observation_window"] = observation_window
     payload["vm_count"] = len(servers)
 
+    target_cust = None
+    for s in servers:
+        c = s.get("customer")
+        if c and str(c).strip():
+            target_cust = str(c).strip()
+            break
+
+    if target_cust:
+        payload["customer_name"] = target_cust
+        payload["customer_status"] = "identified"
+        payload["customer_source"] = "azure_vm_tags"
+        for s in payload.get("servers", []):
+            if not s.get("customer"):
+                s["customer"] = target_cust
+
     # ── Wire to Audit Context and Session Cache ───────────────────
     try:
         from services import session_cache
+        if target_cust:
+            session_cache.ensure_customer(target_cust)
         session_cache.set("last_resource", payload)
         session_cache.ac_set("resource_summary", payload)
     except Exception:
@@ -1167,12 +1184,29 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
             payload["observation_window"] = observation_window
             payload["vm_count"] = len(servers)
 
+            target_cust = None
+            for s in servers:
+                c = s.get("customer")
+                if c and str(c).strip():
+                    target_cust = str(c).strip()
+                    break
+
+            if target_cust:
+                payload["customer_name"] = target_cust
+                payload["customer_status"] = "identified"
+                payload["customer_source"] = "azure_vm_tags"
+                for s in payload.get("servers", []):
+                    if not s.get("customer"):
+                        s["customer"] = target_cust
+
             elapsed = round(time.perf_counter() - t0, 1)
             payload["fetch_time_seconds"] = elapsed
 
             # ── Wire to Audit Context and Session Cache ───────────────────
             try:
                 from services import session_cache
+                if target_cust:
+                    session_cache.ensure_customer(target_cust)
                 session_cache.set("last_resource", payload)
                 session_cache.ac_set("resource_summary", payload)
             except Exception:

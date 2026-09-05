@@ -1045,6 +1045,11 @@ export function ResourcePanel() {
     });
   }, [servers, filter, customerFilter, typeFilter, envFilter, productGroupFilter, statusFilter]);
   const customers = useMemo(() => Array.from(new Set(servers.map((s) => s.customer).filter(Boolean))) as string[], [servers]);
+  React.useEffect(() => {
+    if (customerFilter && !customers.includes(customerFilter)) {
+      setCustomerFilter('');
+    }
+  }, [customers, customerFilter]);
   const productGroups = useMemo(() => Array.from(new Set(servers.map((s) => s.product_group).filter(Boolean))) as string[], [servers]);
   const sorted = useMemo(() => {
     const rows = [...filtered];
@@ -1092,7 +1097,11 @@ export function ResourcePanel() {
     // healthy fleet beside warning hosts).
     const resolved = fetchedPayload?.kpis ? fetchedPayload : await processResource(fetchedServers);
     if (!stillCurrent()) return;
-    const resolvedServers = (resolved.servers as ResourceServer[]) || fetchedServers;
+    const rawServers = (resolved.servers as ResourceServer[]) || fetchedServers;
+    const resolvedServers = rawServers.map((s) => ({
+      ...s,
+      customer: meta.customer || s.customer,
+    }));
     const resourcePayload = {
       ...resolved,
       servers: resolvedServers,
@@ -1109,10 +1118,10 @@ export function ResourcePanel() {
     setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
     setHoursBack(meta.hoursBack);
     setDdCustomActive(false);
-    // Only set when not already known \u2014 an engagement that starts from Resource
-    // Review (never touching Upload & Intake) previously left the persistent
-    // customer header blank on every page, not just this one.
-    if (!data.customerName && meta.customer) setCustomerName(meta.customer);
+    if (meta.customer) {
+      setCustomerName(meta.customer);
+      setCustomerFilter('');
+    }
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);
     // Capture the time-series in the same motion as the fetch. It used to wait
     // for a manual "Load Metrics Deep Dive" click, so anyone who fetched and

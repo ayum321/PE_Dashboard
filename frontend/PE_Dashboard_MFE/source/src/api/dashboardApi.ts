@@ -39,6 +39,8 @@ export interface ResourceServer {
   mem_used?: number;
   disk_used_max?: number;
   health_score?: number;
+  customer?: string;
+  [key: string]: unknown;
 }
 
 export interface SlaBreach {

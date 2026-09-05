@@ -349,6 +349,7 @@ def _payload_to_response(
         session_cache.ac_set("failure_grid",     resp_dict.get("failure_grid") or {})
         session_cache.ac_set("longpole_matrix",  resp_dict.get("longpole_matrix") or {})
         if resolved_customer_name:
+            session_cache.ensure_customer(resolved_customer_name)
             session_cache.ac_set("customer_name", resolved_customer_name)
         # sla_matrix slots written by _compute_sla_matrix call (see below)
         if sla_mx_dict:

@@ -240,3 +240,81 @@ def clear() -> None:
                 os.remove(_CACHE_FILE)
         except Exception:
             pass
+
+
+def ensure_customer(new_customer: Optional[str]) -> bool:
+    """Ensure the session cache belongs to the given customer.
+
+    If new_customer is supplied and differs from the active customer_name,
+    all stale customer payloads (batch, resource, SLA, SOW, findings) are
+    purged from the session cache and audit context so cross-customer stale
+    data never leaks into the newly uploaded customer's views.
+
+    Returns True if a customer switch occurred, False otherwise.
+    """
+    if not new_customer or not str(new_customer).strip():
+        return False
+
+    clean_new = str(new_customer).strip()
+    with _lock:
+        ctx = _state.get(_AC_KEY, {})
+        current = ctx.get("customer_name")
+        if not current:
+            try:
+                from services import config_store
+                current = config_store.get("customer_name")
+            except Exception:
+                current = None
+
+        import re
+        norm_curr = re.sub(r'[^a-zA-Z0-9]', '', str(current or '')).lower()
+        norm_new  = re.sub(r'[^a-zA-Z0-9]', '', clean_new).lower()
+
+        if norm_curr and norm_new and norm_curr != norm_new:
+            import logging
+            logging.getLogger("pe_dashboard.session").info(
+                "Customer switch detected: '%s' -> '%s'. Purging stale session cache.",
+                current, clean_new,
+            )
+            # Purge all old customer payloads
+            for k in list(_state.keys()):
+                if k != _AC_KEY and k != _AC_TS_KEY:
+                    _state.pop(k, None)
+
+            # Wipe audit context
+            _state.pop(_AC_KEY, None)
+            _state.pop(_AC_TS_KEY, None)
+
+            # Re-initialize audit context with new customer
+            new_ctx = _state.setdefault(_AC_KEY, {})
+            new_ctx["customer_name"] = clean_new
+            new_ts = _state.setdefault(_AC_TS_KEY, {})
+            new_ts["customer_name"] = time.time()
+
+            try:
+                from services import config_store
+                config_store.set("customer_name", clean_new)
+                config_store.set("sow_baseline", {})
+                config_store.set("_sow_sla_windows", {})
+                config_store.set("_sow_volume_by_year", {})
+                config_store.set("_sow_contract_meta", {})
+                config_store.set("_batch_sla_xlsx", {})
+            except Exception:
+                pass
+
+            _flush()
+            return True
+        else:
+            # Same customer or first customer: record customer_name
+            ctx = _state.setdefault(_AC_KEY, {})
+            ctx["customer_name"] = clean_new
+            ts = _state.setdefault(_AC_TS_KEY, {})
+            ts["customer_name"] = time.time()
+            try:
+                from services import config_store
+                config_store.set("customer_name", clean_new)
+            except Exception:
+                pass
+            _flush()
+            return False
+
