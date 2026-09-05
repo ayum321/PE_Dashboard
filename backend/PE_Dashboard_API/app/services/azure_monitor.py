@@ -150,9 +150,13 @@ _VM_METRICS_PLATFORM = [
     "Available Memory Percentage",  # Direct % — no SKU lookup needed
 ]
 
-# Disk metrics — try in order; not all VMs support all of these
+# Disk / IO metrics — host uncached storage limits are critical for DB workloads
 _VM_METRICS_DISK = [
-    "OS Disk Bandwidth Consumed Percentage",   # Preferred (available on most VMs)
+    "VM Uncached Bandwidth Consumed Percentage",
+    "VM Cached Bandwidth Consumed Percentage",
+    "VM Uncached IOPS Consumed Percentage",
+    "VM Cached IOPS Consumed Percentage",
+    "OS Disk Bandwidth Consumed Percentage",
     "Data Disk Bandwidth Consumed Percentage",
 ]
 
@@ -217,6 +221,10 @@ _TS_METRIC_GROUPS = [
     ["Percentage CPU"],
     ["Available Memory Percentage"],
     ["Available Memory Bytes"],
+    ["VM Uncached Bandwidth Consumed Percentage"],
+    ["VM Cached Bandwidth Consumed Percentage"],
+    ["VM Uncached IOPS Consumed Percentage"],
+    ["VM Cached IOPS Consumed Percentage"],
     ["OS Disk Bandwidth Consumed Percentage"],
     ["Data Disk Bandwidth Consumed Percentage"],
     _VM_METRICS_THROUGHPUT,
@@ -225,11 +233,15 @@ _TS_METRIC_GROUPS = [
 
 # Aggregation type for each metric
 _METRIC_AGG = {
-    "Percentage CPU":                         "Average",
-    "Available Memory Bytes":                 "Average",
-    "Available Memory Percentage":            "Average",
-    "OS Disk Bandwidth Consumed Percentage":  "Average",
-    "Data Disk Bandwidth Consumed Percentage":"Average",
+    "Percentage CPU":                            "Average",
+    "Available Memory Bytes":                    "Average",
+    "Available Memory Percentage":               "Average",
+    "VM Uncached Bandwidth Consumed Percentage": "Average",
+    "VM Cached Bandwidth Consumed Percentage":   "Average",
+    "VM Uncached IOPS Consumed Percentage":      "Average",
+    "VM Cached IOPS Consumed Percentage":        "Average",
+    "OS Disk Bandwidth Consumed Percentage":     "Average",
+    "Data Disk Bandwidth Consumed Percentage":   "Average",
 }
 
 # Total RAM in bytes — Azure doesn't expose this directly via Monitor.
@@ -4065,13 +4077,16 @@ def _build_server_records(credential, vms: List[dict], hours_back: int,
             cat_cpu = vm.get("cpu_pct") if vm.get("cpu_pct") is not None else vm.get("cpu_used")
             if cat_cpu is not None and float(cat_cpu) > 0:
                 cpu_pct = float(cat_cpu)
+                cpu_pct_avg = cpu_pct
+                if cpu_max_pct is None:
+                    cpu_max_pct = round(cpu_pct * 1.25, 2)
+                if cpu_min_pct is None:
+                    cpu_min_pct = round(cpu_pct * 0.75, 2)
             else:
-                cpu_pct = 64.0 if role_type == "DB" else 55.0 if role_type == "APP" else 35.0
-            cpu_pct_avg = cpu_pct
-            if cpu_max_pct is None:
-                cpu_max_pct = round(cpu_pct * 1.25, 2)
-            if cpu_min_pct is None:
-                cpu_min_pct = round(cpu_pct * 0.75, 2)
+                cpu_pct = 0.0
+                cpu_pct_avg = 0.0
+                cpu_max_pct = cpu_max_pct or 0.0
+                cpu_min_pct = cpu_min_pct or 0.0
 
         avail_pct   = m.get("Available Memory Percentage")
         avail_bytes = m.get("Available Memory Bytes")
@@ -4100,19 +4115,16 @@ def _build_server_records(credential, vms: List[dict], hours_back: int,
             cat_mem = vm.get("mem_pct") if vm.get("mem_pct") is not None else vm.get("mem_used")
             if cat_mem is not None and float(cat_mem) > 0:
                 mem_pct = float(cat_mem)
-            else:
-                mem_pct = 72.0 if role_type == "DB" else 62.0 if role_type == "APP" else 40.0
             if mem_total_gb <= 0:
-                mem_total_gb = float(vm.get("mem_total_gb") or vm.get("mem_gb") or (128.0 if role_type == "DB" else 64.0 if role_type == "APP" else 32.0))
+                mem_total_gb = float(vm.get("mem_total_gb") or vm.get("mem_gb") or 0.0)
             needs_memory_sku = False
 
         if mem_total_gb <= 0:
-            mem_total_gb = float(vm.get("mem_total_gb") or vm.get("mem_gb") or (128.0 if role_type == "DB" else 64.0 if role_type == "APP" else 32.0))
+            mem_total_gb = float(vm.get("mem_total_gb") or vm.get("mem_gb") or 0.0)
 
         # Memory MAX/MIN — the raw Azure metric is "Available %" (lower = worse),
         # so the USED-% max (worst pressure point) comes from the AVAILABLE MIN,
-        # and the USED-% min (best point) comes from the AVAILABLE MAX. Inverted
-        # on purpose — do not swap these without also swapping the tooltip copy.
+        # and the USED-% min (best point) comes from the AVAILABLE MAX.
         _avail_min = m.get("Available Memory Percentage__min")
         _avail_max = m.get("Available Memory Percentage__max")
         mem_max_pct = round(max(0.0, min(100.0, 100.0 - _avail_min)), 2) if _avail_min is not None else None
@@ -4122,26 +4134,36 @@ def _build_server_records(credential, vms: List[dict], hours_back: int,
         if mem_min_pct is None and mem_pct > 0.0:
             mem_min_pct = round(mem_pct * 0.85, 2)
 
-        # Absent disk metric → None (not a fabricated 0.0). Emitting 0.0 here
-        # would let a server with no disk telemetry look like a genuine "0% disk"
-        # reading and drag the fleet Avg Disk toward zero. None flows through to
-        # disk_available=False → disk_pct=None so it is excluded from the mean.
-        _disk_raw = m.get("OS Disk Bandwidth Consumed Percentage")
-        _disk_max = m.get("OS Disk Bandwidth Consumed Percentage__max")
-        _disk_min = m.get("OS Disk Bandwidth Consumed Percentage__min")
-        if _disk_raw is None:
-            _disk_raw = m.get("Data Disk Bandwidth Consumed Percentage")
-            _disk_max = m.get("Data Disk Bandwidth Consumed Percentage__max")
-            _disk_min = m.get("Data Disk Bandwidth Consumed Percentage__min")
+        # Storage / IO metrics — check host throughput caps first (crucial for DB IOPS/bandwidth)
+        _disk_candidates = [
+            "VM Uncached Bandwidth Consumed Percentage",
+            "VM Cached Bandwidth Consumed Percentage",
+            "VM Uncached IOPS Consumed Percentage",
+            "VM Cached IOPS Consumed Percentage",
+            "OS Disk Bandwidth Consumed Percentage",
+            "Data Disk Bandwidth Consumed Percentage",
+        ]
+        _disk_raw = None
+        _disk_max = None
+        _disk_min = None
+        for _dc in _disk_candidates:
+            if m.get(_dc) is not None:
+                _val = m.get(_dc)
+                if _disk_raw is None or _val > _disk_raw:
+                    _disk_raw = _val
+                    _disk_max = m.get(_dc + "__max")
+                    _disk_min = m.get(_dc + "__min")
+
         disk_pct = round(_disk_raw, 2) if _disk_raw is not None else None
         disk_max_pct = round(_disk_max, 2) if _disk_max is not None else None
         disk_min_pct = round(_disk_min, 2) if _disk_min is not None else None
 
-        if disk_pct is None or disk_pct == 0.0:
-            cat_disk = vm.get("disk_pct") if vm.get("disk_pct") is not None else (vm.get("disk_used_max") or 18.5)
-            disk_pct = float(cat_disk)
-            disk_max_pct = round(disk_pct * 1.2, 2)
-            disk_min_pct = round(disk_pct * 0.8, 2)
+        if disk_pct is None:
+            cat_disk = vm.get("disk_pct") if vm.get("disk_pct") is not None else vm.get("disk_used_max")
+            if cat_disk is not None and float(cat_disk) > 0:
+                disk_pct = float(cat_disk)
+                disk_max_pct = round(disk_pct * 1.2, 2)
+                disk_min_pct = round(disk_pct * 0.8, 2)
 
         sub_match = _re.match(r"/subscriptions/([^/]+)/", rid, _re.IGNORECASE)
         if sub_match and vm.get("vm_size"):

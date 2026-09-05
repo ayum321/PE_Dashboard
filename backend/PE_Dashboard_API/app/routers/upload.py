@@ -259,7 +259,25 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     # adaptive baselines, correlation) can read it without an extra request.
     try:
         from services import session_cache
-        res_payload = {"servers": enriched}
+        existing_res = session_cache.get("last_resource") or {}
+        existing_servers = existing_res.get("servers", [])
+        prev_cust = session_cache.ac_get("customer_name")
+        curr_cust = detected_customer or customer_name
+
+        if prev_cust and curr_cust and prev_cust.lower() != curr_cust.lower():
+            server_map = {}
+        else:
+            server_map = {s.get("host"): s for s in existing_servers if s.get("host")}
+
+        for s in enriched:
+            h = s.get("host")
+            if h:
+                server_map[h] = s
+            else:
+                server_map[str(id(s))] = s
+
+        merged_servers = list(server_map.values())
+        res_payload = {"servers": merged_servers}
         session_cache.set("last_resource", res_payload)
         # ── Audit context E4: resource_summary ────────────────────────
         session_cache.ac_set("resource_summary", res_payload)

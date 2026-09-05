@@ -832,6 +832,15 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
     payload["hours_back"] = body.hours_back
     payload["observation_window"] = observation_window
     payload["vm_count"] = len(servers)
+
+    # ── Wire to Audit Context and Session Cache ───────────────────
+    try:
+        from services import session_cache
+        session_cache.set("last_resource", payload)
+        session_cache.ac_set("resource_summary", payload)
+    except Exception:
+        pass
+
     return payload
 
 
@@ -1160,6 +1169,14 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
 
             elapsed = round(time.perf_counter() - t0, 1)
             payload["fetch_time_seconds"] = elapsed
+
+            # ── Wire to Audit Context and Session Cache ───────────────────
+            try:
+                from services import session_cache
+                session_cache.set("last_resource", payload)
+                session_cache.ac_set("resource_summary", payload)
+            except Exception:
+                pass
 
             yield _sse("result", payload)
 

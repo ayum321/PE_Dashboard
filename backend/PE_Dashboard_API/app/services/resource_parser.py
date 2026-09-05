@@ -161,23 +161,45 @@ def _infer_server_type(host, context="", doc_section_hint=""):
     - Context: surrounding text mentions database-related keywords
     """
     h = host.lower()
-    # JDA/BY convention: tsXXNNNNNN — classify by numeric suffix range
-    m = re.match(r'ts[a-z]{2}(\d+)', h)
-    if m:
-        n = int(m.group(1))
-        if 1525 <= n <= 1535: return "SRE"    # SRE servers
-        if 1540 <= n <= 1549: return "APP"    # ACT servers
-        return "DB"                            # all other ts* = DB
 
-    # doc_section_hint from DOCX heading takes priority over hostname guesses
+    # 1. doc_section_hint from DOCX heading/filename takes top priority
     if doc_section_hint:
         dh = doc_section_hint.lower()
-        if re.search(r'\bsre\b', dh):
+        if re.search(r'\bsre\b|\bintegration\b', dh):
             return "SRE"
-        if re.search(r'\bapp(?:lication)?\b|\bweb\b|\bbatch\b|\betl\b|\bact\b', dh):
+        if re.search(r'\bapp(?:lication)?\b|\bweb\b|\bbatch\b|\betl\b|\bact\b|\bui\b', dh):
             return "APP"
         if re.search(r'\bdb\b|\bdatabase\b|\boracle\b|\bsql\b|\bdata\s*server\b', dh):
             return "DB"
+
+    # 2. SRE / Integration indicators in hostname
+    if any(k in h for k in ["sre", "integ", "etl", "gateway"]):
+        return "SRE"
+
+    # 3. Generic DB indicators in hostname
+    if any(k in h for k in ["db", "oracle", "sql", "data", "mongo", "redis", "postgres",
+                           "pg", "mysql", "mssql", "mariadb", "cassandra", "elastic"]):
+        return "DB"
+    if re.search(r'[-_]db[-_\d]|db\d{1,3}$', h):
+        return "DB"
+
+    # 4. JDA/BY convention: tsXXNNNNNN — classify by numeric suffix range or tier code
+    m = re.match(r'ts[a-z]{2}(\d+)', h)
+    if m:
+        n_str = m.group(1)
+        try:
+            n = int(n_str)
+            if 1525 <= n <= 1535: return "SRE"
+            if 1540 <= n <= 1549: return "APP"
+        except ValueError:
+            pass
+        # JDA modern 9-digit tier coding: e.g. tsbf[client:4][tier:2][node:3]
+        if len(n_str) >= 8:
+            tier = n_str[-5:-3]
+            if tier == "02": return "APP"
+            if tier == "03": return "DB"
+            if tier in ("25", "30", "31", "32"): return "SRE"
+        return "DB"
 
     # SRE indicators in hostname
     if "sre" in h:

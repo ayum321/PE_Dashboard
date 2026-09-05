@@ -1020,6 +1020,23 @@ def parse_resource_file(file_bytes: bytes, filename: str) -> List[Dict[str, Any]
         except Exception as exc:
             logger.warning("parse_resource_file: NVIDIA LLM fallback failed: %s", exc)
 
+    # ── OCR chart fallback for image-only reports ─────────────────
+    # If the file has embedded chart screenshots (Azure Monitor, Grafana, Zabbix)
+    # and either yielded 0 servers or only 0-metric stubs, run OCR chart extractor.
+    if _all_zero(servers) and (mode in ("IMAGE_DOCX", "TEXT_DOCX") or (filename or "").lower().endswith(".docx")):
+        try:
+            from services.resource_ocr import extract_servers_from_docx_images, is_ocr_available
+            if is_ocr_available():
+                ocr_servers = extract_servers_from_docx_images(file_bytes, filename)
+                if ocr_servers:
+                    logger.info(
+                        "parse_resource_file: OCR chart parser yielded %d server(s) with live metrics",
+                        len(ocr_servers),
+                    )
+                    servers = ocr_servers
+        except Exception as exc:
+            logger.warning("parse_resource_file: OCR fallback failed: %s", exc)
+
     if not servers:
         logger.info("parse_resource_file: no text metrics extracted — image_only, no further enrichment available")
 
