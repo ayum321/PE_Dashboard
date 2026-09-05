@@ -19,7 +19,6 @@ def create_dashboard_zip():
         'graphify-out',
         '.system_generated',
         '.vscode',
-        'build',
         'dist',
         '.pytest_cache'
     }
@@ -27,6 +26,7 @@ def create_dashboard_zip():
     exclude_files = {
         'PE_Dashboard.zip',
         'PE_Dashboard_Package.zip',
+        'PE_Dashboard_MFE_Portal_Build.zip',
         'diff_output.txt',
         '.server_pid',
         '.pe_baseline.db-shm',
