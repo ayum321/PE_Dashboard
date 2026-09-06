@@ -13,6 +13,7 @@ import {
   searchAzureVms,
   updateConfig,
 } from '../../api/dashboardApi';
+import { isValidCustomerName } from '../../context/AppDataContext';
 
 export interface AzureVm {
   resource_id: string;
@@ -76,17 +77,20 @@ function getVmEnv(vm: AzureVm): string {
 }
 
 function customerOf(vm: AzureVm): string {
-  if (vm.customer?.trim()) return vm.customer.trim();
+  if (vm.customer?.trim() && isValidCustomerName(vm.customer.trim())) return vm.customer.trim();
   const tags = vm.tags || {};
   for (const k of ['CustomerName', 'customerName', 'ClientName', 'clientName']) {
-    if (tags[k]?.trim()) return tags[k].trim();
+    const val = tags[k]?.trim();
+    if (val && isValidCustomerName(val)) return val;
   }
   for (const k of ['Customer', 'customer', 'Client', 'client']) {
-    if (tags[k]?.trim() && isNaN(Number(tags[k].trim()))) return tags[k].trim();
+    const val = tags[k]?.trim();
+    if (val && isNaN(Number(val)) && isValidCustomerName(val)) return val;
   }
   const aliases = new Set(['customername', 'clientname']);
   for (const [key, value] of Object.entries(tags)) {
-    if (aliases.has(key.toLowerCase()) && String(value || '').trim()) return String(value).trim();
+    const val = String(value || '').trim();
+    if (aliases.has(key.toLowerCase()) && val && isValidCustomerName(val)) return val;
   }
   return UNTAGGED;
 }
@@ -614,9 +618,9 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         const c = customerOf(v);
         if (c !== UNTAGGED) custCounts.set(c, (custCounts.get(c) || 0) + 1);
       }
-      const identifiedCustomers = Array.from(custCounts.keys());
-      const taggedVmCount = Array.from(custCounts.values()).reduce((sum, count) => sum + count, 0);
-      const customer = identifiedCustomers.length === 1 ? identifiedCustomers[0] : undefined;
+      const identifiedCustomers = Array.from(custCounts.keys()).filter((c) => isValidCustomerName(c));
+      const taggedVmCount = identifiedCustomers.reduce((sum, c) => sum + (custCounts.get(c) || 0), 0);
+      const customer = identifiedCustomers.length === 1 && isValidCustomerName(identifiedCustomers[0]) ? identifiedCustomers[0] : undefined;
       const customerStatus: AzureFetchMeta['customerStatus'] = customer
         ? 'identified'
         : identifiedCustomers.length > 1 ? 'mixed' : 'untagged';

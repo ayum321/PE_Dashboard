@@ -256,6 +256,13 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
         return False
 
     clean_new = str(new_customer).strip()
+    try:
+        from services.customer_identity import is_valid_customer_name
+        if not is_valid_customer_name(clean_new):
+            return False
+    except Exception:
+        pass
+
     with _lock:
         ctx = _state.get(_AC_KEY, {})
         current = ctx.get("customer_name")
@@ -265,6 +272,19 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
                 current = config_store.get("customer_name")
             except Exception:
                 current = None
+
+        try:
+            from services.customer_identity import is_valid_customer_name
+            if current and not is_valid_customer_name(current):
+                current = None
+                ctx.pop("customer_name", None)
+                try:
+                    from services import config_store
+                    config_store.set("customer_name", "")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         import re
         norm_curr = re.sub(r'[^a-zA-Z0-9]', '', str(current or '')).lower()

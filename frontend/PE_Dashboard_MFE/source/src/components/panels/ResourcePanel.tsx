@@ -24,7 +24,7 @@ import {
   processResource,
   ResourceServer,
 } from '../../api/dashboardApi';
-import { useAppData } from '../../context/AppDataContext';
+import { isValidCustomerName, useAppData } from '../../context/AppDataContext';
 import { AzureFetchMeta, AzureFetchModal } from '../shared/AzureFetchModal';
 import { KpiStatCard } from '../shared/KpiStatCard';
 import { MiniGauge } from '../shared/MiniGauge';
@@ -1098,18 +1098,19 @@ export function ResourcePanel() {
     const resolved = fetchedPayload?.kpis ? fetchedPayload : await processResource(fetchedServers);
     if (!stillCurrent()) return;
     const rawServers = (resolved.servers as ResourceServer[]) || fetchedServers;
+    const validMetaCust = isValidCustomerName(meta.customer) ? meta.customer : undefined;
     const resolvedServers = rawServers.map((s) => ({
       ...s,
-      customer: meta.customer || s.customer,
+      customer: validMetaCust || (isValidCustomerName(s.customer) ? s.customer : undefined),
     }));
     const resourcePayload = {
       ...resolved,
       servers: resolvedServers,
       hours_back: resolved.hours_back ?? meta.hoursBack,
-      customer_name: meta.customer,
-      customer_status: meta.customerStatus,
+      customer_name: validMetaCust,
+      customer_status: validMetaCust ? meta.customerStatus : 'untagged',
       customer_message: meta.customerMessage,
-      customer_source: meta.customer ? 'azure_vm_tags' : undefined,
+      customer_source: validMetaCust ? 'azure_vm_tags' : undefined,
     };
     setResource(resourcePayload);
     setFleetKpis((resolved.kpis as FleetKpis) || null);
@@ -1118,8 +1119,8 @@ export function ResourcePanel() {
     setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
     setHoursBack(meta.hoursBack);
     setDdCustomActive(false);
-    if (meta.customer) {
-      setCustomerName(meta.customer);
+    if (validMetaCust) {
+      setCustomerName(validMetaCust);
       setCustomerFilter('');
     }
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);

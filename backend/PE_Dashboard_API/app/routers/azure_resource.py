@@ -55,6 +55,7 @@ from services.resource_calculator import build_resource_payload
 from services import baseline_store
 from services import pe_config
 from services.spike_attribution import attribute_spikes
+from services.customer_identity import is_valid_customer_name
 router = APIRouter()
 
 
@@ -836,9 +837,14 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
     target_cust = None
     for s in servers:
         c = s.get("customer")
-        if c and str(c).strip():
+        if c and str(c).strip() and is_valid_customer_name(str(c).strip()):
             target_cust = str(c).strip()
             break
+
+    for s in payload.get("servers", []):
+        s_cust = s.get("customer")
+        if s_cust and not is_valid_customer_name(str(s_cust)):
+            s["customer"] = None
 
     if target_cust:
         payload["customer_name"] = target_cust
@@ -847,6 +853,10 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
         for s in payload.get("servers", []):
             if not s.get("customer"):
                 s["customer"] = target_cust
+    else:
+        payload["customer_name"] = None
+        payload["customer_status"] = "untagged"
+        payload["customer_source"] = None
 
     # ── Wire to Audit Context and Session Cache ───────────────────
     try:
@@ -1187,9 +1197,14 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
             target_cust = None
             for s in servers:
                 c = s.get("customer")
-                if c and str(c).strip():
+                if c and str(c).strip() and is_valid_customer_name(str(c).strip()):
                     target_cust = str(c).strip()
                     break
+
+            for s in payload.get("servers", []):
+                s_cust = s.get("customer")
+                if s_cust and not is_valid_customer_name(str(s_cust)):
+                    s["customer"] = None
 
             if target_cust:
                 payload["customer_name"] = target_cust
@@ -1198,6 +1213,10 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
                 for s in payload.get("servers", []):
                     if not s.get("customer"):
                         s["customer"] = target_cust
+            else:
+                payload["customer_name"] = None
+                payload["customer_status"] = "untagged"
+                payload["customer_source"] = None
 
             elapsed = round(time.perf_counter() - t0, 1)
             payload["fetch_time_seconds"] = elapsed

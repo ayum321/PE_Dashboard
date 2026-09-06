@@ -2916,14 +2916,27 @@ def _infer_location_from_text(text: str) -> str:
 
 def _resolve_customer_name(tags: Optional[dict] = None, rg: str = "", sub_id: str = "", vm_name: str = "") -> str:
     """Extract or infer enterprise customer name from tags, resource group, VM name, or catalog."""
+    try:
+        from services.customer_identity import is_valid_customer_name
+    except Exception:
+        def is_valid_customer_name(s):
+            if not s:
+                return False
+            low = str(s).strip().lower()
+            return low not in {
+                "server", "servers", "host", "hosts", "vm", "vms", "node", "nodes",
+                "cluster", "clusters", "customer", "client", "unknown", "none",
+                "null", "undefined", "default", "unassigned", "cpu", "untagged",
+            }
+
     if tags:
         for k in ("CustomerName", "customerName", "ClientName", "clientName"):
             v = tags.get(k)
-            if v and str(v).strip():
+            if v and str(v).strip() and is_valid_customer_name(str(v).strip()):
                 return str(v).strip()
         for k in ("Customer", "customer", "Client", "client"):
             v = tags.get(k)
-            if v and str(v).strip() and not str(v).strip().isdigit():
+            if v and str(v).strip() and not str(v).strip().isdigit() and is_valid_customer_name(str(v).strip()):
                 return str(v).strip()
 
     sub_lower = (sub_id or "").strip().lower()
@@ -2960,12 +2973,6 @@ def _resolve_customer_name(tags: Optional[dict] = None, rg: str = "", sub_id: st
             for k, v in _ENTERPRISE_CUSTOMER_CATALOG.items():
                 if k.startswith(prefix) or prefix.startswith(k):
                     return v["customer"]
-
-    if tags:
-        for k in ("Customer", "customer", "Client", "client"):
-            v = tags.get(k)
-            if v and str(v).strip():
-                return str(v).strip()
 
     return ""
 
@@ -3362,7 +3369,7 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
                 rg_m = re.search(r"/resourceGroups/([^/]+)", rid, re.I)
                 rg = rg_m.group(1) if rg_m else ""
                 tags = s.get("tags") or {}
-                c_name = _resolve_customer_name(tags, rg, sub_id, host) or cust or "Customer"
+                c_name = _resolve_customer_name(tags, rg, sub_id, host) or (cust if cust and str(cust).lower() != "customer" else "")
                 app = tags.get("Application") or s.get("application") or ""
                 env = s.get("environment") or tags.get("Environment_Type") or tags.get("Environment") or "PROD"
                 vm_type = s.get("type") or "APP"
@@ -3379,9 +3386,10 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
                         break
 
                 if sub_id and sub_id not in subs_map:
+                    sub_display = f"{c_name} ({rg})" if (c_name and rg) else c_name if c_name else rg if rg else f"Subscription ({sub_id[:8]})"
                     subs_map[sub_id] = {
                         "id": sub_id,
-                        "name": f"{c_name} ({rg})" if rg else f"{c_name} ({sub_id[:8]})",
+                        "name": sub_display,
                         "customer": c_name,
                         "state": "Enabled",
                         "is_default": False,

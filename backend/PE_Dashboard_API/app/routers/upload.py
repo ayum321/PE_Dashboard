@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from services import config_store
 from services.customer_identity import (
     identify as identify_customer,
+    is_valid_customer_name,
     set_active as set_active_customer,
     verdict_response_fields,
 )
@@ -117,7 +118,7 @@ def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
 def _resolve_customer_identity(**kwargs: Any) -> Dict[str, Any]:
     verdict = identify_customer(auto_adopt=True, **kwargs)
     target_name = verdict.display or verdict.name
-    if target_name:
+    if target_name and is_valid_customer_name(target_name):
         set_active_customer(target_name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
         try:
             from services import session_cache
@@ -264,6 +265,8 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     # Cache the last resource snapshot so cross-pillar engines (SLA matrix
     # adaptive baselines, correlation) can read it without an extra request.
     target_customer = detected_customer or customer_name
+    if target_customer and not is_valid_customer_name(target_customer):
+        target_customer = None
     try:
         from services import session_cache
         switched = session_cache.ensure_customer(target_customer) if target_customer else False
@@ -275,6 +278,9 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
         server_map = {}
         for s in existing_servers:
             s_cust = s.get("customer")
+            if s_cust and not is_valid_customer_name(s_cust):
+                s["customer"] = None
+                s_cust = None
             if s_cust and norm_target:
                 norm_s = re.sub(r'[^a-zA-Z0-9]', '', str(s_cust)).lower()
                 if norm_s != norm_target:
@@ -283,6 +289,9 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
                 server_map[s["host"]] = s
 
         for s in enriched:
+            s_cust = s.get("customer")
+            if s_cust and not is_valid_customer_name(s_cust):
+                s["customer"] = None
             if target_customer and not s.get("customer"):
                 s["customer"] = target_customer
             h = s.get("host")
@@ -391,9 +400,14 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 servers=servers_raw,
             )
             cust_name = customer_fields.get("customer_name") or customer_fields.get("customer_candidate_name")
+            if cust_name and not is_valid_customer_name(cust_name):
+                cust_name = None
 
             enriched = [_enrich(dict(s), img_only) for s in (servers_raw or [])]
             for s in enriched:
+                s_cust = s.get("customer")
+                if s_cust and not is_valid_customer_name(s_cust):
+                    s["customer"] = None
                 if cust_name and not s.get("customer"):
                     s["customer"] = cust_name
 
@@ -407,6 +421,9 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 server_map = {}
                 for s in existing_servers:
                     s_cust = s.get("customer")
+                    if s_cust and not is_valid_customer_name(s_cust):
+                        s["customer"] = None
+                        s_cust = None
                     if s_cust and norm_target:
                         norm_s = re.sub(r'[^a-zA-Z0-9]', '', str(s_cust)).lower()
                         if norm_s != norm_target:
@@ -414,6 +431,11 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                     if s.get("host"):
                         server_map[s["host"]] = s
                 for s in enriched:
+                    s_cust = s.get("customer")
+                    if s_cust and not is_valid_customer_name(s_cust):
+                        s["customer"] = None
+                    if cust_name and not s.get("customer"):
+                        s["customer"] = cust_name
                     h = s.get("host")
                     if h:
                         server_map[h] = s

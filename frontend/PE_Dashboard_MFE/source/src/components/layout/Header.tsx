@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAppData } from '../../context/AppDataContext';
+import { isValidCustomerName, useAppData } from '../../context/AppDataContext';
 import '../../theme/dashboard.css';
 import { ResetIcon } from '../../theme/icons';
 
@@ -31,7 +31,7 @@ export function Header() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 24px' }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 14, fontWeight: 700, letterSpacing: '-0.01em', color: '#f0f4ff' }}>PE Audit Dashboard</h1>
-          {data.customerName && (
+          {isValidCustomerName(data.customerName) && (
             <p style={{ margin: '2px 0 0', fontSize: 11, color: '#6b7db3', fontWeight: 500 }}>Customer: {data.customerName}</p>
           )}
         </div>

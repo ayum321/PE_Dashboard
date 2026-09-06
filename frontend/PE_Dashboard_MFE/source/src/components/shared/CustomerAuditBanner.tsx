@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Box, Typography } from '@material-ui/core';
-import { useAppData } from '../../context/AppDataContext';
+import { isValidCustomerName, useAppData } from '../../context/AppDataContext';
 
 interface WindowRow {
   run_date?: string;
@@ -53,7 +53,8 @@ export function CustomerAuditBanner() {
   const batch = data.batch as CustomerIdentityPayload | null;
   const resource = data.resource as CustomerIdentityPayload | null;
   const sow = data.sowBaseline as CustomerIdentityPayload | null;
-  const customerName = data.customerName || batch?.customer_name || resource?.customer_name || sow?.customer_name || null;
+  const rawCustomer = data.customerName || batch?.customer_name || resource?.customer_name || sow?.customer_name || null;
+  const customerName = isValidCustomerName(rawCustomer) ? rawCustomer : null;
 
   const mismatch = useMemo(() => {
     const sources = [

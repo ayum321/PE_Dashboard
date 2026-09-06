@@ -19,7 +19,7 @@ import {
   uploadDashboardFile,
   workbookSlaSnapshotFromUpload,
 } from '../../api/dashboardApi';
-import { AppData, useAppData } from '../../context/AppDataContext';
+import { AppData, isValidCustomerName, useAppData } from '../../context/AppDataContext';
 import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
 import { BatchIcon, BenchmarkIcon, ResourceIcon, SlaMatrixIcon, SowIcon } from '../../theme/icons';
 import { AzureFetchMeta, AzureFetchModal } from '../shared/AzureFetchModal';
@@ -322,12 +322,13 @@ export function UploadPanel() {
       // path (handleFetched in ResourcePanel.tsx) — so it never silently
       // overrides an engagement already established from Ctrl-M/SOW.
       const resourceCustomer = (result.data as { customer_name?: string }).customer_name;
-      if (resourceCustomer) setCustomerName(resourceCustomer);
+      const validResourceCustomer = isValidCustomerName(resourceCustomer) ? resourceCustomer : null;
+      if (validResourceCustomer) setCustomerName(validResourceCustomer);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
         resource,
-        customerName: resourceCustomer || data.customerName,
+        customerName: validResourceCustomer || (isValidCustomerName(data.customerName) ? data.customerName : null),
         findings: null,
         redFlags: null,
         peNarrative: null,
@@ -431,12 +432,13 @@ export function UploadPanel() {
       markProcessing('sow');
       setSowBaseline(result);
       const sowCustomer = (result as { customer_name?: string }).customer_name;
-      if (sowCustomer) setCustomerName(sowCustomer);
+      const validSowCustomer = isValidCustomerName(sowCustomer) ? sowCustomer : null;
+      if (validSowCustomer) setCustomerName(validSowCustomer);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
         sowBaseline: result,
-        customerName: sowCustomer || data.customerName,
+        customerName: validSowCustomer || (isValidCustomerName(data.customerName) ? data.customerName : null),
         findings: null,
         redFlags: null,
         peNarrative: null,
@@ -455,21 +457,22 @@ export function UploadPanel() {
   };
 
   const handleAzureFetched = (servers: ResourceServer[], meta: AzureFetchMeta, resolved: DashboardPayload) => {
+    const validCustomer = isValidCustomerName(meta.customer) ? meta.customer : undefined;
     const customerServers = servers.map((s) => ({
       ...s,
-      customer: meta.customer || s.customer,
+      customer: validCustomer || (isValidCustomerName(s.customer) ? s.customer : undefined),
     }));
     const resource = {
       ...resolved,
       servers: customerServers,
       hours_back: resolved.hours_back ?? meta.hoursBack,
-      customer_name: meta.customer,
-      customer_status: meta.customerStatus,
+      customer_name: validCustomer,
+      customer_status: validCustomer ? meta.customerStatus : 'untagged',
       customer_message: meta.customerMessage,
-      customer_source: meta.customer ? 'azure_vm_tags' : undefined,
+      customer_source: validCustomer ? 'azure_vm_tags' : undefined,
     };
     setResource(resource);
-    if (meta.customer) setCustomerName(meta.customer);
+    if (validCustomer) setCustomerName(validCustomer);
     setAzureMessage(`Live Azure Monitor metrics fetched for ${servers.length} server(s).`);
     // Matches vanilla's runAzureFetch(): jump straight to Resource Review so
     // the fetch result is immediately visible instead of sitting on Upload.

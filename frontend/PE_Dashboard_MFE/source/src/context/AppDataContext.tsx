@@ -86,15 +86,38 @@ const normalizeStringList = (value: unknown): string[] =>
       .filter(Boolean)
     : [];
 
+const INVALID_CUSTOMER_NAMES = new Set([
+  'server', 'servers', 'host', 'hosts', 'vm', 'vms', 'node', 'nodes',
+  'cluster', 'clusters', 'instance', 'instances', 'machine', 'machines',
+  'system', 'systems', 'database', 'databases', 'customer', 'customers',
+  'client', 'clients', 'unknown', 'none', 'null', 'undefined', 'default',
+  'unassigned', 'n/a', 'na', 'test', 'prod', 'untagged', 'cpu', 'memory',
+  'mem', 'disk', 'disks', 'ram', 'io', 'iops', 'storage', 'fleet', 'device',
+  'devices', 'checklist', 'template', 'overview', 'summary',
+]);
+
+export const isValidCustomerName = (name: unknown): boolean => {
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length < 2) return false;
+  const lower = trimmed.toLowerCase();
+  const alnum = lower.replace(/[^a-z0-9]/g, '');
+  if (!alnum || alnum.length < 2) return false;
+  if (INVALID_CUSTOMER_NAMES.has(lower) || INVALID_CUSTOMER_NAMES.has(alnum)) return false;
+  return true;
+};
+
 export const normalizeCustomer = (name: unknown): string => {
   if (typeof name !== 'string') return '';
   return name.toLowerCase().replace(/[^a-z0-9]/g, '');
 };
 
 export const isCustomerChange = (current: string | null | undefined, incoming: string | null | undefined): boolean => {
-  const normCurrent = normalizeCustomer(current);
+  if (!isValidCustomerName(incoming)) return false;
   const normIncoming = normalizeCustomer(incoming);
-  if (!normCurrent || !normIncoming) return false;
+  if (!normIncoming) return false;
+  const normCurrent = isValidCustomerName(current) ? normalizeCustomer(current) : '';
+  if (!normCurrent) return true;
   return normCurrent !== normIncoming;
 };
 
@@ -156,9 +179,18 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
         const sow = sowResult.status === 'fulfilled' ? sowResult.value : null;
         const reviewed = reviewedProductsResult.status === 'fulfilled' ? reviewedProductsResult.value : null;
 
-        const restoredCustomer = typeof restored?.customer_name === 'string' && restored.customer_name.trim()
+        const rawCustomer = typeof restored?.customer_name === 'string' && restored.customer_name.trim()
           ? restored.customer_name.trim()
           : null;
+        const restoredCustomer = isValidCustomerName(rawCustomer) ? rawCustomer : null;
+
+        // Clean any invalid customer name currently stored on frontend
+        if (current.customerName && !isValidCustomerName(current.customerName)) {
+          current = {
+            ...current,
+            customerName: null,
+          };
+        }
 
         // Check if the backend customer changed from what frontend holds
         const customerSwitched = Boolean(restoredCustomer && isCustomerChange(current.customerName, restoredCustomer));
@@ -207,7 +239,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
             if (isEmptyDashboardPayload(current.peNarrative) && hasDashboardPayload(restored.pe_narrative)) updates.peNarrative = restored.pe_narrative;
             if (isEmptyDashboardPayload(current.executive) && hasDashboardPayload(restored.executive)) updates.executive = restored.executive;
             if (isEmptyDashboardPayload(current.finalJudgment) && hasDashboardPayload(restored.final_judgment)) updates.finalJudgment = restored.final_judgment;
-            if ((!current.customerName || !current.customerName.trim()) && restoredCustomer) {
+            if ((!current.customerName || !isValidCustomerName(current.customerName)) && restoredCustomer) {
               updates.customerName = restoredCustomer;
             }
           }
@@ -266,9 +298,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
 
   const setBatch = useCallback((value: DashboardPayload | null) => {
     setData((prev) => {
-      const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+      const rawCustomer = typeof (value as any)?.customer_name === 'string'
         ? (value as any).customer_name.trim()
         : null;
+      const incomingCustomer = isValidCustomerName(rawCustomer) ? rawCustomer : null;
 
       if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
         return {
@@ -278,10 +311,11 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
         };
       }
 
+      const activeCustomer = isValidCustomerName(prev.customerName) ? prev.customerName : incomingCustomer;
       return {
         ...prev,
         batch: value,
-        customerName: prev.customerName || incomingCustomer,
+        customerName: activeCustomer,
       };
     });
   }, []);
@@ -289,9 +323,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   const setResource = useCallback(
     (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => {
       setData((prev) => {
-        const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+        const rawCandidate = typeof (value as any)?.customer_name === 'string'
           ? (value as any).customer_name.trim()
           : (value as any)?.servers?.[0]?.customer?.trim() || null;
+        const incomingCustomer = isValidCustomerName(rawCandidate) ? rawCandidate : null;
 
         if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
           return {
@@ -301,10 +336,11 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           };
         }
 
+        const activeCustomer = isValidCustomerName(prev.customerName) ? prev.customerName : incomingCustomer;
         return {
           ...prev,
           resource: value,
-          customerName: prev.customerName || incomingCustomer,
+          customerName: activeCustomer,
         };
       });
     },
@@ -314,9 +350,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   const setSlaMatrix = useCallback(
     (value: DashboardPayload | null) => {
       setData((prev) => {
-        const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+        const rawCustomer = typeof (value as any)?.customer_name === 'string'
           ? (value as any).customer_name.trim()
           : null;
+        const incomingCustomer = isValidCustomerName(rawCustomer) ? rawCustomer : null;
 
         if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
           return {
@@ -326,10 +363,11 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           };
         }
 
+        const activeCustomer = isValidCustomerName(prev.customerName) ? prev.customerName : incomingCustomer;
         return {
           ...prev,
           slaMatrix: value,
-          customerName: prev.customerName || incomingCustomer,
+          customerName: activeCustomer,
         };
       });
     },
@@ -344,9 +382,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   const setSowBaseline = useCallback(
     (value: DashboardPayload | null) => {
       setData((prev) => {
-        const incomingCustomer = typeof (value as any)?.customer_name === 'string'
+        const rawCustomer = typeof (value as any)?.customer_name === 'string'
           ? (value as any).customer_name.trim()
           : null;
+        const incomingCustomer = isValidCustomerName(rawCustomer) ? rawCustomer : null;
 
         if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
           return {
@@ -356,10 +395,11 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           };
         }
 
+        const activeCustomer = isValidCustomerName(prev.customerName) ? prev.customerName : incomingCustomer;
         return {
           ...prev,
           sowBaseline: value,
-          customerName: prev.customerName || incomingCustomer,
+          customerName: activeCustomer,
         };
       });
     },
@@ -399,14 +439,15 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   const setCustomerName = useCallback(
     (value: string | null) => {
       setData((prev) => {
-        const newCustomer = value?.trim() || null;
+        const raw = value?.trim() || null;
+        const newCustomer = isValidCustomerName(raw) ? raw : null;
         if (newCustomer && isCustomerChange(prev.customerName, newCustomer)) {
           return {
             ...EMPTY_APP_DATA,
             customerName: newCustomer,
           };
         }
-        return { ...prev, customerName: newCustomer ?? prev.customerName };
+        return { ...prev, customerName: newCustomer ?? (isValidCustomerName(prev.customerName) ? prev.customerName : null) };
       });
     },
     [],

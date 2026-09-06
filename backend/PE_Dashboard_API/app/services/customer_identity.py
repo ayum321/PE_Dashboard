@@ -75,10 +75,31 @@ _NOISE_TOKENS = {
     "SAP", "ECC", "S4", "S4HANA", "HANA", "ORACLE", "EBS", "PEOPLESOFT",
     "MANHATTAN", "BLUEYONDER", "BY", "JDA",
     "CTRL", "CTRLM", "BMC", "ESP", "AUTOSYS", "TWS",
-    # cloud / infra / tech
+    # cloud / infra / tech / compute
     "AZURE", "AWS", "GCP", "OCI", "SQL", "DB", "APP", "WEB", "API",
     "ZABBIX", "NAGIOS", "GRAFANA", "PROMETHEUS", "SPLUNK", "NEWRELIC",
     "SLA", "PE", "RCA", "SRE", "INFRA", "NETWORK", "STORAGE",
+    # generic infrastructure / asset words (NEVER a customer name!)
+    "SERVER", "SERVERS", "HOST", "HOSTS", "VM", "VMS", "NODE", "NODES",
+    "CLUSTER", "CLUSTERS", "INSTANCE", "INSTANCES", "MACHINE", "MACHINES",
+    "BOX", "BOXES", "HARDWARE", "INFRASTRUCTURE", "SYSTEM", "SYSTEMS",
+    "DATABASE", "DATABASES", "DBA", "ENGINE", "PLATFORM", "CONTAINER",
+    "CONTAINERS", "POD", "PODS", "SERVICE", "SERVICES", "TIER", "TIERS",
+    "POOL", "POOLS", "RESOURCE", "RESOURCES", "FLEET", "DEVICE", "DEVICES",
+    # hardware / metrics
+    "CPU", "MEM", "MEMORY", "RAM", "DISK", "DISKS", "IO", "IOPS",
+    "THROUGHPUT", "LATENCY", "BANDWIDTH", "NET", "SWAP", "UPTIME", "LOAD",
+    "PERCENTAGE", "TELEMETRY", "CAPACITY", "STAT", "STATS", "STATISTICS",
+    # generic placeholder / identity words
+    "CUSTOMER", "CUSTOMERS", "CLIENT", "CLIENTS", "TENANT", "TENANTS",
+    "ACCOUNT", "ACCOUNTS", "COMPANY", "COMPANIES", "USER", "USERS",
+    "UNKNOWN", "NONE", "NULL", "UNDEFINED", "DEFAULT", "UNASSIGNED",
+    "ANONYMOUS", "GENERIC", "UNIDENTIFIED", "UNTAGGED",
+    # process / audit / document terms
+    "CHECKLIST", "TEMPLATE", "CONTRACT", "MSA", "BASELINE", "COMPLIANCE",
+    "ASSESSMENT", "GO", "LIVE", "GOLIVE", "READINESS", "ENGAGEMENT",
+    "OVERVIEW", "WORKSHEET", "SHEET", "MATRIX", "MATRICES",
+    "COMPLETED", "COMPLETE", "PENDING", "ACTIVE", "INACTIVE",
     # period / report words
     "DAILY", "WEEKLY", "MONTHLY", "BIWEEKLY", "YEARLY", "QUARTERLY",
     "REPORT", "REPORTS", "REVIEW", "AUDIT", "SUMMARY", "EXTRACT", "EXPORT",
@@ -90,7 +111,7 @@ _NOISE_TOKENS = {
     "DAYTIME", "NIGHTLY", "OVERNIGHT", "INTRADAY", "CYCLIC", "ADHOC",
     "HOURLY", "REALTIME", "WEEKEND", "WEEKDAY", "MORNING", "EVENING",
     "NIGHT", "BATCH", "BATCHES", "WINDOW", "WINDOWS", "CYCLE", "CYCLES",
-    "SCHEDULE", "SCHEDULED", "SCHEDULER", "WORKFLOW", "WORKFLOWS",
+    "SCHEDULE", "SCHEDULED", "SCHEDULER", "SCHED", "WORKFLOW", "WORKFLOWS",
     "PROCESS", "PROCESSES", "STREAM", "STREAMS", "CHAIN", "CHAINS",
     "FOLDER", "FOLDERS", "TRIGGER", "TRIGGERS", "CONDITION", "CONDITIONS",
     "GROUP", "GROUPS",
@@ -113,6 +134,7 @@ _HEADER_HINTS = (
 _WORD_RE = re.compile(r"[A-Z][A-Z0-9]{2,}")        # uppercase tokens, 3+ chars
 _LINE_RE = re.compile(r"(?im)^\s*(customer|client|company|account|tenant)\s*[:\-]\s*(.+?)\s*$")
 _NONALNUM = re.compile(r"[^A-Z0-9 ]+")
+_VERSION_RE = re.compile(r"^(?:V\d+|\d+V|\d{4}[A-Z]?|[A-Z]?\d{4}|\d{1,2}[A-Z]{3}\d{2,4})$", re.I)
 
 
 @dataclass
@@ -149,7 +171,7 @@ class CustomerVerdict:
 
 
 # ─────────────────────────────────────────────────────────────────
-#  Normalisation
+#  Normalisation & Validation
 # ─────────────────────────────────────────────────────────────────
 
 def _strip_ext(name: str) -> str:
@@ -167,16 +189,33 @@ def normalise(raw: str) -> str:
     for t in tokens:
         if t in _NOISE_TOKENS:
             continue
-        # Strip year suffixes & length-1 noise
+        # Strip year suffixes, length-1 noise, and version stamps (e.g. 2025v, v1)
         if len(t) <= 1:
+            continue
+        if _VERSION_RE.match(t):
             continue
         cleaned.append(t)
     return " ".join(cleaned)
 
 
+def is_valid_customer_name(name: Optional[str]) -> bool:
+    """Return True only if name represents a genuine customer identity, not infrastructure or noise."""
+    if not name or not str(name).strip():
+        return False
+    norm = normalise(str(name))
+    if not norm or len(norm) < 2:
+        return False
+    parts = norm.split()
+    if not parts or all(p in _NOISE_TOKENS for p in parts):
+        return False
+    if norm in _NOISE_TOKENS:
+        return False
+    return True
+
+
 def display_name(canonical: str) -> str:
     """Return a friendly Title Case display version."""
-    if not canonical:
+    if not canonical or not is_valid_customer_name(canonical):
         return ""
     return " ".join(p.capitalize() for p in canonical.split())
 
@@ -199,7 +238,7 @@ def _from_filename(filename: str) -> List[CustomerCandidate]:
     stem = _strip_ext(os.path.basename(filename))
     raw = re.sub(r"[_\-\.]+", " ", stem).upper()
     norm = normalise(raw)
-    parts = [p for p in norm.split() if len(p) >= 3]
+    parts = [p for p in norm.split() if len(p) >= 3 and is_valid_customer_name(p)]
     if not parts:
         return []
     # Longer tokens are more distinctive customer markers; rank them so the
@@ -230,7 +269,7 @@ def _from_text(text: str, source: str = "content") -> List[CustomerCandidate]:
             break
         raw = m.group(2).strip()
         norm = normalise(raw)
-        parts = norm.split()
+        parts = [p for p in norm.split() if is_valid_customer_name(p)]
         if parts:
             out.append(CustomerCandidate(
                 name=parts[0],
@@ -242,13 +281,13 @@ def _from_text(text: str, source: str = "content") -> List[CustomerCandidate]:
     matches = _WORD_RE.findall(head)
     counts: Dict[str, int] = {}
     for w in matches:
-        if w in _NOISE_TOKENS:
+        if w in _NOISE_TOKENS or not is_valid_customer_name(w):
             continue
         counts[w] = counts.get(w, 0) + 1
     if counts:
         # Pick the most repeated meaningful uppercase word in the heading
         top = max(counts.items(), key=lambda kv: kv[1])
-        if top[1] >= 1:
+        if top[1] >= 1 and is_valid_customer_name(top[0]):
             out.append(CustomerCandidate(
                 name=top[0], raw=top[0],
                 source=source, confidence=60 if top[1] >= 2 else 45,
@@ -278,6 +317,7 @@ def _from_sub_application(values: Iterable[Any]) -> List[CustomerCandidate]:
         for tok in re.split(r"[_\-\s]+", s):
             if (tok
                     and tok not in _NOISE_TOKENS
+                    and is_valid_customer_name(tok)
                     and len(tok) >= 3
                     and not tok.isdigit()
                     and tok not in seen_in_row):
@@ -306,7 +346,7 @@ def _from_servers(servers: List[Dict[str, Any]]) -> List[CustomerCandidate]:
         cand = s.get("_customer_name") or s.get("customer") or s.get("Customer")
         if cand:
             norm = normalise(str(cand))
-            parts = norm.split()
+            parts = [p for p in norm.split() if is_valid_customer_name(p)]
             if parts:
                 out.append(CustomerCandidate(
                     name=parts[0], raw=str(cand),
@@ -323,7 +363,7 @@ def _from_sow(sow_payload: Dict[str, Any] | None) -> List[CustomerCandidate]:
     if not name:
         return []
     norm = normalise(str(name))
-    parts = norm.split()
+    parts = [p for p in norm.split() if is_valid_customer_name(p)]
     if not parts:
         return []
     return [CustomerCandidate(
@@ -438,14 +478,20 @@ def get_active() -> Optional[str]:
     try:
         from services import session_cache
         val = session_cache.ac_get("customer_name", "") or ""
-        norm = normalise(str(val))
-        if norm:
-            return norm
+        if val:
+            if is_valid_customer_name(str(val)):
+                return normalise(str(val))
+            else:
+                session_cache.ac_del("customer_name")
     except Exception:
         pass
     val = config_store.get("customer_name", "") or ""
-    norm = normalise(str(val))
-    return norm or None
+    if val:
+        if is_valid_customer_name(str(val)):
+            return normalise(str(val))
+        else:
+            config_store.set("customer_name", "")
+    return None
 
 
 def get_active_confidence() -> int:
@@ -487,9 +533,11 @@ def set_active(canonical: str, raw: Optional[str] = None, *,
     evidence is strong enough to supersede this one (see SUPERSEDE_MARGIN).
     """
     canonical = normalise(canonical)
-    if not canonical:
+    if not canonical or not is_valid_customer_name(canonical):
         return
     display = display_name(canonical)
+    if not display:
+        return
     config_store.set("customer_name", display)
     conf_val = int(confidence) if confidence is not None else 0
     src_val = source or ""
@@ -680,7 +728,7 @@ def identify(
             candidates=cands, status="corrected", active=best.name,
             previous_name=active, previous_display=display_name(active),
             previous_confidence=active_conf, previous_source=active_source,
-            message=(f"Customer identity updated: '{display_name(active)}' → "
+            message=(f"Customer identity updated: '{display_name(active)}' -> "
                      f"'{display_name(best.name)}'. {supersede_reason}."
                      f"{corr_msg}"),
         )
@@ -724,11 +772,11 @@ def verdict_to_dict(verdict: CustomerVerdict, *, max_candidates: int = 8) -> Dic
 
 def selected_customer_name(verdict: CustomerVerdict) -> Optional[str]:
     """Customer name that should remain active after applying this verdict."""
-    if verdict.status == "mismatch" and verdict.active:
+    if verdict.status == "mismatch" and verdict.active and is_valid_customer_name(verdict.active):
         return display_name(verdict.active)
-    if verdict.display:
+    if verdict.display and is_valid_customer_name(verdict.display):
         return verdict.display
-    if verdict.active:
+    if verdict.active and is_valid_customer_name(verdict.active):
         return display_name(verdict.active)
     return None
 
