@@ -53,7 +53,7 @@ export function CustomerAuditBanner() {
   const batch = data.batch as CustomerIdentityPayload | null;
   const resource = data.resource as CustomerIdentityPayload | null;
   const sow = data.sowBaseline as CustomerIdentityPayload | null;
-  const rawCustomer = data.customerName || batch?.customer_name || resource?.customer_name || sow?.customer_name || null;
+  const rawCustomer = data.customerName || resource?.customer_name || sow?.customer_name || batch?.customer_name || null;
   const customerName = isValidCustomerName(rawCustomer) ? rawCustomer : null;
 
   const mismatch = useMemo(() => {
@@ -161,12 +161,12 @@ export function CustomerAuditBanner() {
     ? `Active engagement retained after ${mismatch.label.toLowerCase()} mismatch.`
     : corrected
       ? `Corrected by ${corrected.label.toLowerCase()} — stronger identity evidence found.`
-      : batch?.customer_name
-        ? 'Sourced from Ctrl-M identity checks'
-        : resource?.customer_name
-          ? resource.customer_message || 'Sourced from resource utilization data'
-          : sow?.customer_name
-            ? 'Sourced from SOW contract metadata'
+      : resource?.customer_name
+        ? resource.customer_message || 'Sourced from resource utilization data'
+        : sow?.customer_name
+          ? 'Sourced from SOW contract metadata'
+          : batch?.customer_name
+            ? 'Sourced from Ctrl-M identity checks'
             : resource?.customer_message
               ? resource.customer_message
               : 'No customer identity evidence was supplied; fleet analysis remains valid.';

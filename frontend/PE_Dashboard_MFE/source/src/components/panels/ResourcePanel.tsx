@@ -917,9 +917,6 @@ export function ResourcePanel() {
 
   React.useEffect(() => {
     if (!persistedDeepDive) {
-      setDeepDive((current) => current == null ? current : null);
-      setDeepDiveVm((current) => current ? '' : current);
-      setCorrelatedVms((current) => current.size ? new Set<string>() : current);
       return;
     }
     setDeepDive((current) => current === persistedDeepDive ? current : persistedDeepDive);

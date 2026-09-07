@@ -219,7 +219,11 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           if (customerSwitched) {
             // When customer switched, adopt exactly what backend currently holds
             updates.batch = hasDashboardPayload(restored.batch) ? restored.batch : null;
-            updates.resource = hasDashboardPayload(restored.resource) ? (restored.resource as AppData['resource']) : null;
+            const currentDd = (current.resource as any)?.deep_dive;
+            const restoredRes = (restored.resource as AppData['resource']) || null;
+            updates.resource = (restoredRes && currentDd && !(restoredRes as any)?.deep_dive
+              ? { ...restoredRes, deep_dive: currentDd }
+              : (hasDashboardPayload(restored.resource) ? restoredRes : null)) as AppData['resource'];
             updates.slaMatrix = hasDashboardPayload(restored.sla_matrix) ? restored.sla_matrix : null;
             updates.benchmark = hasDashboardPayload(restored.benchmark) ? restored.benchmark : null;
             updates.findings = hasDashboardPayload(restored.findings) ? restored.findings : null;
@@ -231,7 +235,15 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           } else {
             // Normal sync without customer switch: fill missing or update
             if (isEmptyDashboardPayload(current.batch) && hasDashboardPayload(restored.batch)) updates.batch = restored.batch;
-            if (isEmptyDashboardPayload(current.resource) && hasDashboardPayload(restored.resource)) updates.resource = restored.resource as AppData['resource'];
+            if (hasDashboardPayload(restored.resource)) {
+              const currentDd = (current.resource as any)?.deep_dive;
+              const restoredRes = restored.resource as AppData['resource'];
+              if (currentDd && !(restoredRes as any)?.deep_dive) {
+                updates.resource = { ...restoredRes, deep_dive: currentDd } as AppData['resource'];
+              } else if (isEmptyDashboardPayload(current.resource)) {
+                updates.resource = restoredRes;
+              }
+            }
             if (isEmptyDashboardPayload(current.slaMatrix) && hasDashboardPayload(restored.sla_matrix)) updates.slaMatrix = restored.sla_matrix;
             if (isEmptyDashboardPayload(current.benchmark) && hasDashboardPayload(restored.benchmark)) updates.benchmark = restored.benchmark;
             if (isEmptyDashboardPayload(current.findings) && hasDashboardPayload(restored.findings)) updates.findings = restored.findings;
@@ -303,6 +315,16 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
         : null;
       const incomingCustomer = isValidCustomerName(rawCustomer) ? rawCustomer : null;
 
+      // Priority Rule: Resource Utilization / Azure Server has higher authentic priority.
+      // If resource is already loaded or active customer was established by resource,
+      // do not wipe and do not overwrite customerName with noisy batch tokens.
+      if (prev.resource && hasDashboardPayload(prev.resource)) {
+        return {
+          ...prev,
+          batch: value,
+        };
+      }
+
       if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
         return {
           ...EMPTY_APP_DATA,
@@ -328,9 +350,12 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           : (value as any)?.servers?.[0]?.customer?.trim() || null;
         const incomingCustomer = isValidCustomerName(rawCandidate) ? rawCandidate : null;
 
+        // Priority Rule: Resource / Azure Server has highest authenticity.
+        // If customer was previously inferred from Ctrl-M, update customerName to the
+        // authentic Azure server name while preserving batch data so correlation works.
         if (incomingCustomer && isCustomerChange(prev.customerName, incomingCustomer)) {
           return {
-            ...EMPTY_APP_DATA,
+            ...prev,
             customerName: incomingCustomer,
             resource: value,
           };

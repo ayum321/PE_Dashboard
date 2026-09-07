@@ -154,6 +154,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const [authInfo, setAuthInfo] = useState<DashboardPayload | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [deviceCodeInfo, setDeviceCodeInfo] = useState<{ verification_uri: string; user_code: string; message: string } | null>(null);
+  const [codeCopied, setCodeCopied] = useState(false);
   // State updates are asynchronous. A ref closes the small gap in which two
   // clicks can both enter handleSignIn before React re-renders the button.
   const signInInFlight = useRef(false);
@@ -279,24 +280,45 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     return () => window.clearTimeout(timer);
   }, [open, authInfo?.method, subscriptionsWarming, loadSubscriptions, invalidateAzureSession]);
 
+  const handleCopyAndOpenMicrosoft = useCallback(() => {
+    if (!deviceCodeInfo) return;
+    const code = deviceCodeInfo.user_code;
+    if (code && typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(code).then(() => {
+        setCodeCopied(true);
+        setTimeout(() => setCodeCopied(false), 5000);
+      }).catch(() => {});
+    }
+    window.open(deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin', '_blank', 'noopener,noreferrer');
+  }, [deviceCodeInfo]);
+
   const handleSignIn = useCallback(async () => {
     if (signInInFlight.current) return;
     const modalToken = modalGeneration.current;
     signInInFlight.current = true;
     setAuthBusy(true);
     setDeviceCodeInfo(null);
+    setCodeCopied(false);
     setDiscoverStatus({ text: 'Connecting to Azure\u2026', tone: 'muted' });
     try {
       await clearAzureDeviceCode().catch(() => {});
       const result = await connectAzure();
       if (modalToken !== modalGeneration.current) return;
       if (result.device_code_required) {
+        const userCode = String(result.user_code || '');
+        const uri = String(result.verification_uri || 'https://microsoft.com/devicelogin');
+        if (userCode && typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard.writeText(userCode).then(() => {
+            setCodeCopied(true);
+            setTimeout(() => setCodeCopied(false), 5000);
+          }).catch(() => {});
+        }
         setDeviceCodeInfo({
-          verification_uri: String(result.verification_uri || 'https://microsoft.com/devicelogin'),
-          user_code: String(result.user_code || ''),
+          verification_uri: uri,
+          user_code: userCode,
           message: String(result.message || ''),
         });
-        setDiscoverStatus({ text: 'Please complete login on the Microsoft page using the code above.', tone: 'muted' });
+        setDiscoverStatus({ text: 'Code copied to clipboard! Paste (Ctrl+V) on the Microsoft sign-in page.', tone: 'green' });
         return;
       }
       setDeviceCodeInfo(null);
@@ -710,9 +732,9 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
           </Box>
         )}
 
-        {/* Device Code Instructions Banner with Bypass Option */}
+        {/* Device Code Instructions Banner with 1-Click Copy & Open */}
         {deviceCodeInfo && (
-          <Box style={{ borderRadius: 8, border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Box style={{ borderRadius: 8, border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)', padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Box display="flex" justifyContent="space-between" alignItems="center">
               <Typography variant="body2" style={{ color: '#93c5fd', fontWeight: 800 }}>
                 Azure Corporate Sign-In
@@ -733,12 +755,46 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 Bypass Code / Direct Sign-In
               </Button>
             </Box>
-            <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
-              1. Open <a href={deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin'} target="_blank" rel="noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', fontWeight: 700 }}>{deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin'}</a> in a new tab.
+
+            <Box style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <Button
+                variant="contained"
+                onClick={handleCopyAndOpenMicrosoft}
+                style={{
+                  background: codeCopied ? '#059669' : '#2563eb',
+                  color: '#ffffff',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: 'none',
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  boxShadow: '0 2px 8px rgba(37,99,235,0.4)',
+                }}
+              >
+                {codeCopied ? '✓ Code Copied! Opening Microsoft Sign-In…' : '📋 Copy Code & Open Microsoft Sign-In'}
+              </Button>
+              <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
+                Code: <strong
+                  onClick={() => {
+                    if (deviceCodeInfo.user_code && typeof navigator !== 'undefined' && navigator.clipboard) {
+                      navigator.clipboard.writeText(deviceCodeInfo.user_code);
+                      setCodeCopied(true);
+                      setTimeout(() => setCodeCopied(false), 5000);
+                    }
+                  }}
+                  title="Click to copy code"
+                  style={{ cursor: 'pointer', background: '#1e293b', padding: '4px 12px', borderRadius: 4, letterSpacing: '0.12em', fontSize: 14, color: '#38bdf8', border: '1px solid #38bdf8' }}
+                >
+                  {deviceCodeInfo.user_code}
+                </strong>
+                {codeCopied && <span style={{ color: '#34d399', marginLeft: 8, fontSize: 11 }}>✓ Copied!</span>}
+              </Typography>
+            </Box>
+
+            <Typography variant="caption" style={{ color: '#cbd5e1', fontSize: 11 }}>
+              Code is automatically copied to your clipboard. Simply press <strong>Ctrl+V</strong> on the Microsoft page to authenticate.
             </Typography>
-            <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
-              2. Enter code: <strong style={{ background: '#1e293b', padding: '3px 10px', borderRadius: 4, letterSpacing: '0.12em', fontSize: 14, color: '#38bdf8', border: '1px solid #38bdf8' }}>{deviceCodeInfo.user_code}</strong>
-            </Typography>
+
             <Box display="flex" justifyContent="space-between" alignItems="center">
               <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <CircularProgress size={12} color="inherit" /> Waiting for Azure login to complete in your browser...

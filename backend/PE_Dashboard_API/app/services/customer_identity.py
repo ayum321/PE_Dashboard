@@ -114,7 +114,9 @@ _NOISE_TOKENS = {
     "SCHEDULE", "SCHEDULED", "SCHEDULER", "SCHED", "WORKFLOW", "WORKFLOWS",
     "PROCESS", "PROCESSES", "STREAM", "STREAMS", "CHAIN", "CHAINS",
     "FOLDER", "FOLDERS", "TRIGGER", "TRIGGERS", "CONDITION", "CONDITIONS",
-    "GROUP", "GROUPS",
+    "GROUP", "GROUPS", "JOB", "JOBS", "TASK", "TASKS", "STEP", "STEPS",
+    "ATTA", "CALLOFF", "LOADING", "LOADINGFILES", "RELOADING", "RCCP",
+    "ACT", "COST", "EXPORT", "OUTBOUND", "INBOUND", "CONTINUOUS", "REL", "MPS",
     # document type
     "CSV", "XLSX", "XLS", "PDF", "DOCX", "DOC", "TXT", "JSON", "XML",
     # generic English
@@ -344,13 +346,26 @@ def _from_servers(servers: List[Dict[str, Any]]) -> List[CustomerCandidate]:
     out: list[CustomerCandidate] = []
     for s in servers or []:
         cand = s.get("_customer_name") or s.get("customer") or s.get("Customer")
+        if not cand or not is_valid_customer_name(str(cand)):
+            try:
+                from services.azure_monitor import _resolve_customer_name
+                resolved = _resolve_customer_name(
+                    tags=s.get("tags"),
+                    rg=s.get("resource_group") or s.get("rg", ""),
+                    sub_id=s.get("subscription_id") or s.get("sub_id", ""),
+                    vm_name=s.get("host") or s.get("name", ""),
+                )
+                if resolved and is_valid_customer_name(resolved):
+                    cand = resolved
+            except Exception:
+                pass
         if cand:
             norm = normalise(str(cand))
             parts = [p for p in norm.split() if is_valid_customer_name(p)]
             if parts:
                 out.append(CustomerCandidate(
-                    name=parts[0], raw=str(cand),
-                    source="resource", confidence=90,
+                    name=" ".join(parts), raw=str(cand),
+                    source="resource", confidence=95,
                 ))
                 break  # one server is enough — they all share the same tag
     return out
@@ -367,7 +382,7 @@ def _from_sow(sow_payload: Dict[str, Any] | None) -> List[CustomerCandidate]:
     if not parts:
         return []
     return [CustomerCandidate(
-        name=parts[0], raw=str(name),
+        name=" ".join(parts), raw=str(name),
         source="sow", confidence=95,
     )]
 
@@ -418,8 +433,15 @@ def best_candidate(cands: List[CustomerCandidate]) -> Optional[CustomerCandidate
     for c in cands:
         name_sources.setdefault(c.name, set()).add(c.source)
 
-    src_rank = {"sub_application": 0, "sow": 1, "header": 2, "resource": 3,
-                "filename": 4, "content": 5, "config": 6}
+    src_rank = {
+        "resource": 0,
+        "sow": 1,
+        "header": 2,
+        "filename": 3,
+        "sub_application": 4,
+        "content": 5,
+        "config": 6,
+    }
 
     def _sort_key(c: CustomerCandidate):
         # Cross-source boost: +15 per additional source that confirms
@@ -457,9 +479,11 @@ MIN_SUPERSEDE_CONFIDENCE = 80
 # only produces a warning, so a fleet's confirmed Resource/SOW identity is
 # never silently clobbered by a later, weaker Ctrl-M filename guess.
 SOURCE_TRUST_TIER = {
-    "header": 0, "sow": 0, "resource": 0,
-    "sub_application": 1,
-    "filename": 2,
+    "resource": 0,
+    "header": 0,
+    "sow": 0,
+    "filename": 1,
+    "sub_application": 2,
     "content": 3,
     "config": 4,
 }
@@ -694,11 +718,12 @@ def identify(
     active_tier = SOURCE_TRUST_TIER.get(active_source or "", 4)
     new_tier = SOURCE_TRUST_TIER.get(best.source, 2)
 
-    # When a user uploads a new document with an identified customer (confidence >= 35),
-    # treat it as an explicit customer switch rather than blocking it as an unyielding mismatch.
-    if best.confidence >= 35:
+    # Resource Utilization / Azure Server is authentic cloud infra telemetry.
+    # It must ALWAYS supersede Ctrl-M (sub_application, filename, content)
+    # regardless of whether Ctrl-M was uploaded before or after.
+    if best.source == "resource" and active_source in ("sub_application", "filename", "content", "config", None):
         can_supersede = True
-        supersede_reason = f"uploaded {best.source} identified customer '{display_name(best.name)}'"
+        supersede_reason = f"Resource / Azure Server identification is more authentic than '{active_source}'"
     elif new_tier < active_tier:
         can_supersede = best.confidence >= TIER_OVERRIDE_MIN_CONFIDENCE
         supersede_reason = (
@@ -716,6 +741,8 @@ def identify(
             f"identification's {active_conf}"
         )
     else:
+        # A lower-trust source (e.g. Ctrl-M sub_application or filename)
+        # must NEVER silently downgrade or overwrite a higher-trust source (like resource/azure)
         can_supersede = False
         supersede_reason = None
 

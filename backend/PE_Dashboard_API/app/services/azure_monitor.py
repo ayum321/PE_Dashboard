@@ -468,6 +468,33 @@ def restore_cached_user_credential(session_id=None) -> Optional[dict]:
     except Exception as cli_exc:
         logger.debug("Azure CLI credential not available: %s", cli_exc)
 
+    # 1b. Check if analyst is signed in via Azure PowerShell (Connect-AzAccount)
+    try:
+        from azure.identity import AzurePowerShellCredential
+        ps_cred = AzurePowerShellCredential()
+        token = ps_cred.get_token("https://management.azure.com/.default")
+        if token:
+            payload_b64 = token.token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            user_name = claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or claims.get("email") or "Azure User"
+            display_name = claims.get("name") or user_name
+            tenant_id = claims.get("tid") or ""
+            info = {
+                "logged_in": True,
+                "name": user_name,
+                "display_name": display_name,
+                "tenant_id": tenant_id,
+                "method": "browser",
+            }
+            _set_session(session_id, ps_cred, info)
+            _save_auth_record(info)
+            clear_device_code_state(session_id)
+            logger.info("Directly authenticated via Azure PowerShell for %s (%s)", user_name, display_name)
+            return info
+    except Exception as ps_exc:
+        logger.debug("Azure PowerShell credential not available: %s", ps_exc)
+
     auth_record = _load_auth_record()
     if not auth_record or not auth_record.get("logged_in"):
         return None

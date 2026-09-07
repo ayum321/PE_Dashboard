@@ -1503,4 +1503,12 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
         },
     }
     _ts_cache_set(cache_key, response)
+    try:
+        from services import session_cache as _sc
+        _lr = _sc.get("last_resource")
+        if isinstance(_lr, dict):
+            _lr["deep_dive"] = response
+            _sc.set("last_resource", _lr)
+    except Exception as _c_exc:
+        logger.debug("Failed to cache deep_dive in last_resource: %s", _c_exc)
     return response
