@@ -179,7 +179,7 @@ const WF_STATUS_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#2dd
 /** Tier bucket from a workflow row's sla_source, mirrors the real dashboard's
  * "Active SLA Commitments" Tier 1 (BatchSLA XLSX) / Tier 2 (SOW) / Tier 3 (default) split. */
 function _workflowTier(src: string): 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides' | 'Tier 2 \u2014 SOW Contract Batch Window Ceilings' | 'Tier 3 \u2014 Global Defaults' {
-  if (src.startsWith('batch_sla_xlsx')) return 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides';
+  if (src.startsWith('batch_sla_xlsx') || src.includes('time_window') || src.includes('inferred')) return 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides';
   if (src === 'sow_extracted') return 'Tier 2 \u2014 SOW Contract Batch Window Ceilings';
   return 'Tier 3 \u2014 Global Defaults';
 }

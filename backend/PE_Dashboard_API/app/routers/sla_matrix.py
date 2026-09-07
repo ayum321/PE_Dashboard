@@ -1048,7 +1048,7 @@ def _compute_sla_matrix(
                         # S2: Disambiguate when distinct workflows (e.g. ASC_CONTINUOUS vs ASC_REL_DO)
                         # share an umbrella Sub_Application group and explicit anchors are absent.
                         if not _anchor_pair_used and "Job_Name" in rg.columns:
-                            _wf_toks = [t for t in re.split(r"[_\s]+", _norm(sub_app)) if len(t) >= 4 and t not in ("PROD", "TEST", "DAILY", "BATCH")]
+                            _wf_toks = [t for t in re.split(r"[_\s]+", _norm(sub_app)) if len(t) >= 2 and t not in ("PROD", "TEST", "DAILY", "BATCH", "ASC", "WF")]
                             if _wf_toks:
                                 _jmatch = rg["Job_Name"].str.upper().apply(lambda jn: any(tok in jn for tok in _wf_toks))
                                 if _jmatch.any():
@@ -1185,7 +1185,7 @@ def _compute_sla_matrix(
                             _inferred_h = _overnight_delta_hours(_st_cand, _et_cand)
                             if _inferred_h and _inferred_h > 0:
                                 sla_h_wf = _inferred_h
-                                sla_src_wf = "time_window_inferred"
+                                sla_src_wf = "batch_sla_xlsx_time_window"
                                 join_hit = True
                         except Exception:
                             pass

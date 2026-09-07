@@ -655,7 +655,7 @@ _BATCH_SLA_FIELDS: dict[str, dict[str, Any]] = {
         },
     },
     "module": {
-        "required": False, "internal": None, "aliases": {
+        "required": False, "internal": "Module", "aliases": {
             "module": "provided BatchSLA header",
         },
     },
@@ -1026,6 +1026,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
     # source column explicitly mapped as Current End Time can establish an
     # observed completion for this workbook-only SLA matrix.
     contract_dur_series = _col(df, "Contract_Duration", optional=True)
+    module_series       = _col(df, "Module",            optional=True)
 
     workflows: list[dict] = []
     _consecutive_nan_rows = 0   # track section boundary (reset per sheet)
@@ -1037,7 +1038,13 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             val = series.iloc[idx] if hasattr(series, "iloc") else fallback
             return "" if (val is None or (isinstance(val, float) and val != val)) else str(val).strip()
 
-        batch_name = _v(_col(df, "Batch_Name"), f"Row_{idx}")
+        batch_name = _v(_col(df, "Batch_Name"))
+        if not batch_name or batch_name.startswith("Row_"):
+            # Fall back to Module column if Batch_Name is unpopulated
+            batch_name = _v(module_series)
+        if not batch_name:
+            batch_name = f"Row_{idx}"
+
         if not batch_name or batch_name.startswith("Row_"):
             _consecutive_nan_rows += 1
             # 3+ consecutive empty rows = section boundary — stop parsing
