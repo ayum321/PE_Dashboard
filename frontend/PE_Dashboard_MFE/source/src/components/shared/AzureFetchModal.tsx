@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Button, CircularProgress, Typography } from '@material-ui/core';
 import {
+  clearAzureDeviceCode,
   connectAzure,
   DashboardPayload,
   discoverAzureVms,
@@ -283,8 +284,10 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     const modalToken = modalGeneration.current;
     signInInFlight.current = true;
     setAuthBusy(true);
+    setDeviceCodeInfo(null);
     setDiscoverStatus({ text: 'Connecting to Azure\u2026', tone: 'muted' });
     try {
+      await clearAzureDeviceCode().catch(() => {});
       const result = await connectAzure();
       if (modalToken !== modalGeneration.current) return;
       if (result.device_code_required) {
@@ -707,21 +710,50 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
           </Box>
         )}
 
-        {/* Device Code Instructions Banner */}
+        {/* Device Code Instructions Banner with Bypass Option */}
         {deviceCodeInfo && (
-          <Box style={{ borderRadius: 8, border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Typography variant="body2" style={{ color: '#93c5fd', fontWeight: 800 }}>
-              Action Required: Complete Azure Corporate Sign-In
-            </Typography>
+          <Box style={{ borderRadius: 8, border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <Box display="flex" justifyContent="space-between" alignItems="center">
+              <Typography variant="body2" style={{ color: '#93c5fd', fontWeight: 800 }}>
+                Azure Corporate Sign-In
+              </Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => void handleSignIn()}
+                style={{
+                  borderColor: '#38bdf8',
+                  color: '#38bdf8',
+                  fontSize: 11,
+                  textTransform: 'none',
+                  fontWeight: 700,
+                  padding: '2px 10px',
+                }}
+              >
+                Bypass Code / Direct Sign-In
+              </Button>
+            </Box>
             <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
               1. Open <a href={deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin'} target="_blank" rel="noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', fontWeight: 700 }}>{deviceCodeInfo.verification_uri || 'https://microsoft.com/devicelogin'}</a> in a new tab.
             </Typography>
             <Typography variant="caption" style={{ color: '#e2e8f0', fontSize: 12 }}>
               2. Enter code: <strong style={{ background: '#1e293b', padding: '3px 10px', borderRadius: 4, letterSpacing: '0.12em', fontSize: 14, color: '#38bdf8', border: '1px solid #38bdf8' }}>{deviceCodeInfo.user_code}</strong>
             </Typography>
-            <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <CircularProgress size={12} color="inherit" /> Waiting for Azure login to complete in your browser...
-            </Typography>
+            <Box display="flex" justifyContent="space-between" alignItems="center">
+              <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <CircularProgress size={12} color="inherit" /> Waiting for Azure login to complete in your browser...
+              </Typography>
+              <Typography
+                variant="caption"
+                onClick={() => {
+                  setDeviceCodeInfo(null);
+                  void clearAzureDeviceCode().catch(() => {});
+                }}
+                style={{ color: '#94a3b8', cursor: 'pointer', textDecoration: 'underline', fontSize: 11 }}
+              >
+                Dismiss
+              </Typography>
+            </Box>
           </Box>
         )}
 

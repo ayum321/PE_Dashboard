@@ -404,6 +404,9 @@ export const connectAzure = (): Promise<DashboardPayload> =>
 export const disconnectAzure = (): Promise<DashboardPayload> =>
   request<DashboardPayload>('/api/azure/browser-logout', { method: 'POST' });
 
+export const clearAzureDeviceCode = (): Promise<DashboardPayload> =>
+  request<DashboardPayload>('/api/azure/clear-device-code', { method: 'POST' });
+
 export const getAzureSubscriptions = (): Promise<DashboardPayload> =>
   request<DashboardPayload>('/api/azure/subscriptions');
 

@@ -436,8 +436,37 @@ def _clear_auth_record() -> None:
 
 
 def restore_cached_user_credential(session_id=None) -> Optional[dict]:
-    """Attempt silent restore of previously authenticated Azure user from local token cache."""
+    """Attempt silent restore of previously authenticated Azure user from Azure CLI or local token cache."""
     import json as _json, base64
+
+    # 1. First priority: Check if analyst is already signed in via Azure CLI (`az login`).
+    # This provides instant, silent corporate authentication with the user's authentic
+    # Azure AD identity, without requiring any device codes or browser redirects.
+    try:
+        from azure.identity import AzureCliCredential
+        cli_cred = AzureCliCredential()
+        token = cli_cred.get_token("https://management.azure.com/.default")
+        if token:
+            payload_b64 = token.token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            user_name = claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username") or claims.get("email") or "Azure User"
+            display_name = claims.get("name") or user_name
+            tenant_id = claims.get("tid") or ""
+            info = {
+                "logged_in": True,
+                "name": user_name,
+                "display_name": display_name,
+                "tenant_id": tenant_id,
+                "method": "browser",
+            }
+            _set_session(session_id, cli_cred, info)
+            _save_auth_record(info)
+            clear_device_code_state(session_id)
+            logger.info("Directly authenticated via Azure CLI for %s (%s)", user_name, display_name)
+            return info
+    except Exception as cli_exc:
+        logger.debug("Azure CLI credential not available: %s", cli_exc)
 
     auth_record = _load_auth_record()
     if not auth_record or not auth_record.get("logged_in"):
@@ -463,6 +492,7 @@ def restore_cached_user_credential(session_id=None) -> Optional[dict]:
                 "method": "browser",
             }
             _set_session(session_id, cred, info)
+            clear_device_code_state(session_id)
             logger.info("Silently restored Azure user credential for %s (%s)", user_name, display_name)
             return info
     except Exception as exc:
@@ -473,13 +503,12 @@ def restore_cached_user_credential(session_id=None) -> Optional[dict]:
 
 
 def browser_login(session_id=None) -> dict:
-    """Launch interactive browser login or Device Code flow and cache the credential.
+    """Launch direct interactive browser login and cache the credential.
 
-    On desktop environments, opens Microsoft 'Pick an account' page in the
+    On desktop environments, checks Azure CLI then opens Microsoft 'Pick an account' page in the
     analyst's default browser so they authenticate with their corporate Azure AD
     account. Every data pull is tied to the user's authentic Azure AD identity.
-    On container/headless environments, provides Device Code flow so analysts
-    can authenticate with their corporate Azure account from their own browser.
+    Bypasses device code entry whenever the user can authenticate directly.
     """
     _require_sdk()
     import json as _json, base64
@@ -488,31 +517,34 @@ def browser_login(session_id=None) -> dict:
     _preflight_auth_network()
 
     with _login_lock(session_id):
+        # Clear any pending device code flow so direct login takes precedence
+        clear_device_code_state(session_id)
+
         existing = _get_cred(session_id)
         existing_info = _get_info(session_id)
         if existing is not None and existing_info.get("logged_in"):
             return existing_info
 
-        # Check if silent restore from local user token cache succeeds
+        # Check if silent restore from Azure CLI or local user token cache succeeds
         restored = restore_cached_user_credential(session_id)
         if restored and restored.get("logged_in"):
             return restored
 
-        # In container / headless Linux, launch Device Code flow so user can sign in on their laptop
-        is_headless = os.path.exists("/app") or os.environ.get("KUBERNETES_SERVICE_HOST") is not None or not os.environ.get("DISPLAY")
-        if is_headless and sys.platform != "win32":
-            return start_device_code_auth(session_id)
-
-        logger.info("Azure auth: launching interactive browser login for analyst user…")
+        logger.info("Azure auth: launching direct interactive browser login for analyst user...")
         try:
             from azure.identity import InteractiveBrowserCredential, TokenCachePersistenceOptions
             cache_opts = TokenCachePersistenceOptions(name="pe_dashboard_user_cache")
             cred = InteractiveBrowserCredential(cache_persistence_options=cache_opts, timeout=_BROWSER_AUTH_TIMEOUT_S)
-            cred.authenticate(scopes=["https://management.azure.com/.default"])
             token = cred.get_token("https://management.azure.com/.default")
         except Exception as exc:
-            logger.warning("Interactive browser login failed (%s); falling back to Device Code flow", exc)
-            return start_device_code_auth(session_id)
+            # In headless non-Windows environments without display, fall back to Device Code
+            is_headless = os.path.exists("/app") or os.environ.get("KUBERNETES_SERVICE_HOST") is not None or not os.environ.get("DISPLAY")
+            if is_headless and sys.platform != "win32":
+                logger.warning("Interactive browser login failed (%s); falling back to Device Code flow", exc)
+                return start_device_code_auth(session_id)
+            raise AzureConfigError(
+                f"Direct browser sign-in failed or was cancelled: {exc}"
+            ) from exc
 
         # Decode JWT to extract user's actual corporate identity
         try:
@@ -552,6 +584,7 @@ def clear_browser_credential(session_id=None) -> None:
     """Clear this session's in-memory browser credential on sign-out and delete saved auth record."""
     _clear_session(session_id)
     _clear_auth_record()
+    clear_device_code_state(session_id)
 
 
 def _build_credential(cfg: dict, session_id=None):

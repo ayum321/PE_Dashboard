@@ -515,7 +515,29 @@ def azure_auth_status(request: Request, response: Response) -> Dict[str, Any]:
     """Return which auth method is active — always instant (no network call)."""
     sid = _session_id(request, response)
 
-    from services.azure_monitor import get_device_code_state
+    from services.azure_monitor import clear_device_code_state, get_device_code_state, restore_cached_user_credential
+
+    mem_info = dict(get_browser_credential_info(sid) or {})
+    if get_browser_credential(sid) is not None and mem_info.get("logged_in"):
+        clear_device_code_state(sid)
+        return {
+            "method": "browser",
+            "name": mem_info.get("name", ""),
+            "display_name": mem_info.get("display_name", ""),
+            "tenant_id": mem_info.get("tenant_id", ""),
+        }
+
+    # Attempt silent restore from Azure CLI or local user token cache
+    restored = restore_cached_user_credential(sid)
+    if restored and restored.get("logged_in"):
+        clear_device_code_state(sid)
+        return {
+            "method": "browser",
+            "name": restored.get("name", ""),
+            "display_name": restored.get("display_name", ""),
+            "tenant_id": restored.get("tenant_id", ""),
+        }
+
     dev_state = get_device_code_state(sid)
     if dev_state.get("device_code_required") and dev_state.get("status") == "waiting_for_user":
         return {
@@ -526,27 +548,16 @@ def azure_auth_status(request: Request, response: Response) -> Dict[str, Any]:
             "message": dev_state.get("message", ""),
         }
 
-    mem_info = dict(get_browser_credential_info(sid) or {})
-    if get_browser_credential(sid) is not None and mem_info.get("logged_in"):
-        return {
-            "method": "browser",
-            "name": mem_info.get("name", ""),
-            "display_name": mem_info.get("display_name", ""),
-            "tenant_id": mem_info.get("tenant_id", ""),
-        }
-
-    # Attempt silent restore from local user token cache (no browser popup if already cached)
-    from services.azure_monitor import restore_cached_user_credential
-    restored = restore_cached_user_credential(sid)
-    if restored and restored.get("logged_in"):
-        return {
-            "method": "browser",
-            "name": restored.get("name", ""),
-            "display_name": restored.get("display_name", ""),
-            "tenant_id": restored.get("tenant_id", ""),
-        }
-
     return {"method": "none", "name": ""}
+
+
+@router.post("/azure/clear-device-code")
+def azure_clear_device_code(request: Request, response: Response) -> Dict[str, Any]:
+    """Clear pending device code state so analyst can bypass code entry and sign in directly."""
+    sid = _session_id(request, response)
+    from services.azure_monitor import clear_device_code_state
+    clear_device_code_state(sid)
+    return {"ok": True, "message": "Device code state cleared."}
 
 
 @router.get("/azure/subscriptions")
