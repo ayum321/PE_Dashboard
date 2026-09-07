@@ -325,6 +325,20 @@ export const uploadBatchSlaXlsx = (file: File, onProgress?: UploadProgressHandle
   return requestWithProgress<DashboardPayload>('/api/batch-sla/upload', formData, onProgress);
 };
 
+/** Recompute SLA Matrix with a specific SLA ceiling or mode via /api/sla-matrix/json */
+export const recomputeSlaMatrix = (
+  slaMode: string = 'daily',
+  slaHrs?: number,
+  customer?: string,
+  rows: any[] = []
+): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/sla-matrix/json', {
+    rows,
+    sla_mode: slaMode,
+    sla_hrs: slaHrs,
+    customer,
+  });
+
 /** Re-run batch KPIs from the cached Ctrl-M rows with current manual job exclusions. */
 export const refreshBatch = (manualExclusions: { name: string; reason: string }[] = []): Promise<DashboardPayload> =>
   postDashboardPayload('/api/batch/refresh', { manual_exclusions: manualExclusions });

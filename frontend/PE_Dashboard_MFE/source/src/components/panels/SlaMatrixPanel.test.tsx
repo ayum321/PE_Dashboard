@@ -16,6 +16,7 @@ jest.mock('../../api/dashboardApi', () => {
     getExecutiveDashboard: jest.fn(),
     getPeNarrative: jest.fn(),
     getFinalJudgment: jest.fn(),
+    recomputeSlaMatrix: jest.fn(),
   };
 });
 
@@ -27,6 +28,7 @@ const api = require('../../api/dashboardApi') as {
   getExecutiveDashboard: jest.Mock;
   getPeNarrative: jest.Mock;
   getFinalJudgment: jest.Mock;
+  recomputeSlaMatrix: jest.Mock;
 };
 
 const RICH_SLA_PAYLOAD = {
@@ -242,5 +244,94 @@ describe('SlaMatrixPanel', () => {
     expect(getByText(/SLA contract loaded\. Upload Ctrl-M evidence when available/i)).toBeDefined();
     expect(getByText(/Workbook SLA Matrix loaded/i)).toBeDefined();
     expect(api.generateFindings).not.toHaveBeenCalled();
+  });
+
+  it('renders provenance badges and interactive ceiling pills, and updates Tier 3 when ceiling pill is clicked', async () => {
+    const payloadWithTiers = {
+      ...RICH_SLA_PAYLOAD,
+      explicit_sla_matrix: false,
+      sla_limit_hrs: 6.0,
+      workflow_summary: [
+        {
+          workflow_name: 'CONTRACT_FLOW',
+          batch_type: 'DAILY',
+          runtime_h: 5.0,
+          sla_h: 8.0,
+          buffer_pct: 37.5,
+          status: 'LONG_JOB',
+          sla_source: 'batch_sla_xlsx',
+        },
+        {
+          workflow_name: 'UNMATCHED_FLOW',
+          batch_type: 'DAILY',
+          runtime_h: 7.0,
+          sla_h: 6.0,
+          buffer_pct: -16.7,
+          status: 'BREACH',
+          sla_source: 'fallback',
+        },
+      ],
+    };
+
+    api.recomputeSlaMatrix.mockResolvedValue({});
+
+    const { getByText, getAllByText } = render(
+      <MemoryRouter>
+        <AppDataProvider>
+          <SlaDataInjector payload={payloadWithTiers}>
+            <SlaMatrixPanel />
+          </SlaDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
+    );
+
+    // Provenance badges should be visible
+    expect(getByText('T1 · Contract')).toBeDefined();
+    expect(getByText('T3 · Assumed (6h)')).toBeDefined();
+
+    // Ceiling pills should be rendered
+    const pill825 = getByText('8.25h');
+    expect(pill825).toBeDefined();
+
+    // Click 8.25h pill
+    fireEvent.click(pill825);
+
+    await waitFor(() => {
+      // UNMATCHED_FLOW runtime 7.0h against 8.25h ceiling:
+      // Headroom = (8.25 - 7.0) * 60 = 75m left
+      // Buffer% = ((8.25 - 7) / 8.25) * 100 = 15.2% (LONG_JOB)
+      // Tier 3 badge updates to T3 · Assumed (8.25h)
+      expect(getByText('T3 · Assumed (8.25h)')).toBeDefined();
+      expect(getByText('75m left')).toBeDefined();
+    });
+  });
+
+  it('filters workflow commitments table with instant search filter', () => {
+    const payloadMulti = {
+      ...RICH_SLA_PAYLOAD,
+      workflow_summary: [
+        { workflow_name: 'ALPHA_BATCH', batch_type: 'DAILY', runtime_h: 4.0, sla_h: 6.0, buffer_pct: 33.3, status: 'LONG_JOB', sla_source: 'fallback' },
+        { workflow_name: 'BETA_REPORT', batch_type: 'DAILY', runtime_h: 2.0, sla_h: 6.0, buffer_pct: 66.7, status: 'OK', sla_source: 'fallback' },
+      ],
+    };
+
+    const { getByPlaceholderText, getByText, queryByText } = render(
+      <MemoryRouter>
+        <AppDataProvider>
+          <SlaDataInjector payload={payloadMulti}>
+            <SlaMatrixPanel />
+          </SlaDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
+    );
+
+    expect(getByText('ALPHA_BATCH')).toBeDefined();
+    expect(getByText('BETA_REPORT')).toBeDefined();
+
+    const searchInput = getByPlaceholderText(/Filter workflows or types/i);
+    fireEvent.change(searchInput, { target: { value: 'ALPHA' } });
+
+    expect(getByText('ALPHA_BATCH')).toBeDefined();
+    expect(queryByText('BETA_REPORT')).toBeNull();
   });
 });

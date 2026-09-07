@@ -1823,7 +1823,15 @@ export function ResourcePanel() {
       <Typography variant="h6">Resource Review</Typography>
 
       <AzureConnectionCard authInfo={azureAuth} serverCount={servers.length} onOpen={() => setAzureModalOpen(true)} />
-      <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} existingServers={servers} />
+      <AzureFetchModal
+        open={azureModalOpen}
+        autoStartAuth={azureAuth?.method !== 'browser'}
+        onClose={() => setAzureModalOpen(false)}
+        onFetched={handleFetched}
+        onAuthChanged={setAzureAuth}
+        existingServers={servers}
+        customerName={data.customerName || (servers?.[0]?.customer && isValidCustomerName(servers[0].customer) ? servers[0].customer : undefined)}
+      />
 
       <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16, marginBottom: 16 }}>
         <KpiStatCard

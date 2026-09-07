@@ -201,6 +201,50 @@ class TestSlaRegressionFixes(unittest.TestCase):
         self.assertEqual(wf["sla_h"], 4.0)
         self.assertEqual(wf["status"], "OK")
 
+    def test_tier_3_assumed_ceiling_synchronization(self):
+        # When NO BatchSLA is loaded, workflows fall into Tier 3.
+        # Testing changing assumed ceiling from 6.0h to 8.25h:
+        # Table rows MUST use 8.25h, moving headroom and buffer% accordingly.
+        config_store.set("_batch_sla_xlsx", {})
+        config_store.set("_sow_sla_windows", {})
+
+        df = pd.DataFrame([
+            {
+                "Job_Name": "ACT_JOB_1",
+                "Sub_Application": "PROD_ACT",
+                "Start_Time": "2026-08-30 00:00:00",
+                "End_Time": "2026-08-30 10:00:00",  # 10.0h runtime
+            }
+        ])
+
+        # 1. At standard 6.0h ceiling:
+        resp_6 = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=6.0)
+        sum_6 = resp_6.workflow_summary or []
+        self.assertEqual(len(sum_6), 1)
+        wf_6 = sum_6[0]
+        self.assertEqual(wf_6["sla_h"], 6.0)
+        self.assertAlmostEqual(wf_6["runtime_h"], 10.0, places=2)
+        # Headroom = (6 - 10) * 60 = -240m
+        self.assertEqual(wf_6["duration_headroom_mins"], -240)
+        # Buffer = (6 - 10)/6 * 100 = -66.67%
+        self.assertAlmostEqual(wf_6["buffer_pct"], -66.67, places=1)
+        self.assertEqual(wf_6["status"], "BREACH")
+
+        # 2. At modified assumed ceiling 8.25h:
+        resp_825 = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=8.25)
+        sum_825 = resp_825.workflow_summary or []
+        self.assertEqual(len(sum_825), 1)
+        wf_825 = sum_825[0]
+        # SLA MUST be 8.25h, NOT frozen at 6.0h!
+        self.assertEqual(wf_825["sla_h"], 8.25)
+        self.assertAlmostEqual(wf_825["runtime_h"], 10.0, places=2)
+        # Headroom = (8.25 - 10) * 60 = -105m (moved from -240m to -105m!)
+        self.assertEqual(wf_825["duration_headroom_mins"], -105)
+        # Buffer = (8.25 - 10)/8.25 * 100 = -21.21% (moved from -66.7% to -21.2%!)
+        self.assertAlmostEqual(wf_825["buffer_pct"], -21.21, places=1)
+        self.assertEqual(wf_825["status"], "BREACH")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -191,6 +191,7 @@ class JsonSlaRequest(BaseModel):
     rows:     List[Dict[str, Any]]
     sla_mode: Optional[str]  = "daily"
     sla_hrs:  Optional[float] = None
+    customer: Optional[str]  = None
 
 
 # ── Logic ────────────────────────────────────────────────────────────────────
@@ -214,6 +215,9 @@ def _compute_sla_matrix(
     if sla_mode == "custom" and custom_sla_hrs:
         global_sla_hrs = float(custom_sla_hrs)
         sla_label = f"Custom SLA ({global_sla_hrs}h)"
+    elif custom_sla_hrs and float(custom_sla_hrs) > 0 and sla_mode == "daily":
+        global_sla_hrs = float(custom_sla_hrs)
+        sla_label = f"Daily SLA ({global_sla_hrs}h)"
     else:
         mode_label, _ = MODES.get(sla_mode, MODES["daily"])
         global_sla_hrs = _mode_hrs(sla_mode)
@@ -341,7 +345,19 @@ def _compute_sla_matrix(
 
     for row in _batch_sla_rows:
         sla_h = row.get("sla_hours")
-        if not sla_h or sla_h <= 0:
+        if not sla_h or float(sla_h) <= 0:
+            _st_c = row.get("start_time") or row.get("start") or row.get("workbook_start_time")
+            _et_c = row.get("expected_end_time") or row.get("end") or row.get("sla") or row.get("workbook_expected_end")
+            if _st_c and _et_c:
+                try:
+                    from services.sla_merger import _overnight_delta_hours
+                    _inf_h = _overnight_delta_hours(str(_st_c), str(_et_c))
+                    if _inf_h and _inf_h > 0:
+                        sla_h = _inf_h
+                        row["sla_hours"] = _inf_h
+                except Exception:
+                    pass
+        if not sla_h or float(sla_h) <= 0:
             continue
         sla_f = float(sla_h)
 
@@ -559,14 +575,13 @@ def _compute_sla_matrix(
         if not has_per_job_sla and not _batch_sla_rows and not _sow_windows:
             return global_sla_hrs, "global"
 
-        # No contract match — use batch-type-aware global default (NOT the UI mode ceiling).
-        # Prevents a "Daily (5h)" UI selection from bleeing into WEEKLY jobs that
-        # have no XLSX match — WEEKLY should fall to 8h, not 5h.
+        # No contract match — use batch-type-aware global default (respecting active global_sla_hrs for DAILY).
         try:
             from services.sla_merger import detect_batch_type
             from services import pe_config as _pc
+            _daily_lim = float(global_sla_hrs) if (global_sla_hrs and float(global_sla_hrs) > 0) else _pc.SLA_DAILY_HRS
             _GLOBAL_TYPE_DEFAULTS: dict[str, float] = {
-                "DAILY": _pc.SLA_DAILY_HRS, "WEEKLY": _pc.SLA_WEEKLY_HRS,
+                "DAILY": _daily_lim, "WEEKLY": _pc.SLA_WEEKLY_HRS,
                 "BIWEEKLY": _pc.SLA_BIWEEKLY_HRS, "MONTHLY": _pc.SLA_MONTHLY_HRS,
             }
             detected = detect_batch_type(sub_app, "") or detect_batch_type(job_name, "")
@@ -1313,18 +1328,24 @@ def _compute_sla_matrix(
                     except Exception:
                         pass
 
-                # Tier 3 — batch-type-aware global default (UI mode must NOT override)
+                # Tier 3 — batch-type-aware global default (respects active global_sla_hrs and pe_config ceilings)
                 if sla_h_wf is None:
-                    _WF_DEFAULTS: dict[str, float] = {
-                        "DAILY": 6.0, "WEEKLY": 8.0, "BIWEEKLY": 12.0, "MONTHLY": 10.0,
-                    }
                     try:
+                        from services import pe_config as _pc
                         from services.sla_merger import detect_batch_type as _dbt3
                         _bt3 = _dbt3(sub_app, _sched_txt)
-                        sla_h_wf   = _WF_DEFAULTS.get(_bt3, global_sla_hrs)
+                        # If a specific global ceiling was requested or active (e.g. 8.25h or custom), use it for DAILY/fallback
+                        _daily_target = float(global_sla_hrs) if (global_sla_hrs and float(global_sla_hrs) > 0) else _pc.SLA_DAILY_HRS
+                        _WF_DEFAULTS: dict[str, float] = {
+                            "DAILY":    _daily_target,
+                            "WEEKLY":   _pc.SLA_WEEKLY_HRS,
+                            "BIWEEKLY": _pc.SLA_BIWEEKLY_HRS,
+                            "MONTHLY":  _pc.SLA_MONTHLY_HRS,
+                        }
+                        sla_h_wf   = _WF_DEFAULTS.get(_bt3, _daily_target)
                         sla_src_wf = f"global_default_{_bt3}" if _bt3 else "global_fallback"
                     except Exception:
-                        sla_h_wf   = global_sla_hrs
+                        sla_h_wf   = global_sla_hrs if (global_sla_hrs and float(global_sla_hrs) > 0) else 6.0
                         sla_src_wf = "global_fallback"
 
                 # Detect batch type
@@ -1533,6 +1554,7 @@ def _compute_sla_matrix(
                     "measurement_reason_detail": measurement_reason_detail,
                     "sla_measurement_basis": sla_basis,
                     "duration_headroom_h": duration_headroom_h,
+                    "duration_headroom_mins": round(duration_headroom_h * 60) if duration_headroom_h is not None else None,
                     "duration_overrun_h":  duration_overrun_h,
                     "runtime_h":       runtime_h,
                     "sla_h":           round(float(sla_h_wf), 4) if sla_h_wf else None,
@@ -1986,6 +2008,10 @@ def sla_matrix_json(body: JsonSlaRequest) -> SlaMatrixResponse:
     _excluded_job_names: list[str] = []
     try:
         from services import session_cache as _sc_jrd
+        from services import config_store as _cs_jrd
+        _req_cust = getattr(body, "customer", None) or _cs_jrd.get("customer_name") or _sc_jrd.ac_get("customer_name")
+        if _req_cust:
+            _sc_jrd.ensure_customer(_req_cust)
         _full_rows = _sc_jrd.get("sla_matrix_runs_df")
         # Prefer the live reviewer exclusion list; last_batch only captures the
         # upload-time snapshot and goes stale after analysts edit exclusions.

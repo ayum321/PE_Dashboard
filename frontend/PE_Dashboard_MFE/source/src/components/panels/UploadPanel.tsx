@@ -736,6 +736,7 @@ export function UploadPanel() {
         onFetched={handleAzureFetched}
         onAuthChanged={setAzureAuth}
         existingServers={data.resource?.servers || []}
+        customerName={data.customerName || (data.resource?.servers?.[0]?.customer && isValidCustomerName(data.resource.servers[0].customer) ? data.resource.servers[0].customer : undefined)}
       />
     </Paper>
   );

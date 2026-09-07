@@ -22,6 +22,7 @@ import {
   getFinalJudgment,
   getPeNarrative,
   getRedFlags,
+  recomputeSlaMatrix,
   refreshBatch,
   uploadBatchSlaXlsx,
   workbookSlaSnapshotFromUpload,
@@ -184,6 +185,76 @@ function _workflowTier(src: string): 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow 
   return 'Tier 3 \u2014 Global Defaults';
 }
 
+function renderTierBadge(wf: WorkflowSummaryRow, currentCeiling?: number) {
+  const tier = _workflowTier(wf.sla_source || '');
+  if (tier === 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') {
+    return (
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          padding: '2px 6px',
+          borderRadius: 4,
+          fontSize: 10,
+          fontWeight: 700,
+          fontFamily: 'monospace',
+          background: 'rgba(45, 212, 191, 0.12)',
+          color: '#2dd4bf',
+          border: '1px solid rgba(45, 212, 191, 0.35)',
+          whiteSpace: 'nowrap',
+        }}
+        title="Tier 1 · Direct contract override from BatchSLA workbook"
+      >
+        T1 · Contract
+      </span>
+    );
+  }
+  if (tier === 'Tier 2 \u2014 SOW Contract Batch Window Ceilings') {
+    return (
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          padding: '2px 6px',
+          borderRadius: 4,
+          fontSize: 10,
+          fontWeight: 700,
+          fontFamily: 'monospace',
+          background: 'rgba(34, 211, 238, 0.12)',
+          color: '#22d3ee',
+          border: '1px solid rgba(34, 211, 238, 0.35)',
+          whiteSpace: 'nowrap',
+        }}
+        title="Tier 2 · SOW contract batch window ceiling"
+      >
+        T2 · SOW
+      </span>
+    );
+  }
+  const ceilVal = currentCeiling ?? Number(wf.sla_h) ?? 6.0;
+  const ceilLabel = `${ceilVal.toFixed(2).replace(/\.?0+$/, '')}h`;
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: '2px 6px',
+        borderRadius: 4,
+        fontSize: 10,
+        fontWeight: 700,
+        fontFamily: 'monospace',
+        background: 'rgba(168, 85, 247, 0.12)',
+        color: '#c084fc',
+        border: '1px solid rgba(168, 85, 247, 0.35)',
+        whiteSpace: 'nowrap',
+      }}
+      title={`Tier 3 · Unmatched assumed global ceiling (${ceilLabel})`}
+    >
+      T3 · Assumed ({ceilLabel})
+    </span>
+  );
+}
+
 function _finiteNumber(value: unknown): number | null {
   if (value == null || value === '') return null;
   const number = Number(value);
@@ -291,6 +362,10 @@ export function SlaMatrixPanel() {
   const [drillStatus, setDrillStatus] = useState<string | null>(null);
   const [breachExpanded, setBreachExpanded] = useState(false);
   const [resLinkExpanded, setResLinkExpanded] = useState(false);
+  const [workflowSearch, setWorkflowSearch] = useState('');
+  const [customCeilingInput, setCustomCeilingInput] = useState('');
+  const [showCustomCeilingBox, setShowCustomCeilingBox] = useState(false);
+  const [recomputingCeiling, setRecomputingCeiling] = useState(false);
   const derivedRefreshId = useRef(0);
 
   const clearDerivedEvidence = () => {
@@ -458,6 +533,99 @@ export function SlaMatrixPanel() {
     || wf.runtime_source_caveat === 'REPORTED_END_EQUALS_TARGET',
   );
 
+  const currentCeiling = Number(slaMatrix.sla_limit_hrs || 6.0);
+
+  const filterWorkflowRows = (rows: WorkflowSummaryRow[] = []) => {
+    if (!workflowSearch.trim()) return rows;
+    const q = workflowSearch.toLowerCase();
+    return rows.filter((wf) =>
+      (wf.workflow_name || '').toLowerCase().includes(q) ||
+      (wf.workflow_key || '').toLowerCase().includes(q) ||
+      (wf.sub_application || '').toLowerCase().includes(q) ||
+      (wf.batch_type || '').toLowerCase().includes(q) ||
+      (wf.status || '').toLowerCase().includes(q)
+    );
+  };
+
+  const handleSelectCeiling = async (targetCeiling: number) => {
+    if (!targetCeiling || targetCeiling <= 0 || isNaN(targetCeiling)) return;
+    setRecomputingCeiling(true);
+    setError(null);
+    try {
+      const rawRows = (data.batch?.raw_rows as any[]) || [];
+      const customer = (data.customerName as string) || undefined;
+
+      let res: any = null;
+      try {
+        res = await recomputeSlaMatrix('daily', targetCeiling, customer, rawRows);
+      } catch (apiErr) {
+        console.warn('API recomputeSlaMatrix warning:', apiErr);
+      }
+
+      // Update local workflow_summary Tier 3 rows so UI immediately reacts
+      const prevWfSummary = (data.slaMatrix?.workflow_summary as WorkflowSummaryRow[]) || [];
+      const updatedWfSummary = prevWfSummary.map((wf) => {
+        const tier = _workflowTier(wf.sla_source || '');
+        if (tier === 'Tier 3 \u2014 Global Defaults') {
+          const rt = _finiteNumber(wf.runtime_h);
+          const newSla = targetCeiling;
+          let buf: number | null = null;
+          let hd: number | null = null;
+          let st = wf.status || 'UNKNOWN';
+          if (rt != null && newSla > 0) {
+            buf = ((newSla - rt) / newSla) * 100;
+            hd = Math.round((newSla - rt) * 60);
+            st = buf < 0 ? 'BREACH' : buf < 15 ? 'AT_RISK' : buf <= 40 ? 'LONG_JOB' : 'OK';
+          }
+          return {
+            ...wf,
+            sla_h: newSla,
+            buffer_pct: buf != null ? Math.round(buf * 10) / 10 : null,
+            duration_headroom_mins: hd,
+            status: st,
+          };
+        }
+        return wf;
+      });
+
+      // Recalculate top-level counts
+      const observedWfs = updatedWfSummary.filter((w) => w.runtime_h != null);
+      let okCount = 0;
+      let longCount = 0;
+      let atRiskCount = 0;
+      let breachCount = 0;
+      observedWfs.forEach((w) => {
+        if (w.status === 'OK') okCount++;
+        else if (w.status === 'LONG_JOB') longCount++;
+        else if (w.status === 'AT_RISK') atRiskCount++;
+        else if (w.status === 'BREACH') breachCount++;
+      });
+      const totalObserved = observedWfs.length;
+      const compPct = totalObserved > 0 ? ((okCount + longCount + atRiskCount) / totalObserved) * 100 : (res?.compliance_pct ?? data.slaMatrix?.compliance_pct ?? 100);
+
+      const baseMatrix = data.slaMatrix || {};
+      const newMatrix: DashboardPayload = {
+        ...baseMatrix,
+        ...(res && Object.keys(res).length > 0 ? res : {}),
+        sla_limit_hrs: targetCeiling,
+        sla_label: `Daily SLA (${targetCeiling.toFixed(2)}h)`,
+        workflow_summary: res?.workflow_summary && res.workflow_summary.length > 0 ? res.workflow_summary : updatedWfSummary,
+        compliance_pct: res?.compliance_pct != null ? res.compliance_pct : Math.round(compPct * 10) / 10,
+        breaching_runs: res?.breaching_runs != null ? res.breaching_runs : breachCount,
+        ok_runs: res?.ok_runs != null ? res.ok_runs : okCount,
+        at_risk_runs: res?.at_risk_runs != null ? res.at_risk_runs : atRiskCount,
+        long_job_runs: res?.long_job_runs != null ? res.long_job_runs : longCount,
+      };
+
+      setSlaMatrix(newMatrix);
+      setUploadNotice(`Assumed ceiling updated to ${targetCeiling.toFixed(2)}h · Table recomputed.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to recompute ceiling');
+    } finally {
+      setRecomputingCeiling(false);
+    }
+  };
+
   const lowBufferJobs = useMemo(
     () =>
       jobSummary
@@ -592,7 +760,26 @@ export function SlaMatrixPanel() {
     const color = headroom < 0 ? '#f43f5e' : headroom <= 15 ? '#f59e0b' : '#10d96e';
     const text = headroom < 0 ? `${Math.abs(headroom)}m over` : `${headroom}m left`;
     const title = 'SLA duration minus the workbook-reported duration. This is the same arithmetic as Buffer %.';
-    return <TableCell align="right" title={title} style={{ color, fontFamily: 'monospace', fontWeight: 700 }}>{text}</TableCell>;
+    const slaMins = (wf.sla_h || 0) * 60;
+    const barPct = slaMins > 0 ? Math.max(0, Math.min(100, (headroom / slaMins) * 100)) : 0;
+    return (
+      <TableCell align="right" title={title}>
+        <Box display="inline-flex" flexDirection="column" alignItems="flex-end" style={{ gap: 3 }}>
+          <span style={{ color, fontFamily: 'monospace', fontWeight: 700, fontSize: 12 }}>{text}</span>
+          <Box style={{ width: 48, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+            <Box
+              style={{
+                width: headroom < 0 ? '100%' : `${barPct}%`,
+                height: '100%',
+                borderRadius: 2,
+                background: color,
+                transition: 'width 0.3s ease',
+              }}
+            />
+          </Box>
+        </Box>
+      </TableCell>
+    );
   };
 
   return (
@@ -638,14 +825,129 @@ export function SlaMatrixPanel() {
             </Typography>
           </Box>
 
-          {/* ── Assumed-SLA warning banner, ported from #sla-assumed-banner (app.js) ── */}
-          {!explicitSlaMatrix && contractConflictWorkflows.length === 0 && (
-            <Box style={{ borderRadius: 12, border: '1px solid rgba(245,158,11,.35)', background: 'rgba(245,158,11,.06)', padding: 12, marginTop: 12 }}>
-              <Typography variant="body2" style={{ color: '#f59e0b', fontWeight: 700 }}>⚠ Assumed SLA ceiling in use</Typography>
-              <Typography variant="caption" color="textSecondary">
-                Unmatched jobs use the assumed {Number(slaMatrix.sla_limit_hrs || 6).toFixed(2)}h global ceiling ({String(slaMatrix.sla_label || 'global mode')}).
-                Upload BatchSLA_info.xlsx (Tier 1) or SOW PDF (Tier 2) to activate contracted SLA ceilings.
-              </Typography>
+          {/* ── Assumed-SLA warning banner, ported from #sla-assumed-banner (app.js) with interactive ceiling pills ── */}
+          {(!explicitSlaMatrix || workflowByTier.has('Tier 3 \u2014 Global Defaults')) && contractConflictWorkflows.length === 0 && (
+            <Box style={{ borderRadius: 12, border: '1px solid rgba(245,158,11,.35)', background: 'rgba(245,158,11,.06)', padding: 14, marginTop: 12 }}>
+              <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 10 }}>
+                <Box style={{ maxWidth: 640 }}>
+                  <Typography variant="body2" style={{ color: '#f59e0b', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>⚠ Assumed SLA ceiling in use</span>
+                    <span style={{ fontSize: 11, background: 'rgba(245,158,11,0.2)', border: '1px solid rgba(245,158,11,0.4)', padding: '1px 7px', borderRadius: 4, color: '#fbbf24', fontWeight: 700, fontFamily: 'monospace' }}>
+                      Active: {currentCeiling.toFixed(2)}h
+                    </span>
+                  </Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 4 }}>
+                    Unmatched / Tier-3 workflows evaluate against this assumed {currentCeiling.toFixed(2)}h global ceiling ({String(slaMatrix.sla_label || 'global mode')}).
+                    Select a ceiling preset or custom duration to test buffer and headroom in real-time.
+                  </Typography>
+                </Box>
+                <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <Typography variant="caption" style={{ color: '#94a3b8', fontWeight: 700, marginRight: 2, fontSize: 11 }}>
+                    Ceiling:
+                  </Typography>
+                  {[6.0, 8.25, 10.0, 12.0].map((val) => {
+                    const isActive = Math.abs(currentCeiling - val) < 0.01;
+                    return (
+                      <Button
+                        key={val}
+                        size="small"
+                        variant={isActive ? 'contained' : 'outlined'}
+                        disabled={recomputingCeiling}
+                        onClick={() => {
+                          setShowCustomCeilingBox(false);
+                          handleSelectCeiling(val);
+                        }}
+                        style={{
+                          textTransform: 'none',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          fontFamily: 'monospace',
+                          padding: '3px 10px',
+                          minWidth: 'auto',
+                          borderRadius: 6,
+                          background: isActive ? '#8b5cf6' : 'rgba(255,255,255,0.04)',
+                          color: isActive ? '#ffffff' : '#c4b5fd',
+                          borderColor: isActive ? '#a78bfa' : 'rgba(139,92,246,0.3)',
+                        }}
+                      >
+                        {val.toFixed(2).replace(/\.?0+$/, '')}h{val === 6 ? ' (Default)' : ''}
+                      </Button>
+                    );
+                  })}
+                  <Button
+                    size="small"
+                    variant={showCustomCeilingBox || (![6.0, 8.25, 10.0, 12.0].some((v) => Math.abs(currentCeiling - v) < 0.01)) ? 'contained' : 'outlined'}
+                    disabled={recomputingCeiling}
+                    onClick={() => setShowCustomCeilingBox(!showCustomCeilingBox)}
+                    style={{
+                      textTransform: 'none',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      fontFamily: 'monospace',
+                      padding: '3px 10px',
+                      minWidth: 'auto',
+                      borderRadius: 6,
+                      background: (![6.0, 8.25, 10.0, 12.0].some((v) => Math.abs(currentCeiling - v) < 0.01)) ? '#8b5cf6' : 'rgba(255,255,255,0.04)',
+                      color: (![6.0, 8.25, 10.0, 12.0].some((v) => Math.abs(currentCeiling - v) < 0.01)) ? '#ffffff' : '#c4b5fd',
+                      borderColor: 'rgba(139,92,246,0.3)',
+                    }}
+                  >
+                    Custom...
+                  </Button>
+                  {showCustomCeilingBox && (
+                    <Box display="inline-flex" alignItems="center" style={{ gap: 4, marginLeft: 4 }}>
+                      <input
+                        type="number"
+                        step="0.25"
+                        min="0.5"
+                        max="24"
+                        placeholder="e.g. 8.25"
+                        value={customCeilingInput}
+                        onChange={(e) => setCustomCeilingInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            const parsed = parseFloat(customCeilingInput);
+                            if (parsed > 0) handleSelectCeiling(parsed);
+                          }
+                        }}
+                        style={{
+                          width: 68,
+                          padding: '3px 6px',
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          background: 'rgba(0,0,0,0.3)',
+                          border: '1px solid rgba(167,139,250,0.5)',
+                          borderRadius: 4,
+                          color: '#fff',
+                          outline: 'none',
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        variant="contained"
+                        disabled={recomputingCeiling || !customCeilingInput}
+                        onClick={() => {
+                          const parsed = parseFloat(customCeilingInput);
+                          if (parsed > 0) handleSelectCeiling(parsed);
+                        }}
+                        style={{
+                          textTransform: 'none',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: '2px 8px',
+                          minWidth: 'auto',
+                          borderRadius: 4,
+                          background: '#8b5cf6',
+                          color: '#fff',
+                        }}
+                      >
+                        Apply
+                      </Button>
+                    </Box>
+                  )}
+                  {recomputingCeiling && <CircularProgress size={16} style={{ color: '#c084fc', marginLeft: 4 }} />}
+                </Box>
+              </Box>
             </Box>
           )}
 
@@ -696,13 +998,31 @@ export function SlaMatrixPanel() {
               (with an "Upload SOW" CTA) to match the real dashboard's always-visible
               two-tier layout with numbered circle badges. ── */}
           <Box className="pe-evidence-surface" style={{ borderRadius: 12, padding: 16, marginTop: 12 }}>
-            <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+            <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
               <Box>
-                <Typography variant="subtitle2">Workbook SLA Commitments</Typography>
+                <Typography variant="subtitle2" style={{ fontWeight: 800 }}>Workbook SLA Commitments</Typography>
                 <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
                 <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#8fa3d2' }}>Only a distinct workbook Current end time produces a measured duration. Headroom is SLA minus that duration; Buffer and Status use the same calculation.</Typography>
               </Box>
-              <Link to="/sow" style={{ fontSize: 10, fontWeight: 700, color: '#22d3ee', textDecoration: 'none' }}>View SOW Contract {'\u2192'}</Link>
+              <Box display="flex" alignItems="center" style={{ gap: 12 }}>
+                <input
+                  type="text"
+                  placeholder="Filter workflows or types..."
+                  value={workflowSearch}
+                  onChange={(e) => setWorkflowSearch(e.target.value)}
+                  style={{
+                    padding: '5px 10px',
+                    fontSize: 11,
+                    borderRadius: 6,
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    border: '1px solid rgba(255, 255, 255, 0.15)',
+                    color: '#e2e8f0',
+                    outline: 'none',
+                    width: 200,
+                  }}
+                />
+                <Link to="/sow" style={{ fontSize: 10, fontWeight: 700, color: '#22d3ee', textDecoration: 'none' }}>View SOW Contract {'\u2192'}</Link>
+              </Box>
             </Box>
 
             {/* Tier 2 — SOW contract ceilings (always shown, empty-state CTA when absent) */}
@@ -714,6 +1034,10 @@ export function SlaMatrixPanel() {
               {!workflowByTier.has('Tier 2 \u2014 SOW Contract Batch Window Ceilings') ? (
                 <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>
                   No SOW contract uploaded yet: <Link to="/sow" style={{ color: '#22d3ee' }}>Upload SOW {'\u2192'}</Link>
+                </Typography>
+              ) : filterWorkflowRows(workflowByTier.get('Tier 2 \u2014 SOW Contract Batch Window Ceilings') || []).length === 0 ? (
+                <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>
+                  No Tier 2 workflows matching "{workflowSearch}"
                 </Typography>
               ) : (
                 <Table size="small" className="pe-table" aria-label="SLA commitments Tier 2">
@@ -730,9 +1054,14 @@ export function SlaMatrixPanel() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {(workflowByTier.get('Tier 2 \u2014 SOW Contract Batch Window Ceilings') || []).slice(0, 20).map((wf, index) => (
+                    {filterWorkflowRows(workflowByTier.get('Tier 2 \u2014 SOW Contract Batch Window Ceilings') || []).slice(0, 20).map((wf, index) => (
                       <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
-                        <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
+                        <TableCell style={{ fontFamily: 'monospace' }}>
+                          <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                            <span>{wf.workflow_name || wf.workflow_key || '?'}</span>
+                            {renderTierBadge(wf, currentCeiling)}
+                          </Box>
+                        </TableCell>
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
                         <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
                         {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
@@ -757,6 +1086,10 @@ export function SlaMatrixPanel() {
               </Box>
               {!workflowByTier.has('Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') ? (
                 <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>No BatchSLA file loaded {'\u2014'} upload on Upload page</Typography>
+              ) : filterWorkflowRows(workflowByTier.get('Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') || []).length === 0 ? (
+                <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>
+                  No Tier 1 workflows matching "{workflowSearch}"
+                </Typography>
               ) : (
                 <Table size="small" className="pe-table" aria-label="SLA commitments Tier 1">
                   <TableHead>
@@ -772,9 +1105,14 @@ export function SlaMatrixPanel() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {(workflowByTier.get('Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') || []).slice(0, 20).map((wf, index) => (
+                    {filterWorkflowRows(workflowByTier.get('Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') || []).slice(0, 20).map((wf, index) => (
                       <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
-                        <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
+                        <TableCell style={{ fontFamily: 'monospace' }}>
+                          <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                            <span>{wf.workflow_name || wf.workflow_key || '?'}</span>
+                            {renderTierBadge(wf, currentCeiling)}
+                          </Box>
+                        </TableCell>
                         <TableCell>{wf.batch_type || '\u2014'}</TableCell>
                         <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
                         {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
@@ -798,36 +1136,47 @@ export function SlaMatrixPanel() {
                   <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'rgba(107,125,179,.2)', border: '1px solid rgba(107,125,179,.4)', color: '#6b7db3', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>3</span>
                   <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10 }}>Tier 3 {'\u2014'} Global Defaults</Typography>
                 </Box>
-                <Table size="small" className="pe-table" aria-label="SLA commitments Tier 3">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Workflow</TableCell>
-                      <TableCell>Type</TableCell>
-                      <TableCell align="right">SLA</TableCell>
-                      {showWorkbookTiming && <TableCell>Contract window / source timing</TableCell>}
-                      <TableCell align="right">Measured duration</TableCell>
-                      <TableCell align="right">Duration headroom</TableCell>
-                      <TableCell align="right">Buffer %</TableCell>
-                      <TableCell>Status</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {(workflowByTier.get('Tier 3 \u2014 Global Defaults') || []).slice(0, 20).map((wf, index) => (
-                      <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
-                        <TableCell style={{ fontFamily: 'monospace' }}>{wf.workflow_name || wf.workflow_key || '?'}</TableCell>
-                        <TableCell>{wf.batch_type || '\u2014'}</TableCell>
-                        <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
-                        {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
-                        <TableCell align="right" title={wf.measurement_reason_detail || 'Workbook-reported duration used to calculate Buffer and Status.'}>{_workbookDurationLabel(wf)}</TableCell>
-                        {renderHeadroomCell(wf)}
-                        <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
-                          {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
-                        </TableCell>
-                        <TableCell><span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span></TableCell>
+                {filterWorkflowRows(workflowByTier.get('Tier 3 \u2014 Global Defaults') || []).length === 0 ? (
+                  <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>
+                    No Tier 3 workflows matching "{workflowSearch}"
+                  </Typography>
+                ) : (
+                  <Table size="small" className="pe-table" aria-label="SLA commitments Tier 3">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Workflow</TableCell>
+                        <TableCell>Type</TableCell>
+                        <TableCell align="right">SLA</TableCell>
+                        {showWorkbookTiming && <TableCell>Contract window / source timing</TableCell>}
+                        <TableCell align="right">Measured duration</TableCell>
+                        <TableCell align="right">Duration headroom</TableCell>
+                        <TableCell align="right">Buffer %</TableCell>
+                        <TableCell>Status</TableCell>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHead>
+                    <TableBody>
+                      {filterWorkflowRows(workflowByTier.get('Tier 3 \u2014 Global Defaults') || []).slice(0, 20).map((wf, index) => (
+                        <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
+                          <TableCell style={{ fontFamily: 'monospace' }}>
+                            <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                              <span>{wf.workflow_name || wf.workflow_key || '?'}</span>
+                              {renderTierBadge(wf, currentCeiling)}
+                            </Box>
+                          </TableCell>
+                          <TableCell>{wf.batch_type || '\u2014'}</TableCell>
+                          <TableCell align="right" title={wf.contract_conflict_detail || undefined}>{_workflowSlaLabel(wf)}</TableCell>
+                          {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
+                          <TableCell align="right" title={wf.measurement_reason_detail || 'Workbook-reported duration used to calculate Buffer and Status.'}>{_workbookDurationLabel(wf)}</TableCell>
+                          {renderHeadroomCell(wf)}
+                          <TableCell align="right" style={{ color: wf.buffer_pct != null ? (wf.buffer_pct < 0 ? '#f43f5e' : wf.buffer_pct < 15 ? '#f59e0b' : '#10d96e') : '#6b7db3' }}>
+                            {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
+                          </TableCell>
+                          <TableCell><span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
               </Box>
             )}
 

@@ -46,6 +46,7 @@ interface Props {
   ) => void | Promise<void>;
   onAuthChanged?: (auth: DashboardPayload) => void;
   existingServers?: Array<{ resource_id?: string; host?: string; server?: string; name?: string; customer?: string; type?: string }>;
+  customerName?: string;
 }
 
 const TYPE_COLOR: Record<string, string> = { APP: '#10b981', DB: '#3b82f6', SRE: '#f59e0b' };
@@ -154,7 +155,7 @@ function IndeterminateCheckbox({
 /** Full "Fetch from Azure Monitor" workflow — search/browse → discover → fleet
  * filters (type/env/region/product group) → customer-grouped VM selection →
  * fetch. Ported from the #azure-fetch-modal two-step dialog (index.html/app.js). */
-export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetched, onAuthChanged, existingServers }: Props) {
+export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetched, onAuthChanged, existingServers, customerName }: Props) {
   const [authInfo, setAuthInfo] = useState<DashboardPayload | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [deviceCodeInfo, setDeviceCodeInfo] = useState<{ verification_uri: string; user_code: string; message: string } | null>(null);
@@ -167,7 +168,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const subscriptionLoadGeneration = useRef(0);
   const [step, setStep] = useState<1 | 2>(1);
 
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(customerName || '');
   const [searchBusy, setSearchBusy] = useState(false);
   const [discoverStatus, setDiscoverStatus] = useState<{ text: string; tone: 'muted' | 'amber' | 'red' | 'green' } | null>(null);
 
@@ -187,6 +188,8 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const [regionFilter, setRegionFilter] = useState('ALL');
   const [pgFilter, setPgFilter] = useState('ALL');
   const [vmSearch, setVmSearch] = useState('');
+  const [quickVmInput, setQuickVmInput] = useState('');
+  const [quickVmMessage, setQuickVmMessage] = useState<{ text: string; tone: 'green' | 'amber' } | null>(null);
 
   const [hoursBack, setHoursBack] = useState(24);
   const [fetchBusy, setFetchBusy] = useState(false);
@@ -272,7 +275,12 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
       return;
     }
     const modalToken = ++modalGeneration.current;
-    setStep(1);
+    if (discoveredVms.length === 0) {
+      setStep(1);
+    }
+    if (customerName && !searchQuery) {
+      setSearchQuery(customerName);
+    }
     setFetchStatus(null);
     setDiscoverStatus(null);
     setSubscriptionsWarming(false);
@@ -440,7 +448,16 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     }
     setSelectedVmIds(preselected);
     setCollapsedCustomers(new Set());
-    setCustomerFilter('ALL');
+    if (customerName) {
+      const matchCust = deduped.find((v) => customerOf(v).toLowerCase() === customerName.toLowerCase());
+      if (matchCust) {
+        setCustomerFilter(customerOf(matchCust));
+      } else {
+        setCustomerFilter('ALL');
+      }
+    } else {
+      setCustomerFilter('ALL');
+    }
     setTypeFilters(new Set());
     setEnvFilter('ALL');
     setRegionFilter('ALL');
@@ -659,6 +676,48 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setVmSearch('');
   };
 
+  const handleQuickAddVm = () => {
+    const raw = quickVmInput.trim();
+    if (!raw) return;
+    const tokens = raw.split(/[\s,;]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    if (!tokens.length) return;
+    const matchedIds: string[] = [];
+    discoveredVms.forEach((vm) => {
+      const vName = (vm.name || '').toLowerCase();
+      const vId = (vm.resource_id || '').toLowerCase();
+      if (tokens.some((tok) => vName.includes(tok) || vId.includes(tok))) {
+        matchedIds.push(vm.resource_id);
+      }
+    });
+    if (matchedIds.length > 0) {
+      setSelectedVmIds((prev) => {
+        const next = new Set(prev);
+        matchedIds.forEach((id) => next.add(id));
+        return next;
+      });
+      setQuickVmMessage({ text: `Matched and selected ${matchedIds.length} VM(s)`, tone: 'green' });
+      setQuickVmInput('');
+      setTimeout(() => setQuickVmMessage(null), 4000);
+    } else {
+      setQuickVmMessage({ text: `No discovered VMs matched "${raw}"`, tone: 'amber' });
+      setTimeout(() => setQuickVmMessage(null), 4000);
+    }
+  };
+
+  const selectNewCustomerVms = () => {
+    setSelectedVmIds((prev) => {
+      const next = new Set(prev);
+      discoveredVms.forEach((v) => {
+        if (!isVmInFleet(v)) {
+          if (!customerName || customerOf(v).toLowerCase() === customerName.toLowerCase() || customerOf(v) === UNTAGGED) {
+            next.add(v.resource_id);
+          }
+        }
+      });
+      return next;
+    });
+  };
+
   const handleFetch = async () => {
     const hasFilter = filteredVms.length !== discoveredVms.length;
     const selectedVms = hasFilter
@@ -865,6 +924,28 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
 
         {step === 1 && (
           <Box style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {discoveredVms.length > 0 && (
+              <Box display="flex" alignItems="center" justifyContent="space-between" style={{ background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.4)', borderRadius: 10, padding: '10px 14px' }}>
+                <Box>
+                  <Typography variant="body2" style={{ color: '#93c5fd', fontWeight: 700 }}>
+                    ⚡ {discoveredVms.length} VMs previously discovered in this session
+                  </Typography>
+                  <Typography variant="caption" color="textSecondary">
+                    {existingServers && existingServers.length > 0 ? `${existingServers.length} active server(s) in fleet · ` : ''}
+                    Resume selection directly without reloading from Azure.
+                  </Typography>
+                </Box>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  onClick={() => setStep(2)}
+                  style={{ fontSize: 11, fontWeight: 700, textTransform: 'none' }}
+                >
+                  Resume Selection ({discoveredVms.length} VMs) →
+                </Button>
+              </Box>
+            )}
+
             <Box style={{ borderRadius: 10, border: '1px solid #213060', padding: 16 }}>
               <Typography variant="caption" style={{ display: 'block', color: '#6b7db3', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', fontSize: 9, marginBottom: 8 }}>
                 Search by customer, server name, or tag
@@ -883,6 +964,31 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               </Box>
               <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
                 <Typography variant="caption" style={{ color: '#6b7db3', fontSize: 10, fontWeight: 600 }}>Quick select:</Typography>
+                {customerName && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery(customerName);
+                      void handleSearch(customerName);
+                    }}
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.25)',
+                      border: '1px solid #10b981',
+                      borderRadius: 12,
+                      padding: '3px 10px',
+                      color: '#34d399',
+                      fontSize: 11,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <span>★ {customerName}</span>
+                    <span style={{ fontSize: 9, opacity: 0.85 }}>(Active Customer)</span>
+                  </button>
+                )}
                 {[
                   { label: 'All Customers', q: '*' },
                   { label: 'Target', q: 'target' },
@@ -973,7 +1079,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
           <Box style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10, overflow: 'hidden' }}>
             {/* Summary strip */}
             <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
-              <Button size="small" onClick={() => setStep(1)} style={{ fontSize: 10, color: '#6b7db3', minWidth: 0 }}>{'\u2039'} Search</Button>
+              <Button size="small" variant="outlined" onClick={() => setStep(1)} style={{ fontSize: 10, color: '#93c5fd', borderColor: '#213060', textTransform: 'none' }}>← Back to Search</Button>
               <span style={{ color: '#334155' }}>|</span>
               <Typography variant="body2" style={{ fontWeight: 800 }}>
                 {customerSet.size > 1 ? `${discoveredVms.length} VMs \u00b7 ${customerSet.size} customers` : `${discoveredVms.length} VMs`}
@@ -992,15 +1098,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   <Button
                     size="small"
                     variant="outlined"
-                    onClick={() => {
-                      setSelectedVmIds((prev) => {
-                        const next = new Set(prev);
-                        discoveredVms.forEach((v) => {
-                          if (!isVmInFleet(v)) next.add(v.resource_id);
-                        });
-                        return next;
-                      });
-                    }}
+                    onClick={selectNewCustomerVms}
                     style={{ fontSize: 10, borderColor: '#10b981', color: '#34d399' }}
                     title="Select all discovered VMs not yet in the active fleet"
                   >
@@ -1027,6 +1125,28 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 )}
               </Box>
             </Box>
+
+            {/* Active fleet context banner */}
+            {existingServers && existingServers.length > 0 && (
+              <Box style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                  <span style={{ color: '#34d399', fontSize: 14 }}>✓</span>
+                  <Typography variant="caption" style={{ color: '#d1fae5', fontSize: 11, fontWeight: 600 }}>
+                    Active Fleet: <strong>{existingServers.length} server(s)</strong> loaded{customerName ? ` for ${customerName}` : ''}.
+                    Fleet mode is set to <strong>Append</strong> — newly selected servers will be added without overwriting your existing servers.
+                  </Typography>
+                </Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={selectNewCustomerVms}
+                  style={{ fontSize: 10, borderColor: '#10b981', color: '#34d399', fontWeight: 700, textTransform: 'none', background: 'rgba(16,185,129,0.1)' }}
+                  title="Select all unadded VMs for this customer"
+                >
+                  + Select unadded {customerName ? `for ${customerName}` : 'VMs'}
+                </Button>
+              </Box>
+            )}
 
             {/* Fleet filters */}
             <Box style={{ borderRadius: 10, border: '1px solid #213060', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1103,12 +1223,36 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 </Box>
               )}
 
-              <input
-                value={vmSearch}
-                onChange={(e) => setVmSearch(e.target.value)}
-                placeholder={'Filter by VM name, app, or customer\u2026'}
-                style={{ background: 'rgba(0,0,0,.35)', border: '1px solid #213060', borderRadius: 6, padding: '7px 10px', color: '#e2e8f0', fontSize: 12, outline: 'none' }}
-              />
+              <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <input
+                  value={vmSearch}
+                  onChange={(e) => setVmSearch(e.target.value)}
+                  placeholder={'Filter by VM name, app, or customer\u2026'}
+                  style={{ flex: 1, minWidth: 200, background: 'rgba(0,0,0,.35)', border: '1px solid #213060', borderRadius: 6, padding: '7px 10px', color: '#e2e8f0', fontSize: 12, outline: 'none' }}
+                />
+                <Box display="flex" alignItems="center" style={{ gap: 6, background: 'rgba(15,23,42,0.6)', border: '1px solid #334155', borderRadius: 6, padding: '3px 8px' }}>
+                  <input
+                    value={quickVmInput}
+                    onChange={(e) => setQuickVmInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleQuickAddVm(); }}
+                    placeholder="Quick-select VM by name(s)..."
+                    style={{ width: 180, background: 'transparent', border: 'none', color: '#e2e8f0', fontSize: 11, outline: 'none' }}
+                  />
+                  <Button
+                    size="small"
+                    onClick={handleQuickAddVm}
+                    disabled={!quickVmInput.trim()}
+                    style={{ fontSize: 10, color: '#38bdf8', padding: '1px 6px', textTransform: 'none', fontWeight: 700 }}
+                  >
+                    + Select
+                  </Button>
+                </Box>
+                {quickVmMessage && (
+                  <span style={{ fontSize: 10, color: quickVmMessage.tone === 'green' ? '#34d399' : '#f59e0b', fontWeight: 600 }}>
+                    {quickVmMessage.text}
+                  </span>
+                )}
+              </Box>
             </Box>
 
             {/* VM table */}
