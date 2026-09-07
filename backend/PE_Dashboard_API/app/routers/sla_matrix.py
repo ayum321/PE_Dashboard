@@ -340,6 +340,8 @@ def _compute_sla_matrix(
                     wf_norm, _secondary_key_count[wf_norm],
                 )
                 continue
+            if is_secondary and wf_norm in _bsla_exact:
+                continue
             _bsla_exact[wf_norm] = (sla_f, wf_raw)
             tokens = frozenset(t for t in re.split(r"[_\s]+", wf_norm) if len(t) >= 2)
             if tokens:
@@ -1043,6 +1045,19 @@ def _compute_sla_matrix(
                                     rg_ends = _anchor_ends
                                     _anchor_pair_used = True
 
+                        # S2: Disambiguate when distinct workflows (e.g. ASC_CONTINUOUS vs ASC_REL_DO)
+                        # share an umbrella Sub_Application group and explicit anchors are absent.
+                        if not _anchor_pair_used and "Job_Name" in rg.columns:
+                            _wf_toks = [t for t in re.split(r"[_\s]+", _norm(sub_app)) if len(t) >= 4 and t not in ("PROD", "TEST", "DAILY", "BATCH")]
+                            if _wf_toks:
+                                _jmatch = rg["Job_Name"].str.upper().apply(lambda jn: any(tok in jn for tok in _wf_toks))
+                                if _jmatch.any():
+                                    _tok_starts = rg.loc[_jmatch, "_start"].dropna()
+                                    _tok_ends = rg.loc[_jmatch, "_end"].dropna()
+                                    if not _tok_starts.empty and not _tok_ends.empty:
+                                        rg_starts = _tok_starts
+                                        rg_ends = _tok_ends
+
                         elapsed = None
                         if not rg_starts.empty and not rg_ends.empty:
                             _rs = rg_starts.min()
@@ -1158,6 +1173,22 @@ def _compute_sla_matrix(
                 if _bsla_pre:
                     sla_h_wf, sla_src_wf, raw_batch_name_wf = _bsla_pre
                     join_hit = True
+
+                # Tier 1.5 — time-window SLA inference (Start_Time + Expected_End_Time in anchor row)
+                # Handles contracts where SLA was specified as a clock window (e.g. 05:00 AM -> 8:30 AM = 3.5h)
+                if sla_h_wf is None and _anchor_row:
+                    _st_cand = _anchor_row.get("start_time") or _anchor_row.get("start")
+                    _et_cand = _anchor_row.get("expected_end_time") or _anchor_row.get("end") or _anchor_row.get("sla")
+                    if _st_cand and _et_cand:
+                        try:
+                            from services.sla_merger import _overnight_delta_hours
+                            _inferred_h = _overnight_delta_hours(_st_cand, _et_cand)
+                            if _inferred_h and _inferred_h > 0:
+                                sla_h_wf = _inferred_h
+                                sla_src_wf = "time_window_inferred"
+                                join_hit = True
+                        except Exception:
+                            pass
 
                 # Tier 2 — SOW-extracted batch-type ceiling
                 if sla_h_wf is None and _sow_windows:

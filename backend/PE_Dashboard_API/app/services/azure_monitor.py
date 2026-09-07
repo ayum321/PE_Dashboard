@@ -891,6 +891,11 @@ def _query_single_vm_timeseries(client, rid, start_time, end_time, granularity):
                 }
                 if max_points and m.name not in _CHART_ONLY_METRICS:
                     series_max[m.name] = max_points
+                if "Available Memory" in m.name:
+                    if not points:
+                        logger.warning("VM %s: Azure Monitor returned 0 data points for %s (check guest OS diagnostic extension or Azure Monitor Agent).", vm_label, m.name)
+                    elif all(p.get("v") == 0 for p in points):
+                        logger.warning("VM %s: '%s' is emitting all zeroes. For Linux VMs, verify Azure Monitor Agent is configured to report MemAvailable rather than raw free memory.", vm_label, m.name)
                 if points:
                     series[m.name] = points
         except Exception as exc:
@@ -969,7 +974,7 @@ def _abs_breach_cfg(metric_name: str, is_db: bool = False) -> dict | None:
 
 
 def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
-                       band: dict) -> dict:
+                       band: dict, vm_size_info: Optional[dict] = None) -> dict:
     """Two-gate severity: a statistical anomaly only escalates to warning/critical
     when its ABSOLUTE value is also operationally material. A z-score spike that
     is statistically unusual for a VM but trivial in absolute terms (e.g. 12% CPU
@@ -979,16 +984,28 @@ def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
     Returns a STRUCTURED dict so it's audit-defensible and machine-readable for
     later export into PE findings — never a freetext-only string:
       severity, reason_code (typed enum), severity_reason (human text),
-      confidence, threshold (the band crossed), peak_pct, duration_min, z_score.
+      confidence, confidence_score, threshold (the band crossed), peak_pct, duration_min, z_score.
     """
     role = str(band.get("role") or "app").upper()
     result = resolve_severity(
         band.get("metric") or "other", used_peak, role,
         anomaly_result={"z": z, "z_critical": z_crit}, duration_min=dur_min,
+        vm_size_info=vm_size_info,
     )
     confidence = "high" if result["severity"] in ("critical", "critical_sustained") else (
         "medium" if z >= 2.0 else "low"
     )
+    # Numeric confidence score (0.00 to 1.00) based on z distance, duration, and severity
+    z_diff = max(0.0, float(z) - float(z_crit))
+    base_conf = 0.5 + min(0.35, z_diff * 0.15)
+    if dur_min >= 15:
+        base_conf += 0.1
+    if result["severity"] in ("critical", "critical_sustained"):
+        base_conf += 0.05
+    elif result["severity"] == "notable":
+        base_conf = min(base_conf, 0.45)
+    confidence_score = round(min(1.0, max(0.1, base_conf)), 2)
+
     pk, du, zr = round(float(used_peak), 1), int(dur_min), round(float(z), 1)
     threshold = result.get("threshold", band["warn"])
     if result["reason_code"] == "expected_range":
@@ -1003,8 +1020,8 @@ def _classify_severity(used_peak: float, dur_min: int, z: float, z_crit: float,
         reason = f"{pk:.0f}% {'>=' if result['severity'] != 'notable' else '<'} {threshold:.0f}% {'crit' if result['severity'].startswith('critical') else 'warn'} band"
     return {
         "severity": result["severity"], "reason_code": result["reason_code"],
-        "severity_reason": reason, "confidence": confidence, "threshold": threshold,
-        "peak_pct": pk, "duration_min": du, "z_score": zr,
+        "severity_reason": reason, "confidence": confidence, "confidence_score": confidence_score,
+        "threshold": threshold, "peak_pct": pk, "duration_min": du, "z_score": zr,
     }
 
 
@@ -1052,7 +1069,8 @@ def _break_series_on_data_gaps(series_points: list, neutral_value: float) -> lis
 
 
 def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
-                   metric_name: str = "", is_db: bool = False) -> list:
+                   metric_name: str = "", is_db: bool = False,
+                   vm_size_info: Optional[dict] = None) -> list:
     """Detect spikes in a time-series using DUAL classifiers:
     
     Classifier 1: Z-score (catches sudden deviations from server's own baseline)
@@ -1082,11 +1100,7 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
     std = variance ** 0.5
 
     # Metric-specific z-score thresholds. These now ACTUALLY gate detection
-    # (see `eff_sigma` below). Previously `z_critical` was computed here but
-    # only passed to _classify_severity for the confidence label, while the
-    # detection loop always compared against the default threshold_sigma=2.0 —
-    # so the documented per-metric sigmas (and the disk noise suppression they
-    # exist for) were never in effect.
+    # (see `eff_sigma` below).
     mn = (metric_name or "").lower()
     if "cpu" in mn:
         z_critical = 2.5   # CPU has natural batch variance
@@ -1098,27 +1112,21 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
         z_critical = 3.0
 
     # Detection gate: honour the metric-specific sigma, but never LOOSER than
-    # the caller-supplied threshold_sigma (so an explicit stricter request from
-    # a caller still wins).
+    # the caller-supplied threshold_sigma.
     eff_sigma = max(float(threshold_sigma), z_critical)
 
     # Absolute thresholds (Classifier 2) — chronic breach detection.
-    # Sourced from the canonical pe_config bands via _abs_breach_cfg, so the
-    # spike detector, per-VM hot-hours, and fleet hot-hours all read ONE shared
-    # threshold set instead of three parallel hardcoded tables.
     abs_cfg = _abs_breach_cfg(metric_name, is_db=is_db)
-    band = _metric_elevation(metric_name, is_db=is_db)   # used-% warn/crit for the abs-significance gate
+    band = _metric_elevation(metric_name, is_db=is_db)
 
     spikes = []
 
     # Orientation is read from the band rather than re-derived by substring.
-    # `_metric_elevation` already owns this decision and exports it as `invert`.
     is_inverted_metric = bool(band.get("invert"))
 
     # Build diurnal (hour-of-day) statistics when multi-day samples are present.
     # For enterprise batch workloads (SCPO, Ctrl-M, Oracle), batch hours (22:00-06:00 UTC)
-    # have naturally higher compute than daytime. A diurnal model prevents false alarms
-    # on planned night batch while catching subtle daytime lockups that a flat 24h baseline misses.
+    # have naturally higher compute than daytime.
     hourly_groups: dict = {}
     for p in series_points:
         t_str = p.get("t")
@@ -1141,40 +1149,69 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 if median_val >= 50.0 and sorted_vals[0] >= 30.0:
                     cyclic_batch_hours.add(h)
 
+    # ── Segmented Baseline for Bimodal / Duty-Cycle Workloads (A1) ──
+    # Enterprise batch servers exhibit bimodal distributions: heavy duty cycle vs idle.
+    # Segment points into batch-window vs off-cycle/idle to compute separate baselines.
+    batch_pts = []
+    idle_pts = []
+    if cyclic_batch_hours:
+        for p in series_points:
+            t_str = p.get("t")
+            h = None
+            if t_str and "T" in t_str:
+                try:
+                    h = int(t_str.split("T")[1][:2])
+                except Exception:
+                    pass
+            if h is not None and h in cyclic_batch_hours:
+                batch_pts.append(p["v"])
+            else:
+                idle_pts.append(p["v"])
+
+    has_segmented_baseline = bool(cyclic_batch_hours and len(batch_pts) >= 3 and len(idle_pts) >= 3)
+    if has_segmented_baseline:
+        mean_batch = sum(batch_pts) / len(batch_pts)
+        std_batch = (sum((v - mean_batch) ** 2 for v in batch_pts) / len(batch_pts)) ** 0.5
+        mean_idle = sum(idle_pts) / len(idle_pts)
+        std_idle = (sum((v - mean_idle) ** 2 for v in idle_pts) / len(idle_pts)) ** 0.5
+    else:
+        mean_batch = mean_idle = mean
+        std_batch = std_idle = std
+
     # ── Classifier 1: Z-score spike detection ──
-    # For "Available Memory %", a SPIKE is a DROP (negative z).
-    # For CPU/Disk, a SPIKE is a RISE (positive z).
-    # A missing Azure bucket is not evidence that a condition stayed elevated.
-    # Break the detector at the last observed point so duration means observed
-    # continuous evidence, not a timestamp gap filled in by arithmetic.
     series_points = _break_series_on_data_gaps(series_points, 100.0 if is_inverted_metric else 0.0)
-    if std >= 0.001:
+    if std >= 0.001 or (has_segmented_baseline and (std_batch >= 0.001 or std_idle >= 0.001)):
         in_spike = False
         spike_start = None
         spike_peak = 0
         spike_peak_time = ""
         spike_z = 0
+        spike_base_type = "global"
+        spike_seg_m = mean
+        spike_seg_s = std
 
         for i, p in enumerate(series_points):
-            z_global = (p["v"] - mean) / std
-            effective_z = -z_global if is_inverted_metric else z_global
-
-            # Check diurnal batch suppression if point falls in an established cyclic batch window
             t_str = p.get("t")
-            if cyclic_batch_hours and t_str and "T" in t_str:
+            h = None
+            if t_str and "T" in t_str:
                 try:
                     h = int(t_str.split("T")[1][:2])
-                    if h in cyclic_batch_hours:
-                        # Regular scheduled batch activity across all days is suppressed from
-                        # false-alarm z-score spikes unless it breaches critical limits.
-                        if is_inverted_metric:
-                            if p["v"] >= 15.0:
-                                effective_z = min(effective_z, 1.0)
-                        else:
-                            if p["v"] <= 75.0:
-                                effective_z = min(effective_z, 1.0)
                 except Exception:
                     pass
+
+            is_batch_pt = bool(cyclic_batch_hours and h is not None and h in cyclic_batch_hours)
+            if has_segmented_baseline:
+                seg_m = mean_batch if is_batch_pt else mean_idle
+                seg_s = std_batch if is_batch_pt else std_idle
+                base_type = "segmented"
+            else:
+                seg_m = mean
+                seg_s = std
+                base_type = "global"
+
+            z_curr = ((p["v"] - seg_m) / seg_s) if seg_s >= 0.001 else 0.0
+            effective_z = -z_curr if is_inverted_metric else z_curr
+
             if effective_z >= eff_sigma:
                 if not in_spike:
                     in_spike = True
@@ -1182,6 +1219,9 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                     spike_peak = p["v"]
                     spike_peak_time = p["t"]
                     spike_z = effective_z
+                    spike_base_type = base_type
+                    spike_seg_m = seg_m
+                    spike_seg_s = seg_s
                 else:
                     # Track worst point: for inverted metrics, lower = worse
                     if is_inverted_metric:
@@ -1204,19 +1244,21 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                     except Exception:
                         dur_min = 0
 
-                    # Two-gate severity: z-score selects the spike, absolute value
-                    # sets the label. used-% = peak for CPU/disk, 100-peak for mem.
                     used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
-                    sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band)
+                    sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band, vm_size_info=vm_size_info)
 
                     spikes.append(make_spike_record(
                         start=spike_start, end=series_points[i - 1]["t"],
                         peak=round(spike_peak, 2), peak_time=spike_peak_time,
                         duration_min=dur_min, severity=sv["severity"],
                         reason_code=sv["reason_code"], severity_reason=sv["severity_reason"],
-                        confidence=sv["confidence"], detection="z_score",
+                        confidence=sv["confidence"], confidence_score=sv.get("confidence_score"),
+                        detection="z_score",
                         z_score=round(spike_z, 2), mean=round(mean, 2), std=round(std, 2),
+                        baseline_type=spike_base_type, segment_mean=round(spike_seg_m, 2), segment_std=round(spike_seg_s, 2),
                         threshold=sv.get("threshold"), peak_pct=sv.get("peak_pct"),
+                        awr_window_start=spike_start, awr_window_end=series_points[i - 1]["t"],
+                        awr_drilldown_available=is_db,
                     ))
                     in_spike = False
 
@@ -1230,19 +1272,22 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
             except Exception:
                 dur_min = 0
             used_peak = (100.0 - spike_peak) if is_inverted_metric else spike_peak
-            sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band)
+            sv = _classify_severity(used_peak, dur_min, spike_z, z_critical, band, vm_size_info=vm_size_info)
             spikes.append(make_spike_record(
                 start=spike_start, end=series_points[-1]["t"],
                 peak=round(spike_peak, 2), peak_time=spike_peak_time,
                 duration_min=dur_min, severity=sv["severity"],
                 reason_code=sv["reason_code"], severity_reason=sv["severity_reason"],
-                confidence=sv["confidence"], detection="z_score",
+                confidence=sv["confidence"], confidence_score=sv.get("confidence_score"),
+                detection="z_score",
                 z_score=round(spike_z, 2), mean=round(mean, 2), std=round(std, 2),
+                baseline_type=spike_base_type, segment_mean=round(spike_seg_m, 2), segment_std=round(spike_seg_s, 2),
                 threshold=sv.get("threshold"), peak_pct=sv.get("peak_pct"),
+                awr_window_start=spike_start, awr_window_end=series_points[-1]["t"],
+                awr_drilldown_available=is_db,
             ))
 
     # ── Classifier 2: Absolute threshold breach detection ──
-    # Catches chronically sick servers that z-score misses
     if abs_cfg:
         is_inverted = abs_cfg.get("invert", False)
         crit_thresh = abs_cfg["critical"]
@@ -1256,7 +1301,6 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
         breach_severity = "warning"
 
         for i, p in enumerate(series_points):
-            # For inverted metrics (memory available), BELOW threshold = breach
             is_critical = (p["v"] <= crit_thresh) if is_inverted else (p["v"] >= crit_thresh)
             is_warning = (p["v"] <= warn_thresh) if is_inverted else (p["v"] >= warn_thresh)
 
@@ -1268,7 +1312,6 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                     breach_peak_time = p["t"]
                     breach_severity = "critical" if is_critical else "warning"
                 else:
-                    # Track worst point (lowest for inverted, highest for normal)
                     if is_inverted:
                         if p["v"] < breach_peak:
                             breach_peak = p["v"]
@@ -1290,7 +1333,6 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         dur_min = 0
 
                     if dur_min >= min_dur:
-                        # Check overlap with z-score spikes — don't double-count
                         overlaps = any(
                             s["start"] <= breach_start and s["end"] >= series_points[i-1]["t"]
                             for s in spikes
@@ -1298,12 +1340,6 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         if not overlaps:
                             sev = "critical_sustained" if dur_min > 60 else breach_severity
                             used_pk = (100.0 - breach_peak) if is_inverted else breach_peak
-                            # z_score must be SEVERITY-oriented (higher = worse) to
-                            # match classifier-1's `effective_z`. For an inverted
-                            # metric the breach peak is the LOWEST value, so the raw
-                            # z is negative; negate it. Consumers rank with
-                            # max(events, key=z_score) and gate on `z >= 3.0`, both
-                            # of which were unreachable for memory before this.
                             _raw_z = ((breach_peak - mean) / std) if std > 0.001 else 0.0
                             _sev_z = -_raw_z if is_inverted else _raw_z
                             spikes.append(make_spike_record(
@@ -1312,11 +1348,14 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                                 duration_min=dur_min, severity=sev,
                                 reason_code="abs_sustained" if dur_min > 60 else "abs_breach",
                                 severity_reason=f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
-                                confidence="high", detection="absolute_threshold",
+                                confidence="high", confidence_score=0.90, detection="absolute_threshold",
                                 z_score=round(_sev_z, 2),
                                 mean=round(mean, 2), std=round(std, 2),
+                                baseline_type="absolute",
                                 threshold=crit_thresh if breach_severity == "critical" else warn_thresh,
                                 peak_pct=round(used_pk, 1),
+                                awr_window_start=breach_start, awr_window_end=series_points[i - 1]["t"],
+                                awr_drilldown_available=is_db,
                             ))
                     in_breach = False
 
@@ -1337,7 +1376,6 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                 if not overlaps:
                     sev = "critical_sustained" if dur_min > 60 else breach_severity
                     used_pk = (100.0 - breach_peak) if is_inverted else breach_peak
-                    # Severity-oriented z (see the mid-loop close above).
                     _raw_z = ((breach_peak - mean) / std) if std > 0.001 else 0.0
                     _sev_z = -_raw_z if is_inverted else _raw_z
                     spikes.append(make_spike_record(
@@ -1346,11 +1384,14 @@ def _detect_spikes(series_points: list, threshold_sigma: float = 2.0,
                         duration_min=dur_min, severity=sev,
                         reason_code="abs_sustained" if dur_min > 60 else "abs_breach",
                         severity_reason=f"sustained absolute breach {dur_min}min ≥ {min_dur}min",
-                        confidence="high", detection="absolute_threshold",
+                        confidence="high", confidence_score=0.90, detection="absolute_threshold",
                         z_score=round(_sev_z, 2),
                         mean=round(mean, 2), std=round(std, 2),
+                        baseline_type="absolute",
                         threshold=crit_thresh if breach_severity == "critical" else warn_thresh,
                         peak_pct=round(used_pk, 1),
+                        awr_window_start=breach_start, awr_window_end=series_points[-1]["t"],
+                        awr_drilldown_available=is_db,
                     ))
 
     # Expected-range events can be statistically unusual, but they are not
@@ -2328,10 +2369,14 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
     if days_observed < 2:
         return {}
 
+    sufficient_baseline = days_observed >= 14.0 or (days_observed >= 7.0 and hours_back >= 168)
+    baseline_confidence_score = round(min(1.0, max(0.2, (days_observed / 14.0) * min(1.0, hours_back / 168.0))), 2)
+
     analysis: Dict[str, Any] = {
         "days_observed": round(days_observed, 1),
         "hours_back": hours_back,
-        "sufficient_baseline": days_observed >= 15,
+        "sufficient_baseline": sufficient_baseline,
+        "confidence_score": baseline_confidence_score,
         "per_vm": {},
         "fleet": {},
     }
@@ -2536,31 +2581,55 @@ def _compute_baseline_analysis(vm_data: Dict[str, Any], hours_back: int) -> Dict
                     continue
 
             for hour, events in spike_hours.items():
-                unique_days = set(e["date"] for e in events)
-                if len(unique_days) >= 2:
-                    # worst_peak MUST be in the same USED-% space as every other
-                    # field in this dict (overall_mean, hot_hours, daily_stats).
-                    # e["peak"] comes from the raw spike record, which for memory
-                    # is AVAILABLE % — so the worst (most pressured) sample is the
-                    # MINIMUM available, not the maximum. Taking max() here picked
-                    # the LEAST severe sample and emitted it as an available-%
-                    # number inside a used-% dict, which routers/findings.py then
-                    # rendered as "Memory spike ... peak 88% — CRITICAL" for what
-                    # was actually an idle VM.
-                    if is_mem_avail:
-                        _worst_peak = 100.0 - min(e["peak"] for e in events)
-                    else:
-                        _worst_peak = max(e["peak"] for e in events)
-                    recurring_spikes.append({
-                        "hour": hour,
-                        "day_count": len(unique_days),
-                        "days": sorted(unique_days),
-                        "day_names": sorted(set(e["day_name"] for e in events)),
-                        "worst_peak": round(_worst_peak, 1),
-                        "avg_duration_min": round(
-                            sum(e["duration_min"] for e in events) / len(events), 1
-                        ),
-                    })
+                # Magnitude-similarity partitioning (A5):
+                # Don't merge an immaterial blip (e.g. 12% CPU) into a massive 95% outage just because
+                # they occurred at the same hour on different days.
+                sorted_events = sorted(events, key=lambda x: x["peak"])
+                clusters = []
+                for ev in sorted_events:
+                    placed = False
+                    for cl in clusters:
+                        # If peaks are within 35 percentage points or within 2.2x ratio
+                        ref_peak = cl[0]["peak"]
+                        diff = abs(ev["peak"] - ref_peak)
+                        ratio = (ev["peak"] / max(ref_peak, 0.01)) if ref_peak > 0 else 1.0
+                        if diff <= 35.0 or (0.5 <= ratio <= 2.2):
+                            cl.append(ev)
+                            placed = True
+                            break
+                    if not placed:
+                        clusters.append([ev])
+
+                for cl_events in clusters:
+                    unique_days = set(e["date"] for e in cl_events)
+                    if len(unique_days) >= 2:
+                        # worst_peak MUST be in the same USED-% space as every other field.
+                        # Also compute median (representative) peak (A4).
+                        if is_mem_avail:
+                            used_peaks = sorted([100.0 - e["peak"] for e in cl_events])
+                            _worst_peak = max(used_peaks)
+                            _median_peak = used_peaks[len(used_peaks) // 2]
+                        else:
+                            used_peaks = sorted([e["peak"] for e in cl_events])
+                            _worst_peak = max(used_peaks)
+                            _median_peak = used_peaks[len(used_peaks) // 2]
+
+                        durs = sorted([e["duration_min"] for e in cl_events])
+                        _median_dur = durs[len(durs) // 2]
+
+                        recurring_spikes.append({
+                            "hour": hour,
+                            "day_count": len(unique_days),
+                            "days": sorted(unique_days),
+                            "day_names": sorted(set(e["day_name"] for e in cl_events)),
+                            "worst_peak": round(_worst_peak, 1),
+                            "representative_peak": round(_median_peak, 1),
+                            "median_peak": round(_median_peak, 1),
+                            "avg_duration_min": round(
+                                sum(durs) / len(durs), 1
+                            ),
+                            "median_duration_min": round(_median_dur, 1),
+                        })
 
             vm_analysis[display_name] = {
                 "daily_stats": daily_stats,

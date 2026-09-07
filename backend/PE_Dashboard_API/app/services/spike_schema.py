@@ -78,14 +78,24 @@ def make_spike_record(*, start, end, peak, peak_time, duration_min, severity,
                       reason_code, severity_reason, confidence, detection,
                       z_score=None, mean=None, std=None, threshold=None, peak_pct=None,
                       source_metric=None, aggregation=None, grain=None,
-                      formula=None, is_derived=False) -> dict:
+                      formula=None, is_derived=False, confidence_score=None,
+                      baseline_type="global", segment_mean=None, segment_std=None,
+                      awr_window_start=None, awr_window_end=None, awr_drilldown_available=False,
+                      **extra) -> dict:
     """Build a spike record with the full key set always present, contextual
     fields defaulting to None. Keeps all append paths schema-identical."""
-    return {
+    rec = {
         "start": start, "end": end, "peak": peak, "peak_time": peak_time,
         "duration_min": duration_min, "severity": severity, "reason_code": reason_code,
         "severity_reason": severity_reason, "confidence": confidence, "detection": detection,
         "z_score": z_score, "mean": mean, "std": std, "threshold": threshold,
         "peak_pct": peak_pct, "source_metric": source_metric, "aggregation": aggregation,
         "grain": grain, "formula": formula, "is_derived": is_derived,
+        "confidence_score": confidence_score, "baseline_type": baseline_type,
+        "segment_mean": segment_mean, "segment_std": segment_std,
+        "awr_window_start": awr_window_start or start,
+        "awr_window_end": awr_window_end or end,
+        "awr_drilldown_available": bool(awr_drilldown_available),
     }
+    rec.update(extra)
+    return rec

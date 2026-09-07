@@ -74,6 +74,52 @@ class AzureMonitorSpikeDurationTests(unittest.TestCase):
         self.assertTrue(any(s.get("peak") == 45.0 for s in spikes))
 
 
+    def test_segmented_baseline_metadata_and_confidence_score(self):
+        # When segmented baseline activates, baseline_type is 'segmented',
+        # segment stats are captured, confidence_score is float, and AWR metadata is present.
+        values = []
+        offsets = []
+        for day in range(3):
+            for hour in range(24):
+                val = 75.0 if hour == 2 else 5.0
+                values.append(val)
+                offsets.append(day * 24 + hour)
+        # Add an anomalous daytime spike on day 2 at 15:00 UTC (80%)
+        idx = 2 * 24 + 15
+        values[idx] = 80.0
+        spikes = _detect_spikes(_points(values, offsets), metric_name="Percentage CPU", is_db=True)
+        self.assertTrue(spikes)
+        daytime_spike = next((s for s in spikes if s.get("peak") == 80.0), None)
+        self.assertIsNotNone(daytime_spike)
+        self.assertEqual(daytime_spike.get("baseline_type"), "segmented")
+        self.assertIn("confidence_score", daytime_spike)
+        self.assertIsInstance(daytime_spike["confidence_score"], float)
+        self.assertGreaterEqual(daytime_spike["confidence_score"], 0.0)
+        self.assertLessEqual(daytime_spike["confidence_score"], 1.0)
+        self.assertIn("awr_window_start", daytime_spike)
+        self.assertIn("awr_window_end", daytime_spike)
+        self.assertTrue(daytime_spike.get("awr_drilldown_available"))
+
+    def test_vm_sku_aware_severity(self):
+        # Small VM (<= 4 vCPUs) has relaxed CPU warning threshold (70% vs 60%)
+        values = [10.0] * 20 + [65.0] * 5 + [10.0] * 20
+        offsets = list(range(len(values)))
+        # Standard VM without sizing info: 65% CPU -> warning
+        spikes_standard = _detect_spikes(
+            _points(values, offsets), metric_name="Percentage CPU",
+            vm_size_info={"vcpus": 16}
+        )
+        # Small VM (2 vCPUs): 65% CPU is below relaxed 70% warning threshold -> notable or healthy
+        spikes_small = _detect_spikes(
+            _points(values, offsets), metric_name="Percentage CPU",
+            vm_size_info={"vcpus": 2}
+        )
+        if spikes_standard:
+            self.assertEqual(spikes_standard[0]["severity"], "warning")
+        if spikes_small:
+            self.assertIn(spikes_small[0]["severity"], ("notable", "healthy"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

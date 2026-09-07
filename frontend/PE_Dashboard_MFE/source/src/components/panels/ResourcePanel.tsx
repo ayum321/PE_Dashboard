@@ -496,9 +496,13 @@ function inferEnv(vmName: string): string {
   return '';
 }
 
-/** "Available Memory Percentage" reads as available-%, everything else as used-%. */
+/** "Available Memory Percentage" shows used-% (consistent higher=worse) with available-% context. */
 function formatPeak(metric: string, val: number): string {
-  return /Available Memory/i.test(metric) ? `${val.toFixed(1)}% available` : `${val.toFixed(1)}%`;
+  if (/Available Memory/i.test(metric)) {
+    const used = Math.max(0, 100 - val);
+    return `${used.toFixed(1)}% used (${val.toFixed(1)}% avail)`;
+  }
+  return `${val.toFixed(1)}%`;
 }
 
 function humanizeDurationMin(min: number): string {
@@ -817,6 +821,17 @@ export function ResourcePanel() {
   const [activeScopeTab, setActiveScopeTab] = useState<'all' | 'investigation' | 'healthy'>('all');
   const [headroomGrowth, setHeadroomGrowth] = useState<number>(1.0);
   const [showBatchOverlay, setShowBatchOverlay] = useState<boolean>(true);
+  const [expandedRecurringRows, setExpandedRecurringRows] = useState<Set<number>>(new Set());
+
+  const toggleRecurringRow = (idx: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedRecurringRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
 
   const handleInspectSpike = (spike: DeepDiveSpike) => {
     setInspectedSpike(spike);
@@ -1642,7 +1657,7 @@ export function ResourcePanel() {
         | { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] }
         | undefined;
 
-    const groupedRows: Array<{ row: typeof rows[number]; recurring: boolean; count: number; days: number; durations: number[]; maxPeak: number; ctrlM?: { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] } }> = [];
+    const groupedRows: Array<{ row: typeof rows[number]; recurring: boolean; count: number; days: number; durations: number[]; maxPeak: number; occurrences: typeof rows; ctrlM?: { concurrent_jobs: number; heaviest?: string; heaviest_hrs?: number; jobs?: { job: string; hrs?: number }[] } }> = [];
     const used = new Set<number>();
     rows.forEach((row, index) => {
       if (used.has(index)) return;
@@ -1666,6 +1681,7 @@ export function ResourcePanel() {
         days: new Set(related.map((item) => item.peak_time ? new Date(item.peak_time).toISOString().slice(0, 10) : '')).size,
         durations: related.map((item) => durationMinutesFromBounds(item.start, item.end) ?? item.duration_min ?? 0),
         maxPeak: Math.max(...related.map((item) => item.peak || 0)),
+        occurrences: related,
         ctrlM: findCtrlM(row),
       });
     });
@@ -2637,7 +2653,36 @@ export function ResourcePanel() {
 
                   {ddDetail.rows.length > 0 ? (
                     <>
-                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 8 }}>
+                      {/* B11: Per-metric summary chip row */}
+                      {(() => {
+                        const metricCounts: Record<string, number> = {};
+                        for (const r of ddDetail.rows) {
+                          const sm = shortMetric(r.metric);
+                          metricCounts[sm] = (metricCounts[sm] || 0) + 1;
+                        }
+                        return (
+                          <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8, marginBottom: 4 }}>
+                            <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 10, fontWeight: 700 }}>Telemetry events:</Typography>
+                            {Object.entries(metricCounts).map(([mName, mCnt]) => (
+                              <span key={mName} className="metric-badge" style={{ fontSize: 9, background: 'rgba(99,102,241,.12)', border: '1px solid rgba(99,102,241,.35)', color: '#c7d2fe' }}>
+                                {mName}: {mCnt} event{mCnt !== 1 ? 's' : ''}
+                              </span>
+                            ))}
+                          </Box>
+                        );
+                      })()}
+
+                      {/* B4: Single consolidated low-confidence baseline banner */}
+                      {selectedBaselineConfidence?.degraded && (
+                        <Box style={{ marginTop: 6, marginBottom: 6, padding: '6px 12px', borderRadius: 6, background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.35)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ color: '#f59e0b', fontSize: 13 }}>⚠️</span>
+                          <Typography variant="caption" style={{ color: '#fbbf24', fontSize: 10, fontWeight: 600 }}>
+                            Low-confidence baseline: observation window has fewer historical samples than recommended for multi-week models. Operational absolute thresholds take precedence.
+                          </Typography>
+                        </Box>
+                      )}
+
+                      <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 4 }}>
                         Severity rules: <span style={{ color: SEVERITY_COLOR['CRITICAL SUSTAINED'] }}>CRITICAL SUSTAINED</span> {'\u00b7'} <span style={{ color: SEVERITY_COLOR.CRITICAL }}>CRITICAL</span> {'\u00b7'} <span style={{ color: SEVERITY_COLOR.WARNING }}>WARNING</span>
                       </Typography>
                       <Table size="small" className="pe-table" aria-label="Anomaly spike events" style={{ marginTop: 6 }}>
@@ -2653,59 +2698,134 @@ export function ResourcePanel() {
                           </TableRow>
                         </TableHead>
                         <TableBody>
-                          {ddDetail.groupedRows.slice(0, 30).map(({ row: s, recurring, count, days, durations, maxPeak, ctrlM }, i) => {
+                          {ddDetail.groupedRows.slice(0, 30).map(({ row: s, recurring, count, days, durations, maxPeak, occurrences, ctrlM }, i) => {
                             const sevLabel = (s.severity || 'critical').toUpperCase().replace('_', ' ');
                             const sevColor = SEVERITY_COLOR[sevLabel] || '#f43f5e';
                             const start = formatUtcDateTime(s.start);
                             const end = formatUtcDateTime(s.end);
                             const durationText = recurring ? formatRecurringDurations(durations) : humanizeDurationMin(durationMinutesFromBounds(s.start, s.end) ?? s.duration_min ?? 0);
                             const detailText = recurring
-                              ? `${count} events · durations ${durations.map(humanizeDurationMin).join(', ')}${s.severity_reason ? ` · representative event: ${s.severity_reason}` : ''}`
+                              ? `${count} occurrences · durations ${durations.map(humanizeDurationMin).join(', ')}${s.severity_reason ? ` · representative: ${s.severity_reason}` : ''}`
                               : s.severity_reason || '\u2014';
-                            const pattern = recurring ? `Likely recurring (${days}d)` : (s.detection === 'absolute_threshold' ? 'Sustained breach' : 'Z-score spike');
+                            const isPlateau = (s.duration_min && s.duration_min >= 60) || s.detection === 'absolute_threshold';
+                            const patternLabel = recurring
+                              ? `Recurring pattern (${count}x)`
+                              : isPlateau
+                                ? 'Duty-cycle plateau'
+                                : 'Z-score spike';
+                            const patternColor = isPlateau && !recurring ? '#c084fc' : recurring ? '#f59e0b' : '#38bdf8';
+                            const patternTooltip = recurring
+                              ? `${count} events clustered around the same window across ${days} distinct days`
+                              : isPlateau
+                                ? 'Sustained elevated compute spanning across batch window'
+                                : 'Sudden statistical departure from historical baseline';
                             const isInspected = inspectedSpike === s || (inspectedSpike?.peak === s.peak && inspectedSpike?.start === s.start);
                             return (
-                              <TableRow
-                                key={i}
-                                hover
-                                onClick={() => handleInspectSpike(s)}
-                                style={{
-                                  cursor: 'pointer',
-                                  background: isInspected ? 'rgba(244,63,94,.16)' : undefined,
-                                  borderLeft: isInspected ? '3px solid #f43f5e' : undefined,
-                                }}
-                                title="Click to zoom time-series chart directly to this anomaly"
-                              >
-                                <TableCell>
-                                  <span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>
-                                  {s.detection === 'absolute_threshold' && <span className="metric-badge metric-badge-teal" style={{ fontSize: 8, marginLeft: 4 }}>ABS</span>}
-                                  {selectedBaselineConfidence?.degraded && (
-                                    <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }} title={lowConfidenceBaselineTitle(selectedBaselineConfidence)}>
-                                      {'⚠'} low-confidence baseline
-                                    </span>
-                                  )}
-                                </TableCell>
-                                <TableCell>{shortMetric(s.metric)}</TableCell>
-                                <TableCell style={{ fontFamily: 'monospace' }}>{recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}{recurring && <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }}>{count}x</span>}</TableCell>
-                                <TableCell style={{ fontSize: 10 }}>{recurring ? `${days}d pattern` : `${start} → ${end} UTC`}</TableCell>
-                                <TableCell style={{ fontSize: 10 }}>{durationText}</TableCell>
-                                <TableCell style={{ fontSize: 10, color: recurring ? '#f59e0b' : undefined }}>{pattern}</TableCell>
-                                <TableCell style={{ fontSize: 10 }}>
-                                  <span title={detailText}>{detailText}</span>
-                                  {ctrlM && ctrlM.concurrent_jobs > 0 && (
-                                    <Box style={{ marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
-                                      <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf' }}>
-                                        {'\ud83d\udd17'} {ctrlM.heaviest} ({(ctrlM.heaviest_hrs || 0).toFixed(1)}h) running · {ctrlM.concurrent_jobs} job(s) overlapped · time overlap only
-                                      </Typography>
-                                      {ctrlM.jobs && ctrlM.jobs.length > 1 && (
-                                        <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 2 }}>
-                                          Jobs: {ctrlM.jobs.map((job) => `${job.job} (${(job.hrs || 0).toFixed(1)}h)`).join(' · ')}
+                              <React.Fragment key={i}>
+                                <TableRow
+                                  hover
+                                  onClick={() => handleInspectSpike(s)}
+                                  style={{
+                                    cursor: 'pointer',
+                                    background: isInspected ? 'rgba(244,63,94,.16)' : undefined,
+                                    borderLeft: isInspected ? '3px solid #f43f5e' : undefined,
+                                  }}
+                                  title="Click to zoom time-series chart directly to this anomaly"
+                                >
+                                  <TableCell>
+                                    <span style={{ color: sevColor, fontWeight: 700, fontSize: 10 }}>{sevLabel}</span>
+                                    {s.detection === 'absolute_threshold' && (
+                                      <span
+                                        className="metric-badge metric-badge-teal"
+                                        style={{ fontSize: 8, marginLeft: 4 }}
+                                        title="Absolute threshold breach (chronic condition): metric crossed fixed operational safety limits, independent of baseline deviation."
+                                      >
+                                        ABS
+                                      </span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell>{shortMetric(s.metric)}</TableCell>
+                                  <TableCell style={{ fontFamily: 'monospace' }}>
+                                    {recurring ? formatPeak(s.metric, maxPeak) : s.peak != null ? formatPeak(s.metric, s.peak) : '\u2014'}
+                                    {recurring && (
+                                      <span className="metric-badge metric-badge-amber" style={{ fontSize: 8, marginLeft: 4 }} title={`${count} events in this recurrence cluster`}>
+                                        {count}x
+                                      </span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell style={{ fontSize: 10 }}>
+                                    {recurring ? (
+                                      <button
+                                        onClick={(e) => toggleRecurringRow(i, e)}
+                                        className="pe-pill-btn"
+                                        style={{
+                                          display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 6px',
+                                          borderRadius: 4, fontSize: 9, background: 'rgba(59,130,246,.15)',
+                                          border: '1px solid rgba(59,130,246,.35)', color: '#93c5fd', cursor: 'pointer'
+                                        }}
+                                        title="Click to toggle breakdown of all occurrence dates and timestamps"
+                                      >
+                                        <span>{expandedRecurringRows.has(i) ? '▼' : '▶'}</span>
+                                        <span>{count} events over {days}d</span>
+                                      </button>
+                                    ) : (
+                                      `${start} → ${end} UTC`
+                                    )}
+                                  </TableCell>
+                                  <TableCell style={{ fontSize: 10 }}>{durationText}</TableCell>
+                                  <TableCell style={{ fontSize: 10, color: patternColor }} title={patternTooltip}>
+                                    {patternLabel}
+                                  </TableCell>
+                                  <TableCell style={{ fontSize: 10 }}>
+                                    <span title={detailText}>{detailText}</span>
+                                    {ctrlM && ctrlM.concurrent_jobs > 0 && (
+                                      <Box style={{ marginTop: 2 }} title={`${ctrlM.concurrent_jobs} Ctrl-M job(s) overlapped this spike window (time-coincidence, not host-pinned).`}>
+                                        <Typography variant="caption" style={{ display: 'block', color: '#2dd4bf' }}>
+                                          {'\ud83d\udd17'} {ctrlM.heaviest} ({(ctrlM.heaviest_hrs || 0).toFixed(1)}h) running · {ctrlM.concurrent_jobs} job(s) overlapped · time overlap only
                                         </Typography>
-                                      )}
-                                    </Box>
-                                  )}
-                                </TableCell>
-                              </TableRow>
+                                        {ctrlM.jobs && ctrlM.jobs.length > 1 && (
+                                          <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 8, marginTop: 2 }}>
+                                            Jobs: {ctrlM.jobs.map((job) => `${job.job} (${(job.hrs || 0).toFixed(1)}h)`).join(' · ')}
+                                          </Typography>
+                                        )}
+                                      </Box>
+                                    )}
+                                  </TableCell>
+                                </TableRow>
+
+                                {/* B6: Expandable breakdown of occurrence timestamps */}
+                                {recurring && expandedRecurringRows.has(i) && occurrences && occurrences.length > 0 && (
+                                  <TableRow style={{ background: 'rgba(15,23,42,.75)' }}>
+                                    <TableCell colSpan={7} style={{ padding: '6px 14px' }}>
+                                      <Typography variant="caption" style={{ fontWeight: 700, color: '#94a3b8', display: 'block', marginBottom: 4 }}>
+                                        All {count} Occurrences in this Recurring Pattern (click any to zoom chart):
+                                      </Typography>
+                                      <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 6 }}>
+                                        {occurrences.map((occ, occIdx) => (
+                                          <Box
+                                            key={occIdx}
+                                            onClick={(e) => { e.stopPropagation(); handleInspectSpike(occ); }}
+                                            style={{
+                                              padding: '4px 8px', borderRadius: 4, background: 'rgba(30,41,59,.8)',
+                                              border: '1px solid rgba(148,163,184,.25)', cursor: 'pointer', fontSize: 10,
+                                            }}
+                                            title="Click to inspect this specific occurrence on the timeline"
+                                          >
+                                            <Box display="flex" justifyContent="space-between" alignItems="center">
+                                              <span style={{ color: '#e2e8f0', fontWeight: 600 }}>{formatUtcDateTime(occ.start)}</span>
+                                              <span style={{ color: '#38bdf8', fontFamily: 'monospace' }}>{formatPeak(occ.metric, occ.peak ?? 0)}</span>
+                                            </Box>
+                                            <Box display="flex" justifyContent="space-between" alignItems="center" style={{ color: '#94a3b8', fontSize: 9, marginTop: 2 }}>
+                                              <span>{humanizeDurationMin(durationMinutesFromBounds(occ.start, occ.end) ?? occ.duration_min ?? 0)}</span>
+                                              <span>{occ.detection === 'absolute_threshold' ? 'ABS' : `z=${Number(occ.z_score ?? 0).toFixed(1)}`}</span>
+                                            </Box>
+                                          </Box>
+                                        ))}
+                                      </Box>
+                                    </TableCell>
+                                  </TableRow>
+                                )}
+                              </React.Fragment>
                             );
                           })}
                         </TableBody>
@@ -2730,9 +2850,25 @@ export function ResourcePanel() {
                       <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
                         <Typography variant="subtitle2">Unified Time-Series {'\u2014'} All Metrics ({deepDiveVm})</Typography>
                         <Box display="flex" alignItems="center" style={{ gap: 12 }}>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows active Ctrl-M batch job execution windows on the timeline.">
-                            <input type="checkbox" checked={showBatchOverlay} onChange={(e) => setShowBatchOverlay(e.target.checked)} style={{ accentColor: '#6366f1' }} />
-                            <Typography variant="caption" style={{ fontWeight: 700, color: '#a5b4fc' }}>⚙️ Batch Runs Overlay</Typography>
+                          {/* B8: Disabled/greyed out when no batch data loaded */}
+                          <label
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 6,
+                              cursor: ddDetail.ctrlMActive ? 'pointer' : 'not-allowed',
+                              opacity: ddDetail.ctrlMActive ? 1 : 0.45,
+                            }}
+                            title={ddDetail.ctrlMActive ? 'Shows active Ctrl-M batch job execution windows on the timeline.' : 'No Ctrl-M batch execution data loaded. Upload Ctrl-M history in Upload & Intake to enable this overlay.'}
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={!ddDetail.ctrlMActive}
+                              checked={showBatchOverlay && ddDetail.ctrlMActive}
+                              onChange={(e) => setShowBatchOverlay(e.target.checked)}
+                              style={{ accentColor: '#6366f1' }}
+                            />
+                            <Typography variant="caption" style={{ fontWeight: 700, color: ddDetail.ctrlMActive ? '#a5b4fc' : '#64748b' }}>
+                              ⚙️ Batch Runs Overlay
+                            </Typography>
                           </label>
                           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Shows Azure Monitor's timestamp-aligned Maximum aggregation beside the Average series, exposing short peaks that average values can hide.">
                             <input type="checkbox" checked={ddShowMaxOverlay} onChange={(e) => setDdShowMaxOverlay(e.target.checked)} style={{ accentColor: '#3b82f6' }} />

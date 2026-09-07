@@ -167,13 +167,19 @@ _BATCH_TYPE_WORDS: frozenset = frozenset([
     "NIGHTLY", "OVERNIGHT", "CYCLIC", "OUTBOUND", "BATCH",
 ])
 
+# Process and workflow modifier tokens that must NEVER be stripped as customer prefixes
+_PROCESS_MODIFIER_WORDS: frozenset = frozenset([
+    "RE", "RERUN", "PRE", "POST", "INIT", "STEP", "MAIN", "SUB",
+    "DELTA", "FULL", "EXTRA", "RETRY", "ARCH", "STAGE",
+])
+
 
 def _all_normalized_forms(name: str) -> list[str]:
     """Return all candidate normalized keys for an XLSX workflow name.
 
     Always returns [primary_form]. If the first _-delimited token looks like a
-    customer/site prefix (all-alpha, ≤12 chars, not a batch-type indicator), also
-    appends the prefix-stripped form so the XLSX index matches Ctrl-M names with or
+    customer/site prefix (all-alpha, ≤12 chars, not a batch-type or process indicator),
+    also appends the prefix-stripped form so the XLSX index matches Ctrl-M names with or
     without the customer prefix.
 
     Examples:
@@ -181,6 +187,7 @@ def _all_normalized_forms(name: str) -> list[str]:
         "PROD_DAILY"      → ["DAILY"]  (PROD_ stripped by _strip_env_prefix)
         "WEEKLY_WF1"      → ["WEEKLY_WF1"]  (WEEKLY is a batch-type word — keep)
         "HAUK_WEEKLYREPL" → ["HAUK_WEEKLYREPL", "WEEKLYREPL"]
+        "PROD_RE_LOADINGFILES" → ["RE_LOADINGFILES"] (RE is a process modifier — keep)
     """
     primary = _strip_env_prefix(name).upper()
     if not primary:
@@ -190,7 +197,8 @@ def _all_normalized_forms(name: str) -> list[str]:
         first_tok = primary.split("_")[0]
         if (first_tok.isalpha()
                 and 2 <= len(first_tok) <= 12
-                and first_tok not in _BATCH_TYPE_WORDS):
+                and first_tok not in _BATCH_TYPE_WORDS
+                and first_tok not in _PROCESS_MODIFIER_WORDS):
             secondary = primary[len(first_tok) + 1:]
             if secondary and secondary not in forms:
                 forms.append(secondary)
@@ -517,16 +525,16 @@ def parse_start_time(value: Any) -> Any:
     s = str(value).strip()
     if not s or s.lower() in ("nan", "none", "n/a", "tbd", "-", "adhoc", "on demand"):
         return None
-    # Strip a leading weekday name (and connector/filler words) before matching
+    # Strip a leading weekday name or cadence label (and connector/filler words) before matching
     # a clock time — any customer's Start Time column may state the cadence
-    # inline with the time, e.g. "Sunday 9:05 PM CST", "Monday/Wednesday 9:05 PM
-    # CST", "Saturday start at 2PM CST". Without this, strptime fails on the
-    # leading day-name text and the whole cell is silently dropped as None.
-    # Full names MUST be checked before abbreviations (TUE+DAY != TUESDAY).
+    # inline with the time, e.g. "Sunday 9:05 PM CST", "Daily at 05 AM", "Daily at 11:45 PM",
+    # "Saturday start at 2PM CST". Without this, strptime fails on the
+    # leading day/cadence text and the whole cell is silently dropped as None.
     s = re.sub(
-        rf'^(?:(?:{_DAY_NAMES_ALT})[\s/,&\-]*)+(?:START\s+AT\s+)?',
+        rf'^(?:(?:{_DAY_NAMES_ALT}|DAILY|NIGHTLY|WEEKLY|EVERYDAY|EVERY\s+DAY)[\s/,&\-]*)+(?:START\s+AT\s+|AT\s+)?',
         "", s, flags=re.IGNORECASE,
     ).strip()
+    s = re.sub(r'^(?:START\s+AT|AT)\s+', "", s, flags=re.IGNORECASE).strip()
     if not s:
         return None
     # Normalise NO-BREAK / NARROW NO-BREAK spaces from Excel/Word exports
@@ -919,12 +927,13 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
         # "Saturday start at ", "Sunday "), and repeated day tokens joined by
         # "/", "-", "," or "&". Iterative: keeps stripping while a day-name
         # (optionally followed by filler like "start at"/"at") remains at the front.
-        _DAY = r'(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sun|Mon|Tue|Wed|Thu|Fri|Sat)'
+        _DAY = r'(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sun|Mon|Tue|Wed|Thu|Fri|Sat|Daily|Nightly|Weekly|Everyday|Every\s+day)'
         while True:
             s2 = _re.sub(
                 rf'^{_DAY}(?:\s*[/\-,&]\s*{_DAY})*\s*(?:start\s+at\s+|at\s+)?',
                 '', s, flags=_re.IGNORECASE,
             ).strip()
+            s2 = _re.sub(r'^(?:start\s+at\s+|at\s+)', '', s2, flags=_re.IGNORECASE).strip()
             if s2 == s:
                 break
             s = s2

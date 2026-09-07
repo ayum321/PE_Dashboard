@@ -39,13 +39,14 @@ def canonical_metric(metric: str) -> str:
     return "other"
 
 
-def metric_profile(metric: str, server_role: str = "APP", domain_rules: Optional[dict] = None) -> dict:
+def metric_profile(metric: str, server_role: str = "APP", domain_rules: Optional[dict] = None, vm_size_info: Optional[dict] = None) -> dict:
     """Return generic metric metadata plus role-aware operational bands.
 
     ``domain_rules`` is the intentionally small configuration seam: an
     engagement may override numbers or expected ranges, but never the
     resolution algorithm.  It uses ``{metric: {warn, crit, expected_min,
     expected_max}}`` and may additionally contain ``roles`` keyed by role.
+    ``vm_size_info`` optionally provides vCPU and RAM sizing to scale thresholds.
     """
     from services import pe_config
 
@@ -85,11 +86,21 @@ def metric_profile(metric: str, server_role: str = "APP", domain_rules: Optional
 
     # Product default role profiles.  They are role-aware, not customer-aware.
     if key == "cpu":
-        profile.update({
+        cpu_role_bands = {
             "APP": {"warn": 60.0, "crit": 80.0},
             "DB": {"warn": 85.0, "crit": 95.0},
             "SRE": {"warn": 90.0, "crit": 100.0},
-        }.get(role, {}))
+        }.get(role, {})
+        if vm_size_info and isinstance(vm_size_info, dict) and role == "APP":
+            vcpus = _number(vm_size_info.get("vcpus") or vm_size_info.get("vcpusavailable"))
+            if vcpus is not None:
+                if vcpus <= 4:
+                    # Small VM runs hotter under normal loads — relax threshold slightly
+                    cpu_role_bands = {"warn": 70.0, "crit": 85.0}
+                elif vcpus >= 32:
+                    # Large enterprise host — tighten threshold slightly
+                    cpu_role_bands = {"warn": 55.0, "crit": 75.0}
+        profile.update(cpu_role_bands)
     elif key == "memory" and role == "DB":
         # Oracle SGA/PGA allocation is expected in this entire band.  It is
         # context, not a warning; genuine pressure starts above the band.
@@ -120,13 +131,14 @@ def resolve_severity(
     domain_rules: Optional[dict] = None,
     anomaly_result: Optional[dict] = None,
     duration_min: int = 0,
+    vm_size_info: Optional[dict] = None,
 ) -> dict:
     """Resolve one server/metric verdict from the canonical profile.
 
     Statistical detection can identify a point worth inspecting, but cannot
     upgrade an expected or non-material value into an operational warning.
     """
-    profile = metric_profile(metric, server_role, domain_rules)
+    profile = metric_profile(metric, server_role, domain_rules, vm_size_info=vm_size_info)
     numeric = _number(value)
     if numeric is None:
         return {**profile, "severity": "unknown", "status": "Unknown", "reason_code": "metric_not_emitted", "is_expected": False}
@@ -154,10 +166,10 @@ def resolve_severity(
     return {**base, "severity": "healthy", "status": "Healthy", "reason_code": "within_range", "threshold": warning}
 
 
-def resolve_server_severity(metrics: dict, server_role: str = "APP", domain_rules: Optional[dict] = None) -> dict:
+def resolve_server_severity(metrics: dict, server_role: str = "APP", domain_rules: Optional[dict] = None, vm_size_info: Optional[dict] = None) -> dict:
     """Return the worst canonical result across the metrics actually emitted."""
     resolved = {
-        canonical_metric(metric): resolve_severity(metric, value, server_role, domain_rules)
+        canonical_metric(metric): resolve_severity(metric, value, server_role, domain_rules, vm_size_info=vm_size_info)
         for metric, value in (metrics or {}).items()
     }
     emitted = [result for result in resolved.values() if result["severity"] != "unknown"]

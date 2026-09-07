@@ -684,6 +684,16 @@ def load_ctrlm_bytes(raw: bytes, filename: str = "") -> pd.DataFrame:
                     df["Job_Name"].astype(str).str.strip().str.upper()
                 )
             )
+            # S3: Only treat as a folder control marker if it lacks actual runtime evidence.
+            # Real executable jobs (such as PROD_ATTA) may share their folder name but have real runtime.
+            if "Run_Sec" in df.columns:
+                _has_runtime = df["Run_Sec"] > 0
+                _folder_control = _folder_control & (~_has_runtime)
+            elif "Start_Time" in df.columns and "End_Time" in df.columns:
+                _diff_s = (df["End_Time"] - df["Start_Time"]).dt.total_seconds()
+                _has_runtime = _diff_s > 0
+                _folder_control = _folder_control & (~_has_runtime)
+
             _folder_control_count = int(_folder_control.sum())
             if _folder_control_count:
                 logger.warning(
