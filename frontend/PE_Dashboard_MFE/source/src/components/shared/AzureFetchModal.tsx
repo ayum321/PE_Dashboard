@@ -45,6 +45,7 @@ interface Props {
     resolved: DashboardPayload,
   ) => void | Promise<void>;
   onAuthChanged?: (auth: DashboardPayload) => void;
+  existingServers?: Array<{ resource_id?: string; host?: string; server?: string; name?: string; customer?: string; type?: string }>;
 }
 
 const TYPE_COLOR: Record<string, string> = { APP: '#10b981', DB: '#3b82f6', SRE: '#f59e0b' };
@@ -58,6 +59,9 @@ export interface AzureFetchMeta {
   customerMessage: string;
   taggedVmCount: number;
   selectedVmCount: number;
+  fleetMode?: 'append' | 'replace';
+  newVmCount?: number;
+  existingVmCount?: number;
 }
 
 /** Ported from _getVmEnv() (app.js): infer environment from tags, then name prefix. */
@@ -150,7 +154,7 @@ function IndeterminateCheckbox({
 /** Full "Fetch from Azure Monitor" workflow — search/browse → discover → fleet
  * filters (type/env/region/product group) → customer-grouped VM selection →
  * fetch. Ported from the #azure-fetch-modal two-step dialog (index.html/app.js). */
-export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetched, onAuthChanged }: Props) {
+export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetched, onAuthChanged, existingServers }: Props) {
   const [authInfo, setAuthInfo] = useState<DashboardPayload | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [deviceCodeInfo, setDeviceCodeInfo] = useState<{ verification_uri: string; user_code: string; message: string } | null>(null);
@@ -187,6 +191,35 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const [hoursBack, setHoursBack] = useState(24);
   const [fetchBusy, setFetchBusy] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
+
+  const [fleetMode, setFleetMode] = useState<'append' | 'replace'>('append');
+
+  useEffect(() => {
+    if (existingServers && existingServers.length > 0) {
+      setFleetMode('append');
+    } else {
+      setFleetMode('replace');
+    }
+  }, [existingServers, open]);
+
+  const existingKeySet = useMemo(() => {
+    const set = new Set<string>();
+    if (!existingServers) return set;
+    for (const s of existingServers) {
+      const id = (s.resource_id || '').toLowerCase().trim();
+      const host = (s.host || s.server || s.name || '').toLowerCase().trim();
+      if (id) set.add(id);
+      if (host) set.add(host);
+    }
+    return set;
+  }, [existingServers]);
+
+  const isVmInFleet = useCallback((vm: AzureVm) => {
+    if (!existingServers || existingServers.length === 0) return false;
+    const vmId = (vm.resource_id || '').toLowerCase().trim();
+    const vmName = (vm.name || '').toLowerCase().trim();
+    return Boolean((vmId && existingKeySet.has(vmId)) || (vmName && existingKeySet.has(vmName)));
+  }, [existingServers, existingKeySet]);
 
   const cancelSubscriptionLoads = useCallback(() => {
     subscriptionLoadGeneration.current += 1;
@@ -397,7 +430,15 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
       return;
     }
     setDiscoveredVms(deduped);
-    setSelectedVmIds(new Set());
+    const preselected = new Set<string>();
+    if (existingServers && existingServers.length > 0) {
+      for (const vm of deduped) {
+        if (isVmInFleet(vm)) {
+          preselected.add(vm.resource_id);
+        }
+      }
+    }
+    setSelectedVmIds(preselected);
     setCollapsedCustomers(new Set());
     setCustomerFilter('ALL');
     setTypeFilters(new Set());
@@ -406,7 +447,10 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setPgFilter('ALL');
     setVmSearch('');
     setStep(2);
-    setDiscoverStatus({ text: statusMsg, tone: 'green' });
+    const fleetAddMsg = preselected.size > 0
+      ? ` · ${preselected.size} active fleet VM(s) pre-selected`
+      : '';
+    setDiscoverStatus({ text: `${statusMsg}${fleetAddMsg}`, tone: 'green' });
   };
 
   const handleSearch = async (overrideQuery?: string) => {
@@ -654,6 +698,9 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         : identifiedCustomers.length > 1
           ? `Customer was not assigned because the selected VMs contain multiple customer tags: ${identifiedCustomers.sort().join(', ')}.`
           : 'Customer was not identified because the selected VMs have no Customer, CustomerName, Client, or ClientName tag.';
+      const newVmCount = selectedVms.filter((v) => !isVmInFleet(v)).length;
+      const existingVmCount = selectedVms.filter((v) => isVmInFleet(v)).length;
+
       setFetchStatus('Resolving fleet health and saving evidence…');
       await onFetched((result.servers as ResourceServer[]) || [], {
         hoursBack,
@@ -662,6 +709,9 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         customerMessage,
         taggedVmCount,
         selectedVmCount: selectedVms.length,
+        fleetMode: existingServers && existingServers.length > 0 ? fleetMode : 'replace',
+        newVmCount,
+        existingVmCount,
       }, result);
       onClose();
     } catch (error) {
@@ -938,6 +988,25 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               </Box>
               <Box display="flex" style={{ gap: 8, marginLeft: 'auto' }} alignItems="center">
                 <Button size="small" variant="outlined" onClick={selectAllVms} style={{ fontSize: 10 }}>Select all VMs</Button>
+                {existingServers && existingServers.length > 0 && discoveredVms.some((v) => !isVmInFleet(v)) && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => {
+                      setSelectedVmIds((prev) => {
+                        const next = new Set(prev);
+                        discoveredVms.forEach((v) => {
+                          if (!isVmInFleet(v)) next.add(v.resource_id);
+                        });
+                        return next;
+                      });
+                    }}
+                    style={{ fontSize: 10, borderColor: '#10b981', color: '#34d399' }}
+                    title="Select all discovered VMs not yet in the active fleet"
+                  >
+                    + Select new VMs
+                  </Button>
+                )}
                 {filteredVms.length !== discoveredVms.length && (
                   <Button
                     size="small"
@@ -1106,7 +1175,30 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                                   style={{ cursor: 'pointer', accentColor: '#3b82f6', width: 15, height: 15, verticalAlign: 'middle' }}
                                 />
                               </td>
-                              <td style={{ padding: '5px 8px', fontFamily: 'monospace', color: '#f0f4ff' }}>{vm.name}</td>
+                              <td style={{ padding: '5px 8px', fontFamily: 'monospace', color: '#f0f4ff' }}>
+                                <span>{vm.name}</span>
+                                {isVmInFleet(vm) && (
+                                  <span
+                                    style={{
+                                      marginLeft: 6,
+                                      background: 'rgba(16, 185, 129, 0.15)',
+                                      border: '1px solid rgba(16, 185, 129, 0.45)',
+                                      color: '#34d399',
+                                      borderRadius: 4,
+                                      padding: '1px 5px',
+                                      fontSize: 9,
+                                      fontWeight: 700,
+                                      textTransform: 'uppercase',
+                                      letterSpacing: '.04em',
+                                      display: 'inline-block',
+                                      verticalAlign: 'middle',
+                                    }}
+                                    title="Already loaded in your active fleet"
+                                  >
+                                    In Fleet
+                                  </span>
+                                )}
+                              </td>
                               <td style={{ padding: '5px 8px' }}><span style={{ color: TYPE_COLOR[vm.type] || '#6b7db3', fontWeight: 700, fontSize: 10 }}>{vm.type}</span></td>
                               <td style={{ padding: '5px 8px' }}><span style={{ color: ENV_COLOR[env] || '#6b7db3', fontWeight: 700, fontSize: 10 }}>{env}</span></td>
                               <td style={{ padding: '5px 8px', color: '#6b7db3' }}>{vm.application || vm.tags?.Application || ''}</td>
@@ -1136,11 +1228,80 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   <option value="720">30d</option>
                 </select>
               </Box>
+
+              {existingServers && existingServers.length > 0 && (
+                <Box display="flex" alignItems="center" style={{ gap: 6, background: 'rgba(30, 41, 59, 0.7)', padding: '3px 8px', borderRadius: 8, border: '1px solid #213060' }}>
+                  <Typography variant="caption" style={{ color: '#94a3b8', fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                    Fleet:
+                  </Typography>
+                  <button
+                    type="button"
+                    onClick={() => setFleetMode('append')}
+                    style={{
+                      background: fleetMode === 'append' ? 'rgba(16, 185, 129, 0.25)' : 'transparent',
+                      border: fleetMode === 'append' ? '1px solid #10b981' : '1px solid transparent',
+                      color: fleetMode === 'append' ? '#34d399' : '#64748b',
+                      borderRadius: 5,
+                      padding: '2px 8px',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                    title="Keep existing servers and add newly selected servers to the fleet"
+                  >
+                    <span>+ Add to Fleet</span>
+                    <span style={{ fontSize: 9, opacity: 0.85 }}>({existingServers.length} in fleet)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFleetMode('replace')}
+                    style={{
+                      background: fleetMode === 'replace' ? 'rgba(239, 68, 68, 0.25)' : 'transparent',
+                      border: fleetMode === 'replace' ? '1px solid #ef4444' : '1px solid transparent',
+                      color: fleetMode === 'replace' ? '#fca5a5' : '#64748b',
+                      borderRadius: 5,
+                      padding: '2px 8px',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                    title="Replace entire active fleet with only the selected VMs"
+                  >
+                    ⟳ Replace Fleet
+                  </button>
+                </Box>
+              )}
+
               {(() => {
                 const visibleSelectedCount = filteredVms.filter((v) => selectedVmIds.has(v.resource_id)).length;
                 const hasFilter = filteredVms.length !== discoveredVms.length;
                 const hiddenSelectedCount = Math.max(0, selectedVmIds.size - visibleSelectedCount);
                 const disableFetch = fetchBusy || !selectedVmIds.size || (hasFilter && visibleSelectedCount === 0);
+
+                const selectedVms = hasFilter
+                  ? filteredVms.filter((v) => selectedVmIds.has(v.resource_id))
+                  : discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
+                const newSelectedCount = selectedVms.filter((v) => !isVmInFleet(v)).length;
+                const inFleetSelectedCount = selectedVms.filter((v) => isVmInFleet(v)).length;
+
+                let fetchBtnText = 'Fetch Metrics';
+                if (fetchBusy) {
+                  fetchBtnText = 'Fetching…';
+                } else if (existingServers && existingServers.length > 0 && selectedVms.length > 0) {
+                  if (fleetMode === 'append') {
+                    if (newSelectedCount > 0) {
+                      fetchBtnText = `Fetch & Add (+${newSelectedCount} new)`;
+                    } else {
+                      fetchBtnText = `Refresh Metrics (${selectedVms.length})`;
+                    }
+                  } else if (fleetMode === 'replace') {
+                    fetchBtnText = `Replace Fleet (${selectedVms.length})`;
+                  }
+                }
+
                 return (
                   <>
                     <Box display="flex" alignItems="center" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -1153,6 +1314,11 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                           <>
                             <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{selectedVmIds.size} of {discoveredVms.length}</span> selected
                           </>
+                        )}
+                        {existingServers && existingServers.length > 0 && inFleetSelectedCount > 0 && (
+                          <span style={{ color: '#34d399', fontSize: 10, marginLeft: 6, fontWeight: 600 }}>
+                            ({inFleetSelectedCount} in fleet{newSelectedCount > 0 ? `, +${newSelectedCount} new` : ''})
+                          </span>
                         )}
                       </Typography>
                       {hasFilter && hiddenSelectedCount > 0 && (
@@ -1174,7 +1340,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                         disabled={disableFetch}
                         title={hasFilter && visibleSelectedCount === 0 && selectedVmIds.size > 0 ? 'Select at least one visible VM to fetch, or reset filters.' : undefined}
                       >
-                        {fetchBusy ? <CircularProgress size={16} color="inherit" /> : 'Fetch Metrics'}
+                        {fetchBusy ? <CircularProgress size={16} color="inherit" /> : fetchBtnText}
                       </Button>
                       <Button variant="outlined" onClick={onClose}>Cancel</Button>
                     </Box>

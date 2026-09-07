@@ -12,6 +12,7 @@ import {
   generateFindings,
   parseSow,
   processBatchMulti,
+  processResource,
   refreshBatch,
   ResourceServer,
   uploadBatchSlaXlsx,
@@ -456,16 +457,42 @@ export function UploadPanel() {
     setAzureModalOpen(true);
   };
 
-  const handleAzureFetched = (servers: ResourceServer[], meta: AzureFetchMeta, resolved: DashboardPayload) => {
-    const validCustomer = isValidCustomerName(meta.customer) ? meta.customer : undefined;
+  const handleAzureFetched = async (servers: ResourceServer[], meta: AzureFetchMeta, resolved: DashboardPayload) => {
+    const validCustomer = isValidCustomerName(meta.customer) ? meta.customer : (isValidCustomerName(data.customerName) ? data.customerName : undefined);
     const customerServers = servers.map((s) => ({
       ...s,
       customer: validCustomer || (isValidCustomerName(s.customer) ? s.customer : undefined),
     }));
+
+    let finalServers: ResourceServer[] = customerServers;
+    let finalPayload = resolved;
+
+    const existingServers = data.resource?.servers || [];
+    const isAppend = (meta.fleetMode ?? 'append') === 'append' && existingServers.length > 0;
+    if (isAppend) {
+      const serverKey = (s: { resource_id?: string; host?: string; server?: string; name?: string }) =>
+        (s.resource_id || s.host || s.server || s.name || '').toLowerCase().trim();
+      const mergedMap = new Map<string, ResourceServer>();
+      for (const s of existingServers) {
+        const k = serverKey(s);
+        if (k) mergedMap.set(k, s);
+      }
+      for (const s of customerServers) {
+        const k = serverKey(s);
+        if (k) mergedMap.set(k, s);
+      }
+      finalServers = Array.from(mergedMap.values());
+      try {
+        finalPayload = await processResource(finalServers);
+      } catch {
+        finalPayload = { ...resolved, servers: finalServers };
+      }
+    }
+
     const resource = {
-      ...resolved,
-      servers: customerServers,
-      hours_back: resolved.hours_back ?? meta.hoursBack,
+      ...finalPayload,
+      servers: finalServers,
+      hours_back: finalPayload.hours_back ?? meta.hoursBack,
       customer_name: validCustomer,
       customer_status: validCustomer ? meta.customerStatus : 'untagged',
       customer_message: meta.customerMessage,
@@ -473,7 +500,11 @@ export function UploadPanel() {
     };
     setResource(resource);
     if (validCustomer) setCustomerName(validCustomer);
-    setAzureMessage(`Live Azure Monitor metrics fetched for ${servers.length} server(s).`);
+    setAzureMessage(
+      isAppend && finalServers.length > customerServers.length
+        ? `Added ${customerServers.length} server(s) to active fleet (${finalServers.length} total).`
+        : `Live Azure Monitor metrics fetched for ${finalServers.length} server(s).`
+    );
     // Matches vanilla's runAzureFetch(): jump straight to Resource Review so
     // the fetch result is immediately visible instead of sitting on Upload.
     history.push('/resource');
@@ -704,6 +735,7 @@ export function UploadPanel() {
         onClose={() => setAzureModalOpen(false)}
         onFetched={handleAzureFetched}
         onAuthChanged={setAzureAuth}
+        existingServers={data.resource?.servers || []}
       />
     </Paper>
   );

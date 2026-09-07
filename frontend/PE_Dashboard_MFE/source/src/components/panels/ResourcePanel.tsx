@@ -1102,49 +1102,72 @@ export function ResourcePanel() {
   ) => {
     const refreshId = ++resourceRefreshId.current;
     const stillCurrent = () => refreshId === resourceRefreshId.current;
-    clearDeepDiveState(false);
-    // Persist the exact resource-engine verdict alongside the raw Azure rows.
-    // Export/Findings consume this same object; storing only `servers` caused
-    // them to recreate counts independently (and occasionally report a
-    // healthy fleet beside warning hosts).
-    const resolved = fetchedPayload?.kpis ? fetchedPayload : await processResource(fetchedServers);
-    if (!stillCurrent()) return;
-    const rawServers = (resolved.servers as ResourceServer[]) || fetchedServers;
+    const isAppend = (meta.fleetMode ?? 'append') === 'append' && servers.length > 0;
+    if (!isAppend) {
+      clearDeepDiveState(false);
+    }
+
+    const rawServers = (fetchedPayload?.servers as ResourceServer[]) || fetchedServers;
     const validMetaCust = isValidCustomerName(meta.customer) ? meta.customer : undefined;
     const resolvedServers = rawServers.map((s) => ({
       ...s,
       customer: validMetaCust || (isValidCustomerName(s.customer) ? s.customer : undefined),
     }));
+
+    let finalServers: ResourceServer[] = resolvedServers;
+    let resolved = fetchedPayload?.kpis && !isAppend ? fetchedPayload : null;
+
+    if (isAppend) {
+      const serverKey = (s: { resource_id?: string; host?: string; server?: string; name?: string }) =>
+        (s.resource_id || s.host || s.server || s.name || '').toLowerCase().trim();
+      const mergedMap = new Map<string, ResourceServer>();
+      // Preserve existing servers
+      for (const s of servers) {
+        const k = serverKey(s);
+        if (k) mergedMap.set(k, s as unknown as ResourceServer);
+      }
+      // Overlay newly fetched servers (fresher metrics)
+      for (const s of resolvedServers) {
+        const k = serverKey(s);
+        if (k) mergedMap.set(k, s);
+      }
+      finalServers = Array.from(mergedMap.values());
+      try {
+        resolved = await processResource(finalServers);
+      } catch {
+        resolved = { ...fetchedPayload, servers: finalServers };
+      }
+    } else if (!resolved) {
+      resolved = await processResource(finalServers);
+    }
+
+    if (!stillCurrent()) return;
+
+    const finalCustomer = validMetaCust || (isValidCustomerName(data.customerName) ? data.customerName : undefined);
     const resourcePayload = {
       ...resolved,
-      servers: resolvedServers,
-      hours_back: resolved.hours_back ?? meta.hoursBack,
-      customer_name: validMetaCust,
-      customer_status: validMetaCust ? meta.customerStatus : 'untagged',
+      servers: finalServers,
+      hours_back: resolved?.hours_back ?? meta.hoursBack,
+      customer_name: finalCustomer,
+      customer_status: finalCustomer ? (meta.customerStatus || 'identified') : 'untagged',
       customer_message: meta.customerMessage,
-      customer_source: validMetaCust ? 'azure_vm_tags' : undefined,
+      customer_source: finalCustomer ? 'azure_vm_tags' : undefined,
     };
     setResource(resourcePayload);
-    setFleetKpis((resolved.kpis as FleetKpis) || null);
-    setAnomalies((resolved.anomalies as ResourceAnomaly[]) || []);
-    const exec = resolved.executive_summary as ExecutiveSummary | undefined;
+    setFleetKpis((resolved?.kpis as FleetKpis) || null);
+    setAnomalies((resolved?.anomalies as ResourceAnomaly[]) || []);
+    const exec = resolved?.executive_summary as ExecutiveSummary | undefined;
     setExecSummary(exec && exec.verdict !== 'NO DATA' ? exec : null);
     setHoursBack(meta.hoursBack);
     setDdCustomActive(false);
-    if (validMetaCust) {
-      setCustomerName(validMetaCust);
+    if (finalCustomer) {
+      setCustomerName(finalCustomer);
       setCustomerFilter('');
     }
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);
-    // Capture the time-series in the same motion as the fetch. It used to wait
-    // for a manual "Load Metrics Deep Dive" click, so anyone who fetched and
-    // exported straight away shipped a report whose Metrics Explorer had a
-    // panel per host and a series for none of them ("0 of 12 with series").
-    // Failure here is non-fatal: handleLoadDeepDive records its own error and
-    // the button stays available for a retry.
-    // The rows arrive as ResourceServer from the fetch and are read here as
-    // ServerRow — the same widening `servers` already applies at line ~575.
-    void handleLoadDeepDive(resolvedServers as unknown as ServerRow[], meta.hoursBack, resourcePayload);
+
+    // Capture the time-series in the same motion as the fetch for the full fleet.
+    void handleLoadDeepDive(finalServers as unknown as ServerRow[], meta.hoursBack, resourcePayload);
   };
 
   const handleLoadDeepDive = async (
@@ -1751,8 +1774,8 @@ export function ResourcePanel() {
         <Typography className={classes.empty} variant="body2" color="textSecondary">
           Upload a resource report in Upload &amp; Intake, or fetch live Azure metrics below, to populate this view.
         </Typography>
-        <AzureConnectionCard authInfo={azureAuth} onOpen={() => setAzureModalOpen(true)} />
-        <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} />
+        <AzureConnectionCard authInfo={azureAuth} serverCount={servers.length} onOpen={() => setAzureModalOpen(true)} />
+        <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} existingServers={servers} />
       </Paper>
     );
   }
@@ -1799,8 +1822,8 @@ export function ResourcePanel() {
     <Paper className={`${classes.panel} kpi-card`} elevation={0}>
       <Typography variant="h6">Resource Review</Typography>
 
-      <AzureConnectionCard authInfo={azureAuth} onOpen={() => setAzureModalOpen(true)} />
-      <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} />
+      <AzureConnectionCard authInfo={azureAuth} serverCount={servers.length} onOpen={() => setAzureModalOpen(true)} />
+      <AzureFetchModal open={azureModalOpen} autoStartAuth={azureAuth?.method !== 'browser'} onClose={() => setAzureModalOpen(false)} onFetched={handleFetched} onAuthChanged={setAzureAuth} existingServers={servers} />
 
       <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16, marginBottom: 16 }}>
         <KpiStatCard
@@ -2100,6 +2123,15 @@ export function ResourcePanel() {
           <option value="Unknown">Unknown</option>
         </TextField>
         <Typography variant="caption" color="textSecondary">{sorted.length} of {servers.length} servers</Typography>
+        <Button
+          size="small"
+          variant="outlined"
+          color="primary"
+          onClick={() => setAzureModalOpen(true)}
+          style={{ fontSize: 11, textTransform: 'none', marginLeft: 'auto' }}
+        >
+          + Add More Servers
+        </Button>
       </Box>
       <Table size="small" className="pe-table" aria-label="Resource review table">
         <TableHead>
@@ -3200,11 +3232,12 @@ export function ResourcePanel() {
 
 interface AzureConnectionCardProps {
   authInfo: Record<string, unknown> | null;
+  serverCount?: number;
   onOpen: () => void;
 }
 
 /** Compact status card + trigger for the full AzureFetchModal discovery/select/fetch workflow. */
-function AzureConnectionCard({ authInfo, onOpen }: AzureConnectionCardProps) {
+function AzureConnectionCard({ authInfo, serverCount = 0, onOpen }: AzureConnectionCardProps) {
   const connected = authInfo?.method === 'browser';
   return (
     <Box
@@ -3214,11 +3247,15 @@ function AzureConnectionCard({ authInfo, onOpen }: AzureConnectionCardProps) {
       <Box>
         <Typography variant="subtitle2">Azure Monitor Connection</Typography>
         <Typography variant="caption" color="textSecondary">
-          {connected ? `Connected as ${authInfo?.display_name || authInfo?.name}` : 'Not connected'}
+          {connected
+            ? `Connected as ${authInfo?.display_name || authInfo?.name}${serverCount > 0 ? ` · ${serverCount} active server(s) in fleet` : ''}`
+            : 'Not connected'}
         </Typography>
       </Box>
       <Button size="small" variant="contained" color="primary" onClick={onOpen}>
-        {connected ? 'Fetch from Azure Monitor' : 'Connect Azure'}
+        {connected
+          ? (serverCount > 0 ? '+ Add / Manage Servers' : 'Fetch from Azure Monitor')
+          : 'Connect Azure'}
       </Button>
     </Box>
   );
