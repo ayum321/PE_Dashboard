@@ -200,9 +200,21 @@ def _clear_sow_engagement_state_for_customer_switch() -> None:
             config_store.set(key, 0)
         else:
             config_store.set(key, {})
+    config_store.set("_batch_sla_xlsx", {})
+    config_store.set("last_sla_matrix", {})
+    config_store.set("workflow_sla_summary", [])
+    config_store.set("job_runs_df", [])
+    config_store.set("sla_matrix_runs_df", [])
     session_cache.ac_del("sow_contract")
     session_cache.ac_del("volume_vs_sow")
+    session_cache.ac_del("workflow_sla_summary")
+    session_cache.ac_del("job_runs_df")
+    session_cache.ac_del("sla_matrix_runs_df")
+    session_cache.ac_del("sla_resolved")
+    session_cache.ac_del("sla_job_summary")
     session_cache.set("last_sow_compare", None)
+    session_cache.set("last_sla_matrix", None)
+    session_cache.set("last_batch", None)
 
 
 def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
@@ -216,6 +228,11 @@ def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[s
     )
     active = get_active_customer()
     if verdict.name and verdict.status != "mismatch" and active and active != verdict.name:
+        try:
+            from services import session_cache
+            session_cache.ensure_customer(verdict.name)
+        except Exception:
+            pass
         _clear_sow_engagement_state_for_customer_switch()
     # "corrected" means this upload's evidence was strong enough to
     # supersede a weaker prior identification (see customer_identity's
@@ -234,6 +251,12 @@ def _payload_to_response(
 ) -> BatchResponse:
     customer_fields = dict(customer_fields or {})
     resolved_customer_name = customer_fields.get("customer_name") or customer_name
+    if resolved_customer_name:
+        try:
+            from services import session_cache
+            session_cache.ensure_customer(resolved_customer_name)
+        except Exception:
+            pass
     # Compute full-dataset SLA Matrix from the parsed dataframe so PE Findings
     # + Red Flags + PE Consultant all see ALL runs (not just top_jobs).
     sla_mx_dict: Optional[Dict[str, Any]] = None

@@ -242,6 +242,9 @@ def clear() -> None:
             pass
 
 
+_active_customer_name: Optional[str] = None
+
+
 def ensure_customer(new_customer: Optional[str]) -> bool:
     """Ensure the session cache belongs to the given customer.
 
@@ -252,6 +255,7 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
 
     Returns True if a customer switch occurred, False otherwise.
     """
+    global _active_customer_name
     if not new_customer or not str(new_customer).strip():
         return False
 
@@ -265,7 +269,7 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
 
     with _lock:
         ctx = _state.get(_AC_KEY, {})
-        current = ctx.get("customer_name")
+        current = _active_customer_name or ctx.get("customer_name")
         if not current:
             try:
                 from services import config_store
@@ -310,6 +314,7 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
             new_ctx["customer_name"] = clean_new
             new_ts = _state.setdefault(_AC_TS_KEY, {})
             new_ts["customer_name"] = time.time()
+            _active_customer_name = clean_new
 
             try:
                 from services import config_store
@@ -319,6 +324,17 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
                 config_store.set("_sow_volume_by_year", {})
                 config_store.set("_sow_contract_meta", {})
                 config_store.set("_batch_sla_xlsx", {})
+                config_store.set("last_sla_matrix", {})
+                config_store.set("workflow_sla_summary", [])
+                config_store.set("job_runs_df", [])
+                config_store.set("sla_matrix_runs_df", [])
+            except Exception:
+                pass
+
+            # Remove disk cache file on customer switch
+            try:
+                if os.path.exists(_CACHE_FILE):
+                    os.remove(_CACHE_FILE)
             except Exception:
                 pass
 
@@ -330,6 +346,7 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
             ctx["customer_name"] = clean_new
             ts = _state.setdefault(_AC_TS_KEY, {})
             ts["customer_name"] = time.time()
+            _active_customer_name = clean_new
             try:
                 from services import config_store
                 config_store.set("customer_name", clean_new)
@@ -337,4 +354,5 @@ def ensure_customer(new_customer: Optional[str]) -> bool:
                 pass
             _flush()
             return False
+
 

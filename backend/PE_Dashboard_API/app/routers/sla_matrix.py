@@ -18,6 +18,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 
 import re
+import pandas as pd
 
 from services import config_store
 from services import pe_config
@@ -53,31 +54,71 @@ def _family_base(norm_name: str) -> str:
     return _TRAILING_QUALIFIER_RE.sub("", norm_name).strip()
 
 
-def _anchor_job_mask(jnames_upper: "pd.Series", anchor: str) -> "pd.Series":
-    """Boolean mask selecting rows whose (upper-cased) Job_Name matches `anchor`.
+def _anchor_job_mask(jnames_upper: "pd.Series", anchor: Any) -> "pd.Series":
+    """Boolean mask selecting rows whose (upper-cased) Job_Name matches any candidate in `anchor`.
 
     Match priority — most precise first:
-      1. Exact case-folded equality.
-      2. Underscore-insensitive exact equality. Closes the customer-portability
-         edge case where the SLA XLSX stores an anchor with underscores stripped
-         (e.g. ``DRESTARTAPP1DAILY``) while the Ctrl-M export logs the same job
-         with underscores (``D_RESTART_APP1_Daily``). Both sides are compared in
-         their punctuation-free form for *exact* equality, so the anchor lands on
-         the right job instead of falling through to the full min/max window — and
-         because it is equality (not containment) it never pulls in an unrelated
-         job the way a substring match could.
-        Deliberately local to anchor narrowing: it does NOT touch ``_norm`` or the
-        token-split workflow matcher (both rely on underscores as token delimiters),
-        so global SLA resolution behaviour is unchanged.
+      1. Multi-candidate / newline handling: splits newline, carriage-return, tab,
+         semicolon, or multi-space separated candidate sentinels (e.g. cells H2/H3).
+      2. Exact case-folded equality for any candidate.
+      3. Underscore-insensitive exact equality for any candidate (e.g. DRESTARTAPP1DAILY vs D_RESTART_APP1_Daily).
+      4. Environment prefix tolerance (P_, PRD_, PROD_) for any candidate.
     """
-    _exact = jnames_upper == anchor
-    if _exact.any():
-        return _exact
-    _us_anchor = anchor.replace("_", "")
-    if _us_anchor:
-        _exact_us = jnames_upper.str.replace("_", "", regex=False) == _us_anchor
-        if _exact_us.any():
-            return _exact_us
+    if jnames_upper is None or jnames_upper.empty:
+        return pd.Series(dtype=bool)
+
+    candidates: list[str] = []
+    if isinstance(anchor, (list, tuple, set)):
+        raw_items = list(anchor)
+    elif isinstance(anchor, str):
+        raw_items = [anchor]
+    else:
+        raw_items = [str(anchor or "")]
+
+    for item in raw_items:
+        if not item:
+            continue
+        parts = re.split(r"[\r\n\t;]+| {2,}", str(item).strip().upper())
+        for p in parts:
+            p_clean = p.strip()
+            if p_clean and p_clean not in ("UNKNOWN", "NONE", "NAN", "—", ""):
+                candidates.append(p_clean)
+
+    if not candidates:
+        return jnames_upper.ne(jnames_upper)
+
+    # 1. Exact equality for any candidate
+    mask = pd.Series(False, index=jnames_upper.index)
+    for cand in candidates:
+        m = jnames_upper == cand
+        if m.any():
+            mask |= m
+    if mask.any():
+        return mask
+
+    # 2. Underscore-insensitive match
+    j_no_us = jnames_upper.str.replace("_", "", regex=False)
+    for cand in candidates:
+        c_no_us = cand.replace("_", "")
+        if c_no_us:
+            m = j_no_us == c_no_us
+            if m.any():
+                mask |= m
+    if mask.any():
+        return mask
+
+    # 3. Environment prefix tolerance (P_, PRD_, PROD_)
+    _ENV_PREFIX_RE = re.compile(r"^(?:P_|PRD_|PROD_)")
+    j_no_prefix = jnames_upper.str.replace(_ENV_PREFIX_RE, "", regex=True)
+    for cand in candidates:
+        cand_stripped = _ENV_PREFIX_RE.sub("", cand)
+        if cand_stripped:
+            m = (j_no_prefix == cand_stripped) | (jnames_upper == cand_stripped) | (j_no_prefix == cand)
+            if m.any():
+                mask |= m
+    if mask.any():
+        return mask
+
     return jnames_upper.ne(jnames_upper)
 
 
@@ -280,97 +321,99 @@ def _compute_sla_matrix(
     # gives last-writer-wins and silently assigns the wrong SLA. Skip colliding secondaries.
     _secondary_key_count: dict[str, int] = {}
     for row in _batch_sla_rows:
-        wf_raw = row.get("workflow") or ""
-        sla_h  = row.get("sla_hours")
+        sla_h = row.get("sla_hours")
         if not sla_h or sla_h <= 0:
             continue
-        try:
-            from services.sla_merger import _all_normalized_forms as _anf
-            _wf_forms = _anf(wf_raw)
-        except Exception:
-            _wf_forms = [_norm(wf_raw)]
-        # Count occurrences of each secondary (non-primary) form across all XLSX rows
-        if len(_wf_forms) > 1:
-            for _sf in _wf_forms[1:]:
-                _secondary_key_count[_sf] = _secondary_key_count.get(_sf, 0) + 1
+        _all_names = []
+        for _n in [row.get("workflow"), row.get("module")] + list(row.get("aliases") or []):
+            if _n and str(_n).strip() and str(_n).strip() not in _all_names:
+                _all_names.append(str(_n).strip())
+        for _wf_item in _all_names:
+            try:
+                from services.sla_merger import _all_normalized_forms as _anf
+                _wf_forms = _anf(_wf_item)
+            except Exception:
+                _wf_forms = [_norm(_wf_item)]
+            # Count occurrences of each secondary (non-primary) form across all XLSX rows
+            if len(_wf_forms) > 1:
+                for _sf in _wf_forms[1:]:
+                    _secondary_key_count[_sf] = _secondary_key_count.get(_sf, 0) + 1
 
     for row in _batch_sla_rows:
-        wf_raw = row.get("workflow") or ""
-        sla_h  = row.get("sla_hours")
+        sla_h = row.get("sla_hours")
         if not sla_h or sla_h <= 0:
             continue
-        sla_f   = float(sla_h)
-        # Index under ALL normalized forms: primary + customer-prefix-stripped secondary.
-        # PETBARN_DAILY in XLSX indexes as both "PETBARN_DAILY" and "DAILY" so it matches
-        # Ctrl-M Sub_Application regardless of whether the customer prefix is present.
-        # Exception: secondary keys shared by multiple workflows are SKIPPED to avoid
-        # non-deterministic last-writer-wins assignment of the wrong SLA.
-        try:
-            from services.sla_merger import _all_normalized_forms as _anf
-            _wf_forms = _anf(wf_raw)
-        except Exception:
-            _wf_forms = [_norm(wf_raw)]
-        _primary_wf_norm = _wf_forms[0] if _wf_forms else _norm(wf_raw)
-        # Record EVERY XLSX row under its primary workflow key, even when a
-        # customer defines multiple rows for the SAME workflow name scoped to
-        # different Schedule day-ranges (e.g. "Sun to Thu" main batch vs
-        # "Fri, Sat" maintenance window). _decompose_subgroup uses this to
-        # route each Ctrl-M run_date to its own contracted row instead of
-        # letting every day silently fall back to whichever row is "generic".
-        if _primary_wf_norm:
-            _bsla_variants.setdefault(_primary_wf_norm, []).append(row)
-            _bsla_family.setdefault(_family_base(_primary_wf_norm), []).append(row)
-        # Only the FIRST row seen for a given workflow name feeds the generic
-        # exact/anchor/token lookups below — identical to the historical
-        # single-row-per-workflow behaviour. Additional schedule-variant rows
-        # are reachable exclusively through _bsla_variants / _row_override.
-        if _primary_wf_norm in _primary_key_seen:
+        sla_f = float(sla_h)
+
+        _all_names = []
+        for _n in [row.get("workflow"), row.get("module")] + list(row.get("aliases") or []):
+            if _n and str(_n).strip() and str(_n).strip() not in _all_names:
+                _all_names.append(str(_n).strip())
+        if not _all_names:
             continue
-        if _primary_wf_norm:
-            _primary_key_seen.add(_primary_wf_norm)
-        for _i, wf_norm in enumerate(_wf_forms):
-            if not wf_norm:
+
+        _primary_wf_norm = None
+        for _wf_item in _all_names:
+            try:
+                from services.sla_merger import _all_normalized_forms as _anf
+                _wf_forms = _anf(_wf_item)
+            except Exception:
+                _wf_forms = [_norm(_wf_item)]
+            _curr_primary = _wf_forms[0] if _wf_forms else _norm(_wf_item)
+            if not _primary_wf_norm:
+                _primary_wf_norm = _curr_primary
+
+            if _curr_primary:
+                _bsla_variants.setdefault(_curr_primary, []).append(row)
+                _bsla_family.setdefault(_family_base(_curr_primary), []).append(row)
+
+            if _curr_primary in _primary_key_seen:
                 continue
-            is_secondary = _i > 0
-            if is_secondary and _secondary_key_count.get(wf_norm, 0) > 1:
-                # Collision: skip this secondary key — multiple workflows map to same key
-                import logging as _log_col
-                _log_col.getLogger("pe_dashboard.sla_matrix").debug(
-                    "Skipping colliding secondary BSLA key '%s' (appears in %d workflows)",
-                    wf_norm, _secondary_key_count[wf_norm],
-                )
-                continue
-            if is_secondary and wf_norm in _bsla_exact:
-                continue
-            _bsla_exact[wf_norm] = (sla_f, wf_raw)
-            tokens = frozenset(t for t in re.split(r"[_\s]+", wf_norm) if len(t) >= 2)
-            if tokens:
-                _bsla_tokens.append((tokens, sla_f, wf_raw))
-        # Index by first_job + last_job so we can match even when Sub_Application
-        # is missing from the Ctrl-M export (defaults to "UNKNOWN").
-        _primary_wf_norm = _wf_forms[0] if _wf_forms else _norm(wf_raw)
-        for fld in ("first_job", "last_job"):
-            anchor = _norm(row.get(fld) or "")
-            if anchor and anchor not in ("UNKNOWN", ""):
+            if _curr_primary:
+                _primary_key_seen.add(_curr_primary)
+
+            for _i, wf_norm in enumerate(_wf_forms):
+                if not wf_norm:
+                    continue
+                is_secondary = _i > 0
+                if is_secondary and _secondary_key_count.get(wf_norm, 0) > 1:
+                    import logging as _log_col
+                    _log_col.getLogger("pe_dashboard.sla_matrix").debug(
+                        "Skipping colliding secondary BSLA key '%s' (appears in %d workflows)",
+                        wf_norm, _secondary_key_count[wf_norm],
+                    )
+                    continue
+                if is_secondary and wf_norm in _bsla_exact:
+                    continue
+                _bsla_exact[wf_norm] = (sla_f, _wf_item)
+                tokens = frozenset(t for t in re.split(r"[_\s]+", wf_norm) if len(t) >= 2)
+                if tokens:
+                    _bsla_tokens.append((tokens, sla_f, _wf_item))
+
+        # Index by all candidate first_job / last_job anchors (handles missing Sub_Application)
+        _cand_anchors: list[str] = []
+        for _f_raw in (row.get("first_jobs_list") or [row.get("first_job")]):
+            if _f_raw:
+                for _sp in re.split(r"[\r\n\t;]+| {2,}", str(_f_raw).strip()):
+                    if _sp.strip():
+                        _cand_anchors.append(_sp.strip())
+        for _l_raw in (row.get("last_jobs_list") or [row.get("last_job")]):
+            if _l_raw:
+                for _sp in re.split(r"[\r\n\t;]+| {2,}", str(_l_raw).strip()):
+                    if _sp.strip():
+                        _cand_anchors.append(_sp.strip())
+
+        for anchor_raw in _cand_anchors:
+            anchor = _norm(anchor_raw)
+            if anchor and anchor not in ("UNKNOWN", "NONE", "NAN", "—", ""):
                 _bsla_by_job_variants.setdefault(anchor, [])
-                # Only record each distinct claiming workflow once per anchor —
-                # a workflow's own first_job == last_job would otherwise double-count.
                 if not any(c is row for c in _bsla_by_job_variants[anchor]):
                     _bsla_by_job_variants[anchor].append(row)
                 if len(_bsla_by_job_variants[anchor]) <= 1:
                     _bsla_by_job[anchor] = (sla_f, "batch_sla_xlsx")
-                    # Remember which XLSX workflow this anchor belongs to, so a group
-                    # decomposed by anchor job name can be re-keyed to the workflow's
-                    # OWN name (e.g. "scpo_d1(spd)") instead of the raw job name —
-                    # collapsing first_job + last_job of the same workflow into ONE
-                    # synthetic row instead of two duplicate rows.
                     if _primary_wf_norm:
                         _bsla_anchor_wf[anchor] = _primary_wf_norm
                 else:
-                    # Collision: a second distinct workflow claims this same anchor
-                    # job. Remove any single-candidate assignment already made —
-                    # _decompose_subgroup must disambiguate by run-date instead of
-                    # silently keeping whichever workflow was indexed first.
                     _bsla_by_job.pop(anchor, None)
                     _bsla_anchor_wf.pop(anchor, None)
 
@@ -399,16 +442,24 @@ def _compute_sla_matrix(
     # sla_end_time for precision runtime measurement (reference script Tier 2 logic).
     _bsla_full: dict[str, dict] = {}
     for _brow in _batch_sla_rows:
-        _bwf = _brow.get("workflow") or ""
-        try:
-            from services.sla_merger import _all_normalized_forms as _anf3
-            for _bwf_n in _anf3(_bwf):
-                if _bwf_n and _bwf_n not in _bsla_full:
-                    _bsla_full[_bwf_n] = _brow
-        except Exception:
-            _bk = _norm(_bwf)
-            if _bk:
-                _bsla_full[_bk] = _brow
+        _all_b_names = [_brow.get("workflow")]
+        if _brow.get("module"):
+            _all_b_names.append(_brow.get("module"))
+        for _al in (_brow.get("aliases") or []):
+            if _al and _al not in _all_b_names:
+                _all_b_names.append(_al)
+        for _bwf in _all_b_names:
+            if not _bwf:
+                continue
+            try:
+                from services.sla_merger import _all_normalized_forms as _anf3
+                for _bwf_n in _anf3(_bwf):
+                    if _bwf_n and _bwf_n not in _bsla_full:
+                        _bsla_full[_bwf_n] = _brow
+            except Exception:
+                _bk = _norm(_bwf)
+                if _bk and _bk not in _bsla_full:
+                    _bsla_full[_bk] = _brow
 
     def _bulk_lookup_bsla(job: str, sub_app: str) -> tuple[float, str, str] | None:
         """Fast normalized lookup in BatchSLA XLSX.
@@ -914,7 +965,37 @@ def _compute_sla_matrix(
                 _wf_key = _bsla_anchor_wf.get(_jn_norm, _jn_norm)
                 _seen.setdefault(_wf_key, None)
 
-            _generic_out = [(_wf_key, _g) for _wf_key in _seen] if _seen else []
+            _generic_out = []
+            if len(_seen) == 1:
+                _wf_key = next(iter(_seen.keys()))
+                _generic_out.append((_wf_key, _g))
+            elif len(_seen) > 1:
+                for _wf_key in _seen:
+                    _wf_row = _bsla_full.get(_wf_key) or _bsla_full.get(_norm(_wf_key)) or {}
+                    _f_anchors = _wf_row.get("first_jobs_list") or ([_wf_row.get("first_job")] if _wf_row.get("first_job") else [])
+                    _l_anchors = _wf_row.get("last_jobs_list") or ([_wf_row.get("last_job")] if _wf_row.get("last_job") else [])
+                    _all_wf_anchors = [a for a in (_f_anchors + _l_anchors) if a]
+
+                    _mask = _anchor_job_mask(_jnames_up, _all_wf_anchors) if _all_wf_anchors else pd.Series(False, index=_g.index)
+                    _mod = _wf_row.get("module")
+                    if _mod:
+                        _mod_norm = _norm(_mod)
+                        if _mod_norm:
+                            _mod_toks = [t for t in re.split(r"[_\s]+", _mod_norm) if len(t) >= 2 and t not in ("PROD", "TEST", "DAILY", "BATCH", "ASC", "WF")]
+                            if _mod_toks:
+                                _mask |= _jnames_up.apply(lambda j: any(t in j for t in _mod_toks))
+
+                    if "Sub_Application" in _g.columns:
+                        _sub_col = _g["Sub_Application"].astype(str).str.upper()
+                        if _mod:
+                            _mask |= (_sub_col == _mod.upper())
+                        _wf_str = str(_wf_row.get("workflow") or "").upper()
+                        if _wf_str:
+                            _mask |= (_sub_col == _wf_str)
+
+                    _wf_slice = _g.loc[_mask] if _mask.any() else _g
+                    _generic_out.append((_wf_key, _wf_slice))
+
             _out_final = _collision_out + _generic_out
             if not _out_final:
                 return [] if _sa_unknown else [(_sa, _g)]
@@ -965,8 +1046,12 @@ def _compute_sla_matrix(
                             or _bsla_full.get(norm_sub)
                             or {}
                         )
-                _first_anchor = (_anchor_row.get("first_job") or "").strip().upper()
-                _last_anchor  = (_anchor_row.get("last_job")  or "").strip().upper()
+                _first_anchors = _anchor_row.get("first_jobs_list") or ([_anchor_row.get("first_job")] if _anchor_row.get("first_job") else [])
+                _last_anchors  = _anchor_row.get("last_jobs_list")  or ([_anchor_row.get("last_job")]  if _anchor_row.get("last_job")  else [])
+                _first_anchors = [str(a).strip() for a in _first_anchors if a and str(a).strip() and str(a).strip().upper() not in ("UNKNOWN", "NONE", "NAN", "—", "")]
+                _last_anchors  = [str(a).strip() for a in _last_anchors  if a and str(a).strip() and str(a).strip().upper() not in ("UNKNOWN", "NONE", "NAN", "—", "")]
+                _first_anchor = _first_anchors[0] if _first_anchors else ""
+                _last_anchor  = _last_anchors[0] if _last_anchors else ""
                 # Real XLSX Schedule-column text (e.g. "1st Sunday", "Last Sunday of
                 # Month", "Sun to Fri") when a Tier-1 hit resolved an anchor row.
                 # detect_batch_type() classifies far more accurately with this real
@@ -1004,10 +1089,10 @@ def _compute_sla_matrix(
                     # producing implausible results like a 10-minute SLA showing 6+
                     # hours of "elapsed" time. Measure each matching execution's own
                     # duration instead and take the worst (longest) single execution.
-                    _single_job_wf = bool(_first_anchor) and _first_anchor == _last_anchor
+                    _single_job_wf = bool(_first_anchors and _last_anchors and set(_first_anchors) == set(_last_anchors))
                     if _single_job_wf and "Job_Name" in rg.columns:
                         _jnames = rg["Job_Name"].str.upper()
-                        _sm = _anchor_job_mask(_jnames, _first_anchor)
+                        _sm = _anchor_job_mask(_jnames, _first_anchors)
                         _single_rows = rg.loc[_sm & rg["_start"].notna() & rg["_end"].notna()]
                         if not _single_rows.empty:
                             _durs = (_single_rows["_end"] - _single_rows["_start"]).dt.total_seconds() / 3600
@@ -1033,10 +1118,10 @@ def _compute_sla_matrix(
                         _fm = _lm = None
                         if "Job_Name" in rg.columns:
                             _jnames = rg["Job_Name"].str.upper()
-                            _fm = _anchor_job_mask(_jnames, _first_anchor) if _first_anchor else None
-                            _lm = _anchor_job_mask(_jnames, _last_anchor) if _last_anchor else None
+                            _fm = _anchor_job_mask(_jnames, _first_anchors) if _first_anchors else None
+                            _lm = _anchor_job_mask(_jnames, _last_anchors) if _last_anchors else None
 
-                        if _first_anchor and _last_anchor:
+                        if _first_anchors and _last_anchors:
                             if _fm is not None and _lm is not None and _fm.any() and _lm.any():
                                 _anchor_starts = rg.loc[_fm, "_start"].dropna()
                                 _anchor_ends = rg.loc[_lm, "_end"].dropna()
@@ -1049,14 +1134,31 @@ def _compute_sla_matrix(
                         # share an umbrella Sub_Application group and explicit anchors are absent.
                         if not _anchor_pair_used and "Job_Name" in rg.columns:
                             _wf_toks = [t for t in re.split(r"[_\s]+", _norm(sub_app)) if len(t) >= 2 and t not in ("PROD", "TEST", "DAILY", "BATCH", "ASC", "WF")]
+                            if _anchor_row.get("module"):
+                                _wf_toks.extend([t for t in re.split(r"[_\s]+", _norm(_anchor_row.get("module"))) if len(t) >= 2 and t not in ("PROD", "TEST", "DAILY", "BATCH", "ASC", "WF")])
+                            for _al in (_anchor_row.get("aliases") or []):
+                                _wf_toks.extend([t for t in re.split(r"[_\s]+", _norm(_al)) if len(t) >= 2 and t not in ("PROD", "TEST", "DAILY", "BATCH", "ASC", "WF")])
+                            _wf_toks = list(set(_wf_toks))
+
+                            _jmatch = pd.Series(False, index=rg.index)
+                            if "Sub_Application" in rg.columns and _anchor_row.get("module"):
+                                _jmatch |= (rg["Sub_Application"].astype(str).str.upper() == str(_anchor_row.get("module")).upper())
+
                             if _wf_toks:
-                                _jmatch = rg["Job_Name"].str.upper().apply(lambda jn: any(tok in jn for tok in _wf_toks))
-                                if _jmatch.any():
-                                    _tok_starts = rg.loc[_jmatch, "_start"].dropna()
-                                    _tok_ends = rg.loc[_jmatch, "_end"].dropna()
-                                    if not _tok_starts.empty and not _tok_ends.empty:
-                                        rg_starts = _tok_starts
-                                        rg_ends = _tok_ends
+                                _jmatch |= rg["Job_Name"].str.upper().apply(lambda jn: any(tok in jn for tok in _wf_toks))
+
+                            if _jmatch.any():
+                                _tok_starts = rg.loc[_jmatch, "_start"].dropna()
+                                _tok_ends = rg.loc[_jmatch, "_end"].dropna()
+                                if not _tok_starts.empty and not _tok_ends.empty:
+                                    rg_starts = _tok_starts
+                                    rg_ends = _tok_ends
+                            elif len(_subgroups) > 1 or sub_app_is_unknown:
+                                # When decomposed from a shared group, if neither anchors nor tokens
+                                # matched on this date, this workflow did NOT run. Do not attribute
+                                # the whole company's min/max span as its runtime.
+                                rg_starts = pd.Series(dtype="datetime64[ns]")
+                                rg_ends   = pd.Series(dtype="datetime64[ns]")
 
                         elapsed = None
                         if not rg_starts.empty and not rg_ends.empty:
@@ -1073,7 +1175,9 @@ def _compute_sla_matrix(
                         # Take the worst (longest) cluster, not the full span.
                         # Skipped for single-job workflows — the guard above already
                         # measures each execution's own duration directly.
-                        if not _single_job_wf and elapsed > 12 and not rg_starts.empty and not rg_ends.empty:
+                        _exp_sla = float(_anchor_row.get("sla_hours") or 0.0)
+                        _cluster_threshold = max(2.0 * _exp_sla, 6.0) if _exp_sla > 0 else 12.0
+                        if not _single_job_wf and elapsed > _cluster_threshold and not rg_starts.empty and not rg_ends.empty:
                             try:
                                 _cluster_starts = rg["_start"].dropna().sort_values()
                                 _cluster_ends   = rg["_end"].dropna()
@@ -1177,18 +1281,23 @@ def _compute_sla_matrix(
                 # Tier 1.5 — time-window SLA inference (Start_Time + Expected_End_Time in anchor row)
                 # Handles contracts where SLA was specified as a clock window (e.g. 05:00 AM -> 8:30 AM = 3.5h)
                 if sla_h_wf is None and _anchor_row:
-                    _st_cand = _anchor_row.get("start_time") or _anchor_row.get("start")
-                    _et_cand = _anchor_row.get("expected_end_time") or _anchor_row.get("end") or _anchor_row.get("sla")
-                    if _st_cand and _et_cand:
-                        try:
-                            from services.sla_merger import _overnight_delta_hours
-                            _inferred_h = _overnight_delta_hours(_st_cand, _et_cand)
-                            if _inferred_h and _inferred_h > 0:
-                                sla_h_wf = _inferred_h
-                                sla_src_wf = "batch_sla_xlsx_time_window"
-                                join_hit = True
-                        except Exception:
-                            pass
+                    if _anchor_row.get("sla_hours") and float(_anchor_row.get("sla_hours", 0)) > 0:
+                        sla_h_wf = float(_anchor_row["sla_hours"])
+                        sla_src_wf = _anchor_row.get("sla_source") or "batch_sla_xlsx"
+                        join_hit = True
+                    else:
+                        _st_cand = _anchor_row.get("start_time") or _anchor_row.get("start") or _anchor_row.get("workbook_start_time")
+                        _et_cand = _anchor_row.get("expected_end_time") or _anchor_row.get("end") or _anchor_row.get("sla") or _anchor_row.get("workbook_expected_end")
+                        if _st_cand and _et_cand:
+                            try:
+                                from services.sla_merger import _overnight_delta_hours
+                                _inferred_h = _overnight_delta_hours(_st_cand, _et_cand)
+                                if _inferred_h and _inferred_h > 0:
+                                    sla_h_wf = _inferred_h
+                                    sla_src_wf = "batch_sla_xlsx_time_window"
+                                    join_hit = True
+                            except Exception:
+                                pass
 
                 # Tier 2 — SOW-extracted batch-type ceiling
                 if sla_h_wf is None and _sow_windows:

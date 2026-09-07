@@ -397,9 +397,9 @@ def parse_sla_hours(value: Any) -> Optional[float]:
         if fv >= 1:
             return fv  # already in hours
     s = str(value).strip().lower()
-    # Compound: "3 hours 30 min", "2hr 17 min", "5 hours 57 minutes", "4 hours 48 min"
+    # Compound: "3 hours 30 min", "2hr 17 min", "1h 30m", "5 hours 57 minutes", "4 hours 48 min"
     # Must check BEFORE the simpler single-unit patterns
-    m = re.search(r'(\d+(?:\.\d+)?)\s*h[ro]?u?r?s?\s+(\d+(?:\.\d+)?)\s*min', s)
+    m = re.search(r'(\d+(?:\.\d+)?)\s*h[ro]?u?r?s?\s*(\d+(?:\.\d+)?)\s*(?:min(?:ute)?s?|m\b)', s)
     if m:
         return round(float(m.group(1)) + float(m.group(2)) / 60, 4)
     # Engine+buffer: "11 hrs+4 hrs", "13 hrs + 4 hrs", "7 hrs+ 4 hrs"
@@ -416,9 +416,11 @@ def parse_sla_hours(value: Any) -> Optional[float]:
     m = re.search(r'(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*min', s)
     if m:
         return round(((float(m.group(1)) + float(m.group(2))) / 2) / 60, 4)
-    # Clock time like "9PM", "9:30PM", "11:00 AM" → not a duration, return None
+    # Clock time like "9PM", "9:30PM", "11:00 AM", "2:00 PM EST" → not a duration, return None
     # Caller (FLATS Expected End Time) must handle these as deadline times
-    if re.match(r'^\d{1,2}(?::\d{2})?\s*(?:am|pm)$', s):
+    if re.search(r'\b(?:am|pm)\b', s, re.IGNORECASE):
+        return None
+    if re.match(r'^(?:daily|everyday|nightly|weekly)?\s*(?:at\s*)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?$', s, re.IGNORECASE) and not re.search(r'\b(?:hrs?|hours?|mins?|minutes?)\b', s, re.IGNORECASE):
         return None
     # "H:MM:SS hrs" / "HH:MM:SS hrs." / "H:MM hrs" — a clock-style duration
     # combined with a unit suffix (CCBA: "06:00:00 hrs."). MUST be checked
@@ -572,6 +574,17 @@ def parse_start_time(value: Any) -> Any:
             return datetime.datetime.strptime(s_clean.strip(), fmt).time()
         except ValueError:
             continue
+
+    _clock_m = re.search(r'\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AaPp][Mm])?|\d{1,2}\s*[AaPp][Mm])\b', s)
+    if _clock_m:
+        _ck = _clock_m.group(1).strip()
+        _ck = re.sub(r'(\d)(AM|PM)$', r'\1 \2', _ck, flags=re.IGNORECASE)
+        for fmt in _TIME_FMTS:
+            try:
+                return datetime.datetime.strptime(_ck.strip(), fmt).time()
+            except ValueError:
+                continue
+
     return None
 
 
@@ -961,6 +974,12 @@ def _overnight_delta_hours(start_val: Any, end_val: Any) -> Optional[float]:
         _mh = _re.match(r'^(\d{1,2})(:\d{2}(?::\d{2})?)\s*([AaPp][Mm])$', s)
         if _mh and int(_mh.group(1)) > 12:
             s = f"{int(_mh.group(1)) - 12}{_mh.group(2)} {_mh.group(3).upper()}"
+
+        # Fallback clock extraction: if s still contains day tokens or words (e.g. "Thrusday at 12:45 AM",
+        # "Every 3rd Wednesday at 12:45 AM"), extract the clock pattern directly.
+        _clock_m = _re.search(r'\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AaPp][Mm])?|\d{1,2}\s*[AaPp][Mm])\b', s)
+        if _clock_m:
+            s = _clock_m.group(1).strip()
         return s
 
     try:
@@ -1038,12 +1057,16 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             val = series.iloc[idx] if hasattr(series, "iloc") else fallback
             return "" if (val is None or (isinstance(val, float) and val != val)) else str(val).strip()
 
-        batch_name = _v(_col(df, "Batch_Name"))
+        raw_batch = _v(_col(df, "Batch_Name"))
+        raw_mod   = _v(module_series)
+        batch_name = raw_batch
         if not batch_name or batch_name.startswith("Row_"):
             # Fall back to Module column if Batch_Name is unpopulated
-            batch_name = _v(module_series)
+            batch_name = raw_mod
         if not batch_name:
             batch_name = f"Row_{idx}"
+
+        aliases = [a for a in [raw_batch, raw_mod] if a and not a.startswith("Row_")]
 
         if not batch_name or batch_name.startswith("Row_"):
             _consecutive_nan_rows += 1
@@ -1091,13 +1114,12 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
 
             Delimiters seen across customers:
               - 2+ consecutive spaces (Haleon)
-              - newline / tab
+              - newline / carriage return / tab
             Single-space within a job name is NOT a delimiter.
             """
             if not raw:
                 return []
-            # Try multi-space split first
-            parts = re.split(r'  +|\t|\n', raw)
+            parts = re.split(r'[\r\n\t]+|  +', raw)
             parts = [p.strip() for p in parts if p.strip()]
             return parts if parts else [raw.strip()]
 
@@ -1372,6 +1394,8 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
 
         workflows.append({
             "workflow":           batch_name,
+            "module":             raw_mod or None,
+            "aliases":            aliases,
             "batch_type":         btype,
             "schedule":           schedule,
             "schedule_days":      (sorted(_parse_schedule_days(schedule))
@@ -1379,8 +1403,8 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             "timezone":           timezone,
             "first_job":          first_job,
             "last_job":           last_job,
-            "first_jobs_list":    first_jobs if is_parallel else None,
-            "last_jobs_list":     last_jobs  if is_parallel else None,
+            "first_jobs_list":    first_jobs if first_jobs else None,
+            "last_jobs_list":     last_jobs  if last_jobs  else None,
             "is_parallel":        is_parallel,
             "sla_hours":          sla_h,
             "sla_source":         sla_source,

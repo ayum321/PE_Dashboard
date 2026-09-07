@@ -562,11 +562,8 @@ def set_active(canonical: str, raw: Optional[str] = None, *,
     display = display_name(canonical)
     if not display:
         return
-    config_store.set("customer_name", display)
     conf_val = int(confidence) if confidence is not None else 0
     src_val = source or ""
-    config_store.set(_ACTIVE_CONF_KEY, conf_val)
-    config_store.set(_ACTIVE_SRC_KEY, src_val)
     try:
         from services import session_cache
         session_cache.ensure_customer(display)
@@ -575,6 +572,9 @@ def set_active(canonical: str, raw: Optional[str] = None, *,
         session_cache.ac_set(_ACTIVE_SRC_KEY, src_val)
     except Exception:
         pass
+    config_store.set("customer_name", display)
+    config_store.set(_ACTIVE_CONF_KEY, conf_val)
+    config_store.set(_ACTIVE_SRC_KEY, src_val)
     # Retire the old active_customer keys so stale legacy values never win.
     config_store.set("active_customer", "")
     config_store.set("active_customer_raw", "")
