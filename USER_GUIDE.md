@@ -1,278 +1,351 @@
 # PE Dashboard — User Guide
 
-> A step-by-step walkthrough for Performance Engineers.
-> No prior knowledge of the code is needed — just follow each section in order.
+> A step-by-step guide for Performance Engineers on how to use the live portal.
+> No technical knowledge required — just open the portal and follow the steps.
 
 ---
 
 ## Table of Contents
 
-1. [Opening the Dashboard](#1-opening-the-dashboard)
+1. [Accessing the Dashboard](#1-accessing-the-dashboard)
 2. [Selecting a Customer](#2-selecting-a-customer)
 3. [Step 1 — Upload Your Files](#3-step-1--upload-your-files)
-4. [Step 2 — Pull Azure VM Data](#4-step-2--pull-azure-vm-data)
+4. [Step 2 — Pull Azure VM Data Live](#4-step-2--pull-azure-vm-data-live)
 5. [Step 3 — Review the SLA Matrix](#5-step-3--review-the-sla-matrix)
 6. [Step 4 — Review Batch Analytics](#6-step-4--review-batch-analytics)
 7. [Step 5 — Review Resource Health](#7-step-5--review-resource-health)
-8. [Step 6 — Review Findings & Red Flags](#8-step-6--review-findings--red-flags)
-9. [Step 7 — AI Insights (Optional)](#9-step-7--ai-insights-optional)
-10. [Step 8 — Export & Save the Report](#10-step-8--export--save-the-report)
+8. [Step 6 — Review Findings and Red Flags](#8-step-6--review-findings-and-red-flags)
+9. [Step 7 — AI Insights](#9-step-7--ai-insights)
+10. [Step 8 — Export and Save the Report](#10-step-8--export-and-save-the-report)
 11. [Viewing Past Reports (Archive)](#11-viewing-past-reports-archive)
 12. [Settings](#12-settings)
 13. [FAQ](#13-faq)
 
 ---
 
-## 1. Opening the Dashboard
+## 1. Accessing the Dashboard
 
-**Fastest way (local setup):**
+Open your browser and go to the portal URL shared by your team:
 
-1. Double-click `start.bat` in the root folder of the project.
-2. Wait ~30 seconds — it will start both the API and the UI automatically.
-3. Your browser will open at `http://127.0.0.1:3000`.
+```
+https://<your-host>/pe-dashboard
+```
 
-**If it is hosted on a server:**
-Go to the URL shared by your team (e.g. `https://<your-host>/pe-dashboard`).
+- No installation needed — it runs fully in the browser.
+- Works on Chrome, Edge, and Firefox.
+- You must be on the company network or VPN to access it.
 
 ---
 
 ## 2. Selecting a Customer
 
-- At the top of the dashboard you will see a **Customer Selector** dropdown.
-- Select the customer you are doing the engagement for.
-- All panels — SLA Matrix, Batch, Resources, Findings — will update to show only that customer's data.
-- You can switch customers at any time without losing data.
+Once the portal loads, the first thing to do is **select your customer**.
 
-> **Tip:** Each customer's data is stored separately. Switching customers does not clear the other customer's uploaded files.
+- At the top of the page you will see a **Customer Selector** dropdown.
+- Click it and pick the customer you are working on.
+- All panels — SLA Matrix, Batch, Resources, Findings — will immediately show data for that customer only.
+- You can switch between customers at any time. Each customer's data is stored separately — switching does not delete anything.
+
+> **Tip:** Always confirm the customer name at the top before starting any analysis.
 
 ---
 
 ## 3. Step 1 — Upload Your Files
 
-Go to the **Upload** tab.
+Click the **Upload** tab in the navigation.
 
-You need to upload **two files** before the tool can do any analysis:
-
-### A. Ctrl-M Execution File
-- This is the Control-M batch execution export (CSV or Excel format).
-- It contains all job run history — start times, end times, durations, statuses.
-- Upload it using the **"Ctrl-M / Batch File"** upload button.
-
-### B. Batch SLA Data
-- This is the SLA matrix file — usually an Excel file with workflow names and their SLA time windows.
-- It tells the tool what the agreed SLA limit is for each workflow.
-- Upload it using the **"SLA / Batch Config File"** upload button.
-
-### C. SOW / Contract Document (Optional but recommended)
-- Upload the Statement of Work (PDF or Word document).
-- The tool will extract data volume commitments (DFU/SKU) and SLA terms from it automatically.
-
-Once both required files are uploaded, the tool will process them automatically. You will see the **Batch Analytics** and **SLA Matrix** panels populate with data within seconds.
+You need to bring **two files** from the customer engagement. The tool cannot compute anything without them.
 
 ---
 
-## 4. Step 2 — Pull Azure VM Data
+### A. Ctrl-M Execution File *(Required)*
 
-Go to the **Resources** tab.
+**What it is:** The Control-M batch execution export for the customer.
+**Format:** CSV or Excel (.xlsx)
+**What it contains:** All job run history — job names, start times, end times, durations, and statuses.
 
-This step connects to Azure and pulls live CPU, memory, and disk metrics for the customer's VMs.
+**How to upload:**
+1. Click **"Upload Ctrl-M / Batch File"**
+2. Select the file from your computer
+3. The tool will parse it and confirm how many jobs were loaded
 
-### How to pull:
+---
 
-1. Click **"Add / Fetch Azure VMs"**.
-2. In the modal that opens:
-   - Enter your **Azure Subscription ID**.
-   - Enter the **Resource Group** name (or leave blank to scan all).
-   - Select the **time range** (e.g. last 24 hours, last 7 days).
-3. Click **"Fetch"**.
-4. The tool will connect to Azure Monitor and pull live metrics for all VMs in that subscription.
-5. Once done, VMs will appear in the resource table with CPU %, Memory %, and Disk % columns.
+### B. Batch SLA File *(Required)*
 
-### Adding VMs manually (Quick-Add):
-If you already know the VM name and want to add it quickly:
-- Use the **Quick-Add VM** bar at the bottom of the modal.
-- Type the VM name and press Enter.
+**What it is:** The SLA matrix for the customer's batch workflows.
+**Format:** Excel (.xlsx)
+**What it contains:** Workflow names and their agreed SLA time windows (e.g. Workflow X must complete within 6 hours).
 
-> **Note:** If you close the modal and reopen it, your previously fetched VMs are still there. You do not need to re-fetch.
+**How to upload:**
+1. Click **"Upload SLA / Batch Config File"**
+2. Select the file from your computer
+3. The tool will map each workflow to its SLA limit
+
+---
+
+### C. SOW / Contract Document *(Recommended)*
+
+**What it is:** The signed Statement of Work or contract PDF/Word document.
+**What the tool does with it:** Automatically extracts data volume commitments (DFU/SKU) and SLA terms.
+
+**How to upload:**
+1. Click **"Upload SOW Document"**
+2. Select the PDF or Word file
+
+---
+
+Once all files are uploaded, the **Batch Analytics** and **SLA Matrix** panels will automatically populate with data — no further action needed.
+
+---
+
+## 4. Step 2 — Pull Azure VM Data Live
+
+Click the **Resources** tab in the navigation.
+
+This step pulls real-time CPU, memory, and disk metrics directly from Azure Monitor for the customer's servers.
+
+### How to do it:
+
+1. Click **"Add / Fetch Azure VMs"**
+2. In the window that appears:
+   - Enter the **Azure Subscription ID** for the customer's environment
+   - Enter the **Resource Group** name, or leave it blank to scan all groups
+   - Choose the **time range** — for example, last 24 hours or last 7 days
+3. Click **"Fetch"**
+4. The portal connects to Azure and pulls live metrics for all VMs
+5. VMs appear in the table with **CPU %**, **Memory %**, and **Disk %** values
+
+### If you want to add a specific VM manually:
+- Use the **Quick-Add VM** bar at the bottom of the fetch window
+- Type the VM hostname and press Enter
+
+> **Note:** If you close and reopen the fetch window, your VMs are still there. You do not need to fetch again unless you want fresh data.
 
 ---
 
 ## 5. Step 3 — Review the SLA Matrix
 
-Go to the **SLA Matrix** tab.
+Click the **SLA Matrix** tab.
 
-This is the core compliance view. It shows every batch workflow grouped by SLA tier:
+This is the main compliance view. Every batch workflow is listed here with its SLA health status.
 
-| Tier | What it means |
+---
+
+### How workflows are grouped — the 3 Tiers
+
+| Tier | Badge | What it means |
+|---|---|---|
+| **Tier 1** | `T1 · Contract` | SLA comes directly from the signed contract or Ctrl-M time window |
+| **Tier 2** | `T2 · SOW` | SLA was extracted from the uploaded SOW document |
+| **Tier 3** | `T3 · Assumed` | No contractual SLA was found — the tool applies an assumed ceiling |
+
+---
+
+### What each column shows
+
+| Column | What it means |
 |---|---|
-| **Tier 1 - Contract** | SLA is directly from the signed contract / Ctrl-M time window |
-| **Tier 2 - SOW** | SLA is extracted from the Statement of Work document |
-| **Tier 3 - Assumed** | No contractual SLA found — tool uses an assumed ceiling |
+| **Workflow** | The job or workflow name, with its tier badge |
+| **SLA (h)** | The agreed SLA limit in hours |
+| **Measured Duration** | How long the job actually ran (from Ctrl-M data) |
+| **Headroom** | Time left before the SLA is breached — shown as a mini progress bar |
+| **Buffer %** | What percentage of the SLA window is unused |
+| **Status** | OK (safe) / At Risk (close to limit) / Breaching (over the limit) |
 
-### What each column means:
+---
 
-| Column | Description |
+### Changing the assumed SLA ceiling for Tier 3
+
+- At the top of the SLA Matrix you will see a coloured banner: **"Assumed Ceiling: X.Xh"**
+- Click any of the pill buttons to change it: `6.0h` `8.25h` `10.0h` `12.0h` or `Custom...`
+- All Tier-3 workflow rows will **recalculate instantly** — no need to re-upload anything
+
+This is useful when you know the customer expects a different ceiling than the default.
+
+---
+
+### Searching for a specific workflow
+
+- Type in the **Search** box above the table
+- The table filters in real time across all three tiers
+- Clear the box to see all workflows again
+
+---
+
+### Summary numbers at the top
+
+| Metric | What it tells you |
 |---|---|
-| **Workflow** | Job / workflow name with its tier badge |
-| **SLA (h)** | The SLA time limit in hours |
-| **Measured Duration** | Actual run time from the Ctrl-M data |
-| **Headroom** | Time remaining before the SLA is breached (SLA minus duration) |
-| **Buffer %** | What % of the SLA window is still unused |
-| **Status** | OK / At Risk / Breaching |
-
-### Changing the assumed ceiling (Tier 3):
-- At the top of the SLA Matrix panel you will see a banner: **"Assumed Ceiling: X.Xh"**
-- Click any of the pill buttons — `6.0h`, `8.25h`, `10.0h`, `12.0h`, or `Custom...` — to change it.
-- All Tier-3 rows will **recalculate instantly** without re-uploading any files.
-
-### Searching workflows:
-- Use the **Search** box above the table to filter by workflow name.
-- Works across all three tiers simultaneously.
-
-### Key metrics at the top:
-- **Compliance %** — percentage of workflows within SLA
-- **Total Runs** — total number of workflows analysed
-- **Breaching** — count of workflows over SLA
-- **At Risk** — count within 10% of their SLA limit
+| **Compliance %** | Percentage of workflows currently within their SLA |
+| **Total Runs** | Total number of workflows analysed |
+| **Breaching** | How many workflows are over their SLA limit |
+| **At Risk** | How many are within 10% of their limit |
 
 ---
 
 ## 6. Step 4 — Review Batch Analytics
 
-Go to the **Batch** tab.
+Click the **Batch** tab.
 
-This panel gives a deeper look at batch execution patterns from the Ctrl-M data.
+This panel goes deeper into the execution patterns from the Ctrl-M data.
 
-- **Top longest-running jobs** — sorted by duration
-- **Jobs by status** — Completed, Failed, Running, Aborted
-- **Runtime distribution** — how job durations are spread
-- **Worst-day analysis** — which days had the highest batch load
-- **Waterfall chart** — job timeline across the batch window
+**What you will see:**
 
-Use this panel to identify jobs that are consistently slow, frequently failing, or running dangerously close to their SLA window.
+- **Top longest-running jobs** — sorted by actual duration, worst first
+- **Jobs by status** — breakdown of Completed, Failed, Running, Aborted counts
+- **Runtime distribution chart** — shows how job durations are spread
+- **Worst-day analysis** — which dates had the highest batch load
+- **Waterfall chart** — a visual timeline of jobs running across the batch window
+
+**Use this panel to find:**
+- Jobs that consistently run long and eat into SLA headroom
+- Jobs that frequently fail or abort
+- Days where the overall batch window was dangerously full
 
 ---
 
 ## 7. Step 5 — Review Resource Health
 
-Go to the **Resources** tab (after fetching Azure data in Step 2).
+Click the **Resources** tab (after completing Step 2).
 
-Each VM is shown with:
+Each Azure VM is listed with its current health metrics:
 
-| Column | Threshold |
+| Metric | Green (OK) | Yellow (Warning) | Red (Critical) |
+|---|---|---|---|
+| **CPU %** | Below 75% | 75% to 90% | Above 90% |
+| **Memory %** | Below 80% | 80% to 90% | Above 90% |
+| **Disk %** | Below 75% | 75% to 85% | Above 85% |
+
+- Click any VM row to expand it and see a **time-series chart** of how that metric changed over the selected period.
+- VMs are labelled by their role (DB server, App server, etc.).
+- An **Infrastructure Health Score** is shown at the top of the panel.
+
+---
+
+## 8. Step 6 — Review Findings and Red Flags
+
+Click the **Findings** tab.
+
+After the tool has processed all uploaded data and Azure metrics, it automatically generates a list of findings. You do not need to create these manually.
+
+**Findings are generated for:**
+- SLA breaches and workflows running at risk
+- Servers with high CPU, memory, or disk usage
+- Batch jobs with high failure or abort rates
+- Data volume gaps compared to what is in the SOW
+- Benchmark or UAT deviations
+
+Each finding has a **severity level**: Critical / High / Medium / Low
+
+---
+
+### Red Flags
+
+The **Red Flags** section highlights the most urgent issues that must be resolved before customer go-live. These are automatically ranked by the tool's scoring engine.
+
+---
+
+### Final Judgment
+
+At the top of the Findings panel you will see the **Final Judgment card**:
+
+| Verdict | Meaning |
 |---|---|
-| **CPU %** | Green < 75%, Yellow 75-90%, Red > 90% |
-| **Memory %** | Green < 80%, Yellow 80-90%, Red > 90% |
-| **Disk %** | Green < 75%, Yellow 75-85%, Red > 85% |
+| **GO** | All pillars passed — safe to proceed |
+| **HOLD** | Some concerns — review before proceeding |
+| **REMEDIATE** | Issues found — fixes required first |
+| **BLOCKED** | Critical failures — cannot proceed |
 
-- Click any VM row to expand and see a time-series chart of its metrics.
-- VMs are colour-coded by role (DB server, App server, etc.).
-- The panel shows an overall **Infrastructure Health Score**.
-
----
-
-## 8. Step 6 — Review Findings & Red Flags
-
-Go to the **Findings** tab.
-
-The tool automatically generates findings based on everything it has analysed:
-
-- SLA breaches and near-breaches
-- High CPU / memory servers
-- Jobs with high failure rates
-- Data volume gaps vs. SOW commitments
-- Benchmark deviations
-
-Each finding has a **severity**: Critical / High / Medium / Low.
-
-### Red Flags tab:
-- Shows the most urgent items that need to be addressed before go-live.
-- These are automatically prioritised by the tool's scoring engine.
-
-### Final Judgment card:
-- Shows the overall verdict: **GO / HOLD / BLOCKED / REMEDIATE**
-- Based on the combined score across all four pillars (Batch, Resource, SOW, Benchmark).
+This verdict is calculated automatically based on scores across all four pillars: Batch, Resource Health, SOW, and Benchmark.
 
 ---
 
-## 9. Step 7 — AI Insights (Optional)
+## 9. Step 7 — AI Insights
 
-If AI is enabled on your deployment:
+The portal includes an AI engine that reads all the computed data and writes a plain-English narrative summary.
 
-1. Go to the **AI Insights** section (available in the Findings or Batch panel).
-2. Click **"Generate AI Analysis"**.
-3. The tool sends all the computed data to the AI engine (Gemini / NVIDIA Gemma).
-4. Within 30-60 seconds, a written narrative appears — summarising what the data shows, what the risks are, and what to investigate next.
+**How to use it:**
+1. In the Findings or Batch panel, click **"Generate AI Analysis"**
+2. Wait 30–60 seconds
+3. A written summary appears — covering what the data shows, what the risks are, and what to investigate
 
-> This does not change any numbers. It just writes a human-readable summary of what the tool found.
+> This does not change any numbers or findings. It is a written interpretation to help explain the analysis to stakeholders or include in communications.
 
 ---
 
-## 10. Step 8 — Export & Save the Report
+## 10. Step 8 — Export and Save the Report
 
-Once your analysis is complete:
+Once your analysis is complete, download a permanent copy.
 
-1. Click **"Export Report"** (usually in the top-right or Findings panel).
-2. The tool generates a **self-contained HTML report** — all data, charts, and findings are embedded in a single file.
-3. Download and save it.
+**How to export:**
+1. Click **"Export Report"** in the top-right corner or from the Findings panel
+2. The portal generates a **self-contained HTML report file**
+3. Your browser will download it automatically — save it to your machine or SharePoint
 
-The report includes:
-- Customer name and engagement date
-- All SLA compliance results
-- Resource health summary
-- Findings list with severity
-- Final judgment verdict
+**The report includes:**
+- Customer name and date of analysis
+- Full SLA compliance results with all three tiers
+- Resource health summary per server
+- Complete findings list with severity
+- Final Judgment verdict (GO / HOLD / REMEDIATE / BLOCKED)
 - Governance sign-off checklist
 
-> The HTML file is self-contained — no internet connection needed to open it. Safe to email to customers or store in SharePoint.
+> The report is a single HTML file — no internet connection needed to open it. You can email it directly to stakeholders or attach it to a ticket.
 
 ---
 
 ## 11. Viewing Past Reports (Archive)
 
-Go to the **Archive** tab.
+Click the **Archive** tab.
 
-- All previously exported reports are listed here by customer and date.
-- Click any entry to reload that report's data into the dashboard.
-- Use this to compare what was analysed in previous engagements.
+Every report you have exported is saved here, organised by customer and date.
+
+- Click any past entry to **reload that report's data** into the dashboard
+- Use this to review what was analysed in a previous engagement
+- Useful for tracking if a customer's SLA health has improved or worsened between visits
 
 ---
 
 ## 12. Settings
 
-Go to the **Settings** tab to configure:
+Click the **Settings** tab to adjust thresholds and defaults.
 
 | Setting | What it controls |
 |---|---|
-| **Daily SLA Limit (hrs)** | Default assumed SLA ceiling for Tier-3 workflows |
-| **CPU / Memory / Disk thresholds** | When a server is flagged as Warning vs. Critical |
-| **AI Provider** | Switch between Gemini and NVIDIA Gemma |
-| **Cookie / session settings** | For multi-user deployments |
+| **Daily SLA Limit (hrs)** | The default assumed SLA ceiling applied to Tier-3 workflows |
+| **CPU / Memory / Disk thresholds** | The values at which servers are flagged as Warning or Critical |
+| **AI Provider** | Switch between Gemini and NVIDIA Gemma for AI Insights |
 
-Changes take effect immediately without restarting the tool.
+Changes apply immediately — no page refresh needed.
+
+> **Note:** Settings changes affect all customers on this portal. Coordinate with the team before changing thresholds.
 
 ---
 
 ## 13. FAQ
 
-**Q: I uploaded a file but the table is empty — what's wrong?**
-A: Check that the Ctrl-M file has the expected column headers (job name, start time, end time, status). The tool expects a standard Ctrl-M export format. If columns are missing or renamed, contact the PE team.
+**Q: I uploaded a file but the SLA Matrix or Batch table is empty.**
+A: Check that your Ctrl-M export has the standard column headers (job name, start time, end time, status). If the file is from a non-standard Ctrl-M configuration or the columns are renamed, the parser may not recognise it. Contact the PE team with a sample row.
 
-**Q: The Azure fetch is failing — what do I check?**
-A: Make sure you are logged in with an Azure account that has at least **Reader** role on the subscription. Also verify the Subscription ID is correct.
+**Q: The Azure fetch is failing or showing no VMs.**
+A: Your Azure account needs at least **Reader** access on the subscription. Double-check the Subscription ID — a typo here is the most common cause. Also confirm you are on VPN.
 
-**Q: I changed the assumed ceiling but the numbers did not update.**
-A: Refresh the page and re-select the customer. If the issue persists, re-upload the SLA file.
+**Q: I changed the Tier-3 ceiling but the numbers did not change.**
+A: Refresh the page, re-select the customer, and try again. If it still does not update, re-upload the SLA file.
 
-**Q: Can two engineers work on the same customer at the same time?**
-A: Not recommended — the tool stores one session per customer. The last person to upload files or fetch Azure data will overwrite the previous state.
+**Q: Can two engineers use the same customer session at the same time?**
+A: Not recommended. The portal stores one session per customer. If two people upload files or fetch Azure data for the same customer simultaneously, the last action will overwrite the previous one.
 
-**Q: Where are the saved reports stored on the server?**
-A: In the `PE_STATE_DIR` volume (configured in `docker-compose.yml`, defaults to `/data` inside the container). On a local setup, check the `backend/PE_Dashboard_API/data/` folder.
+**Q: I cannot see the AI Insights button.**
+A: AI Insights may be disabled on this deployment. Contact your portal administrator to enable it.
 
-**Q: The AI Insights button is not visible.**
-A: AI is disabled by default. Ask your system administrator to set `AI_ENABLED=true` in the environment configuration.
+**Q: I exported a report — where is it saved?**
+A: It downloads to your browser's default downloads folder. Move it to SharePoint or your engagement folder for safekeeping.
+
+**Q: How do I do analysis for a new customer?**
+A: Select the new customer from the Customer Selector at the top. Then start from Step 1 — upload fresh Ctrl-M and SLA files for that customer.
 
 ---
 
-*For technical issues or feature requests, contact the PE Engineering team.*
+*For technical issues or to request new features, contact the PE Engineering team.*
