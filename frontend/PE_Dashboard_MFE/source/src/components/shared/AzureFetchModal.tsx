@@ -188,6 +188,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   const [regionFilter, setRegionFilter] = useState('ALL');
   const [pgFilter, setPgFilter] = useState('ALL');
   const [vmSearch, setVmSearch] = useState('');
+  const [selectedOnlyFilter, setSelectedOnlyFilter] = useState(false);
   const [quickVmInput, setQuickVmInput] = useState('');
   const [quickVmMessage, setQuickVmMessage] = useState<{ text: string; tone: 'green' | 'amber' } | null>(null);
 
@@ -463,6 +464,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setRegionFilter('ALL');
     setPgFilter('ALL');
     setVmSearch('');
+    setSelectedOnlyFilter(false);
     setStep(2);
     const fleetAddMsg = preselected.size > 0
       ? ` · ${preselected.size} active fleet VM(s) pre-selected`
@@ -563,6 +565,9 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
 
   const filteredVms = useMemo(() => {
     let list = discoveredVms;
+    if (selectedOnlyFilter) {
+      list = list.filter((v) => selectedVmIds.has(v.resource_id));
+    }
     if (customerFilter !== 'ALL') list = list.filter((v) => customerOf(v) === customerFilter);
     if (typeFilters.size > 0) list = list.filter((v) => typeFilters.has(v.type));
     if (envFilter !== 'ALL') list = list.filter((v) => getVmEnv(v) === envFilter);
@@ -576,7 +581,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
         customerOf(v).toLowerCase().includes(q));
     }
     return list;
-  }, [discoveredVms, customerFilter, typeFilters, envFilter, regionFilter, pgFilter, vmSearch]);
+  }, [discoveredVms, selectedOnlyFilter, selectedVmIds, customerFilter, typeFilters, envFilter, regionFilter, pgFilter, vmSearch]);
 
   const { customerOrder, groupedFiltered, multiCustomer } = useMemo(() => {
     const map = new Map<string, AzureVm[]>();
@@ -674,6 +679,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     setRegionFilter('ALL');
     setPgFilter('ALL');
     setVmSearch('');
+    setSelectedOnlyFilter(false);
   };
 
   const handleQuickAddVm = () => {
@@ -719,10 +725,13 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   };
 
   const handleFetch = async () => {
+    const visibleSelectedCount = filteredVms.filter((v) => selectedVmIds.has(v.resource_id)).length;
     const hasFilter = filteredVms.length !== discoveredVms.length;
-    const selectedVms = hasFilter
-      ? filteredVms.filter((v) => selectedVmIds.has(v.resource_id))
-      : discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
+    if (hasFilter && visibleSelectedCount === 0) {
+      setFetchStatus('No visible VMs selected. Select at least one visible VM or click "Show hidden" to reset filters.');
+      return;
+    }
+    const selectedVms = discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
 
     if (!selectedVms.length) {
       setFetchStatus(hasFilter ? 'No visible VMs selected. Select at least one visible VM or reset filters.' : 'Select at least one VM to fetch metrics for.');
@@ -1109,14 +1118,25 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   </Button>
                 )}
                 {filteredVms.length !== discoveredVms.length && (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    onClick={() => toggleVisibleVms(true)}
-                    style={{ fontSize: 10, borderColor: '#3b82f6', color: '#93c5fd' }}
-                  >
-                    Select visible ({filteredVms.length})
-                  </Button>
+                  <>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => toggleVisibleVms(true)}
+                      style={{ fontSize: 10, borderColor: '#3b82f6', color: '#93c5fd' }}
+                    >
+                      Select visible ({filteredVms.length})
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={resetFilters}
+                      style={{ fontSize: 10, borderColor: '#38bdf8', color: '#38bdf8', textTransform: 'none' }}
+                      title="Clear active filters to view all discovered VMs"
+                    >
+                      Show all VMs ({discoveredVms.length})
+                    </Button>
+                  </>
                 )}
                 <Button size="small" onClick={clearSelection} style={{ fontSize: 10, color: '#6b7db3' }}>Clear selection</Button>
                 {multiCustomer && (
@@ -1157,7 +1177,28 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 <Typography variant="caption" style={{ fontWeight: 800, textTransform: 'uppercase', fontSize: 9, letterSpacing: '.1em', color: '#6b7db3' }}>
                   Fleet filters {filteredVms.length !== discoveredVms.length && <span style={{ color: '#3b82f6' }}>({filteredVms.length} of {discoveredVms.length})</span>}
                 </Typography>
-                <Button size="small" onClick={resetFilters} style={{ fontSize: 9, color: '#6b7db3' }}>Reset filters</Button>
+                <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                  {selectedVmIds.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedOnlyFilter((prev) => !prev)}
+                      style={{
+                        background: selectedOnlyFilter ? 'rgba(56, 189, 248, 0.2)' : 'transparent',
+                        border: `1px solid ${selectedOnlyFilter ? '#38bdf8' : '#334155'}`,
+                        borderRadius: 4,
+                        padding: '2px 8px',
+                        color: selectedOnlyFilter ? '#38bdf8' : '#94a3b8',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                      title="Filter table to show only selected VMs"
+                    >
+                      {selectedOnlyFilter ? '✓ Showing selected only' : `Show selected only (${selectedVmIds.size})`}
+                    </button>
+                  )}
+                  <Button size="small" onClick={resetFilters} style={{ fontSize: 9, color: '#6b7db3' }}>Reset filters</Button>
+                </Box>
               </Box>
 
               {customerList.length > 1 && (
@@ -1428,9 +1469,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 const hiddenSelectedCount = Math.max(0, selectedVmIds.size - visibleSelectedCount);
                 const disableFetch = fetchBusy || !selectedVmIds.size || (hasFilter && visibleSelectedCount === 0);
 
-                const selectedVms = hasFilter
-                  ? filteredVms.filter((v) => selectedVmIds.has(v.resource_id))
-                  : discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
+                const selectedVms = discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
                 const newSelectedCount = selectedVms.filter((v) => !isVmInFleet(v)).length;
                 const inFleetSelectedCount = selectedVms.filter((v) => isVmInFleet(v)).length;
 
@@ -1469,14 +1508,42 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                         )}
                       </Typography>
                       {hasFilter && hiddenSelectedCount > 0 && (
-                        <Button
-                          size="small"
-                          onClick={clearHiddenSelection}
-                          style={{ fontSize: 9, color: '#f87171', padding: '1px 6px', textTransform: 'none', border: '1px solid rgba(248,113,113,.3)', borderRadius: 4 }}
-                          title="Remove selected VMs that are hidden by active filters"
-                        >
-                          Clear {hiddenSelectedCount} hidden
-                        </Button>
+                        <Box display="flex" alignItems="center" style={{ gap: 6 }}>
+                          <Button
+                            size="small"
+                            onClick={resetFilters}
+                            style={{
+                              fontSize: 10,
+                              color: '#38bdf8',
+                              padding: '2px 8px',
+                              textTransform: 'none',
+                              border: '1px solid rgba(56,189,248,.45)',
+                              borderRadius: 4,
+                              fontWeight: 700,
+                              background: 'rgba(56,189,248,.12)',
+                              cursor: 'pointer',
+                            }}
+                            title="Reset filters to make all hidden selected VMs visible in the table"
+                          >
+                            👁 Show {hiddenSelectedCount} hidden
+                          </Button>
+                          <Button
+                            size="small"
+                            onClick={clearHiddenSelection}
+                            style={{
+                              fontSize: 9,
+                              color: '#f87171',
+                              padding: '1px 6px',
+                              textTransform: 'none',
+                              border: '1px solid rgba(248,113,113,.3)',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                            }}
+                            title="Remove selected VMs that are hidden by active filters"
+                          >
+                            Clear {hiddenSelectedCount} hidden
+                          </Button>
+                        </Box>
                       )}
                     </Box>
                     <Box display="flex" style={{ marginLeft: 'auto', gap: 8 }}>
