@@ -1051,6 +1051,7 @@ def _compute_sla_matrix(
                 return [] if _sa_unknown else [(_sa, _g)]
             return _out_final
 
+        _claimed_bsla_ids: set[int] = set()
         for sub_app_raw, grp in tdf.groupby("_sub"):
             sub_app = str(sub_app_raw or "").strip()
             sub_app_is_unknown = not sub_app or sub_app.upper() in ("UNKNOWN", "NAN", "NONE", "—", "")
@@ -1667,6 +1668,83 @@ def _compute_sla_matrix(
                     "debug_sla_source":        sla_src_wf,
                     "debug_runtime_source":    runtime_src,
                     "debug_buffer_reason":     buf_rsn,
+                })
+                if _anchor_row:
+                    _claimed_bsla_ids.add(id(_anchor_row))
+                if _override_hit:
+                    _claimed_bsla_ids.add(id(_override_hit))
+                if raw_batch_name_wf:
+                    for _br in _batch_sla_rows:
+                        if _br.get("workflow") == raw_batch_name_wf:
+                            _claimed_bsla_ids.add(id(_br))
+                if is_explicit_no_sla:
+                    for _br in _batch_sla_rows:
+                        if _br.get("workflow") == sub_app or _br.get("module") == sub_app:
+                            _claimed_bsla_ids.add(id(_br))
+
+        # Preserve all unobserved workbook contracts in the SLA inventory as NOT_OBSERVED
+        for _unmatched_row in _batch_sla_rows:
+            if id(_unmatched_row) not in _claimed_bsla_ids:
+                _un_wf_name = _unmatched_row.get("workflow") or _unmatched_row.get("module") or "UNNAMED"
+                _un_is_undeclared = (
+                    _unmatched_row.get("sla_undeclared")
+                    or _unmatched_row.get("sla_source") == "SLA_UNDECLARED"
+                    or _unmatched_row.get("sla_confidence") == "EXPLICIT_NONE"
+                )
+                _un_tier = "UNDECLARED" if _un_is_undeclared else "T1"
+                _un_status = "SLA_UNDECLARED" if _un_is_undeclared else "NOT_OBSERVED"
+                _un_sla_h = None if _un_is_undeclared else _unmatched_row.get("sla_hours")
+                _un_norm = _norm(_un_wf_name)
+                workflow_summary.append({
+                    "workflow_key":    _un_norm,
+                    "workflow_name":   _un_wf_name,
+                    "sub_application": _unmatched_row.get("module") or _un_wf_name,
+                    "batch_type":      _unmatched_row.get("batch_type") or "DAILY",
+                    "tier":            _un_tier,
+                    "measurement_state": "NOT_OBSERVED",
+                    "workflow_start":  None,
+                    "workflow_end":    None,
+                    "actual_start_time": None,
+                    "actual_end_time":   None,
+                    "elapsed_duration_h": None,
+                    "runtime_h":       None,
+                    "measurement_reason_code": "WORKFLOW_NOT_OBSERVED_IN_CTRL_M",
+                    "measurement_reason_detail": "Contract defined in BatchSLA workbook but no matching execution was observed in the Control-M dataset.",
+                    "sla_measurement_basis": "not_observed",
+                    "duration_headroom_h": None,
+                    "duration_overrun_h": None,
+                    "duration_headroom_mins": None,
+                    "duration_overrun_mins": None,
+                    "sla_h":           _un_sla_h,
+                    "sla_source":      _unmatched_row.get("sla_source") or "batch_sla_xlsx",
+                    "buffer_pct":      None,
+                    "status":          _un_status,
+                    "job_count":       0,
+                    "total_runs":       0,
+                    "breach_run_count": 0,
+                    "breach_run_dates": [],
+                    "failed_job_count": 0,
+                    "first_job_anchor": _unmatched_row.get("first_job"),
+                    "last_job_anchor":  _unmatched_row.get("last_job"),
+                    "anchor_used":      False,
+                    "clock_sla_end_m":   None,
+                    "clock_buffer_mins": None,
+                    "clock_sla_status":  None,
+                    "contract_start_time": _unmatched_row.get("start_time"),
+                    "start_delay_mins":    None,
+                    "start_time_status":   None,
+                    "sow_window_hrs":      None,
+                    "sow_avg_runtime_hrs": None,
+                    "sow_buffer_hrs":      None,
+                    "sow_status":          None,
+                    "debug_raw_subapp":        _unmatched_row.get("module") or _un_wf_name,
+                    "debug_raw_batch_name":    _unmatched_row.get("workflow"),
+                    "debug_normalized_subapp": _norm(_unmatched_row.get("module") or _un_wf_name),
+                    "debug_normalized_batch":  _norm(_unmatched_row.get("workflow")) if _unmatched_row.get("workflow") else None,
+                    "debug_join_hit":          False,
+                    "debug_sla_source":        _unmatched_row.get("sla_source") or "batch_sla_xlsx",
+                    "debug_runtime_source":    "not_observed",
+                    "debug_buffer_reason":     "No executions observed in Control-M",
                 })
     except Exception as _wf_exc:
         import logging as _log_wf

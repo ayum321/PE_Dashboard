@@ -358,6 +358,36 @@ class TestSlaRegressionFixes(unittest.TestCase):
         resp = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=6.0)
         self.assertTrue(any("older engine" in w for w in (resp.warnings or [])))
 
+    def test_unmatched_workbook_contracts_preserved_as_not_observed(self):
+        # 2 workbook contracts defined, but only 1 observed in Ctrl-M.
+        # The unobserved contract MUST be present in workflow_summary with status NOT_OBSERVED!
+        config_store.set("_batch_sla_xlsx", {
+            "parser_version": "module-alias-v2",
+            "workflows": [
+                {"workflow": "OBSERVED_WF", "module": "OBSERVED_WF", "sla_hours": 3.0, "sla_source": "batch_sla_xlsx"},
+                {"workflow": "UNOBSERVED_WF", "module": "UNOBSERVED_WF", "sla_hours": 8.0, "sla_source": "batch_sla_xlsx"},
+            ],
+        })
+        df = pd.DataFrame([
+            {
+                "Job_Name": "JOB_1",
+                "Sub_Application": "OBSERVED_WF",
+                "Start_Time": "2026-08-30 00:00:00",
+                "End_Time": "2026-08-30 01:00:00",
+            },
+        ])
+        resp = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=6.0)
+        wf_names = [w["workflow_name"] for w in resp.workflow_summary]
+        self.assertIn("OBSERVED_WF", wf_names)
+        self.assertIn("UNOBSERVED_WF", wf_names)
+        unobs_row = next(w for w in resp.workflow_summary if w["workflow_name"] == "UNOBSERVED_WF")
+        self.assertEqual(unobs_row["status"], "NOT_OBSERVED")
+        self.assertEqual(unobs_row["measurement_state"], "NOT_OBSERVED")
+        self.assertEqual(unobs_row["sla_h"], 8.0)
+        self.assertIsNone(unobs_row["runtime_h"])
+        self.assertIsNone(unobs_row["duration_headroom_mins"])
+        self.assertIsNone(unobs_row["buffer_pct"])
+
 
 if __name__ == "__main__":
     unittest.main()
