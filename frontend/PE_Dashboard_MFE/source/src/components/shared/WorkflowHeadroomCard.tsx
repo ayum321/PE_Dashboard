@@ -14,16 +14,45 @@ interface WorkflowHeadroomCardProps {
   workflows?: WorkflowItem[];
 }
 
+// Single source of truth for the buffer bands — the legend below is rendered
+// from this same table, so the swatches can never drift from the bar colours.
+// Ordered most-severe first; the first match wins.
+// NO_BUFFER is its own band, not a shade of AT_RISK: sla_merger.py classifies
+// a buffer within ±0.5% as "runs to the exact edge, zero slack", which is a
+// materially different finding from merely having a thin margin.
+const BANDS = [
+  {
+    color: '#f43f5e',
+    label: 'Breach (<0%)',
+    match: (s: string, b: number) => s === 'BREACH' || b < -0.5,
+  },
+  {
+    color: '#fb923c',
+    label: 'No Buffer (±0.5%)',
+    match: (s: string, b: number) => s === 'NO_BUFFER' || Math.abs(b) <= 0.5,
+  },
+  {
+    color: '#f59e0b',
+    label: 'At Risk (0.5–15%)',
+    match: (s: string, b: number) => s === 'AT_RISK' || b <= 15,
+  },
+  {
+    color: '#22d3ee',
+    label: 'Long Job (15–40%)',
+    match: (s: string, b: number) => s === 'LONG_JOB' || b <= 40,
+  },
+  {
+    color: '#10d96e',
+    label: 'OK (>40%)',
+    match: () => true,
+  },
+] as const;
+
 export function WorkflowHeadroomCard({ workflows }: WorkflowHeadroomCardProps) {
   if (!workflows || workflows.length === 0) return null;
 
-  const getStatusColor = (status: string, buffer: number) => {
-    const s = status.toUpperCase();
-    if (s === 'BREACH' || buffer < 0) return '#f43f5e';
-    if (s === 'NO_BUFFER' || s === 'AT_RISK' || buffer <= 15) return '#f59e0b';
-    if (s === 'LONG_JOB' || buffer <= 40) return '#22d3ee';
-    return '#10d96e';
-  };
+  const getStatusColor = (status: string, buffer: number) =>
+    (BANDS.find((band) => band.match(status.toUpperCase(), buffer)) || BANDS[BANDS.length - 1]).color;
 
   return (
     <Box
@@ -46,21 +75,11 @@ export function WorkflowHeadroomCard({ workflows }: WorkflowHeadroomCardProps) {
           </Typography>
         </Box>
         <Box display="flex" flexWrap="wrap" style={{ gap: 8 }}>
-          <span style={{ fontSize: 10, color: '#10d96e', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10d96e' }} /> OK (&gt;40%)
-          </span>
-          <span style={{ fontSize: 10, color: '#22d3ee', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#22d3ee' }} /> Long Job (15–40%)
-          </span>
-          <span style={{ fontSize: 10, color: '#f59e0b', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f59e0b' }} /> At Risk (0.5–15%)
-          </span>
-          <span style={{ fontSize: 10, color: '#f59e0b', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f59e0b' }} /> No Buffer (±0.5%)
-          </span>
-          <span style={{ fontSize: 10, color: '#f43f5e', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f43f5e' }} /> Breach (&lt;0%)
-          </span>
+          {BANDS.map((band) => (
+            <span key={band.label} style={{ fontSize: 10, color: band.color, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: band.color }} /> {band.label}
+            </span>
+          ))}
         </Box>
       </Box>
 

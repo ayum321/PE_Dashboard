@@ -47,6 +47,7 @@ export function buildExportPayload(data: AppData): DashboardPayload {
   ));
   const payload: DashboardPayload = {
     batch: data.batch,
+    sla_matrix: data.slaMatrix,
     resource: data.resource,
     servers: data.resource?.servers,
     sow: data.sowCompare,

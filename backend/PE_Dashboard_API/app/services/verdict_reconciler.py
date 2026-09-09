@@ -25,6 +25,8 @@ import logging
 import re
 from typing import Any, Optional
 
+from services import pe_config
+
 log = logging.getLogger("pe_dashboard.verdict_reconciler")
 
 # Grade severity ranking (higher = more severe)
@@ -229,7 +231,7 @@ def _resource_context(kpi: dict) -> Optional[str]:
     avg_cpu = _safe_float(res.get("avg_cpu"))
     grade = res.get("fleet_grade")
     score = _safe_float(res.get("fleet_score"))
-    if n_critical > 0 or (score is not None and score < 70):
+    if n_critical > 0 or not pe_config.is_healthy_fleet(score, grade):
         return None
     if peak_mem is not None:
         bits.append(f"DB mem peak {peak_mem:.1f}%")

@@ -28,56 +28,17 @@ from services.customer_identity import (
     set_active as set_active_customer,
     verdict_response_fields,
 )
-from services.resource_parser import get_health_score
-from services.resource_parser_generic import parse_resource_file
 from services.sla_parser import detect_resource_mode
 from services.smart_router import classify
 
 router = APIRouter()
 
 # ── Constants ───────────────────────────────────────────────────
-ALLOWED_EXTENSIONS     = {".docx", ".csv", ".xlsx", ".xls"}
 SMART_UPLOAD_ALLOWED   = {".pdf", ".docx", ".csv", ".xlsx", ".xls", ".txt", ".html", ".htm"}
 MAX_FILE_BYTES         = 50 * 1024 * 1024  # 50 MB
 
 
 # ── Pydantic response models ────────────────────────────────────
-class ServerRecord(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    host:            str
-    type:            str   = "APP"
-    label:           Optional[str] = None
-    cpu_used:        float = 0.0
-    cpu_avg:         float = 0.0
-    mem_used:        float = 0.0
-    mem_total_gb:    float = 0.0
-    disk_used_max:   float = 0.0
-    disks:           Dict[str, float] = Field(default_factory=dict)
-    health_score:    float = 0.0
-    image_only:      bool  = False
-
-
-class UploadResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    filename:         str
-    file_type:        str
-    server_count:     int
-    image_only:       bool
-    customer_name:    Optional[str] = None   # active customer after identity checks
-    customer_status: Optional[str] = None
-    customer_cross_check: Optional[str] = None
-    customer_conflicts: Optional[List[Dict[str, str]]] = None
-    customer_corroborated_by: Optional[List[str]] = None
-    customer_message: Optional[str] = None
-    customer_active_name: Optional[str] = None
-    customer_candidate_name: Optional[str] = None
-    servers:          List[ServerRecord]
-    ai_summary:       Optional[str] = None   # post-upload Gemma/Llama briefing
-    ai_model:         Optional[str] = None
-
-
 class SmartUploadResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -96,23 +57,6 @@ class SmartUploadResponse(BaseModel):
 # ── Helpers ─────────────────────────────────────────────────────
 def _ext(filename: str) -> str:
     return os.path.splitext(filename or "")[1].lower()
-
-
-def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
-    def _safe_float(v):
-        try:
-            f = float(v or 0)
-            return f if f == f else 0.0  # NaN guard
-        except (ValueError, TypeError):
-            return 0.0
-    cpu  = _safe_float(record.get("cpu_used"))
-    mem  = _safe_float(record.get("mem_used"))
-    disk = _safe_float(record.get("disk_used_max"))
-    stype = record.get("type", "APP") or "APP"
-
-    record["health_score"]    = float(get_health_score(cpu, mem, disk, stype))
-    record["image_only"]      = bool(record.get("_image_only", image_only))
-    return record
 
 
 def _resolve_customer_identity(*, pillar: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
@@ -136,10 +80,9 @@ def _run_post_upload_summary(
 ) -> tuple[Optional[str], Optional[str]]:
     """Generate a short post-upload AI briefing using the unified ai_engine.
 
-    Triggered automatically after every /api/upload and /api/smart-upload
-    so the UI can surface 'what this file actually shows' before the user
-    clicks anything else.  Returns (text, model_id) or (None, None) when
-    AI is disabled / unavailable.
+    Triggered automatically after /api/smart-upload so the UI can surface
+    'what this file actually shows' before the user clicks anything else.
+    Returns (text, model_id) or (None, None) when AI is disabled / unavailable.
     """
     try:
         if not bool(config_store.get("ai_post_upload", True)):
@@ -149,40 +92,7 @@ def _run_post_upload_summary(
         return None, None
 
     # Build a compact, model-friendly digest of the upload
-    if kind == "resource":
-        rows = []
-        for s in (servers or [])[:40]:
-            if s.get("image_only"):
-                continue
-            rows.append({
-                "host": (s.get("host") or "?").split(".")[0],
-                "type": s.get("type", "APP"),
-                "cpu":  round(float(s.get("cpu_used")  or 0), 1),
-                "mem":  round(float(s.get("mem_used")  or 0), 1),
-                "disk": round(float(s.get("disk_used_max") or 0), 1),
-            })
-        digest = {
-            "file":     filename,
-            "customer": customer_name or "",
-            "servers":  rows,
-            "counts": {
-                "total":      len(servers or []),
-                "with_data":  sum(1 for s in (servers or [])
-                                  if (float(s.get("cpu_used") or 0) > 0
-                                      or float(s.get("mem_used") or 0) > 0
-                                      or float(s.get("disk_used_max") or 0) > 0)),
-                "image_only": sum(1 for s in (servers or []) if s.get("image_only")),
-            },
-        }
-        prompt = (
-            "You just received a server resource utilization report. Read the "
-            "JSON digest below and write a 5-line briefing covering: (1) fleet "
-            "health one-liner, (2) top 3 servers by CPU/MEM/DISK with exact %, "
-            "(3) any servers that look mis-classified, (4) one risk to watch, "
-            "(5) one immediate action.  Use hostnames. No filler.\n\n"
-            f"DIGEST: {payload or digest}"
-        )
-    elif kind == "batch":
+    if kind == "batch":
         prompt = (
             "You just received a Ctrl-M batch run report. Write a 4-line "
             "briefing covering: SLA compliance, top breaching jobs (with hours), "
@@ -214,124 +124,9 @@ def _run_post_upload_summary(
         return None, None
 
 
-# ── /api/upload (resource only) ──────────────────────────────────
-@router.post(
-    "/upload",
-    response_model=UploadResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Upload a DOCX resource utilization report",
-)
-async def upload(file: UploadFile = File(...)) -> UploadResponse:
-    if not file or not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided.")
-
-    ext = _ext(file.filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type '{ext}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
-        )
-
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    if len(raw) > MAX_FILE_BYTES:
-        raise HTTPException(status_code=413, detail=f"File exceeds 50 MB limit.")
-
-    try:
-        # RULE 4 — parse_resource_file() calls detect_resource_mode() internally.
-        # save_resource_session() clears stale keys from the previous upload.
-        servers_raw: List[Dict[str, Any]] = parse_resource_file(raw, file.filename)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Failed to parse {file.filename}: {exc}") from exc
-
-    # image_only = True when ALL servers have zero metrics (no text data at all).
-    def _has_data(s):
-        return (float(s.get("cpu_used") or 0) > 0
-                or float(s.get("mem_used") or 0) > 0
-                or float(s.get("disk_used_max") or 0) > 0)
-
-    image_only = not any(_has_data(s) for s in (servers_raw or []))
-
-    customer_fields = _resolve_customer_identity(
-        filename=file.filename,
-        servers=servers_raw,
-        pillar="resource",
-    )
-    customer_name = customer_fields.get("customer_name")
-    detected_customer = customer_fields.get("customer_candidate_name") or customer_name
-
-    enriched = [_enrich(dict(s), image_only) for s in (servers_raw or [])]
-
-    # Cache the last resource snapshot so cross-pillar engines (SLA matrix
-    # adaptive baselines, correlation) can read it without an extra request.
-    target_customer = detected_customer or customer_name
-    if target_customer and not is_valid_customer_name(target_customer):
-        target_customer = None
-    try:
-        from services import session_cache
-        switched = session_cache.ensure_customer(target_customer) if target_customer else False
-        existing_res = session_cache.get("last_resource") or {}
-        existing_servers = existing_res.get("servers", []) if not switched else []
-
-        import re
-        norm_target = re.sub(r'[^a-zA-Z0-9]', '', str(target_customer or '')).lower()
-        server_map = {}
-        for s in existing_servers:
-            s_cust = s.get("customer")
-            if s_cust and not is_valid_customer_name(s_cust):
-                s["customer"] = None
-                s_cust = None
-            if s_cust and norm_target:
-                norm_s = re.sub(r'[^a-zA-Z0-9]', '', str(s_cust)).lower()
-                if norm_s != norm_target:
-                    continue  # drop servers from a different customer
-            if s.get("host"):
-                server_map[s["host"]] = s
-
-        for s in enriched:
-            s_cust = s.get("customer")
-            if s_cust and not is_valid_customer_name(s_cust):
-                s["customer"] = None
-            if target_customer and not s.get("customer"):
-                s["customer"] = target_customer
-            h = s.get("host")
-            if h:
-                server_map[h] = s
-            else:
-                server_map[str(id(s))] = s
-
-        merged_servers = list(server_map.values())
-        res_payload = {"servers": merged_servers, "customer_name": target_customer}
-        session_cache.set("last_resource", res_payload)
-        # ── Audit context E4: resource_summary ────────────────────────
-        session_cache.ac_set("resource_summary", res_payload)
-    except Exception:
-        pass
-
-    # ── Post-upload AI summary (Gemma→Llama→Gemini waterfall) ───────
-    ai_summary, ai_model = _run_post_upload_summary(
-        kind="resource", filename=file.filename,
-        servers=enriched, customer_name=detected_customer,
-    )
-
-    return UploadResponse(
-        filename=file.filename,
-        file_type=ext.lstrip("."),
-        server_count=len(enriched),
-        image_only=bool(image_only),
-        customer_name=customer_name,
-        customer_status=customer_fields.get("customer_status"),
-        customer_cross_check=customer_fields.get("customer_cross_check"),
-        customer_conflicts=customer_fields.get("customer_conflicts"),
-        customer_corroborated_by=customer_fields.get("customer_corroborated_by"),
-        customer_message=customer_fields.get("customer_message"),
-        customer_active_name=customer_fields.get("customer_active_name"),
-        customer_candidate_name=customer_fields.get("customer_candidate_name"),
-        servers=enriched,
-        ai_summary=ai_summary,
-        ai_model=ai_model,
-    )
+# Resource utilization is sourced exclusively from Azure Monitor
+# (/api/azure/fetch-resources). The DOCX/PDF ingestion route was removed so a
+# hand-supplied document can never become fleet evidence on a sign-off page.
 
 
 # ── /api/smart-upload (any file type) ────────────────────────────
@@ -390,75 +185,11 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 pass
 
         elif file_type == "resource":
-            # RULE 4 — single entry point; detect_resource_mode + session clear inside
-            servers_raw = parse_resource_file(raw, file.filename)
-            img_only = not any(
-                s.get("cpu_used", 0) > 0 or s.get("mem_used", 0) > 0
-                for s in (servers_raw or [])
+            raise HTTPException(
+                status_code=415,
+                detail=("Resource utilization is sourced from Azure Monitor, not uploaded "
+                        "documents. Connect Azure and use 'Fetch live metrics' instead."),
             )
-
-            customer_fields = _resolve_customer_identity(
-                filename=file.filename,
-                servers=servers_raw,
-                pillar="resource",
-            )
-            cust_name = customer_fields.get("customer_name") or customer_fields.get("customer_candidate_name")
-            if cust_name and not is_valid_customer_name(cust_name):
-                cust_name = None
-
-            enriched = [_enrich(dict(s), img_only) for s in (servers_raw or [])]
-            for s in enriched:
-                s_cust = s.get("customer")
-                if s_cust and not is_valid_customer_name(s_cust):
-                    s["customer"] = None
-                if cust_name and not s.get("customer"):
-                    s["customer"] = cust_name
-
-            try:
-                from services import session_cache
-                switched = session_cache.ensure_customer(cust_name) if cust_name else False
-                existing_res = session_cache.get("last_resource") or {}
-                existing_servers = existing_res.get("servers", []) if not switched else []
-                import re
-                norm_target = re.sub(r'[^a-zA-Z0-9]', '', str(cust_name or '')).lower()
-                server_map = {}
-                for s in existing_servers:
-                    s_cust = s.get("customer")
-                    if s_cust and not is_valid_customer_name(s_cust):
-                        s["customer"] = None
-                        s_cust = None
-                    if s_cust and norm_target:
-                        norm_s = re.sub(r'[^a-zA-Z0-9]', '', str(s_cust)).lower()
-                        if norm_s != norm_target:
-                            continue
-                    if s.get("host"):
-                        server_map[s["host"]] = s
-                for s in enriched:
-                    s_cust = s.get("customer")
-                    if s_cust and not is_valid_customer_name(s_cust):
-                        s["customer"] = None
-                    if cust_name and not s.get("customer"):
-                        s["customer"] = cust_name
-                    h = s.get("host")
-                    if h:
-                        server_map[h] = s
-                    else:
-                        server_map[str(id(s))] = s
-                merged_servers = list(server_map.values())
-                res_payload = {"servers": merged_servers, "customer_name": cust_name}
-                session_cache.set("last_resource", res_payload)
-                session_cache.ac_set("resource_summary", res_payload)
-            except Exception:
-                pass
-
-            data = {
-                "filename": file.filename,
-                "file_type": ext.lstrip("."),
-                "server_count": len(enriched),
-                "image_only": img_only,
-                "servers": enriched,
-            }
-            data.update(customer_fields)
 
         elif file_type == "sla_matrix":
             from services.batch_calculator import load_ctrlm_bytes

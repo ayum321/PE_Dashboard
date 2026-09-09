@@ -180,7 +180,8 @@ const DRILL_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#3b82f6'
 const WF_STATUS_COLOR: Record<string, string> = {
   OK: '#10d96e', LONG_JOB: '#2dd4bf', AT_RISK: '#f59e0b', BREACH: '#f43f5e',
   NO_BUFFER: '#f59e0b', NOT_OBSERVED: '#6b7db3', SLA_MISSING: '#f59e0b',
-  SLA_UNDECLARED: '#f59e0b', SLA_CONTRACT_CONFLICT: '#fb7185', UNKNOWN: '#6b7db3',
+  SLA_UNDECLARED: '#f59e0b', SLA_CONTRACT_CONFLICT: '#fb7185',
+  MEASUREMENT_UNRESOLVED: '#f59e0b', RUNTIME_MISSING: '#6b7db3', UNKNOWN: '#6b7db3',
 };
 
 /** Tier bucket from a workflow row's sla_source and backend tier, mirrors the real dashboard's

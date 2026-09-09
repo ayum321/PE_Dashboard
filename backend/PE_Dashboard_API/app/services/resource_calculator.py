@@ -480,11 +480,22 @@ def build_resource_payload(servers: List[dict]) -> Dict[str, Any]:
     n_known = len(known)
 
     if n_known:
+        # Azure sets cpu_pct from the most-recent hourly bucket and cpu_avg_pct
+        # from the period average, so averaging the headline reading yielded a
+        # fleet "average" that was really a mean of latest-hour spot readings —
+        # and it disagreed with the per-role AVG column, which reads the average
+        # field. Prefer the true period average; fall back only when absent.
+        def _period_avg(r: Dict[str, Any], avg_key: str, headline_key: str):
+            v = r.get(avg_key)
+            return v if v is not None else r.get(headline_key)
+
         # The shared aggregation utility preserves a legitimate 0% reading but
         # excludes absent values. Every consumer also receives coverage, so a
         # dash / partial metric can never masquerade as fleet-wide 0%.
-        avg_cpu, cpu_coverage, cpu_reporting, _ = safe_avg([r["cpu_pct"] for r in known])
-        avg_mem, mem_coverage, mem_reporting, _ = safe_avg([r["mem_pct"] for r in known])
+        avg_cpu, cpu_coverage, cpu_reporting, _ = safe_avg(
+            [_period_avg(r, "cpu_avg_pct", "cpu_pct") for r in known])
+        avg_mem, mem_coverage, mem_reporting, _ = safe_avg(
+            [_period_avg(r, "mem_avg_pct", "mem_pct") for r in known])
         avg_disk, disk_coverage, disk_reporting, _ = safe_avg([r["disk_pct"] for r in known])
         avg_cpu = round(avg_cpu, 1) if avg_cpu is not None else None
         avg_mem = round(avg_mem, 1) if avg_mem is not None else None

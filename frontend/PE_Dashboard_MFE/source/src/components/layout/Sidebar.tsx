@@ -33,7 +33,7 @@ const ANALYSIS_ITEMS: NavItem[] = [
 ];
 
 const INTELLIGENCE_ITEMS: NavItem[] = [
-  { path: '/findings', label: 'PE Findings', icon: FindingsIcon },
+  { path: '/findings', label: 'PE Verdict', icon: FindingsIcon },
   { path: '/governance', label: 'Governance', icon: GovernanceIcon },
   { path: '/archive', label: 'Review Registry', icon: ArchiveIcon },
   { path: '/settings', label: 'Settings', icon: SettingsIcon },

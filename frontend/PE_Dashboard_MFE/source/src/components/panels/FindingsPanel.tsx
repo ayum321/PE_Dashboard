@@ -102,10 +102,10 @@ export function FindingsPanel() {
       <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" style={{ gap: 12, marginBottom: 12 }}>
         <Box>
           <Typography variant="h5" style={{ fontWeight: 800, letterSpacing: '-.01em', color: '#f0f4ff' }}>
-            PE Findings &amp; Intelligence
+            PE Verdict &amp; Findings
           </Typography>
           <Typography variant="caption" color="textSecondary">
-            Synthesized cross-pillar intelligence from SOW, Batch Execution, Azure Infrastructure, and Benchmark telemetry
+            Sign-off decision and the evidence behind it — synthesized across SOW, Batch Execution, Azure Infrastructure, and Benchmark telemetry
           </Typography>
         </Box>
         <Box display="flex" alignItems="center" style={{ gap: 8 }}>

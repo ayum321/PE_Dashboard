@@ -15,7 +15,7 @@ Usage:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Optional
 
 # ── Internal import (lazy to avoid circular) ─────────────────────────────────
 def _cfg(key: str, default: Any = None) -> Any:
@@ -765,3 +765,25 @@ def score_to_grade(score: float) -> tuple[str, str]:
         if score >= threshold:
             return letter, label
     return "F", "BLOCKED — MAJOR"
+
+
+# Grades that a verdict may describe as "healthy". Grade C is "CONDITIONAL HOLD"
+# in GRADE_TABLE and redflags.py separately flags C/D/F as "below acceptable
+# production standard" — so anything below B must never be called healthy.
+HEALTHY_FLEET_GRADES = ("A", "B")
+
+# Final-Judgment decision-matrix floors. A pillar below its floor hard-blocks
+# sign-off. Named here so the verdict sentence quotes the same number the
+# comparison used — they were previously bare literals inside the f-strings.
+PILLAR_HARD_BLOCK_FLOOR = 40.0
+SLA_HARD_BLOCK_FLOOR = 50.0
+RESOURCE_HARD_BLOCK_FLOOR = 60.0
+PILLAR_HOLD_FLOOR = 60.0
+
+
+def is_healthy_fleet(score: Optional[float], grade: Optional[str] = None) -> bool:
+    """True only when fleet health clears the same bar redflags.py demands (grade B+)."""
+    letter = (grade or "").strip().upper()[:1]
+    if not letter and score is not None:
+        letter = score_to_grade(float(score))[0]
+    return letter in HEALTHY_FLEET_GRADES

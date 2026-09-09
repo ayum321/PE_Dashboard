@@ -184,8 +184,12 @@ def _build_evidence_facts(digest: Dict[str, Any]) -> Dict[str, Any]:
         "peak_mem_pct": _first(rk.get("peak_mem_pct"), rk.get("max_mem_pct"), rk.get("mem_peak_pct")),
         "avg_cpu": _first(rk.get("avg_cpu"), rk.get("avg_cpu_pct"), rk.get("cpu_avg")),
         "n_critical_findings": (
+            # PE Findings is the sign-off gate; red flags are consultative
+            # questions. Summing the two inflated the count and disagreed with
+            # final_judgment.py, which picks findings-when-present.
+            _int(rule_f.get("critical_count"), len(rule_f.get("critical") or []))
+            if rule_f else
             _int(rf_sum.get("critical") or rf_sum.get("CRITICAL"))
-            + len(rule_f.get("critical") or [])
         ),
         "regression_count": _first(
             bk.get("regression_count"),
@@ -503,13 +507,26 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     fnd = payload.get("findings") or {}
     if isinstance(fnd, dict) and fnd.get("findings"):
         _fl = fnd["findings"]
+        # The findings ledger emits `level`; `severity` only exists on
+        # smart-findings. Reading the wrong key silently produced an empty
+        # critical list, which is how the batch panel showed 0 while the
+        # ledger showed 11.
+        def _lvl(f: Dict[str, Any]) -> str:
+            return str(f.get("level") or f.get("severity") or "").lower()
+
+        _summary = fnd.get("summary") or {}
+        _crit = [f for f in _fl if _lvl(f) == "critical"]
         out["rule_findings"] = {
+            # Authoritative total. The sample list below is truncated for prose,
+            # so it must never be used to derive a count.
+            "critical_count": _int(_summary.get("critical"), len(_crit)),
             "critical": [
                 {"text": f.get("text"), "source": f.get("source")}
-                for f in _fl if str(f.get("severity", "")).lower() == "critical"
+                for f in _crit
             ][:10],
-            "warning_count": len([f for f in _fl if str(f.get("severity", "")).lower() == "warning"]),
-            "total": len(_fl),
+            "warning_count": _int(_summary.get("warning"),
+                                  len([f for f in _fl if _lvl(f) == "warning"])),
+            "total": _int(_summary.get("total"), len(_fl)),
         }
 
     # -- Deep dive time-series evidence ------------------------------------
@@ -1014,10 +1031,13 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
                 for f in regressions[:2]
             )
             regression_note = f" Runtime regression detected: {_reg_txt}."
-    # When smart-findings carry no critical tally, fall back to the rule-engine count
-    # so the panel's "critical findings block sign-off" matches the findings table.
-    if not critical_count:
-        critical_count = len((digest.get("rule_findings") or {}).get("critical") or [])
+    # The /api/generate-findings ledger is the authoritative sign-off gate (the
+    # same call final_judgment.py makes), so it wins over the smart-findings
+    # tally whenever it is present rather than only when that tally is zero.
+    _rf_digest = digest.get("rule_findings") or {}
+    if _rf_digest:
+        critical_count = _int(_rf_digest.get("critical_count"),
+                              len(_rf_digest.get("critical") or []))
 
     if isinstance(triage, dict):
         low_buf_jobs = triage.get("low_buffer_jobs") or []
@@ -1203,7 +1223,7 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         role_cpu_thresholds, mem_threshold,
         DB_MEM_EXPECTED_LO, DB_MEM_EXPECTED_HI,
     )
-    from services.pe_config import MEM_WARN, MEM_CRIT
+    from services.pe_config import MEM_WARN, MEM_CRIT, is_healthy_fleet
 
     def _cpu_status(peak: float, ok: float, warn: float) -> str:
         if peak <= ok:   return "OK"
@@ -1222,8 +1242,10 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
 
     def _mem_thresh_label(stype: str) -> str:
         if stype == "DB":
-            return f"Expected {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% · HIGH >{DB_MEM_EXPECTED_HI:.0f}%"
-        return f"OK ≤{MEM_WARN:.0f}% · WATCH ≤{MEM_CRIT:.0f}% · HIGH >{MEM_CRIT:.0f}%"
+            # .1f matches the precision the value column is rendered at, so a
+            # boundary reading can't look mis-classified against a rounded label.
+            return f"Expected {DB_MEM_EXPECTED_LO:.1f}-{DB_MEM_EXPECTED_HI:.1f}% · HIGH >{DB_MEM_EXPECTED_HI:.1f}%"
+        return f"OK ≤{MEM_WARN:.1f}% · WATCH ≤{MEM_CRIT:.1f}% · HIGH >{MEM_CRIT:.1f}%"
 
     for stype, items in type_buckets.items():
         def _pick(srv, *fields):
@@ -1290,7 +1312,8 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
         _db_ok  = role_cpu_thresholds("DB")["ok"]
         _sre_ok = role_cpu_thresholds("SRE")["ok"]
         prose_i = (
-            f"Average CPU across the fleet is {fleet_avg_cpu:.1f}% and memory {fleet_avg_mem:.1f}%. "
+            f"Average CPU across the fleet is {fleet_avg_cpu:.1f}% and memory {fleet_avg_mem:.1f}% "
+            f"(period averages, matching the per-role AVG column; PEAK shows the worst bucket). "
             "Thresholds are role-aware, not a single flat number — "
             f"APP CPU {_app_ok:.0f}%, DB CPU {_db_ok:.0f}%, SRE CPU {_sre_ok:.0f}%; "
             f"DB memory {DB_MEM_EXPECTED_LO:.0f}-{DB_MEM_EXPECTED_HI:.0f}% is the expected "
@@ -1303,15 +1326,21 @@ def _deterministic_fallback(digest: Dict[str, Any], customer: str) -> Dict[str, 
             + (f" {n_dual} host(s) show simultaneous CPU + memory pressure." if n_dual else "")
             + (f" Fleet grade: {fleet_grade} (score: {fleet_score:.1f})." if fleet_grade != "N/A" else "")
             + (
-                # PE sign-off implication: explain what the grade means for audit approval
-                f" Grade {fleet_grade} ({fleet_score:.1f}/100) is below the PE approval threshold of 70 — "
-                "infrastructure must be remediated or the customer must formally acknowledge and "
-                "sign off the risk before PE can proceed to go-live approval."
-                if fleet_grade not in ("N/A", None) and 0 < fleet_score < 70
+                # PE sign-off implication: explain what the grade means for audit approval.
+                # The bar is the canonical grade table (B+), the same bar redflags.py
+                # demands — a bare score >= 70 let grade C read as "acceptable" while
+                # red flags simultaneously called it "below acceptable production standard".
+                f" Grade {fleet_grade} ({fleet_score:.1f}/100) is below the PE approval "
+                "standard of grade B — infrastructure must be remediated or the customer "
+                "must formally acknowledge and sign off the risk before PE can proceed "
+                "to go-live approval."
+                if fleet_grade not in ("N/A", None) and fleet_score > 0
+                and not is_healthy_fleet(fleet_score, fleet_grade)
                 else (
-                    f" Grade {fleet_grade} ({fleet_score:.1f}/100) meets the PE approval threshold of 70 — "
-                    "infrastructure health is acceptable for sign-off."
-                    if fleet_grade not in ("N/A", None) and fleet_score >= 70
+                    f" Grade {fleet_grade} ({fleet_score:.1f}/100) meets the PE approval "
+                    "standard of grade B — infrastructure health is acceptable for sign-off."
+                    if fleet_grade not in ("N/A", None)
+                    and is_healthy_fleet(fleet_score, fleet_grade)
                     else ""
                 )
             )

@@ -1458,6 +1458,12 @@ def _compute_sla_matrix(
                         "No Ctrl-M first/last-job anchor matched this BatchSLA row; "
                         "the displayed duration is an unanchored Ctrl-M window."
                     )
+                elif elapsed_duration_h is not None and "/all_jobs" in runtime_src:
+                    measurement_reason_code = "UNANCHORED_CTRL_M_WINDOW"
+                    measurement_reason_detail = (
+                        "No sentinel pair was configured; duration uses the observed "
+                        "workflow/application window for the representative run."
+                    )
                 elif elapsed_duration_h is not None:
                     measurement_reason_code = "MATCHED_CTRL_M_WINDOW"
                     measurement_reason_detail = "Matched Ctrl-M start/end timestamps for the representative workflow run."
@@ -1605,11 +1611,39 @@ def _compute_sla_matrix(
                     ("T2" if sla_src_wf == "sow_extracted" else
                      ("UNDECLARED" if sla_src_wf == "SLA_UNDECLARED" else "T3"))
                 )
+                anchor_configured = bool(_first_anchors or _last_anchors)
                 measurement_state = (
                     "VALID" if anchor_used and runtime_h is not None and runtime_h > 0 else
-                    ("ANCHOR_UNMATCHED" if not anchor_used and runtime_h is not None and runtime_h > 0 else
-                     ("NOT_OBSERVED" if not runtime_h or runtime_h <= 0 else "WORKBOOK_REPORTED"))
+                    ("ANCHOR_UNMATCHED" if anchor_configured and runtime_h is not None and runtime_h > 0 else
+                     ("OBSERVED_UNANCHORED" if runtime_src.startswith("per_run_max_elapsed") and runtime_h > 0 else
+                      ("RUNTIME_ONLY" if runtime_h > 0 else "NOT_OBSERVED")))
                 )
+
+                # A widest-sub-application fallback remains useful diagnostic
+                # telemetry, but it is not the contracted first-job -> last-job
+                # measurement when configured sentinels did not match. Preserve
+                # the provisional arithmetic separately and make the canonical
+                # compliance fields explicitly unscored.
+                indicative_buffer_pct = None
+                indicative_duration_headroom_h = None
+                indicative_clock_buffer_mins = None
+                if measurement_state == "ANCHOR_UNMATCHED" and sla_src_wf != "SLA_UNDECLARED":
+                    indicative_buffer_pct = buf_wf
+                    indicative_duration_headroom_h = duration_headroom_h
+                    indicative_clock_buffer_mins = clock_buffer_mins
+                    buf_wf = None
+                    status_wf = "MEASUREMENT_UNRESOLVED"
+                    duration_headroom_h = None
+                    duration_overrun_h = None
+                    clock_buffer_mins = None
+                    clock_sla_status = None
+                    start_delay_mins = None
+                    start_time_status = None
+                    breach_run_dates = []
+                    buf_rsn = (
+                        "Configured first/last sentinel job names were not both found; "
+                        "the retained runtime is an unanchored diagnostic window and is not scored"
+                    )
 
                 workflow_summary.append({
                     # ── Canonical columns ──
@@ -1619,6 +1653,7 @@ def _compute_sla_matrix(
                     "batch_type":      batch_type_wf or "UNKNOWN",
                     "tier":            row_tier,
                     "measurement_state": measurement_state,
+                    "status_eligible": status_wf in {"OK", "LONG_JOB", "AT_RISK", "BREACH"},
                     "workflow_start":  wf_start_s,
                     "workflow_end":    wf_end_s,
                     # Public, stable aliases for the React audit table.
@@ -1631,6 +1666,9 @@ def _compute_sla_matrix(
                     "duration_headroom_h": duration_headroom_h,
                     "duration_headroom_mins": round(duration_headroom_h * 60) if duration_headroom_h is not None else None,
                     "duration_overrun_h":  duration_overrun_h,
+                    "indicative_buffer_pct": indicative_buffer_pct,
+                    "indicative_duration_headroom_h": indicative_duration_headroom_h,
+                    "indicative_clock_buffer_mins": indicative_clock_buffer_mins,
                     "runtime_h":       runtime_h,
                     "sla_h":           round(float(sla_h_wf), 4) if sla_h_wf else None,
                     "sla_source":      sla_src_wf,
@@ -1702,6 +1740,7 @@ def _compute_sla_matrix(
                     "batch_type":      _unmatched_row.get("batch_type") or "DAILY",
                     "tier":            _un_tier,
                     "measurement_state": "NOT_OBSERVED",
+                    "status_eligible": False,
                     "workflow_start":  None,
                     "workflow_end":    None,
                     "actual_start_time": None,
@@ -1715,6 +1754,9 @@ def _compute_sla_matrix(
                     "duration_overrun_h": None,
                     "duration_headroom_mins": None,
                     "duration_overrun_mins": None,
+                    "indicative_buffer_pct": None,
+                    "indicative_duration_headroom_h": None,
+                    "indicative_clock_buffer_mins": None,
                     "sla_h":           _un_sla_h,
                     "sla_source":      _unmatched_row.get("sla_source") or "batch_sla_xlsx",
                     "buffer_pct":      None,

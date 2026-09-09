@@ -77,7 +77,7 @@ class FinalJudgmentResponse(BaseModel):
 # unit-testable in isolation and shared with any future surface. This router
 # orchestrates: it asks the engine for scores, builds the composite, runs the
 # decision matrix, then has the LLM narrate FROM the computed evidence.
-from services import judgment_engine
+from services import judgment_engine, pe_config
 
 
 # ── Decision matrix ────────────────────────────────────────────────
@@ -214,7 +214,7 @@ def _resource_despite(kpi_evidence: Dict[str, Any]) -> Optional[str]:
     score = _safe_float(res.get("fleet_score"))
     peak_mem = _safe_float(res.get("peak_mem_pct"))
     avg_cpu = _safe_float(res.get("avg_cpu"))
-    if n_critical > 0 or (score is not None and score < 70):
+    if n_critical > 0 or not pe_config.is_healthy_fleet(score, grade):
         return None
     if not any(v is not None for v in (score, peak_mem, avg_cpu)) and not grade:
         return None
@@ -253,16 +253,18 @@ def _decision_with_reason(
 
     # Hard blocks
     for name, val in pillars.items():
-        if val < 40:
+        if val < pe_config.PILLAR_HARD_BLOCK_FLOOR:
             return ("BLOCKED",
-                    _with_support(f"{name.upper()} score {val:.1f}% < 40% hard-block floor"))
+                    _with_support(f"{name.upper()} score {val:.1f}% < "
+                                  f"{pe_config.PILLAR_HARD_BLOCK_FLOOR:.0f}% hard-block floor"))
     if critical_findings >= 1:
         return ("BLOCKED",
                 f"{critical_findings} CRITICAL finding(s) require resolution before sign-off")
 
     # SLA-specific hard block
     sla_score = pillars.get("sla")
-    if sla_score is not None and sla_score < 50:
+    if sla_score is not None and sla_score < pe_config.SLA_HARD_BLOCK_FLOOR:
+        _floor = pe_config.SLA_HARD_BLOCK_FLOOR
         if window_comp is not None:
             # window_comp is the DAY-LEVEL figure, so the clean/total day fraction
             # reconciles with it (e.g. 2/28 days == 7.1%).
@@ -270,26 +272,28 @@ def _decision_with_reason(
                 clean_days = window_total_days - window_breach_days
                 fact = (
                     f"batch finished within its SLA window on only "
-                    f"{clean_days}/{window_total_days} day(s) ({window_comp:.1f}%, < 50% floor)"
+                    f"{clean_days}/{window_total_days} day(s) ({window_comp:.1f}%, < {_floor:.0f}% floor)"
                 )
             else:
-                fact = f"batch-window SLA compliance {window_comp:.1f}% < 50% floor"
+                fact = f"batch-window SLA compliance {window_comp:.1f}% < {_floor:.0f}% floor"
         else:
-            fact = f"SLA compliance {sla_score:.1f}% < 50% floor"
+            fact = f"SLA compliance {sla_score:.1f}% < {_floor:.0f}% floor"
         return ("BLOCKED",
                 _with_support(fact))
 
     # Resource-specific hard block
     resource_score = pillars.get("resource")
-    if resource_score is not None and resource_score < 60:
+    if resource_score is not None and resource_score < pe_config.RESOURCE_HARD_BLOCK_FLOOR:
         return ("BLOCKED",
-                f"Resource health {resource_score:.1f}% < 60% hard-block floor")
+                f"Resource health {resource_score:.1f}% < "
+                f"{pe_config.RESOURCE_HARD_BLOCK_FLOOR:.0f}% hard-block floor")
 
     # Conditional hold checks
     for name, val in pillars.items():
-        if val < 60:
+        if val < pe_config.PILLAR_HOLD_FLOOR:
             return ("HOLD",
-                    _with_support(f"{name.upper()} score {val:.1f}% < 60% hold threshold"))
+                    _with_support(f"{name.upper()} score {val:.1f}% < "
+                                  f"{pe_config.PILLAR_HOLD_FLOOR:.0f}% hold threshold"))
 
     if loaded_count < 3:
         return ("HOLD",

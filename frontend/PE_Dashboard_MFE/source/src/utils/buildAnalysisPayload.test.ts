@@ -38,6 +38,7 @@ describe('analysis payloads', () => {
   it('sends the complete shared evidence set to the FastAPI PE review renderer', () => {
     const payload = buildPeNarrativePayload(data);
     expect(payload.batch).toBe(data.batch);
+    expect(payload.sla_matrix).toBe(data.slaMatrix);
     expect(payload.resource).toBe(data.resource);
     expect(payload.sla_matrix).toBe(data.slaMatrix);
     expect(payload.findings).toBe(data.findings);

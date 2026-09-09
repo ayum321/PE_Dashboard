@@ -17,7 +17,6 @@ import {
   ResourceServer,
   uploadBatchSlaXlsx,
   uploadBenchmark,
-  uploadDashboardFile,
   workbookSlaSnapshotFromUpload,
 } from '../../api/dashboardApi';
 import { AppData, isValidCustomerName, useAppData } from '../../context/AppDataContext';
@@ -311,40 +310,6 @@ export function UploadPanel() {
     }
   };
 
-  const handleResourceDocxUpload = async (files: File[]) => {
-    beginUpload('resource', files, 'Resource report');
-    try {
-      const result = await uploadDashboardFile(files[0], trackProgress('resource'));
-      markProcessing('resource');
-      const resource = { ...result.data, servers: result.data.servers || [] };
-      setResource(resource);
-      // Resource reports often name the customer in a title/heading even when
-      // Ctrl-M's filename doesn't match the expected pattern. Adopt it only
-      // when no customer is already known — same rule as the Azure live-fetch
-      // path (handleFetched in ResourcePanel.tsx) — so it never silently
-      // overrides an engagement already established from Ctrl-M/SOW.
-      const resourceCustomer = (result.data as { customer_name?: string }).customer_name;
-      const validResourceCustomer = isValidCustomerName(resourceCustomer) ? resourceCustomer : null;
-      const verifiedByResource = (result.data as { customer_verified_by_resource?: boolean }).customer_verified_by_resource;
-      if (validResourceCustomer) setCustomerName(validResourceCustomer, verifiedByResource);
-      clearDerivedEvidence();
-      const refreshStatus = await refreshDerivedEvidence({
-        ...data,
-        resource,
-        customerName: validResourceCustomer || (isValidCustomerName(data.customerName) ? data.customerName : null),
-        findings: null,
-        redFlags: null,
-        peNarrative: null,
-        executive: null,
-        finalJudgment: null,
-      });
-      const serverCount = Number(result.data.server_count) || 0;
-      completeUpload('resource', `${serverCount} server(s) parsed from ${result.filename}. ${refreshStatus}`, serverCount ? `${serverCount} servers` : undefined);
-    } catch (uploadError) {
-      failUpload('resource', uploadError instanceof Error ? uploadError.message : 'Resource upload failed.');
-    }
-  };
-
   const handleWorkflowSlaUpload = async (files: File[]) => {
     beginUpload('sla', files, 'Workflow SLA contract');
     try {
@@ -611,22 +576,6 @@ export function UploadPanel() {
               >
                 {azureBusy ? '...' : connected ? 'Fetch live metrics' : 'Connect Azure'}
               </Button>
-              <label htmlFor="resource-docx-input">
-                <input
-                  className={classes.input}
-                  id="resource-docx-input"
-                  type="file"
-                  accept=".docx"
-                  onChange={(event) => {
-                    const files = Array.from(event.target.files || []);
-                    event.target.value = '';
-                    if (files.length) handleResourceDocxUpload(files);
-                  }}
-                />
-                <Button component="span" size="small" variant="outlined" style={{ fontSize: 10, borderColor: '#213060', color: '#6b7db3' }} disabled={isUploading('resource')}>
-                  {uploads.resource?.phase === 'uploading' ? `Uploading\u2026 ${uploads.resource.progress}%` : uploads.resource?.phase === 'processing' ? 'Processing evidence…' : 'Import supplied report'}
-                </Button>
-              </label>
             </Box>
             {connected && (
               <Box style={{ padding: '0 12px 10px' }}>

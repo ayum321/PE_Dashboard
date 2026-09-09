@@ -1947,157 +1947,6 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
     return patterns
 
 
-_SNAPSHOT_TS_CACHE: Optional[Dict[str, Any]] = None
-
-def _get_snapshot_timeseries_cache() -> Dict[str, Any]:
-    """Load and cache authentic historical time-series data from report snapshots."""
-    global _SNAPSHOT_TS_CACHE
-    if _SNAPSHOT_TS_CACHE is not None:
-        return _SNAPSHOT_TS_CACHE
-
-    import glob, json, os
-    cache: Dict[str, Any] = {}
-    candidates = [
-        "app/data/report_snapshots/**/*.json",
-        "data/report_snapshots/**/*.json",
-        os.path.join(os.path.dirname(__file__), "../data/report_snapshots/**/*.json"),
-    ]
-    files = []
-    for cand in candidates:
-        files.extend(glob.glob(cand, recursive=True))
-
-    for f in sorted(set(files), reverse=True):
-        try:
-            with open(f, encoding="utf-8", errors="ignore") as fp:
-                d = json.load(fp)
-            ts_by_host = d.get("resource_review", {}).get("timeseries_by_host", {})
-            for host, hdata in ts_by_host.items():
-                hl = host.strip().lower()
-                if hl not in cache and hdata.get("series"):
-                    cache[hl] = hdata
-        except Exception:
-            pass
-    _SNAPSHOT_TS_CACHE = cache
-    return _SNAPSHOT_TS_CACHE
-
-
-def _load_fallback_vm_timeseries(rid: str, vm_name: str,
-                                 start_time: datetime, end_time: datetime,
-                                 granularity: timedelta, vm_role: str) -> Tuple[dict, dict, dict]:
-    """Retrieve or synthesize time-series telemetry for a VM from snapshot catalog.
-    Aligns and interpolates points across (start_time, end_time) at granularity.
-    """
-    import math
-    cache = _get_snapshot_timeseries_cache()
-    norm_name = vm_name.strip().lower()
-    source_data = cache.get(norm_name)
-
-    if not source_data or not source_data.get("series"):
-        # Check if there is a donor VM with the same role in cache
-        target_role = (vm_role or "APP").upper()
-        donors = [hd for h, hd in cache.items() if (hd.get("role") or "").upper() == target_role and hd.get("series")]
-        if not donors:
-            donors = [hd for hd in cache.values() if hd.get("series")]
-        if donors:
-            donor_idx = abs(hash(norm_name)) % len(donors)
-            source_data = donors[donor_idx]
-
-    total_seconds = max(60.0, (end_time - start_time).total_seconds())
-    grain_seconds = max(60.0, granularity.total_seconds())
-    num_steps = max(2, int(round(total_seconds / grain_seconds)))
-    grain_min = grain_seconds / 60.0
-    steps_per_hour = max(1.0, 60.0 / grain_min)
-
-    series: Dict[str, list] = {}
-    series_max: Dict[str, list] = {}
-    true_extremes: Dict[str, dict] = {}
-
-    seed_offset = (abs(hash(norm_name)) % 100) / 50.0
-
-    if source_data and source_data.get("series"):
-        for m, pts in source_data["series"].items():
-            if not pts:
-                continue
-            max_pts = source_data.get("series_max", {}).get(m, pts)
-            n_pts = len(pts)
-            n_max = len(max_pts) if max_pts else n_pts
-            aligned = []
-            aligned_max = []
-            for i in range(num_steps):
-                t = start_time + i * granularity
-                t_str = t.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-                if steps_per_hour == 1.0:
-                    val = pts[i % n_pts]["v"]
-                    val_max = max_pts[i % n_max]["v"] if max_pts else val
-                else:
-                    exact_h = i / steps_per_hour
-                    h0 = int(exact_h) % n_pts
-                    h1 = (h0 + 1) % n_pts
-                    frac = exact_h - int(exact_h)
-                    v0 = pts[h0]["v"]
-                    v1 = pts[h1]["v"]
-                    val = v0 + (v1 - v0) * frac + math.sin(i * 0.7 + seed_offset) * 0.5
-                    val_max = max(val, (max_pts[h0 % n_max]["v"] if max_pts else val))
-
-                if "Percentage" in m or "pct" in m.lower():
-                    val = max(0.0, min(100.0, val))
-                    val_max = max(val, min(100.0, val_max))
-                else:
-                    val = max(0.0, val)
-                    val_max = max(val, val_max)
-
-                aligned.append({"t": t_str, "v": round(float(val), 2)})
-                if m not in _CHART_ONLY_METRICS:
-                    aligned_max.append({"t": t_str, "v": round(float(val_max), 2)})
-
-            series[m] = aligned
-            if aligned_max:
-                series_max[m] = aligned_max
-
-            vals = [p["v"] for p in aligned]
-            true_max_v = max([p["v"] for p in aligned_max]) if aligned_max else (max(vals) if vals else None)
-            true_min_v = min(vals) if vals else None
-            true_extremes[m] = {
-                "true_max": round(true_max_v, 2) if true_max_v is not None else None,
-                "true_min": round(true_min_v, 2) if true_min_v is not None else None,
-            }
-
-    if not series or "Percentage CPU" not in series:
-        is_db = (vm_role.upper() == "DB")
-        base_cpu = 12.0 if is_db else 18.0
-        base_mem_avail = 14.0 if is_db else 62.0
-        base_disk = 18.0 if is_db else 12.0
-
-        for m, base_v in [
-            ("Percentage CPU", base_cpu),
-            ("Available Memory Percentage", base_mem_avail),
-            ("OS Disk Bandwidth Consumed Percentage", base_disk),
-            ("Data Disk Bandwidth Consumed Percentage", base_disk * 0.8),
-        ]:
-            aligned = []
-            aligned_max = []
-            for i in range(num_steps):
-                t = start_time + i * granularity
-                t_str = t.strftime("%Y-%m-%dT%H:%M:%SZ")
-                hr = t.hour
-                diurnal = 1.0 + 0.3 * math.sin((hr - 8) / 24.0 * 2 * math.pi)
-                val = max(1.0, min(99.0, base_v * diurnal + math.sin(i * 0.5 + seed_offset) * 2.0))
-                val_max = max(val, min(100.0, val * 1.25))
-                aligned.append({"t": t_str, "v": round(val, 2)})
-                aligned_max.append({"t": t_str, "v": round(val_max, 2)})
-
-            series[m] = aligned
-            series_max[m] = aligned_max
-            vals = [p["v"] for p in aligned]
-            true_extremes[m] = {
-                "true_max": round(max([p["v"] for p in aligned_max]), 2),
-                "true_min": round(min(vals), 2),
-            }
-
-    return series, true_extremes, series_max
-
-
 def _process_vm_series(rid: str, vm_name: str, vm_role: str,
                        series: dict, true_extremes: dict, series_max: dict,
                        granularity: timedelta, result: dict) -> None:
@@ -2271,6 +2120,9 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         if resource_id and role
     }
     result = {}
+    # VMs Azure Monitor returned no telemetry for. Surfaced so the UI can say
+    # "no data" instead of silently showing an empty or invented chart.
+    _no_data_vms: List[str] = []
     workers = min(_AZURE_MONITOR_MAX_WORKERS, len(resource_ids))
 
     if client is not None:
@@ -2301,11 +2153,16 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                     series, true_extremes, series_max = {}, {}, {}
 
                 if not series or not series.get("Percentage CPU"):
-                    series, true_extremes, series_max = _load_fallback_vm_timeseries(
-                        rid, vm_name, start_time, end_time, granularity, _vm_role
-                    )
+                    # No measured telemetry. Previously this substituted a
+                    # synthesised curve or another VM's series, which reached the
+                    # reviewer indistinguishable from real Azure data.
+                    logger.warning("No Azure timeseries for %s — reporting as no-data", vm_name)
+                    series, true_extremes, series_max = {}, {}, {}
+                    _no_data_vms.append(vm_name)
 
                 _process_vm_series(rid, vm_name, _vm_role, series, true_extremes, series_max, granularity, result)
+                if vm_name in _no_data_vms and vm_name in result:
+                    result[vm_name]["data_source"] = "no_data"
     else:
         for rid in resource_ids:
             vm_name = rid.split("/")[-1].lower()
@@ -2320,10 +2177,13 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                 _vm_types_by_resource_id.get(rid.strip().lower())
                 or str(_infer_server_type(vm_name, None, _rg) or "APP").upper()
             )
-            series, true_extremes, series_max = _load_fallback_vm_timeseries(
-                rid, vm_name, start_time, end_time, granularity, _vm_role
-            )
-            _process_vm_series(rid, vm_name, _vm_role, series, true_extremes, series_max, granularity, result)
+            # Without an Azure Monitor client there is no measured telemetry to
+            # report. Fabricating one here is what put invented spikes in front
+            # of reviewers on a sign-off page.
+            _no_data_vms.append(vm_name)
+            _process_vm_series(rid, vm_name, _vm_role, {}, {}, {}, granularity, result)
+            if vm_name in result:
+                result[vm_name]["data_source"] = "no_data"
 
     # ── Pattern detection across all VMs ──
     all_vm_spikes = {vm: data.get("spikes", {}) for vm, data in result.items()}
@@ -2357,6 +2217,9 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         "vms": result,
         "patterns": patterns,
         "baseline": baseline,
+        # VMs Azure Monitor returned no telemetry for. Callers MUST surface this
+        # rather than render an empty chart as if it were a healthy flat line.
+        "no_data_vms": sorted(set(_no_data_vms)),
         "window": {
             "hours_back": hours_back,
             "grain": _grain_label,
@@ -4239,10 +4102,9 @@ def _build_server_records(credential, vms: List[dict], hours_back: int,
             if cat_cpu is not None and float(cat_cpu) > 0:
                 cpu_pct = float(cat_cpu)
                 cpu_pct_avg = cpu_pct
-                if cpu_max_pct is None:
-                    cpu_max_pct = round(cpu_pct * 1.25, 2)
-                if cpu_min_pct is None:
-                    cpu_min_pct = round(cpu_pct * 0.75, 2)
+                # Max/min stay None when Monitor returned no extremes. They were
+                # previously synthesised as avg*1.25 / avg*0.75, which put an
+                # invented spike in front of a reviewer as if it were measured.
             else:
                 cpu_pct = 0.0
                 cpu_pct_avg = 0.0

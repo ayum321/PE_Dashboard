@@ -97,8 +97,9 @@ export function PeReviewSummary() {
   const sections = (narrative.sections as NarrativeSection[]) || [];
   const flags = (data.redFlags?.flags as RedFlag[]) || [];
   const backendUat = data.findings?.uat as BackendUat | undefined;
-  const finalJudgment = data.finalJudgment as { decision?: string; verdict?: string; verdict_reason?: string; pillars?: Record<string, number> } | null;
+  const finalJudgment = data.finalJudgment as { decision?: string; verdict?: string; verdict_reason?: string; pillars?: Record<string, number>; pillar_statuses?: Record<string, string> } | null;
   const pillarScores = (finalJudgment?.pillars as Record<string, number>) || {};
+  const pillarStatuses = (finalJudgment?.pillar_statuses as Record<string, string>) || {};
 
   // The narrative's own verdict/summary text is generated ahead of final
   // judgment scoring and can go stale the moment findings/final-judgment
@@ -159,13 +160,43 @@ export function PeReviewSummary() {
       .slice(0, sectionId === 'batch_sla' ? 5 : 3);
 
   // Pillar scores & status
+  // A tab covers every backend pillar named in its title, so "Batch & SLA"
+  // must reflect BOTH — showing only `batch` let the tab read a healthy 71%
+  // while the `sla` pillar sat below the block floor and drove the verdict.
+  // Worst-of is the honest summary for a gating audit: the section is only as
+  // sound as its weakest evidence pillar.
+  const SECTION_PILLARS: Record<string, string[]> = {
+    data_volume: ['sow'],
+    batch_sla: ['batch', 'sla'],
+    infrastructure: ['resource'],
+    uat: ['benchmark'],
+  };
+  const STATUS_STYLE: Record<string, { label: string; color: string }> = {
+    BLOCKED: { label: 'BLOCKED', color: '#f43f5e' },
+    FAIL:    { label: 'BLOCKED', color: '#f43f5e' },
+    WATCH:   { label: 'REVIEW',  color: '#f59e0b' },
+    PASS:    { label: 'PASS',    color: '#10d96e' },
+  };
+
   const getPillarStatus = (sectionId: string) => {
-    const pillarKey = { data_volume: 'sow', batch_sla: 'batch', infrastructure: 'resource', uat: 'benchmark' }[sectionId] || sectionId;
-    const score = pillarScores[pillarKey];
-    if (score == null) return { score: null, label: 'LOADED', color: '#3b82f6' };
-    if (score < 60) return { score, label: 'BLOCKED', color: '#f43f5e' };
-    if (score < 90) return { score, label: 'REVIEW', color: '#f59e0b' };
-    return { score, label: 'PASS', color: '#10d96e' };
+    const keys = SECTION_PILLARS[sectionId] || [sectionId];
+    const present = keys.filter((k) => pillarScores[k] != null);
+    if (!present.length) return { score: null, label: 'LOADED', color: '#3b82f6', drivenBy: null };
+    // Worst pillar drives the badge, matching how the backend decision matrix
+    // hard-blocks on the lowest-scoring pillar.
+    const worstKey = present.reduce((a, b) => (pillarScores[a] <= pillarScores[b] ? a : b));
+    const score = pillarScores[worstKey];
+    // Backend already classified every pillar (it alone knows which ones carry a
+    // critical finding). Recomputing here produced a second, divergent verdict.
+    const backendStatus = (pillarStatuses[worstKey] || '').toUpperCase();
+    const style = STATUS_STYLE[backendStatus]
+      || (score < 60 ? STATUS_STYLE.FAIL : score < 90 ? STATUS_STYLE.WATCH : STATUS_STYLE.PASS);
+    return {
+      score,
+      label: style.label,
+      color: style.color,
+      drivenBy: present.length > 1 ? worstKey : null,
+    };
   };
 
   const currentSection = visibleSections.find((s) => (s.id || '') === activeTab) || visibleSections[0];
@@ -247,6 +278,7 @@ export function PeReviewSummary() {
                 <span>{style.label}</span>
                 {stat.score != null && (
                   <span
+                    title={stat.drivenBy ? `Worst covered pillar: ${stat.drivenBy.toUpperCase()} (${stat.label})` : stat.label}
                     style={{
                       fontFamily: "'JetBrains Mono', monospace",
                       fontSize: 11,
@@ -257,7 +289,7 @@ export function PeReviewSummary() {
                       fontWeight: 800,
                     }}
                   >
-                    {stat.score.toFixed(0)}%
+                    {stat.score.toFixed(0)}%{stat.drivenBy ? ` ${stat.drivenBy.toUpperCase()}` : ''}
                   </span>
                 )}
               </button>
