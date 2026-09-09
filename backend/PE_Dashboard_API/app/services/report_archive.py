@@ -500,11 +500,131 @@ def save(customer: str, html: str, meta: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+def _recover_report_metadata(row: dict[str, Any], conn: sqlite3.Connection) -> dict[str, Any]:
+    """Auto-recover reviewer names and environment if missing from earlier archives."""
+    slug = row.get("customer_slug")
+    if not slug:
+        return row
+
+    pe_val = str(row.get("pe_name") or "").strip()
+    cust_val = str(row.get("cust_name") or "").strip()
+    env_val = str(row.get("env") or "").strip()
+
+    needs_pe = not pe_val or pe_val in ("—", "Not recorded")
+    needs_cust = not cust_val or cust_val in ("—", "Not recorded")
+    needs_env = not env_val or env_val in ("Not Detected", "—", "Not detected")
+
+    if not (needs_pe or needs_cust or needs_env):
+        return row
+
+    pe_name = pe_val if not needs_pe else ""
+    cust_name = cust_val if not needs_cust else ""
+    env = env_val if not needs_env else ""
+    updated = False
+
+    # 1. Inspect latest snapshot JSON
+    folder = _snapshots_dir() / slug
+    if folder.is_dir():
+        json_files = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for json_path in json_files:
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+                approvals = data.get("approvals") if isinstance(data.get("approvals"), dict) else {}
+                pe_info = approvals.get("pe") if isinstance(approvals.get("pe"), dict) else {}
+                cust_info = approvals.get("customer") if isinstance(approvals.get("customer"), dict) else {}
+
+                if needs_pe:
+                    c = str(pe_info.get("name") or meta.get("pe_name") or approvals.get("pe_name") or "").strip()
+                    if c and c not in ("—", "Not recorded"):
+                        pe_name = c
+                        needs_pe = False
+                        updated = True
+
+                if needs_cust:
+                    c = str(cust_info.get("name") or meta.get("cust_name") or approvals.get("cust_name") or "").strip()
+                    if c and c not in ("—", "Not recorded"):
+                        cust_name = c
+                        needs_cust = False
+                        updated = True
+
+                if needs_env:
+                    c = str(approvals.get("env_type") or meta.get("env") or "").strip()
+                    if c and c not in ("Not Detected", "—", "Not detected"):
+                        env = c
+                        needs_env = False
+                        updated = True
+
+                if not (needs_pe or needs_cust or needs_env):
+                    break
+            except Exception as exc:
+                logger.debug("report_archive: failed reading snapshot JSON %s — %s", json_path, exc)
+
+    # 2. Inspect rendered HTML file
+    if (needs_pe or needs_cust or needs_env) and row.get("file_path"):
+        html_path = _ROOT / str(row["file_path"])
+        if not html_path.is_file():
+            html_path = _files_dir() / f"{slug}.html"
+        if html_path.is_file():
+            try:
+                html_text = html_path.read_text(encoding="utf-8", errors="replace")
+                if needs_pe:
+                    m_pe = re.search(
+                        r'<div class="appr__role">\s*(?:Performance Engineer|PE)\s*</div>\s*<div class="appr__name">\s*([^<]+)\s*</div>',
+                        html_text,
+                        re.IGNORECASE,
+                    )
+                    if m_pe:
+                        c = m_pe.group(1).strip()
+                        if c and c not in ("—", "Not recorded"):
+                            pe_name = c
+                            needs_pe = False
+                            updated = True
+                if needs_cust:
+                    m_cust = re.search(
+                        r'<div class="appr__role">\s*Customer\s*</div>\s*<div class="appr__name">\s*([^<]+)\s*</div>',
+                        html_text,
+                        re.IGNORECASE,
+                    )
+                    if m_cust:
+                        c = m_cust.group(1).strip()
+                        if c and c not in ("—", "Not recorded"):
+                            cust_name = c
+                            needs_cust = False
+                            updated = True
+                if needs_env:
+                    m_env = re.search(r'Environment:\s*([^<,\n\r]+)', html_text, re.IGNORECASE)
+                    if m_env:
+                        c = m_env.group(1).strip()
+                        if c and c.lower() not in ("not detected", "—"):
+                            env = c
+                            needs_env = False
+                            updated = True
+            except Exception as exc:
+                logger.debug("report_archive: failed reading HTML %s — %s", html_path, exc)
+
+    if updated:
+        row["pe_name"] = pe_name
+        row["cust_name"] = cust_name
+        row["env"] = env
+        try:
+            conn.execute(
+                "UPDATE reports SET pe_name = ?, cust_name = ?, env = ? WHERE customer_slug = ?",
+                (pe_name, cust_name, env, slug),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.debug("report_archive: failed updating DB row for %s — %s", slug, exc)
+
+    return row
+
+
 def list_reports() -> list[dict[str, Any]]:
     with _lock:
         conn = _connect()
         cur = conn.execute(f"SELECT {', '.join(_LIST_COLS)} FROM reports ORDER BY generated_at DESC")
-        return [dict(zip(_LIST_COLS, row)) for row in cur.fetchall()]
+        raw_rows = [dict(zip(_LIST_COLS, row)) for row in cur.fetchall()]
+        return [_recover_report_metadata(row, conn) for row in raw_rows]
 
 
 def get_report(slug: str) -> Optional[dict[str, Any]]:
@@ -516,9 +636,13 @@ def get_report(slug: str) -> Optional[dict[str, Any]]:
     if not row:
         return None
     record = dict(zip(cols, row))
+    with _lock:
+        conn = _connect()
+        record = _recover_report_metadata(record, conn)
     fpath = _ROOT / record["file_path"]
     if not fpath.exists():
         logger.warning("report_archive: DB row for %s exists but file missing at %s", slug, fpath)
         return None
     record["html"] = fpath.read_text(encoding="utf-8")
     return record
+

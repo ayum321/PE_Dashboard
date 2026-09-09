@@ -14,6 +14,7 @@ import {
   makeStyles,
 } from '@material-ui/core';
 import { getApiBaseUrl, getReportArchive } from '../../api/dashboardApi';
+import { isValidCustomerName, normalizeCustomer, useOptionalAppData } from '../../context/AppDataContext';
 
 interface ArchiveRow {
   customer_slug: string;
@@ -160,6 +161,8 @@ function SummaryCard({ label, value, note, tone = 'blue' }: { label: string; val
 
 export function ArchivePanel() {
   const classes = useStyles();
+  const appData = useOptionalAppData();
+  const data = appData?.data;
   const [reports, setReports] = useState<ArchiveRow[]>([]);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -176,15 +179,22 @@ export function ArchivePanel() {
   useEffect(() => { void loadReports(); }, [loadReports]);
   const visibleReports = useMemo(() => {
     const query = search.trim().toLowerCase();
+    const isCurrent = (cust: string) => Boolean(
+      data?.customerName && isValidCustomerName(data.customerName) &&
+      normalizeCustomer(data.customerName) === normalizeCustomer(cust)
+    );
     return reports.filter((report) => {
       const matchesFilter = filter === 'all' || (filter === 'signed' && signedOff(report)) || (filter === 'pending' && !signedOff(report)) || (filter === 'attention' && attentionScore(report) > 0);
-      return matchesFilter && (!query || [report.customer, report.env, report.pe_name, report.cust_name].join(' ').toLowerCase().includes(query));
+      const peName = report.pe_name || (isCurrent(report.customer) ? data?.approvals?.pe?.name : '') || '';
+      const custName = report.cust_name || (isCurrent(report.customer) ? data?.approvals?.customer?.name : '') || '';
+      const env = report.env || '';
+      return matchesFilter && (!query || [report.customer, env, peName, custName].join(' ').toLowerCase().includes(query));
     }).sort((left, right) => {
       if (sort === 'customer') return String(left.customer || '').localeCompare(String(right.customer || ''));
       if (sort === 'attention') { const diff = attentionScore(right) - attentionScore(left); if (diff) return diff; }
       return timestamp(right.generated_at) - timestamp(left.generated_at);
     });
-  }, [filter, reports, search, sort]);
+  }, [data?.approvals?.customer?.name, data?.approvals?.pe?.name, data?.customerName, filter, reports, search, sort]);
   const summary = useMemo(() => {
     const latest = [...reports].sort((left, right) => timestamp(right.generated_at) - timestamp(left.generated_at))[0];
     return { signed: reports.filter(signedOff).length, attention: reports.filter((report) => attentionScore(report) > 0).length, latest };
@@ -217,12 +227,34 @@ export function ArchivePanel() {
     {!busy && !error && visibleReports.length > 0 && <Box className={classes.tableWrap}><Table size="small" className="pe-table" aria-label="Review Registry table" style={{ minWidth: 1240 }}><TableHead><TableRow><TableCell>Customer</TableCell><TableCell>Review completion</TableCell><TableCell>Frozen exported evidence</TableCell><TableCell>Review team</TableCell><TableCell>Last exported</TableCell><TableCell>Report access</TableCell></TableRow></TableHead><TableBody>
       {visibleReports.map((report) => {
         const state = reviewState(report), detailOpen = expanded.has(report.customer_slug), detailGroups = snapshots(report);
+        const isCurrentCustomer = Boolean(
+          data?.customerName && isValidCustomerName(data.customerName) &&
+          normalizeCustomer(data.customerName) === normalizeCustomer(report.customer)
+        );
+        const peFallback = isCurrentCustomer ? data?.approvals?.pe?.name : '';
+        const custFallback = isCurrentCustomer ? data?.approvals?.customer?.name : '';
+        const envFallback = isCurrentCustomer && typeof (data?.resource as any)?.servers?.[0]?.environment === 'string'
+          ? (data?.resource as any).servers[0].environment
+          : '';
+
+        const peName = (report.pe_name && report.pe_name !== 'Not recorded' && report.pe_name !== '—')
+          ? report.pe_name
+          : (peFallback || 'Not recorded');
+
+        const custName = (report.cust_name && report.cust_name !== 'Not recorded' && report.cust_name !== '—')
+          ? report.cust_name
+          : (custFallback || 'Not recorded');
+
+        const displayEnv = (report.env && report.env !== 'Not detected' && report.env !== 'Not Detected' && report.env !== '—')
+          ? report.env
+          : (envFallback || 'Not detected');
+
         return <React.Fragment key={report.customer_slug}>
           <TableRow hover style={attentionScore(report) > 0 ? { background: 'rgba(245,158,11,.035)' } : undefined}>
-            <TableCell><Typography variant="body2" style={{ fontWeight: 700 }}>{report.customer || 'Unknown customer'}</Typography><Typography variant="caption" color="textSecondary">Environment: {report.env || 'Not detected'}</Typography></TableCell>
+            <TableCell><Typography variant="body2" style={{ fontWeight: 700 }}>{report.customer || 'Unknown customer'}</Typography><Typography variant="caption" color="textSecondary">Environment: {displayEnv}</Typography></TableCell>
             <TableCell><Box display="flex" flexDirection="column" alignItems="flex-start" style={{ gap: 5 }}><Tag tone={state.tone}>{state.label}</Tag><Tag tone={count(report.checklist_mismatches) ? 'amber' : 'gray'}>{count(report.checklist_mismatches)} evidence gap{count(report.checklist_mismatches) === 1 ? '' : 's'}</Tag><Typography variant="caption" color="textSecondary">{state.detail}</Typography></Box></TableCell>
             <TableCell style={{ minWidth: 300 }}><Box display="flex" style={{ gap: 5, overflowX: 'auto', paddingBottom: 4 }}>{detailGroups.map((group) => <Tag key={group.label} tone={group.tone}>{group.compact}</Tag>)}</Box><Button size="small" onClick={() => toggleExpanded(report.customer_slug)} style={{ marginTop: 4 }}>{detailOpen ? 'Hide breakdown' : 'Show breakdown'}</Button></TableCell>
-            <TableCell><Typography variant="caption" color="textSecondary">PE</Typography><Typography variant="body2" style={{ fontSize: 12 }}>{report.pe_name || 'Not recorded'}</Typography><Typography variant="caption" color="textSecondary">Customer</Typography><Typography variant="body2" style={{ fontSize: 12 }}>{report.cust_name || 'Not recorded'}</Typography></TableCell>
+            <TableCell><Typography variant="caption" color="textSecondary">PE</Typography><Typography variant="body2" style={{ fontSize: 12 }}>{peName}</Typography><Typography variant="caption" color="textSecondary">Customer</Typography><Typography variant="body2" style={{ fontSize: 12 }}>{custName}</Typography></TableCell>
             <TableCell style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>{formatDate(report.generated_at)}</TableCell>
             <TableCell style={{ whiteSpace: 'nowrap' }}><Button size="small" color="primary" href={`${getApiBaseUrl()}/api/report-archive/${encodeURIComponent(report.customer_slug)}`} target="_blank" rel="noopener noreferrer">Open full HTML</Button><Button size="small" href={`${getApiBaseUrl()}/api/report-archive/${encodeURIComponent(report.customer_slug)}/download`}>Download</Button></TableCell>
           </TableRow>

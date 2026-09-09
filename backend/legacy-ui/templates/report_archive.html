@@ -436,9 +436,11 @@ function evidenceCell(record, detailId) {
 
 function teamCell(record) {
   const stack = element("div", "team-stack");
-  const pe = element("div", "team-line", textValue(record.pe_name, "Not recorded"));
+  const peName = (record.pe_name && record.pe_name !== "—") ? record.pe_name : "Not recorded";
+  const pe = element("div", "team-line", peName);
   pe.prepend(element("b", "", "PE"));
-  const customer = element("div", "team-line", textValue(record.cust_name, "Not recorded"));
+  const custName = (record.cust_name && record.cust_name !== "—") ? record.cust_name : "Not recorded";
+  const customer = element("div", "team-line", custName);
   customer.prepend(element("b", "", "Customer"));
   stack.append(pe, customer);
   return stack;

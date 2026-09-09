@@ -34,6 +34,26 @@ const EMPTY_APPROVALS: ApprovalsState = {
   notes: '',
 };
 
+const STORAGE_KEY_APPROVALS = 'pe-dashboard:approvals';
+
+const loadStoredApprovals = (): ApprovalsState => {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage?.getItem(STORAGE_KEY_APPROVALS) : null;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          checklist: { ...EMPTY_APPROVALS.checklist, ...(parsed.checklist || {}) },
+          pe: { ...EMPTY_APPROVALS.pe, ...(parsed.pe || {}) },
+          customer: { ...EMPTY_APPROVALS.customer, ...(parsed.customer || {}) },
+          notes: typeof parsed.notes === 'string' ? parsed.notes : '',
+        };
+      }
+    }
+  } catch { /* ignore storage errors */ }
+  return EMPTY_APPROVALS;
+};
+
 export interface AppData {
   batch: DashboardPayload | null;
   resource: (DashboardPayload & { servers: ResourceServer[] }) | null;
@@ -162,7 +182,10 @@ const settle = <T,>(promise: Promise<T>): Promise<Settled<T>> =>
   );
 
 export const AppDataProvider = ({ children }: { children: React.ReactNode }) => {
-  const [data, setData] = useState<AppData>(EMPTY_APP_DATA);
+  const [data, setData] = useState<AppData>(() => ({
+    ...EMPTY_APP_DATA,
+    approvals: loadStoredApprovals(),
+  }));
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
   const [isLiveSyncing, setIsLiveSyncing] = useState<boolean>(false);
   const isSyncingRef = React.useRef(false);
@@ -497,7 +520,12 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   );
 
   const setApprovals = useCallback(
-    (value: ApprovalsState) => setData((prev) => ({ ...prev, approvals: value })),
+    (value: ApprovalsState) => {
+      setData((prev) => ({ ...prev, approvals: value }));
+      try {
+        window.localStorage?.setItem(STORAGE_KEY_APPROVALS, JSON.stringify(value));
+      } catch { /* ignore storage errors */ }
+    },
     [],
   );
 
@@ -511,8 +539,9 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       await clearSession();
     } finally {
       try {
-        window.sessionStorage.removeItem('pe-dashboard:sow-form-draft-v2');
-        window.sessionStorage.removeItem('pe-dashboard:sow-actual-draft');
+        window.sessionStorage?.removeItem('pe-dashboard:sow-form-draft-v2');
+        window.sessionStorage?.removeItem('pe-dashboard:sow-actual-draft');
+        window.localStorage?.removeItem(STORAGE_KEY_APPROVALS);
       } catch { /* optional browser storage */ }
       setData(EMPTY_APP_DATA);
     }
@@ -566,6 +595,10 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   );
 
   return <AppDataContext.Provider value={value}>{children}</AppDataContext.Provider>;
+};
+
+export const useOptionalAppData = (): AppDataContextValue | undefined => {
+  return useContext(AppDataContext);
 };
 
 export const useAppData = (): AppDataContextValue => {

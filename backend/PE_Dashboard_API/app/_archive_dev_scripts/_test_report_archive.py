@@ -10,7 +10,12 @@ import tempfile
 import re
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+_APP_DIR = Path(__file__).resolve().parents[1]
+if str(_APP_DIR) not in sys.path:
+    sys.path.insert(0, str(_APP_DIR))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -457,13 +462,12 @@ def test_exported_fleet_score_matches_the_frozen_archive_value() -> None:
 
 def test_registry_template_compacts_rows_and_filters_independent_facts() -> None:
     """Exercise the actual inline filter/chip functions without a browser."""
-    template = (
-        Path(__file__).resolve().parents[3]
-        / "backend"
-        / "legacy-ui"
-        / "templates"
-        / "report_archive.html"
-    ).read_text(encoding="utf-8")
+    candidates = [
+        Path(__file__).resolve().parents[4] / "backend" / "legacy-ui" / "templates" / "report_archive.html",
+        Path(__file__).resolve().parents[3] / "legacy-ui" / "templates" / "report_archive.html",
+    ]
+    archive_html = next((p for p in candidates if p.is_file()), candidates[0])
+    template = archive_html.read_text(encoding="utf-8")
     script = template.split("<script>", 1)[1].split("</script>", 1)[0]
     # The first DOM listener starts browser wiring. Everything before it is the
     # pure presentation/filter surface we want to execute against test records.
@@ -519,6 +523,48 @@ console.log(JSON.stringify(result));
     print("  [OK] registry compact chips and independent signed/attention filters")
 
 
+def test_export_route_archives_reviewer_names_and_recovers_missing_names() -> None:
+    root, original = _isolate_archive()
+    try:
+        app = FastAPI()
+        app.include_router(export_router.router, prefix="/api")
+        app.include_router(archive_router, prefix="/api")
+        client = TestClient(app)
+
+        # 1. Export with reviewer names
+        response = client.post("/api/export-report", json={
+            "approvals": {
+                "customer_name": "ITC Ltd",
+                "env_type": "Production",
+                "pe": {"name": "Ayush Mathur", "approved": True, "date": "2026-09-09"},
+                "customer": {"name": "Antony Castaldi", "approved": True, "date": "2026-09-09"},
+            },
+        })
+        _assert(response.status_code == 200, f"export failed: {response.status_code}")
+
+        reports = report_archive.list_reports()
+        _assert(len(reports) == 1, f"expected 1 report: {reports}")
+        _assert(reports[0]["customer"] == "ITC Ltd", f"wrong customer: {reports[0]}")
+        _assert(reports[0]["pe_name"] == "Ayush Mathur", f"pe_name not preserved: {reports[0]}")
+        _assert(reports[0]["cust_name"] == "Antony Castaldi", f"cust_name not preserved: {reports[0]}")
+        _assert(reports[0]["env"] == "Production", f"env not preserved: {reports[0]}")
+
+        # 2. Simulate older/corrupted DB row with empty names
+        conn = sqlite3.connect(report_archive._DB_PATH)
+        conn.execute("UPDATE reports SET pe_name = '', cust_name = '', env = '' WHERE customer_slug = 'itc-ltd'")
+        conn.commit()
+        conn.close()
+
+        # Re-list reports: auto-recovery should restore them from the stored snapshot JSON or HTML
+        recovered = report_archive.list_reports()
+        _assert(recovered[0]["pe_name"] == "Ayush Mathur", f"auto-recovery failed for pe_name: {recovered[0]}")
+        _assert(recovered[0]["cust_name"] == "Antony Castaldi", f"auto-recovery failed for cust_name: {recovered[0]}")
+        _assert(recovered[0]["env"] == "Production", f"auto-recovery failed for env: {recovered[0]}")
+        print("  [OK] export preserves reviewer names and auto-recovers missing DB names")
+    finally:
+        _restore_archive(root, original)
+
+
 def main() -> None:
     print("Report archive regression suite")
     print("-" * 60)
@@ -536,6 +582,7 @@ def main() -> None:
     test_registry_fixture_keeps_signoff_and_attention_filters_independent()
     test_exported_fleet_score_matches_the_frozen_archive_value()
     test_registry_template_compacts_rows_and_filters_independent_facts()
+    test_export_route_archives_reviewer_names_and_recovers_missing_names()
     print("-" * 60)
     print("REPORT ARCHIVE CHECKS PASSED")
 

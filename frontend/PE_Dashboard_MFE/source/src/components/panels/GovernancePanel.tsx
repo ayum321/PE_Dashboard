@@ -146,10 +146,26 @@ export function GovernancePanel() {
       const archiveEnv = typeof exportEvidence.env_type === 'string'
         ? exportEvidence.env_type
         : 'Not Detected';
+      const peName = approvals.pe.name ? approvals.pe.name.trim() : '';
+      const custName = approvals.customer.name ? approvals.customer.name.trim() : '';
       const payload = {
         ...exportEvidence,
+        pe_name: peName,
+        cust_name: custName,
+        pe_approved: approvals.pe.approved,
+        cust_approved: approvals.customer.approved,
         approvals: {
           ...approvals,
+          pe: {
+            ...approvals.pe,
+            name: peName,
+          },
+          customer: {
+            ...approvals.customer,
+            name: custName,
+          },
+          pe_name: peName,
+          cust_name: custName,
           customer_name: data.customerName || '',
           env_type: archiveEnv,
         },

@@ -788,7 +788,11 @@ def _checklist_rows(checklist: dict, evidence: dict) -> tuple[str, int]:
     return "".join(rows), mismatch_count
 
 
-def _latest_registry_metadata(report: dict[str, Any]) -> dict[str, Any]:
+def _latest_registry_metadata(
+    report: dict[str, Any],
+    legacy_ctx: Optional[dict[str, Any]] = None,
+    body: Optional[Any] = None,
+) -> dict[str, Any]:
     """Copy the frozen export payload into the legacy latest-report index.
 
     Review Registry remains a convenience view with one current report per
@@ -805,14 +809,83 @@ def _latest_registry_metadata(report: dict[str, Any]) -> dict[str, Any]:
     benchmark = report.get("benchmark") if isinstance(report.get("benchmark"), dict) else {}
     sign_off = str(meta.get("sign_off_status") or "draft").strip().lower()
 
+    approvals = {}
+    if body is not None:
+        if isinstance(body, dict):
+            approvals = body.get("approvals") or {}
+        elif hasattr(body, "approvals") and body.approvals:
+            approvals = body.approvals or {}
+        elif hasattr(body, "model_dump"):
+            approvals = body.model_dump(exclude_none=True).get("approvals") or {}
+
+    pe_info = approvals.get("pe") if isinstance(approvals, dict) else {}
+    cust_info = approvals.get("customer") if isinstance(approvals, dict) else {}
+
+    pe_name = ""
+    cust_name = ""
+    env = ""
+
+    if isinstance(pe_info, dict) and pe_info.get("name"):
+        pe_name = str(pe_info["name"]).strip()
+    if not pe_name and isinstance(approvals, dict) and approvals.get("pe_name"):
+        pe_name = str(approvals["pe_name"]).strip()
+    if not pe_name and legacy_ctx and legacy_ctx.get("pe_name") and legacy_ctx["pe_name"] != "—":
+        pe_name = str(legacy_ctx["pe_name"]).strip()
+    if not pe_name and meta.get("pe_name"):
+        pe_name = str(meta["pe_name"]).strip()
+
+    if isinstance(cust_info, dict) and cust_info.get("name"):
+        cust_name = str(cust_info["name"]).strip()
+    if not cust_name and isinstance(approvals, dict) and approvals.get("cust_name"):
+        cust_name = str(approvals["cust_name"]).strip()
+    if not cust_name and legacy_ctx and legacy_ctx.get("cust_name") and legacy_ctx["cust_name"] != "—":
+        cust_name = str(legacy_ctx["cust_name"]).strip()
+    if not cust_name and meta.get("cust_name"):
+        cust_name = str(meta["cust_name"]).strip()
+
+    if isinstance(approvals, dict) and approvals.get("env_type"):
+        env = str(approvals["env_type"]).strip()
+    if not env and legacy_ctx and legacy_ctx.get("env") and legacy_ctx["env"] != "Not Detected":
+        env = str(legacy_ctx["env"]).strip()
+    if not env and meta.get("env") and meta["env"] != "Not Detected":
+        env = str(meta["env"]).strip()
+
+    pe_approved = sign_off in {"reviewed", "customer_approved"}
+    if legacy_ctx and "pe_approved" in legacy_ctx:
+        pe_approved = bool(legacy_ctx["pe_approved"])
+    elif isinstance(pe_info, dict) and "approved" in pe_info:
+        pe_approved = bool(pe_info["approved"])
+    elif "pe_approved" in meta:
+        pe_approved = bool(meta["pe_approved"])
+
+    cust_approved = sign_off == "customer_approved"
+    if legacy_ctx and "cust_approved" in legacy_ctx:
+        cust_approved = bool(legacy_ctx["cust_approved"])
+    elif isinstance(cust_info, dict) and "approved" in cust_info:
+        cust_approved = bool(cust_info["approved"])
+    elif "cust_approved" in meta:
+        cust_approved = bool(meta["cust_approved"])
+
+    checklist_mismatches = 0
+    if legacy_ctx and "checklist_mismatches" in legacy_ctx:
+        try:
+            checklist_mismatches = int(legacy_ctx["checklist_mismatches"])
+        except (ValueError, TypeError):
+            checklist_mismatches = 0
+    elif "checklist_mismatches" in meta:
+        try:
+            checklist_mismatches = int(meta["checklist_mismatches"])
+        except (ValueError, TypeError):
+            checklist_mismatches = 0
+
     return {
         "generated_at": meta.get("generated_at"),
-        "env": "",
-        "pe_approved": sign_off in {"reviewed", "customer_approved"},
-        "cust_approved": sign_off == "customer_approved",
-        "pe_name": "",
-        "cust_name": "",
-        "checklist_mismatches": 0,
+        "env": env,
+        "pe_approved": pe_approved,
+        "cust_approved": cust_approved,
+        "pe_name": pe_name,
+        "cust_name": cust_name,
+        "checklist_mismatches": checklist_mismatches,
         # All fields below are read from the same frozen payload rendered into
         # the downloaded HTML.  Missing values stay missing; ``save`` handles
         # the captured flags without fabricating display numbers.
@@ -1904,7 +1977,11 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             if not attached.get("ok"):
                 archive_status = "payload_saved_html_failed"
             else:
-                latest = report_archive.save(customer, rendered_html, _latest_registry_metadata(report))
+                latest = report_archive.save(
+                    customer,
+                    rendered_html,
+                    _latest_registry_metadata(report, legacy_ctx=legacy_ctx, body=export_body),
+                )
                 archive_status = "saved" if latest.get("ok") else "failed"
 
         filename = report_archive.download_filename(audit_id).replace("_archived", "")

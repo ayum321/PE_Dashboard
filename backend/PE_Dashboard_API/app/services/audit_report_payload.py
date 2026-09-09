@@ -340,6 +340,9 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
     customer_approval = _as_dict(approvals.get("customer"))
     requested_customer_approval = bool(customer_approval.get("approved"))
     requested_pe_review = bool(pe.get("approved"))
+    pe_name = _text(pe.get("name") or approvals.get("pe_name") or body.get("pe_name"))
+    cust_name = _text(customer_approval.get("name") or approvals.get("cust_name") or body.get("cust_name"))
+    env = _text(approvals.get("env_type") or body.get("env_type") or body.get("env"))
     if requested_customer_approval and resource_summary is None:
         quality_flags.append("Customer-approved sign-off was blocked because the resource fleet summary is missing.")
     sign_off = "customer_approved" if requested_customer_approval and requested_pe_review and resource_summary is not None else ("reviewed" if requested_pe_review else "draft")
@@ -364,12 +367,18 @@ def build_audit_report_payload(body: dict[str, Any], *, audit_id: str | None = N
             "data_coverage_pct": _number(_as_dict(batch.get("data_coverage")).get("confidence")),
             "missing_metrics": ["resource fleet summary"] if resource_summary is None else [],
             "sign_off_status": sign_off,
+            "pe_name": pe_name,
+            "cust_name": cust_name,
+            "pe_approved": requested_pe_review,
+            "cust_approved": requested_customer_approval,
+            "env": env,
             # Preserve the source record count for the Review Registry.  It is
             # deliberately independent from generated priority actions: an
             # action can be closed or filtered without changing how many
             # issues the reviewer logged for this audit.
             "issues_logged_count": len(issues),
         },
+        "approvals": approvals,
         "executive_verdict": {"headline": headline, "confidence_pct": _number(final.get("confidence_pct") or batch_kpis.get("confidence")), "data_quality_flags": quality_flags},
         "priority_actions": _priority_actions(batch, exceptions, sow_metrics, issues),
         "batch_sla": {
