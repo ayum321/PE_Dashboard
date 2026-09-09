@@ -184,6 +184,9 @@ class SlaMatrixResponse(BaseModel):
     # Strict BatchSLA schema evidence, passed through from the accepted upload.
     # React renders this as source-state information; it never recalculates SLA.
     batch_sla_mapping_report: Optional[Dict[str, Any]] = None
+    warnings:          Optional[List[str]] = None
+    ingest_id:         Optional[str] = None
+    parser_version:    Optional[str] = None
 
 
 class JsonSlaRequest(BaseModel):
@@ -260,14 +263,26 @@ def _compute_sla_matrix(
     _batch_sla_rows: list[dict] = []
     _batch_sla_mapping_report: dict[str, Any] | None = None
     _sow_windows: dict = {}
+    _parser_version: str = ""
+    _ingest_id: str = ""
+    _sla_matrix_warnings: list[str] = []
     try:
         from services import config_store as _cs2
         _bsla = _cs2.get("_batch_sla_xlsx") or {}
         _batch_sla_rows = _bsla.get("workflows") or []
         _batch_sla_mapping_report = _bsla.get("mapping_report") or None
         _sow_windows = _cs2.get("_sow_sla_windows") or {}
+        _parser_version = str(_bsla.get("parser_version") or "")
+        _ingest_id = str(_bsla.get("ingest_id") or "")
     except Exception:
         pass
+
+    CURRENT_PARSER_VERSION = "module-alias-v2"
+    if _batch_sla_rows and _parser_version != CURRENT_PARSER_VERSION:
+        _sla_matrix_warnings.append(
+            f"SLA workbook was parsed by an older engine (v{_parser_version or 'unknown'}). "
+            f"Re-upload the BatchSLA file to use the latest parser (v{CURRENT_PARSER_VERSION})."
+        )
 
     # ── Build a fast bulk-normalized lookup from the BatchSLA XLSX ──────
     # This is the O(1) path: strip env prefix from XLSX workflow names once,
@@ -323,6 +338,26 @@ def _compute_sla_matrix(
     # When two XLSX workflows share a secondary stripped key (e.g. "DAILY_BATCH" from
     # both "PETBARN_DAILY_BATCH" and "TESCO_DAILY_BATCH"), indexing the secondary form
     # gives last-writer-wins and silently assigns the wrong SLA. Skip colliding secondaries.
+    # Map of workflows explicitly marked "No SLA" in the workbook (Comments column)
+    _bsla_undeclared: set[str] = set()
+    _bsla_undeclared_rows: dict[str, dict] = {}
+    for row in _batch_sla_rows:
+        if row.get("sla_undeclared") or row.get("sla_source") == "SLA_UNDECLARED" or row.get("sla_confidence") == "EXPLICIT_NONE":
+            _all_u_names = []
+            for _n in [row.get("workflow"), row.get("module")] + list(row.get("aliases") or []):
+                if _n and str(_n).strip() and str(_n).strip() not in _all_u_names:
+                    _all_u_names.append(str(_n).strip())
+            for _u_item in _all_u_names:
+                try:
+                    from services.sla_merger import _all_normalized_forms as _uanf
+                    _u_forms = _uanf(_u_item)
+                except Exception:
+                    _u_forms = [_norm(_u_item)]
+                for _uf in _u_forms:
+                    if _uf:
+                        _bsla_undeclared.add(_uf)
+                        _bsla_undeclared_rows[_uf] = row
+
     _secondary_key_count: dict[str, int] = {}
     for row in _batch_sla_rows:
         sla_h = row.get("sla_hours")
@@ -1061,6 +1096,12 @@ def _compute_sla_matrix(
                             or _bsla_full.get(norm_sub)
                             or {}
                         )
+                    else:
+                        _anchor_row = (
+                            _bsla_full.get(norm_sub)
+                            or _bsla_undeclared_rows.get(norm_sub)
+                            or {}
+                        )
                 _first_anchors = _anchor_row.get("first_jobs_list") or ([_anchor_row.get("first_job")] if _anchor_row.get("first_job") else [])
                 _last_anchors  = _anchor_row.get("last_jobs_list")  or ([_anchor_row.get("last_job")]  if _anchor_row.get("last_job")  else [])
                 _first_anchors = [str(a).strip() for a in _first_anchors if a and str(a).strip() and str(a).strip().upper() not in ("UNKNOWN", "NONE", "NAN", "—", "")]
@@ -1287,20 +1328,36 @@ def _compute_sla_matrix(
                 join_hit  = False
                 sla_src_wf = "none"
 
+                # Check if this workflow is explicitly declared as "No SLA" in the workbook
+                is_explicit_no_sla = (
+                    norm_sub in _bsla_undeclared
+                    or bool(_anchor_row.get("sla_undeclared"))
+                    or _anchor_row.get("sla_source") == "SLA_UNDECLARED"
+                )
+                if is_explicit_no_sla:
+                    sla_h_wf = None
+                    sla_src_wf = "SLA_UNDECLARED"
+                    raw_batch_name_wf = (
+                        _anchor_row.get("workflow")
+                        or _bsla_undeclared_rows.get(norm_sub, {}).get("workflow")
+                        or sub_app
+                    )
+                    join_hit = True
+
                 # Tier 1 — use the pre-computed hit (already resolved above for anchors).
                 # Reuse avoids a second pass through _bulk_lookup_bsla.
-                if _bsla_pre:
+                if sla_h_wf is None and sla_src_wf != "SLA_UNDECLARED" and _bsla_pre:
                     sla_h_wf, sla_src_wf, raw_batch_name_wf = _bsla_pre
                     join_hit = True
 
                 # Tier 1.5 — time-window SLA inference (Start_Time + Expected_End_Time in anchor row)
                 # Handles contracts where SLA was specified as a clock window (e.g. 05:00 AM -> 8:30 AM = 3.5h)
-                if sla_h_wf is None and _anchor_row:
+                if sla_h_wf is None and sla_src_wf != "SLA_UNDECLARED" and _anchor_row:
                     if _anchor_row.get("sla_hours") and float(_anchor_row.get("sla_hours", 0)) > 0:
                         sla_h_wf = float(_anchor_row["sla_hours"])
                         sla_src_wf = _anchor_row.get("sla_source") or "batch_sla_xlsx"
                         join_hit = True
-                    else:
+                    elif not is_explicit_no_sla:
                         _st_cand = _anchor_row.get("start_time") or _anchor_row.get("start") or _anchor_row.get("workbook_start_time")
                         _et_cand = _anchor_row.get("expected_end_time") or _anchor_row.get("end") or _anchor_row.get("sla") or _anchor_row.get("workbook_expected_end")
                         if _st_cand and _et_cand:
@@ -1315,7 +1372,7 @@ def _compute_sla_matrix(
                                 pass
 
                 # Tier 2 — SOW-extracted batch-type ceiling
-                if sla_h_wf is None and _sow_windows:
+                if sla_h_wf is None and sla_src_wf != "SLA_UNDECLARED" and _sow_windows:
                     try:
                         from services.sla_merger import detect_batch_type as _dbt
                         _bt2 = _dbt(sub_app, _sched_txt)
@@ -1329,7 +1386,7 @@ def _compute_sla_matrix(
                         pass
 
                 # Tier 3 — batch-type-aware global default (respects active global_sla_hrs and pe_config ceilings)
-                if sla_h_wf is None:
+                if sla_h_wf is None and sla_src_wf != "SLA_UNDECLARED":
                     try:
                         from services import pe_config as _pc
                         from services.sla_merger import detect_batch_type as _dbt3
@@ -1356,7 +1413,11 @@ def _compute_sla_matrix(
                     batch_type_wf = "UNKNOWN"
 
                 # ── Buffer formula (workflow level) ───────────────────────
-                if runtime_h <= 0:
+                if sla_src_wf == "SLA_UNDECLARED":
+                    buf_wf    = None
+                    status_wf = "SLA_UNDECLARED"
+                    buf_rsn   = "Workbook explicitly marked this workflow as 'No SLA'; no default ceiling is assigned"
+                elif runtime_h <= 0:
                     buf_wf    = None
                     status_wf = "RUNTIME_MISSING"
                     buf_rsn   = "No valid Start_Time/End_Time in Ctrl-M export for this workflow"
@@ -1538,12 +1599,25 @@ def _compute_sla_matrix(
                     _display_sub_app = f"{_base_sa} ({_sched_part})"
                     _display_wf_name = f"{raw_batch_name_wf or _base_sa} ({_sched_part})"
 
+                row_tier = (
+                    "T1" if (sla_src_wf and "batch_sla_xlsx" in sla_src_wf) else
+                    ("T2" if sla_src_wf == "sow_extracted" else
+                     ("UNDECLARED" if sla_src_wf == "SLA_UNDECLARED" else "T3"))
+                )
+                measurement_state = (
+                    "VALID" if anchor_used and runtime_h is not None and runtime_h > 0 else
+                    ("ANCHOR_UNMATCHED" if not anchor_used and runtime_h is not None and runtime_h > 0 else
+                     ("NOT_OBSERVED" if not runtime_h or runtime_h <= 0 else "WORKBOOK_REPORTED"))
+                )
+
                 workflow_summary.append({
                     # ── Canonical columns ──
                     "workflow_key":    norm_sub,
                     "workflow_name":   _display_wf_name,
                     "sub_application": _display_sub_app,
                     "batch_type":      batch_type_wf or "UNKNOWN",
+                    "tier":            row_tier,
+                    "measurement_state": measurement_state,
                     "workflow_start":  wf_start_s,
                     "workflow_end":    wf_end_s,
                     # Public, stable aliases for the React audit table.
@@ -1885,6 +1959,9 @@ def _compute_sla_matrix(
         data_format=data_format,
         workflow_summary=workflow_summary or None,
         batch_sla_mapping_report=_batch_sla_mapping_report,
+        warnings=_sla_matrix_warnings or None,
+        ingest_id=_ingest_id or None,
+        parser_version=_parser_version or None,
     )
 
     # ── Adaptive per-job baselines + resource correlation ──────────

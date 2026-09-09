@@ -244,7 +244,122 @@ class TestSlaRegressionFixes(unittest.TestCase):
         self.assertAlmostEqual(wf_825["buffer_pct"], -21.21, places=1)
         self.assertEqual(wf_825["status"], "BREACH")
 
+    def test_parse_batch_sla_comments_no_sla(self):
+        from services.sla_merger import _parse_sheet_workflows
+        warnings = []
+        df = pd.DataFrame([
+            {
+                "Batch_Name": "",
+                "Module": "PROD_ACT",
+                "Start_Time": "Monday & Tuesday",
+                "Expected End Time/SLA": "",
+                "Comments": "No SLA",
+            },
+            {
+                "Batch_Name": "",
+                "Module": "PROD_CALLOFF",
+                "Start_Time": "Daily at 05 AM",
+                "Expected End Time/SLA": "8:30 AM",
+                "Comments": "",
+            },
+        ])
+        wfs = _parse_sheet_workflows(df, warnings, "Sheet1")
+        self.assertEqual(len(wfs), 2)
+        act_wf = wfs[0]
+        self.assertEqual(act_wf["workflow"], "PROD_ACT")
+        self.assertTrue(act_wf["sla_undeclared"])
+        self.assertEqual(act_wf["sla_source"], "SLA_UNDECLARED")
+        self.assertIsNone(act_wf["sla_hours"])
+        self.assertEqual(act_wf["sla_confidence"], "EXPLICIT_NONE")
+
+        calloff_wf = wfs[1]
+        self.assertEqual(calloff_wf["workflow"], "PROD_CALLOFF")
+        self.assertFalse(calloff_wf["sla_undeclared"])
+        self.assertEqual(calloff_wf["sla_hours"], 3.5)
+        self.assertEqual(calloff_wf["sla_confidence"], "VERIFIED")
+
+    def test_sla_matrix_undeclared_workflow_does_not_fall_to_tier_3(self):
+        # When a workflow is marked "No SLA" in the workbook,
+        # _compute_sla_matrix MUST NOT assign 6.0h default!
+        config_store.set("_batch_sla_xlsx", {
+            "parser_version": "module-alias-v2",
+            "workflows": [
+                {
+                    "workflow": "PROD_ACT",
+                    "module": "PROD_ACT",
+                    "aliases": ["PROD_ACT"],
+                    "sla_hours": None,
+                    "sla_source": "SLA_UNDECLARED",
+                    "sla_undeclared": True,
+                    "sla_confidence": "EXPLICIT_NONE",
+                },
+                {
+                    "workflow": "ASC_NIGHTLY",
+                    "module": "PROD_ATTA",
+                    "aliases": ["ASC_NIGHTLY", "PROD_ATTA"],
+                    "sla_hours": 3.0,
+                    "sla_source": "BATCH_SLA_XLSX",
+                    "sla_confidence": "VERIFIED",
+                },
+            ],
+        })
+
+        df = pd.DataFrame([
+            {
+                "Job_Name": "P_IC_ACT_JOB",
+                "Sub_Application": "PROD_ACT",
+                "Start_Time": "2026-08-30 00:00:00",
+                "End_Time": "2026-08-30 11:52:00",  # ~11.87h
+            },
+            {
+                "Job_Name": "P_ESP_ATTA_JOB",
+                "Sub_Application": "PROD_ATTA",
+                "Start_Time": "2026-08-30 00:00:00",
+                "End_Time": "2026-08-30 01:00:00",  # 1.0h (buffer 66.7% -> OK)
+            },
+        ])
+
+        resp = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=6.0)
+        sum_rows = {w["sub_application"]: w for w in (resp.workflow_summary or [])}
+
+        # PROD_ACT must be UNDECLARED, not 6.0h BREACH!
+        act_row = sum_rows.get("PROD_ACT")
+        self.assertIsNotNone(act_row)
+        self.assertIsNone(act_row["sla_h"])
+        self.assertEqual(act_row["sla_source"], "SLA_UNDECLARED")
+        self.assertEqual(act_row["status"], "SLA_UNDECLARED")
+        self.assertEqual(act_row["tier"], "UNDECLARED")
+        self.assertIsNone(act_row["buffer_pct"])
+        self.assertIsNone(act_row["duration_headroom_mins"])
+
+        # PROD_ATTA must match via module alias to ASC_NIGHTLY's 3.0h SLA (Tier 1)!
+        atta_row = sum_rows.get("PROD_ATTA")
+        self.assertIsNotNone(atta_row)
+        self.assertEqual(atta_row["sla_h"], 3.0)
+        self.assertEqual(atta_row["tier"], "T1")
+        self.assertEqual(atta_row["status"], "OK")
+
+    def test_stale_cache_warning_detection(self):
+        # Older parser version should trigger a warning in SlaMatrixResponse
+        config_store.set("_batch_sla_xlsx", {
+            "parser_version": "v1-legacy",
+            "workflows": [
+                {"workflow": "SOME_WF", "sla_hours": 4.0},
+            ],
+        })
+        df = pd.DataFrame([
+            {
+                "Job_Name": "JOB_1",
+                "Sub_Application": "SOME_WF",
+                "Start_Time": "2026-08-30 00:00:00",
+                "End_Time": "2026-08-30 01:00:00",
+            },
+        ])
+        resp = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=6.0)
+        self.assertTrue(any("older engine" in w for w in (resp.warnings or [])))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

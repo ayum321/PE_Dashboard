@@ -38,8 +38,11 @@ Public API:
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import re
+import uuid
+from datetime import datetime, timezone
 from numbers import Number
 from typing import Any, Dict, List, Optional
 
@@ -645,6 +648,7 @@ def parse_start_time(value: Any) -> Any:
 # ── Parse BatchSLA_info.xlsx ──────────────────────────────────────────────────
 
 _BATCH_SLA_SCHEMA_VERSION = "2"
+PARSER_VERSION = "module-alias-v2"
 
 # Strict v1 registry.  Each entry is an observed header form backed by either
 # the supplied BatchSLA sheet or a direct regression fixture.  Do not add
@@ -716,9 +720,11 @@ _BATCH_SLA_FIELDS: dict[str, dict[str, Any]] = {
         },
     },
     "comments": {
-        "required": False, "internal": None, "aliases": {
+        "required": False, "internal": "Comments", "aliases": {
             "comments": "provided BatchSLA header",
             "comment": "Batch_SLA.xlsx",
+            "remarks": "Batch_SLA.xlsx",
+            "notes": "Batch_SLA.xlsx",
         },
     },
 }
@@ -1046,6 +1052,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
     # observed completion for this workbook-only SLA matrix.
     contract_dur_series = _col(df, "Contract_Duration", optional=True)
     module_series       = _col(df, "Module",            optional=True)
+    comments_series     = _col(df, "Comments",          optional=True)
 
     workflows: list[dict] = []
     _consecutive_nan_rows = 0   # track section boundary (reset per sheet)
@@ -1372,11 +1379,23 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
                     f"verify source. Value kept but flagged."
                 )
 
+        # ── "No SLA" detection from Comments column ─────────────────────
+        # When the workbook explicitly marks a row as having no SLA
+        # commitment, honour that declaration: set SLA_UNDECLARED so the
+        # resolver never silently assigns a global default ceiling.
+        raw_comment = _v(comments_series) if comments_series is not None else ""
+        _sla_undeclared = False
+        if raw_comment and "no sla" in raw_comment.lower():
+            _sla_undeclared = True
+            if sla_h is None and not contract_conflict:
+                sla_source = "SLA_UNDECLARED"
+
         # ── Tier 2/3 SLA fallback when XLSX has no SLA column ──────────
         # If the XLSX provides only runtime data (no SLA/Expected End Time),
         # sla_h is None and buffer% would show "—".  Apply the 3-tier resolver
         # so every workflow gets at least a default SLA for compliance scoring.
-        if sla_h is None and not contract_conflict:
+        # But skip for rows explicitly marked "No SLA" in the workbook.
+        if sla_h is None and not contract_conflict and not _sla_undeclared:
             try:
                 from services import config_store as _cs
                 _sow_w = _cs.get("_sow_sla_windows") or {}
@@ -1388,7 +1407,7 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
                         sla_source = "SOW_EXTRACTED"
             except Exception:
                 pass
-        if sla_h is None and not contract_conflict:
+        if sla_h is None and not contract_conflict and not _sla_undeclared:
             sla_h = _default_sla_for(btype)
             sla_source = "GLOBAL_DEFAULT"
 
@@ -1408,6 +1427,8 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             "is_parallel":        is_parallel,
             "sla_hours":          sla_h,
             "sla_source":         sla_source,
+            "sla_undeclared":     _sla_undeclared,
+            "sla_comment":        raw_comment or None,
             # VERIFIED   = the file has an explicit "Expected SLA"/"Expected End
             #              Time"/"SLA" column the customer labelled as the target
             #              (or a SOW ceiling) — no interpretation was required.
@@ -1416,8 +1437,10 @@ def _parse_sheet_workflows(df: "Any", warnings: list, sheet_name: str) -> list[d
             #              treated as the SLA target (see sla_schema below); this
             #              status compares an observed sample against the
             #              generic PE default, not a confirmed customer target.
+            # EXPLICIT_NONE = the workbook Comments column says "No SLA".
             "sla_confidence": (
                 "CONFLICT" if contract_conflict else
+                "EXPLICIT_NONE" if _sla_undeclared else
                 "VERIFIED" if sla_source in ("BATCH_SLA_XLSX", "SOW_EXTRACTED") else "UNVERIFIED"
             ),
             # Which file-shape case this row was classified as — the dashboard's
@@ -1758,6 +1781,12 @@ def parse_batch_sla_xlsx(raw_bytes: bytes, filename: str = "BatchSLA_info.xlsx")
         "source_sheet": ", ".join(_sheets_used) if _sheets_used else None,
         "warnings":  warnings,
         "ingestion_status": "accepted",
+        # Versioned ingestion metadata — downstream consumers (sla_matrix.py)
+        # check parser_version to detect stale caches and prompt re-upload.
+        "parser_version": PARSER_VERSION,
+        "file_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "ingest_id": str(uuid.uuid4()),
+        "parsed_at": datetime.now(timezone.utc).isoformat(),
         "mapping_report": {
             "schema_version": _BATCH_SLA_SCHEMA_VERSION,
             "status": "accepted",
@@ -1813,9 +1842,14 @@ def build_workbook_sla_snapshot(parsed: dict) -> dict:
                     "Workbook clock-window and declared Duration values conflict; no SLA was selected."
                 )
             elif not declared_in_workbook:
-                status = "SLA_MISSING"
-                reason_code = "SLA_NOT_DECLARED_IN_WORKBOOK"
-                reason_detail = "This workbook does not declare an SLA target for this row, so no default ceiling is shown as customer evidence."
+                if workflow.get("sla_undeclared") or workflow.get("sla_source") == "SLA_UNDECLARED":
+                    status = "SLA_UNDECLARED"
+                    reason_code = "SLA_NOT_DECLARED_IN_WORKBOOK"
+                    reason_detail = "Workbook explicitly marks this workflow as 'No SLA'; no default ceiling is assigned."
+                else:
+                    status = "SLA_MISSING"
+                    reason_code = "SLA_NOT_DECLARED_IN_WORKBOOK"
+                    reason_detail = "This workbook does not declare an SLA target for this row, so no default ceiling is shown as customer evidence."
             else:
                 status = "NOT_OBSERVED"
                 reason_code = "COMPLETION_NOT_REPORTED"
@@ -1829,12 +1863,21 @@ def build_workbook_sla_snapshot(parsed: dict) -> dict:
                 reason_code = "WORKBOOK_REPORTED_COMPLETION"
                 reason_detail = "Duration is calculated only from this workbook's Start Time and Current end time."
 
+        is_undeclared = bool(workflow.get("sla_undeclared") or workflow.get("sla_source") == "SLA_UNDECLARED")
+        row_tier = "T1" if declared_in_workbook else ("UNDECLARED" if is_undeclared else "T3")
+        row_sla_source = (
+            "batch_sla_xlsx_conflict" if contract_conflict else
+            ("batch_sla_xlsx" if declared_in_workbook else
+             ("SLA_UNDECLARED" if is_undeclared else "global"))
+        )
+
         summary.append({
             "workflow_name": workflow.get("workflow"),
             "workflow_key": workflow.get("workflow"),
             "batch_type": workflow.get("batch_type"),
+            "tier": row_tier,
             "sla_h": sla_h,
-            "sla_source": "batch_sla_xlsx_conflict" if contract_conflict else ("batch_sla_xlsx" if declared_in_workbook else "global"),
+            "sla_source": row_sla_source,
             "runtime_h": runtime_h,
             "buffer_pct": buffer_pct,
             "duration_headroom_mins": duration_headroom_mins,

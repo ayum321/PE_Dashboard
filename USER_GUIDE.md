@@ -28,7 +28,8 @@
 Open your browser and go to the portal URL shared by your team:
 
 ```
-https://<your-host>/pe-dashboard
+Access the Portal:
+https://pedashboard-api-ui-asre-plan-ai-agents.us.live.internal.byp.ai/uploaddashboard
 ```
 
 - No installation needed — it runs fully in the browser.

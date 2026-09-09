@@ -83,6 +83,8 @@ interface WorkflowSummaryRow {
   workflow_name?: string;
   sub_application?: string;
   batch_type?: string;
+  tier?: string | null;
+  measurement_state?: string | null;
   runtime_h?: number;
   sla_h?: number;
   sla_source?: string;
@@ -175,19 +177,48 @@ const CONFIDENCE_LABEL: Record<string, string> = {
 };
 const DRILL_LABEL: Record<string, string> = { OK: 'OK', LONG_JOB: 'Long Job', AT_RISK: 'At Risk', BREACH: 'Breach', FAILED: 'Failed' };
 const DRILL_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#3b82f6', AT_RISK: '#f59e0b', BREACH: '#f43f5e', FAILED: '#6b7db3' };
-const WF_STATUS_COLOR: Record<string, string> = { OK: '#10d96e', LONG_JOB: '#2dd4bf', AT_RISK: '#f59e0b', BREACH: '#f43f5e', NO_BUFFER: '#f59e0b', NOT_OBSERVED: '#6b7db3', SLA_MISSING: '#f59e0b', SLA_CONTRACT_CONFLICT: '#fb7185', UNKNOWN: '#6b7db3' };
+const WF_STATUS_COLOR: Record<string, string> = {
+  OK: '#10d96e', LONG_JOB: '#2dd4bf', AT_RISK: '#f59e0b', BREACH: '#f43f5e',
+  NO_BUFFER: '#f59e0b', NOT_OBSERVED: '#6b7db3', SLA_MISSING: '#f59e0b',
+  SLA_UNDECLARED: '#f59e0b', SLA_CONTRACT_CONFLICT: '#fb7185', UNKNOWN: '#6b7db3',
+};
 
-/** Tier bucket from a workflow row's sla_source, mirrors the real dashboard's
- * "Active SLA Commitments" Tier 1 (BatchSLA XLSX) / Tier 2 (SOW) / Tier 3 (default) split. */
-function _workflowTier(src: string): 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides' | 'Tier 2 \u2014 SOW Contract Batch Window Ceilings' | 'Tier 3 \u2014 Global Defaults' {
-  if (src.startsWith('batch_sla_xlsx') || src.includes('time_window') || src.includes('inferred')) return 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides';
-  if (src === 'sow_extracted') return 'Tier 2 \u2014 SOW Contract Batch Window Ceilings';
-  return 'Tier 3 \u2014 Global Defaults';
+/** Tier bucket from a workflow row's sla_source and backend tier, mirrors the real dashboard's
+ * Tier 1 (BatchSLA XLSX) / Tier 2 (SOW) / Tier 3 (default) / No SLA Declared split. */
+function _workflowTier(src: string, rowTier?: string | null): 'Tier 1 — BatchSLA_info.xlsx Workflow Overrides' | 'Tier 2 — SOW Contract Batch Window Ceilings' | 'Tier 3 — Global Defaults' | 'No SLA Declared' {
+  if (rowTier === 'UNDECLARED' || src === 'SLA_UNDECLARED') return 'No SLA Declared';
+  if (rowTier === 'T1' || src.startsWith('batch_sla_xlsx') || src.includes('time_window') || src.includes('inferred')) return 'Tier 1 — BatchSLA_info.xlsx Workflow Overrides';
+  if (rowTier === 'T2' || src === 'sow_extracted') return 'Tier 2 — SOW Contract Batch Window Ceilings';
+  return 'Tier 3 — Global Defaults';
 }
 
 function renderTierBadge(wf: WorkflowSummaryRow, currentCeiling?: number) {
-  const tier = _workflowTier(wf.sla_source || '');
-  if (tier === 'Tier 1 \u2014 BatchSLA_info.xlsx Workflow Overrides') {
+  const rowTier = wf.tier;
+  const isUndeclared = rowTier === 'UNDECLARED' || wf.sla_source === 'SLA_UNDECLARED' || wf.status === 'SLA_UNDECLARED';
+  if (isUndeclared) {
+    return (
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          padding: '2px 6px',
+          borderRadius: 4,
+          fontSize: 10,
+          fontWeight: 700,
+          fontFamily: 'monospace',
+          background: 'rgba(245, 158, 11, 0.12)',
+          color: '#f59e0b',
+          border: '1px solid rgba(245, 158, 11, 0.35)',
+          whiteSpace: 'nowrap',
+        }}
+        title="No SLA declared in workbook for this workflow — no default ceiling assumed"
+      >
+        No SLA
+      </span>
+    );
+  }
+  const tier = _workflowTier(wf.sla_source || '', rowTier);
+  if (tier === 'Tier 1 — BatchSLA_info.xlsx Workflow Overrides') {
     return (
       <span
         style={{
@@ -209,7 +240,7 @@ function renderTierBadge(wf: WorkflowSummaryRow, currentCeiling?: number) {
       </span>
     );
   }
-  if (tier === 'Tier 2 \u2014 SOW Contract Batch Window Ceilings') {
+  if (tier === 'Tier 2 — SOW Contract Batch Window Ceilings') {
     return (
       <span
         style={{
@@ -231,7 +262,9 @@ function renderTierBadge(wf: WorkflowSummaryRow, currentCeiling?: number) {
       </span>
     );
   }
-  const ceilVal = currentCeiling ?? Number(wf.sla_h) ?? 6.0;
+  // Defect 4 fix: use row's actual sla_h first, then currentCeiling fallback
+  const rowSla = _finiteNumber(wf.sla_h);
+  const ceilVal = (rowSla != null && rowSla > 0) ? rowSla : (currentCeiling ?? 6.0);
   const ceilLabel = `${ceilVal.toFixed(2).replace(/\.?0+$/, '')}h`;
   return (
     <span
@@ -277,6 +310,7 @@ function _clockAfterHours(start: unknown, hours: number | null): string | null {
 }
 
 function _workflowHeadroom(wf: WorkflowSummaryRow): number | null {
+  if (wf.status === 'SLA_UNDECLARED' || wf.sla_source === 'SLA_UNDECLARED' || wf.tier === 'UNDECLARED') return null;
   const supplied = _finiteNumber(wf.duration_headroom_mins);
   if (supplied != null) return Math.round(supplied);
   const runtime = _finiteNumber(wf.runtime_h);
@@ -311,9 +345,9 @@ function _workbookDurationLabel(wf: WorkflowSummaryRow): string {
 }
 
 function _workflowSlaLabel(wf: WorkflowSummaryRow): string {
-  return wf.status === 'SLA_CONTRACT_CONFLICT'
-    ? 'Contract conflict'
-    : wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '—';
+  if (wf.status === 'SLA_CONTRACT_CONFLICT') return 'Contract conflict';
+  if (wf.status === 'SLA_UNDECLARED' || wf.sla_source === 'SLA_UNDECLARED' || wf.tier === 'UNDECLARED') return '—';
+  return wf.sla_h != null ? `${Number(wf.sla_h).toFixed(1)}h` : '—';
 }
 
 const SOURCE_FIELD_LABEL: Record<string, string> = {
@@ -499,6 +533,7 @@ export function SlaMatrixPanel() {
   const compliancePct = Number(slaMatrix.compliance_pct) || 0;
   const windowDayPct = slaMatrix.window_day_compliance_pct != null ? Number(slaMatrix.window_day_compliance_pct) : compliancePct;
   const explicitSlaMatrix = slaMatrix.explicit_sla_matrix === true;
+  const isWorkbookOnly = Boolean((slaMatrix as any).workbook_only || (slaMatrix as any).source === 'batch_sla_xlsx');
   const atRiskThreshold = _configuredAtRiskThreshold(slaMatrix);
 
   // Sourced from the executive-dashboard endpoint (per sub-app SRI/CRS/breach correlation).
@@ -521,7 +556,7 @@ export function SlaMatrixPanel() {
   const workflowByTier = useMemo(() => {
     const groups = new Map<string, WorkflowSummaryRow[]>();
     workflowSummary.forEach((wf) => {
-      const tier = _workflowTier(wf.sla_source || '');
+      const tier = _workflowTier(wf.sla_source || '', wf.tier);
       if (!groups.has(tier)) groups.set(tier, []);
       groups.get(tier)!.push(wf);
     });
@@ -1001,8 +1036,21 @@ export function SlaMatrixPanel() {
             <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
               <Box>
                 <Typography variant="subtitle2" style={{ fontWeight: 800 }}>Workbook SLA Commitments</Typography>
-                <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) {'\u00b7'} Tier 2 (SOW contract ceilings) {'\u00b7'} Tier 3 (global defaults) {'\u2014'} live resolution order</Typography>
-                <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#8fa3d2' }}>Only a distinct workbook Current end time produces a measured duration. Headroom is SLA minus that duration; Buffer and Status use the same calculation.</Typography>
+                <Typography variant="caption" color="textSecondary">Tier 1 (BatchSLA workflows) · Tier 2 (SOW contract ceilings) · Tier 3 (global defaults) — live resolution order</Typography>
+                <Typography variant="caption" style={{ display: 'block', marginTop: 3, color: '#8fa3d2' }}>
+                  {isWorkbookOnly
+                    ? 'Only a distinct workbook Current end time produces a measured duration. Headroom is SLA minus that duration; Buffer and Status use the same calculation.'
+                    : 'Measured duration is derived from Ctrl-M timestamps (anchored when sentinel jobs match; overall workflow window when unanchored). Headroom is SLA minus measured duration.'}
+                </Typography>
+                {Array.isArray((slaMatrix as any).warnings) && (slaMatrix as any).warnings.length > 0 && (
+                  <Box style={{ marginTop: 8, padding: '8px 12px', borderRadius: 6, background: 'rgba(245, 158, 11, 0.1)', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                    {(slaMatrix as any).warnings.map((w: string, i: number) => (
+                      <Typography key={i} variant="caption" style={{ display: 'block', color: '#fbbf24', fontSize: 11 }}>
+                        ⚠️ {w}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
               </Box>
               <Box display="flex" alignItems="center" style={{ gap: 12 }}>
                 <input
@@ -1172,6 +1220,57 @@ export function SlaMatrixPanel() {
                             {wf.buffer_pct != null ? `${Number(wf.buffer_pct).toFixed(1)}%` : '\u2014'}
                           </TableCell>
                           <TableCell><span className="metric-badge" style={{ color: WF_STATUS_COLOR[wf.status || 'UNKNOWN'] || '#6b7db3' }}>{wf.status || 'UNKNOWN'}</span></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </Box>
+            )}
+
+            {/* Explicitly Undeclared — No SLA, shown when rows in the workbook declare No SLA */}
+            {workflowByTier.has('No SLA Declared') && (
+              <Box style={{ marginTop: 16 }}>
+                <Box display="flex" alignItems="center" style={{ gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'rgba(245,158,11,.2)', border: '1px solid rgba(245,158,11,.4)', color: '#f59e0b', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>—</span>
+                  <Typography variant="caption" style={{ fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10 }}>Undeclared Workflows — No SLA Contract Stated</Typography>
+                </Box>
+                {filterWorkflowRows(workflowByTier.get('No SLA Declared') || []).length === 0 ? (
+                  <Typography variant="caption" style={{ fontStyle: 'italic', color: '#6b7db3' }}>
+                    No undeclared workflows matching "{workflowSearch}"
+                  </Typography>
+                ) : (
+                  <Table size="small" className="pe-table" aria-label="SLA commitments undeclared">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Workflow</TableCell>
+                        <TableCell>Type</TableCell>
+                        <TableCell align="right">SLA</TableCell>
+                        {showWorkbookTiming && <TableCell>Contract window / source timing</TableCell>}
+                        <TableCell align="right">Measured duration</TableCell>
+                        <TableCell align="right">Duration headroom</TableCell>
+                        <TableCell align="right">Buffer %</TableCell>
+                        <TableCell>Status</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {filterWorkflowRows(workflowByTier.get('No SLA Declared') || []).slice(0, 20).map((wf, index) => (
+                        <TableRow key={`${wf.workflow_name || 'wf'}-${index}`}>
+                          <TableCell style={{ fontFamily: 'monospace' }}>
+                            <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                              <span>{wf.workflow_name || wf.workflow_key || '?'}</span>
+                              {renderTierBadge(wf, currentCeiling)}
+                            </Box>
+                          </TableCell>
+                          <TableCell>{wf.batch_type || '—'}</TableCell>
+                          <TableCell align="right" title="No SLA target declared in workbook">{_workflowSlaLabel(wf)}</TableCell>
+                          {showWorkbookTiming && <TableCell title={wf.measurement_reason_detail || 'Workbook timing provenance.'}>{_workbookTimingLabel(wf)}</TableCell>}
+                          <TableCell align="right" title={wf.measurement_reason_detail || 'Measured execution duration (diagnostic only — not scored against an SLA).'}>{_workbookDurationLabel(wf)}</TableCell>
+                          {renderHeadroomCell(wf)}
+                          <TableCell align="right" style={{ color: '#6b7db3' }}>
+                            —
+                          </TableCell>
+                          <TableCell><span className="metric-badge" style={{ color: '#f59e0b', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)' }}>NO SLA</span></TableCell>
                         </TableRow>
                       ))}
                     </TableBody>

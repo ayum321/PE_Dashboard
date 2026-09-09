@@ -880,6 +880,7 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
     # still help Batch Review but are not customer evidence in this upload.
     with_sla       = with_explicit
     with_fallback  = sum(1 for w in workflows if w.get("sla_source") in ("SOW_EXTRACTED", "GLOBAL_DEFAULT"))
+    with_undeclared = sum(1 for w in workflows if w.get("sla_undeclared") or w.get("sla_source") == "SLA_UNDECLARED")
     types = list({w.get("batch_type", "?") for w in workflows})
 
     return {
@@ -888,6 +889,10 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
         "with_sla_count":      with_sla,
         "with_explicit_sla":   with_explicit,
         "with_fallback_sla":   with_fallback,
+        "with_undeclared_sla": with_undeclared,
+        "parser_version":      result.get("parser_version"),
+        "ingest_id":           result.get("ingest_id"),
+        "file_sha256":         result.get("file_sha256"),
         "batch_types":         sorted(types),
         "warnings":            result.get("warnings") or [],
         "workflows":           workflows,

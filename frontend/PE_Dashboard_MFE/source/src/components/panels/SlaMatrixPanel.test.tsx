@@ -334,4 +334,48 @@ describe('SlaMatrixPanel', () => {
     expect(getByText('ALPHA_BATCH')).toBeDefined();
     expect(queryByText('BETA_REPORT')).toBeNull();
   });
+
+  it('renders No SLA badge and section for SLA_UNDECLARED workflows without fake headroom', () => {
+    const payloadNoSla = {
+      ...RICH_SLA_PAYLOAD,
+      workflow_summary: [
+        {
+          workflow_name: 'PROD_ACT',
+          batch_type: 'DAILY',
+          runtime_h: 11.87,
+          sla_h: null,
+          buffer_pct: null,
+          status: 'SLA_UNDECLARED',
+          sla_source: 'SLA_UNDECLARED',
+          tier: 'UNDECLARED',
+        },
+        {
+          workflow_name: 'PROD_ATTA',
+          batch_type: 'DAILY',
+          runtime_h: 2.0,
+          sla_h: 3.0,
+          buffer_pct: 33.3,
+          status: 'LONG_JOB',
+          sla_source: 'batch_sla_xlsx',
+          tier: 'T1',
+        },
+      ],
+    };
+
+    const { getByText, getAllByText } = render(
+      <MemoryRouter>
+        <AppDataProvider>
+          <SlaDataInjector payload={payloadNoSla}>
+            <SlaMatrixPanel />
+          </SlaDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
+    );
+
+    expect(getByText('PROD_ACT')).toBeDefined();
+    expect(getByText('Undeclared Workflows — No SLA Contract Stated')).toBeDefined();
+    expect(getByText('PROD_ATTA')).toBeDefined();
+    expect(getAllByText(/T1 · Contract/i).length).toBeGreaterThan(0);
+    expect(getAllByText(/No SLA/i).length).toBeGreaterThan(0);
+  });
 });
