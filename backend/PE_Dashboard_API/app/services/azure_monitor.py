@@ -3028,7 +3028,7 @@ def _infer_location_from_text(text: str) -> str:
         return "japaneast"
     if any(k in t for k in ("sgp", "sin", "apac", "asia", "singapore")):
         return "southeastasia"
-    if any(k in t for k in ("ind", "pune", "blr", "bom", "india")):
+    if any(k in t for k in ("ind", "pune", "blr", "bom", "india", "itc", "atta")):
         return "centralindia"
     if any(k in t for k in ("bra", "sao", "latam", "brazil", "mexico")):
         return "brazilsouth"
@@ -3080,6 +3080,8 @@ def _resolve_customer_name(tags: Optional[dict] = None, rg: str = "", sub_id: st
             "krg": "Kroger Supply Chain",
             "pep": "PepsiCo Global",
             "rel": "Reliance Retail",
+            "itc": "ITC Limited",
+            "atta": "ITC Limited",
             "bim": "Grupo Bimbo",
             "lob": "Loblaw Companies",
             "nfm": "Nebraska Furniture Mart",
@@ -3298,6 +3300,24 @@ _ENTERPRISE_CUSTOMER_CATALOG: Dict[str, Dict[str, Any]] = {
             {"name": "relscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 35.0, "mem_pct": 41.5, "disk_pct": 11.5, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
         ],
     },
+    "itc": {
+        "customer": "ITC Limited",
+        "subscription_id": "5b6c7d8e-9f0a-1b2c-3d4e-5f6a7b8c9d0e",
+        "subscription_name": "ITC Limited (SCPO India Operations)",
+        "resource_group": "rg-itc-scpo-prod-centralindia",
+        "resource_groups": ["rg-itc-scpo-prod-centralindia", "rg-itc-scpo-stage-centralindia"],
+        "location": "centralindia",
+        "aliases": ["atta", "aashirvaad", "itc"],
+        "servers": [
+            {"name": "itcscpodb01", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 65.0, "mem_pct": 73.0, "disk_pct": 24.0, "health_score": 92.0, "status": "Healthy", "env": "PROD"},
+            {"name": "itcscpodb02", "type": "DB", "vm_size": "Standard_E16ds_v5", "mem_total_gb": 128.0, "cpu_pct": 49.0, "mem_pct": 66.0, "disk_pct": 20.0, "health_score": 95.0, "status": "Healthy", "env": "PROD"},
+            {"name": "itcscpoapp01", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 57.0, "mem_pct": 63.0, "disk_pct": 15.0, "health_score": 94.0, "status": "Healthy", "env": "PROD"},
+            {"name": "itcscpoapp02", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 53.0, "mem_pct": 59.0, "disk_pct": 14.0, "health_score": 96.0, "status": "Healthy", "env": "PROD"},
+            {"name": "itcscpoapp03", "type": "APP", "vm_size": "Standard_E8ds_v5", "mem_total_gb": 64.0, "cpu_pct": 61.0, "mem_pct": 66.0, "disk_pct": 17.0, "health_score": 91.0, "status": "Healthy", "env": "PROD"},
+            {"name": "itcscposre01", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 34.0, "mem_pct": 40.0, "disk_pct": 11.0, "health_score": 98.0, "status": "Healthy", "env": "PROD"},
+            {"name": "itcscposre02", "type": "SRE", "vm_size": "Standard_D8s_v5", "mem_total_gb": 32.0, "cpu_pct": 31.0, "mem_pct": 37.0, "disk_pct": 10.0, "health_score": 99.0, "status": "Healthy", "env": "PROD"},
+        ],
+    },
     "bimbo": {
         "customer": "Grupo Bimbo",
         "subscription_id": "3b4c5d6e-7f8a-9b0c-1d2e-3f4a5b6c7d8e",
@@ -3356,7 +3376,11 @@ def _synthesize_customer_estate(query_or_name: str, sub_id: Optional[str] = None
         cust_name = f"Customer ({sub_id[:8]})"
         slug = f"cust{sub_id[:4]}"
     else:
-        cust_name = raw.title() if raw else "Enterprise Customer"
+        try:
+            from services.customer_identity import display_name
+            cust_name = display_name(raw) or (raw.title() if raw else "Enterprise Customer")
+        except Exception:
+            cust_name = raw.title() if raw else "Enterprise Customer"
         slug = re.sub(r"[^a-z0-9]", "", raw.lower())[:6] or "cust"
         if not sub_id:
             h = hashlib.md5(f"sub-{raw.lower()}".encode()).hexdigest()
@@ -3573,7 +3597,7 @@ def get_known_catalog(query: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[
             host = s["name"]
             vm_type = s.get("type", "APP")
             env = s.get("env", "PROD")
-            words = [host, c_name, cat_key, rg, env, vm_type, "SCPO", sub_id, loc, loc.replace("us", " us").replace("europe", " europe")]
+            words = [host, c_name, cat_key, rg, env, vm_type, "SCPO", sub_id, loc, loc.replace("us", " us").replace("europe", " europe"), *profile.get("aliases", [])]
             if _match_query(query, words):
                 if host not in vms_map:
                     vms_map[host] = {

@@ -174,9 +174,10 @@ def _resolve_sow_customer(filename: str, sow_payload: Dict[str, Any]) -> Dict[st
         filename=filename,
         sow_payload=sow_payload,
         auto_adopt=False,
+        pillar="sow",
     )
     if verdict.status in ("first_upload", "corrected") and verdict.name:
-        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
+        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source, pillar="sow")
     return verdict_response_fields(verdict)
 
 

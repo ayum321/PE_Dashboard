@@ -225,6 +225,7 @@ def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[s
         filename=filename,
         df_sub_app=df_sub_app,
         auto_adopt=False,
+        pillar="batch",
     )
     active = get_active_customer()
     if verdict.name and verdict.status != "mismatch" and active and active != verdict.name:
@@ -238,7 +239,7 @@ def _resolve_batch_customer(filename: str, df: Optional[pd.DataFrame]) -> Dict[s
     # supersede a weaker prior identification (see customer_identity's
     # SUPERSEDE_MARGIN) — adopt it the same way a first upload is adopted.
     if verdict.status in ("first_upload", "corrected") and verdict.name:
-        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
+        set_active_customer(verdict.name, verdict.raw, confidence=verdict.confidence, source=verdict.source, pillar="batch")
     return verdict_response_fields(verdict)
 
 

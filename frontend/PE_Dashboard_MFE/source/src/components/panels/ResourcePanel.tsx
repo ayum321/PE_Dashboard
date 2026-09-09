@@ -1161,7 +1161,7 @@ export function ResourcePanel() {
     setHoursBack(meta.hoursBack);
     setDdCustomActive(false);
     if (finalCustomer) {
-      setCustomerName(finalCustomer);
+      setCustomerName(finalCustomer, true);
       setCustomerFilter('');
     }
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);

@@ -991,6 +991,8 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                 )}
                 {[
                   { label: 'All Customers', q: '*' },
+                  { label: 'ITC', q: 'itc' },
+                  { label: 'Reliance', q: 'reliance' },
                   { label: 'Target', q: 'target' },
                   { label: 'Walmart', q: 'walmart' },
                   { label: 'Kroger', q: 'kroger' },
@@ -1002,6 +1004,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                   { label: 'Unilever', q: 'unilever' },
                   { label: 'Woolworths', q: 'woolworths' },
                   { label: 'NFM', q: 'nfm' },
+                  { label: 'India', q: 'centralindia' },
                   { label: 'Europe', q: 'europe' },
                   { label: 'APAC', q: 'southeastasia' },
                 ].map((item) => (

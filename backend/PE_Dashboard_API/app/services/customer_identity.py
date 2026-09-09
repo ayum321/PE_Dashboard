@@ -215,11 +215,29 @@ def is_valid_customer_name(name: Optional[str]) -> bool:
     return True
 
 
+_KNOWN_ACRONYMS = {
+    "ITC", "DHL", "NFM", "BMW", "IBM", "SAP", "JDA", "BY", "SRE", "SCPO", "MPS",
+    "ESP", "BMC", "UAT", "SIT", "RCA", "SLA", "API", "ERP", "WMS", "TMS", "POS",
+    "USA", "UK", "TGT", "WMT", "KRG", "PEP", "REL", "LOB", "BIM", "GE", "HP",
+    "3M", "AMD", "ARM", "BB", "BP", "CBS", "CNN", "CVS", "DEC", "EMC", "GSK",
+    "HCL", "HSBC", "IKEA", "KPMG", "LG", "NEC", "P&G", "PWC", "TCS", "UPS", "USPS",
+    "WIPRO", "YUM", "ATTA",
+}
+
+
 def display_name(canonical: str) -> str:
-    """Return a friendly Title Case display version."""
+    """Return a friendly Title Case display version, preserving enterprise acronyms."""
     if not canonical or not is_valid_customer_name(canonical):
         return ""
-    return " ".join(p.capitalize() for p in canonical.split())
+    parts = canonical.split()
+    out = []
+    for p in parts:
+        up = p.upper()
+        if up in _KNOWN_ACRONYMS or (len(up) <= 3 and up not in ("THE", "AND", "FOR", "INC", "LTD", "CO")):
+            out.append(up)
+        else:
+            out.append(p.capitalize())
+    return " ".join(out)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -493,8 +511,41 @@ SOURCE_TRUST_TIER = {
 # raw score.
 TIER_OVERRIDE_MIN_CONFIDENCE = 70
 
+# Pillar-level trust override. SOURCE_TRUST_TIER above ranks candidates by HOW
+# a name was extracted (filename token vs. explicit header vs. Sub_Application
+# frequency) — but that ranking is blind to WHICH upload the candidate came
+# from. A Resource-Utilization file with no explicit "Customer:" tag still
+# only yields a "filename" candidate (tier 1), the SAME tier a Ctrl-M/batch
+# file's filename candidate gets — so whichever happened to upload first won,
+# regardless of pillar. Per the domain rule (Resource Utilization data comes
+# straight from the servers and is the most reliable signal we have; Ctrl-M
+# naming conventions are the least reliable guess), every candidate produced
+# while identifying a given PILLAR is pinned to a fixed trust tier here,
+# overriding SOURCE_TRUST_TIER entirely for that call. Manual user correction
+# outranks everything; Ctrl-M/batch is pinned below every other tier,
+# including the "config" fallback, so it is always the last resort.
+PILLAR_TRUST_TIER = {
+    "manual":   -2,
+    "resource": -1,
+    "sow":       0,
+    "batch":    10,
+}
+
+
+def _trust_tier(source: Optional[str], pillar: Optional[str] = None) -> int:
+    """Resolve the effective trust tier for a candidate/active identification.
+
+    `pillar` (when known) always wins over the generic per-source tier —
+    see PILLAR_TRUST_TIER above.
+    """
+    if pillar and pillar in PILLAR_TRUST_TIER:
+        return PILLAR_TRUST_TIER[pillar]
+    return SOURCE_TRUST_TIER.get(source or "", 2)
+
+
 _ACTIVE_CONF_KEY = "customer_name_confidence"
 _ACTIVE_SRC_KEY = "customer_name_source"
+_ACTIVE_PILLAR_KEY = "customer_name_pillar"
 
 
 def get_active() -> Optional[str]:
@@ -548,13 +599,30 @@ def get_active_source() -> Optional[str]:
     return config_store.get(_ACTIVE_SRC_KEY, "") or None
 
 
+def get_active_pillar() -> Optional[str]:
+    """Which pillar (resource | batch | sow | manual | ...) set the active
+    customer name — used to decide trust tier on the NEXT upload and to tell
+    the UI whether the name has ever been confirmed by a Resource report."""
+    try:
+        from services import session_cache
+        val = session_cache.ac_get(_ACTIVE_PILLAR_KEY, "") or ""
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    return config_store.get(_ACTIVE_PILLAR_KEY, "") or None
+
+
 def set_active(canonical: str, raw: Optional[str] = None, *,
-                confidence: Optional[int] = None, source: Optional[str] = None) -> None:
+                confidence: Optional[int] = None, source: Optional[str] = None,
+                pillar: Optional[str] = None) -> None:
     """Persist the active customer under the shared customer_name key.
 
     When `confidence`/`source` are supplied, they are recorded alongside the
     name so a later upload's identify() call can decide whether its own
     evidence is strong enough to supersede this one (see SUPERSEDE_MARGIN).
+    `pillar` records WHICH upload type (resource/batch/sow/manual) supplied
+    the name, so the next identify() call can apply PILLAR_TRUST_TIER.
     """
     canonical = normalise(canonical)
     if not canonical or not is_valid_customer_name(canonical):
@@ -564,17 +632,20 @@ def set_active(canonical: str, raw: Optional[str] = None, *,
         return
     conf_val = int(confidence) if confidence is not None else 0
     src_val = source or ""
+    pillar_val = pillar or ""
     try:
         from services import session_cache
         session_cache.ensure_customer(display)
         session_cache.ac_set("customer_name", display)
         session_cache.ac_set(_ACTIVE_CONF_KEY, conf_val)
         session_cache.ac_set(_ACTIVE_SRC_KEY, src_val)
+        session_cache.ac_set(_ACTIVE_PILLAR_KEY, pillar_val)
     except Exception:
         pass
     config_store.set("customer_name", display)
     config_store.set(_ACTIVE_CONF_KEY, conf_val)
     config_store.set(_ACTIVE_SRC_KEY, src_val)
+    config_store.set(_ACTIVE_PILLAR_KEY, pillar_val)
     # Retire the old active_customer keys so stale legacy values never win.
     config_store.set("active_customer", "")
     config_store.set("active_customer_raw", "")
@@ -586,13 +657,45 @@ def clear_active() -> None:
     config_store.set("active_customer_raw", "")
     config_store.set(_ACTIVE_CONF_KEY, 0)
     config_store.set(_ACTIVE_SRC_KEY, "")
+    config_store.set(_ACTIVE_PILLAR_KEY, "")
     try:
         from services import session_cache
         session_cache.ac_del("customer_name")
         session_cache.ac_del(_ACTIVE_CONF_KEY)
         session_cache.ac_del(_ACTIVE_SRC_KEY)
+        session_cache.ac_del(_ACTIVE_PILLAR_KEY)
     except Exception:
         pass
+
+
+def apply_manual_override(name: str) -> Dict[str, Any]:
+    """Let a reviewer directly correct the customer name.
+
+    Manual correction is the highest-trust pillar there is — it always wins
+    over every automatic identification (resource, sow, batch) until a
+    Resource Utilization upload provides fresh server-tag evidence, which is
+    the only thing structurally more authoritative than a human confirming
+    the name explicitly.
+    """
+    canonical = normalise(name)
+    if not canonical or not is_valid_customer_name(canonical):
+        raise ValueError("Not a valid customer name.")
+    display = display_name(canonical)
+    previous = get_active()
+    previous_display = display_name(previous) if previous else None
+    set_active(canonical, name, confidence=100, source="manual", pillar="manual")
+    if previous_display and previous_display != display:
+        message = f"Customer name manually corrected from '{previous_display}' to '{display}'."
+    else:
+        message = f"Customer name manually set to '{display}'."
+    return {
+        "customer_name": display,
+        "customer_status": "manual_override",
+        "customer_active_name": display,
+        "customer_message": message,
+        "customer_verified_by_resource": False,
+        "customer_confidence": 100,
+    }
 
 
 def identify(
@@ -603,12 +706,21 @@ def identify(
     servers:     Optional[List[Dict[str, Any]]] = None,
     sow_payload: Optional[Dict[str, Any]]      = None,
     auto_adopt:  bool                          = True,
+    pillar:      Optional[str]                 = None,
 ) -> CustomerVerdict:
     """
     Identify the customer for an upload and compare against the active one.
 
     If `auto_adopt` is True (default) and no active customer is set yet,
     the best candidate is adopted as the active customer.
+
+    `pillar` names WHICH upload this call is for ("resource" | "batch" |
+    "sow" | ...). When supplied, it overrides the generic per-source trust
+    tier for THIS call's candidates via PILLAR_TRUST_TIER — Resource
+    Utilization data is always the most trustworthy signal, Ctrl-M/batch
+    naming conventions are always the least trustworthy, regardless of
+    which extraction method (filename/content/sub_application) produced
+    the candidate.
     """
     cands = extract_candidates(
         filename=filename, text=text, df_sub_app=df_sub_app,
@@ -687,7 +799,7 @@ def identify(
 
     if not active:
         if auto_adopt:
-            set_active(best.name, best.raw, confidence=best.confidence, source=best.source)
+            set_active(best.name, best.raw, confidence=best.confidence, source=best.source, pillar=pillar)
         return _verdict(
             name=best.name, display=display_name(best.name),
             raw=best.raw, source=best.source, confidence=best.confidence,
@@ -696,12 +808,23 @@ def identify(
         )
 
     if best.name == active:
+        # Same name, but this upload's evidence may be MORE trustworthy than
+        # whatever originally set it (e.g. Ctrl-M guessed it first, and a
+        # Resource Utilization report now corroborates the same name) —
+        # upgrade the recorded pillar/source/confidence so downstream
+        # "verified by resource" checks reflect the strongest evidence seen,
+        # without changing the name itself or wiping any session state.
+        if auto_adopt:
+            cur_tier = _trust_tier(get_active_source(), get_active_pillar())
+            if _trust_tier(best.source, pillar) < cur_tier:
+                set_active(best.name, best.raw, confidence=best.confidence, source=best.source, pillar=pillar)
         return _verdict(
             name=best.name, display=display_name(best.name),
             raw=best.raw, source=best.source, confidence=best.confidence,
             candidates=cands, status="match", active=active,
             message=f"Confirmed customer '{display_name(active)}'.{corr_msg}",
         )
+
 
     # The new upload disagrees with the active customer. Compare the new
     # evidence against whatever set the CURRENT active customer using BOTH
@@ -715,13 +838,17 @@ def identify(
     # silently downgrade a MORE trustworthy one — only warn.
     active_conf = get_active_confidence()
     active_source = get_active_source()
-    active_tier = SOURCE_TRUST_TIER.get(active_source or "", 4)
-    new_tier = SOURCE_TRUST_TIER.get(best.source, 2)
+    active_pillar = get_active_pillar()
+    active_tier = _trust_tier(active_source, active_pillar)
+    new_tier = _trust_tier(best.source, pillar)
 
     # Resource Utilization / Azure Server is authentic cloud infra telemetry.
     # It must ALWAYS supersede Ctrl-M (sub_application, filename, content)
-    # regardless of whether Ctrl-M was uploaded before or after.
-    if best.source == "resource" and active_source in ("sub_application", "filename", "content", "config", None):
+    # regardless of whether Ctrl-M was uploaded before or after. Kept as an
+    # explicit fallback for legacy callers that don't pass `pillar` yet —
+    # the PILLAR_TRUST_TIER comparison above already covers this generically
+    # for any caller that does.
+    if best.source == "resource" and active_pillar != "resource" and active_source in ("sub_application", "filename", "content", "config", None):
         can_supersede = True
         supersede_reason = f"Resource / Azure Server identification is more authentic than '{active_source}'"
     elif new_tier < active_tier:
@@ -748,7 +875,7 @@ def identify(
 
     if can_supersede:
         if auto_adopt:
-            set_active(best.name, best.raw, confidence=best.confidence, source=best.source)
+            set_active(best.name, best.raw, confidence=best.confidence, source=best.source, pillar=pillar)
         return _verdict(
             name=best.name, display=display_name(best.name),
             raw=best.raw, source=best.source, confidence=best.confidence,
@@ -810,6 +937,14 @@ def selected_customer_name(verdict: CustomerVerdict) -> Optional[str]:
 
 def verdict_response_fields(verdict: CustomerVerdict) -> Dict[str, Any]:
     """Flatten the verdict into stable response fields for routers/UI."""
+    verified_by_resource = get_active_pillar() == "resource"
+    verification_note = None
+    if verdict.active and not verified_by_resource:
+        verification_note = (
+            "Customer name is not yet confirmed by a Resource Utilization "
+            "report (the most reliable source). Upload the Resource report "
+            "or verify/edit the name manually."
+        )
     return {
         "customer_name": selected_customer_name(verdict),
         "customer_status": verdict.status,
@@ -820,6 +955,10 @@ def verdict_response_fields(verdict: CustomerVerdict) -> Dict[str, Any]:
         "customer_active_name": display_name(verdict.active) if verdict.active else None,
         "customer_candidate_name": verdict.display,
         "customer_confidence": verdict.confidence,
+        # True only once a Resource Utilization upload's evidence set the
+        # active customer name — the most reliable source per domain rule.
+        "customer_verified_by_resource": verified_by_resource,
+        "customer_verification_note": verification_note,
         # Only meaningful when customer_status == "corrected" — what the
         # active customer WAS before this upload's stronger evidence
         # superseded it, so the UI can show "corrected from X to Y".

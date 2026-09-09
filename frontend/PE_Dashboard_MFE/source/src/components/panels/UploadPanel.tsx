@@ -286,7 +286,8 @@ export function UploadPanel() {
       }
       setBatch(resolvedBatch);
       const customer = (resolvedBatch as { customer_name?: string }).customer_name;
-      if (customer) setCustomerName(customer);
+      const verifiedByResource = (resolvedBatch as { customer_verified_by_resource?: boolean }).customer_verified_by_resource;
+      if (customer) setCustomerName(customer, verifiedByResource);
       // A new Ctrl-M extract creates a new shared evidence set.  Clear every
       // derived screen first, then recalculate it from the returned payload.
       clearDerivedEvidence();
@@ -324,7 +325,8 @@ export function UploadPanel() {
       // overrides an engagement already established from Ctrl-M/SOW.
       const resourceCustomer = (result.data as { customer_name?: string }).customer_name;
       const validResourceCustomer = isValidCustomerName(resourceCustomer) ? resourceCustomer : null;
-      if (validResourceCustomer) setCustomerName(validResourceCustomer);
+      const verifiedByResource = (result.data as { customer_verified_by_resource?: boolean }).customer_verified_by_resource;
+      if (validResourceCustomer) setCustomerName(validResourceCustomer, verifiedByResource);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
@@ -434,7 +436,8 @@ export function UploadPanel() {
       setSowBaseline(result);
       const sowCustomer = (result as { customer_name?: string }).customer_name;
       const validSowCustomer = isValidCustomerName(sowCustomer) ? sowCustomer : null;
-      if (validSowCustomer) setCustomerName(validSowCustomer);
+      const verifiedByResource = (result as { customer_verified_by_resource?: boolean }).customer_verified_by_resource;
+      if (validSowCustomer) setCustomerName(validSowCustomer, verifiedByResource);
       clearDerivedEvidence();
       const refreshStatus = await refreshDerivedEvidence({
         ...data,
@@ -499,7 +502,10 @@ export function UploadPanel() {
       customer_source: validCustomer ? 'azure_vm_tags' : undefined,
     };
     setResource(resource);
-    if (validCustomer) setCustomerName(validCustomer);
+    // Azure VM tags are live infra telemetry — the same trust level as a
+    // Resource Utilization report (arguably more authentic, straight from
+    // the servers), so treat a tag-derived name as resource-verified.
+    if (validCustomer) setCustomerName(validCustomer, true);
     setAzureMessage(
       isAppend && finalServers.length > customerServers.length
         ? `Added ${customerServers.length} server(s) to active fleet (${finalServers.length} total).`

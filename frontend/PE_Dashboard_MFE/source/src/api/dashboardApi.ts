@@ -555,9 +555,30 @@ export interface SessionRestorePayload {
   executive?: DashboardPayload | null;
   final_judgment?: DashboardPayload | null;
   customer_name?: string | null;
+  customer_verified_by_resource?: boolean;
   reviewed_products?: string[];
 }
 
 /** Session-scoped cached payloads used to rebuild the MFE after a browser refresh. */
 export const getSessionRestore = (): Promise<SessionRestorePayload> =>
   request<SessionRestorePayload>('/api/session/restore');
+
+export interface CustomerOverrideResponse {
+  customer_name: string;
+  customer_status: string;
+  customer_active_name: string;
+  customer_message: string;
+  customer_verified_by_resource: boolean;
+  customer_confidence: number;
+}
+
+/** Manually correct the active customer name. Resource Utilization data is the
+ * most reliable automatic source and Ctrl-M naming is the least reliable, but
+ * this lets a reviewer fix a wrong auto-detected name (or one where no
+ * Resource report has been uploaded yet) — it outranks every automatic source. */
+export const postCustomerOverride = (name: string): Promise<CustomerOverrideResponse> =>
+  request<CustomerOverrideResponse>('/api/customer/override', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });

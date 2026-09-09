@@ -47,6 +47,37 @@ class MultiCustomerCatalogTests(unittest.TestCase):
         self.assertTrue(vms)
         self.assertTrue(all(v.get('customer') == 'PepsiCo Global' for v in vms))
 
+    def test_catalog_itc_customer(self):
+        subs, vms = get_known_catalog('itc')
+        self.assertTrue(vms)
+        self.assertTrue(all(v.get('customer') == 'ITC Limited' for v in vms))
+        self.assertTrue(all(v.get('location') == 'centralindia' for v in vms))
+        self.assertTrue(all(v.get('resource_group') == 'rg-itc-scpo-prod-centralindia' for v in vms))
+        roles = {v.get('type') for v in vms}
+        self.assertIn('APP', roles)
+        self.assertIn('DB', roles)
+        self.assertIn('SRE', roles)
+
+    def test_search_vms_itc_and_atta_aliases(self):
+        vms_itc, _ = search_vms_with_fallback(None, 'ITC')
+        self.assertTrue(vms_itc)
+        self.assertEqual(vms_itc[0]['customer'], 'ITC Limited')
+        self.assertEqual(vms_itc[0]['location'], 'centralindia')
+
+        vms_atta, _ = search_vms_with_fallback(None, 'atta')
+        self.assertTrue(vms_atta)
+        self.assertEqual(vms_atta[0]['customer'], 'ITC Limited')
+        self.assertEqual(vms_atta[0]['location'], 'centralindia')
+
+    def test_display_name_preserves_acronyms(self):
+        from services.customer_identity import display_name
+        self.assertEqual(display_name('ITC'), 'ITC')
+        self.assertEqual(display_name('itc'), 'ITC')
+        self.assertEqual(display_name('itc limited'), 'ITC Limited')
+        self.assertEqual(display_name('dhl supply chain'), 'DHL Supply Chain')
+        self.assertEqual(display_name('dhl'), 'DHL')
+        self.assertEqual(display_name('nfm'), 'NFM')
+
     def test_dynamic_synthesis_arbitrary_customer(self):
         subs, vms = get_known_catalog('FedEx Logistics')
         self.assertEqual(len(vms), 8)

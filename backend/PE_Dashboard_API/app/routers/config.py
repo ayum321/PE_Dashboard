@@ -264,6 +264,7 @@ def clear_session(body: ClearSessionRequest = ClearSessionRequest()) -> dict:
 def get_session_restore() -> dict[str, Any]:
     """Return browser-refresh-safe cached dashboard payloads for this session."""
     from services import session_cache
+    from services.customer_identity import get_active_pillar
 
     reviewed_products = session_cache.ac_get("reviewed_products")
     if not isinstance(reviewed_products, list):
@@ -282,5 +283,29 @@ def get_session_restore() -> dict[str, Any]:
         "executive": session_cache.get("last_executive") or None,
         "final_judgment": session_cache.get("last_final_judgment") or None,
         "customer_name": customer_name,
+        "customer_verified_by_resource": bool(customer_name) and get_active_pillar() == "resource",
         "reviewed_products": reviewed_products,
     }
+
+
+class CustomerOverrideRequest(BaseModel):
+    name: str
+
+
+@router.post("/customer/override")
+def override_customer_name(body: CustomerOverrideRequest) -> dict[str, Any]:
+    """Manually correct the active customer name.
+
+    Resource Utilization data is the most reliable automatic source, and
+    Ctrl-M naming conventions are the least reliable — but auto-detection can
+    still get it wrong (e.g. no Resource report uploaded yet). This lets a
+    reviewer set the name explicitly; the manual value outranks every
+    automatic source until a fresh Resource Utilization upload supersedes it.
+    """
+    from services.customer_identity import apply_manual_override
+
+    try:
+        return apply_manual_override(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+

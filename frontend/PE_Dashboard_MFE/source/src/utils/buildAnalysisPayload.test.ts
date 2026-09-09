@@ -14,6 +14,7 @@ const data: AppData = {
   executive: { kpis: { score: 75 } },
   finalJudgment: null,
   customerName: 'Acme',
+  customerVerifiedByResource: true,
   issues: [{ ID: 'ISS-001', Type: 'Bug', Severity: 'Critical', Status: 'Open', Owner: '', ETA: 'N/A', Description: 'Known issue', Mitigation: '', Logged: '2026-08-01' }],
   approvals: { checklist: { batch: false, issues: false, ui: false, res: false, perf: false, sow: false, data: false, ctrlm: false, res15: false }, pe: { name: '', approved: false, date: null, override_blockers: false }, customer: { name: '', approved: false, date: null }, notes: '' },
   reviewedProducts: [],

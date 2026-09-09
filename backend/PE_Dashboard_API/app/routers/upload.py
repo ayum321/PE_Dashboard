@@ -115,11 +115,11 @@ def _enrich(record: Dict[str, Any], image_only: bool) -> Dict[str, Any]:
     return record
 
 
-def _resolve_customer_identity(**kwargs: Any) -> Dict[str, Any]:
-    verdict = identify_customer(auto_adopt=True, **kwargs)
+def _resolve_customer_identity(*, pillar: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+    verdict = identify_customer(auto_adopt=True, pillar=pillar, **kwargs)
     target_name = verdict.display or verdict.name
     if target_name and is_valid_customer_name(target_name):
-        set_active_customer(target_name, verdict.raw, confidence=verdict.confidence, source=verdict.source)
+        set_active_customer(target_name, verdict.raw, confidence=verdict.confidence, source=verdict.source, pillar=pillar)
         try:
             from services import session_cache
             session_cache.ensure_customer(target_name)
@@ -256,6 +256,7 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     customer_fields = _resolve_customer_identity(
         filename=file.filename,
         servers=servers_raw,
+        pillar="resource",
     )
     customer_name = customer_fields.get("customer_name")
     detected_customer = customer_fields.get("customer_candidate_name") or customer_name
@@ -374,6 +375,7 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
             customer_fields = _resolve_customer_identity(
                 filename=file.filename,
                 df_sub_app=df["Sub_Application"].dropna().tolist() if "Sub_Application" in df.columns else None,
+                pillar="batch",
             )
             data.update(customer_fields)
             cust_name = customer_fields.get("customer_name") or customer_fields.get("customer_candidate_name")
@@ -398,6 +400,7 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
             customer_fields = _resolve_customer_identity(
                 filename=file.filename,
                 servers=servers_raw,
+                pillar="resource",
             )
             cust_name = customer_fields.get("customer_name") or customer_fields.get("customer_candidate_name")
             if cust_name and not is_valid_customer_name(cust_name):

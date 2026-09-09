@@ -47,6 +47,10 @@ export interface AppData {
   executive: DashboardPayload | null;
   finalJudgment: DashboardPayload | null;
   customerName: string | null;
+  // True only once a Resource Utilization upload's evidence set the active
+  // customer name — the most reliable source; false means the name came
+  // from Ctrl-M/SOW/manual and should be double-checked.
+  customerVerifiedByResource: boolean;
   issues: IssueRecord[];
   approvals: ApprovalsState;
   reviewedProducts: string[];
@@ -65,6 +69,7 @@ const EMPTY_APP_DATA: AppData = {
   executive: null,
   finalJudgment: null,
   customerName: null,
+  customerVerifiedByResource: false,
   issues: [],
   approvals: EMPTY_APPROVALS,
   reviewedProducts: [],
@@ -137,7 +142,7 @@ interface AppDataContextValue {
   setPeNarrative: (value: DashboardPayload | null) => void;
   setExecutive: (value: DashboardPayload | null) => void;
   setFinalJudgment: (value: DashboardPayload | null) => void;
-  setCustomerName: (value: string | null) => void;
+  setCustomerName: (value: string | null, verifiedByResource?: boolean) => void;
   setIssues: (value: IssueRecord[]) => void;
   setApprovals: (value: ApprovalsState) => void;
   setReviewedProducts: (value: string[]) => void;
@@ -199,6 +204,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           current = {
             ...EMPTY_APP_DATA,
             customerName: restoredCustomer,
+            customerVerifiedByResource: Boolean(restored?.customer_verified_by_resource),
           };
         }
 
@@ -232,6 +238,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
             updates.executive = hasDashboardPayload(restored.executive) ? restored.executive : null;
             updates.finalJudgment = hasDashboardPayload(restored.final_judgment) ? restored.final_judgment : null;
             updates.customerName = restoredCustomer;
+            updates.customerVerifiedByResource = Boolean(restored.customer_verified_by_resource);
           } else {
             // Normal sync without customer switch: fill missing or update
             if (isEmptyDashboardPayload(current.batch) && hasDashboardPayload(restored.batch)) updates.batch = restored.batch;
@@ -254,6 +261,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
             if ((!current.customerName || !isValidCustomerName(current.customerName)) && restoredCustomer) {
               updates.customerName = restoredCustomer;
             }
+            updates.customerVerifiedByResource = Boolean(restored.customer_verified_by_resource);
           }
 
           if (current.reviewedProducts.length === 0) {
@@ -462,7 +470,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
   );
 
   const setCustomerName = useCallback(
-    (value: string | null) => {
+    (value: string | null, verifiedByResource?: boolean) => {
       setData((prev) => {
         const raw = value?.trim() || null;
         const newCustomer = isValidCustomerName(raw) ? raw : null;
@@ -470,9 +478,14 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
           return {
             ...EMPTY_APP_DATA,
             customerName: newCustomer,
+            customerVerifiedByResource: Boolean(verifiedByResource),
           };
         }
-        return { ...prev, customerName: newCustomer ?? (isValidCustomerName(prev.customerName) ? prev.customerName : null) };
+        return {
+          ...prev,
+          customerName: newCustomer ?? (isValidCustomerName(prev.customerName) ? prev.customerName : null),
+          customerVerifiedByResource: verifiedByResource !== undefined ? verifiedByResource : prev.customerVerifiedByResource,
+        };
       });
     },
     [],
