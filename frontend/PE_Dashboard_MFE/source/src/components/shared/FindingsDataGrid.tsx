@@ -25,13 +25,6 @@ export interface FindingItem {
   source?: string;
 }
 
-// Collapsing "OK" (passed-check) findings behind a summary row only helps
-// readability when there are ENOUGH of them to genuinely be noise. Below
-// this count, a single passing check mixed into a small findings list is a
-// real, distinct data point — collapsing it hides information instead of
-// reducing clutter, so it renders inline like any other finding.
-const OK_AUTO_COLLAPSE_THRESHOLD = 3;
-
 interface FindingsDataGridProps {
   findings: FindingItem[];
   filter: 'all' | 'critical' | 'warning' | 'info' | 'ok';

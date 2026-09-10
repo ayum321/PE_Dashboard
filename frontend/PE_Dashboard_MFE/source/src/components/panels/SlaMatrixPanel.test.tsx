@@ -275,7 +275,7 @@ describe('SlaMatrixPanel', () => {
 
     api.recomputeSlaMatrix.mockResolvedValue({});
 
-    const { getByText, getAllByText } = render(
+    const { getByText } = render(
       <MemoryRouter>
         <AppDataProvider>
           <SlaDataInjector payload={payloadWithTiers}>

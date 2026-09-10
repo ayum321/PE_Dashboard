@@ -69,8 +69,11 @@ describe('FindingsPanel', () => {
 
     fireEvent.click(getByRole('button', { name: 'Generate Findings' }));
 
-    expect(await findByText(/Findings Ledger/i)).toBeDefined();
+    // The page now leads with the crux; the full ledger is one click away so
+    // the headline isn't buried under every restatement of the same issue.
     expect((await findAllByText(/One action-required finding/i)).length).toBeGreaterThan(0);
+    fireEvent.click(await findByText(/Show full findings ledger/i));
+
     expect(await findByText(/Contract SLA values were loaded/i)).toBeDefined();
     expect(await findByText(/1 passed checks/i)).toBeDefined();
     fireEvent.click(await findByText(/1 passed checks/i));

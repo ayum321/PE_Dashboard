@@ -1099,57 +1099,15 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
                         on_capacity_progress=_capacity_progress,
                     )
                 except Exception as exc:
-                    logger.warning("Live _build_server_records failed (%s); generating from VM metadata", exc)
-                    fallback_servers = []
-                    from services.azure_monitor import _resolve_customer_name
-                    for vm in vms:
-                        h = vm.get("name", "").lower()
-                        vm_type = vm.get("type") or "APP"
-                        c_pct = float(vm.get("cpu_pct") if vm.get("cpu_pct") is not None else (62.0 if vm_type == "DB" else 55.0 if vm_type == "APP" else 35.0))
-                        m_pct = float(vm.get("mem_pct") if vm.get("mem_pct") is not None else (70.0 if vm_type == "DB" else 62.0 if vm_type == "APP" else 40.0))
-                        d_pct = float(vm.get("disk_pct") if vm.get("disk_pct") is not None else 18.0)
-                        vm_tags = vm.get("tags") or {}
-                        vm_rg = vm.get("rg", "") or vm.get("resource_group", "")
-                        cust_name = vm.get("customer") or _resolve_customer_name(vm_tags, vm_rg, vm.get("subscription_id", ""), h)
-                        app_name = vm.get("application") or vm_tags.get("Application") or "SCPO"
-                        env_name = vm.get("environment") or vm_tags.get("Environment_Type") or "PROD"
-                        loc_name = vm.get("location") or "eastus2"
-
-                        fallback_servers.append({
-                            "host": h,
-                            "server": h,
-                            "type": vm_type,
-                            "cpu_used": c_pct,
-                            "cpu_avg": c_pct,
-                            "cpu_max_pct": round(c_pct * 1.25, 2),
-                            "cpu_min_pct": round(c_pct * 0.75, 2),
-                            "mem_used": m_pct,
-                            "mem_avg": m_pct,
-                            "mem_max_pct": round(m_pct * 1.15, 2),
-                            "mem_min_pct": round(m_pct * 0.85, 2),
-                            "mem_total_gb": float(vm.get("mem_total_gb") or vm.get("mem_gb") or (128.0 if vm_type == "DB" else 64.0 if vm_type == "APP" else 32.0)),
-                            "disk_used_max": d_pct,
-                            "disk_max_pct": round(d_pct * 1.2, 2),
-                            "disk_min_pct": round(d_pct * 0.8, 2),
-                            "cpu_pct": c_pct,
-                            "mem_pct": m_pct,
-                            "disk_pct": d_pct,
-                            "resource_id": vm.get("resource_id", ""),
-                            "location": loc_name,
-                            "vm_size": vm.get("vm_size", "Standard_E8ds_v5"),
-                            "vm_size_desc": (vm.get("vm_size") or "Standard_E8ds_v5").replace("_", " "),
-                            "vcpus": vm.get("vcpus") or (16 if vm_type == "DB" else 8),
-                            "vcpu_source": "catalog",
-                            "resource_group": vm_rg,
-                            "tags": vm_tags,
-                            "customer": cust_name,
-                            "application": app_name,
-                            "environment": env_name,
-                            "product_group": vm.get("product_group", "SCPO"),
-                            "source": "azure_monitor",
-                            "hours_back": body.hours_back,
-                        })
-                    fetch_result["servers"] = fallback_servers
+                    # Previously this invented an entire fleet from hardcoded
+                    # per-role constants (62/55/35% CPU, 70/62/40% memory, a
+                    # fabricated VM size) and tagged it source="azure_monitor",
+                    # so a failed fetch produced a plausible, fully-graded fleet
+                    # that never existed. Surface the failure instead — the
+                    # caller already raises on fetch_error below.
+                    logger.exception("Azure resource fetch failed for %d VM(s)", len(vms))
+                    fetch_result["servers"] = []
+                    fetch_error["error"] = exc
                 finally:
                     fetch_done.set()
 

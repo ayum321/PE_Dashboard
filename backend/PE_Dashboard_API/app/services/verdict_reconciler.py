@@ -289,12 +289,20 @@ def _build_verdict_reason(
     if not has_det_reason and deadline and "0 breach days" not in deadline:
         facts.append(deadline)
 
-    findings_crit = (
-        _safe_int((kpi.get("findings", {}) or {}).get("critical"))
-        or _safe_int((kpi.get("redflags", {}) or {}).get("CRITICAL"))
-        or _safe_int((kpi.get("redflags", {}) or {}).get("critical"))
-        or 0
-    )
+    # PE Findings is the sign-off gate. Red flags are consultative questions and
+    # a different, usually smaller, tally — falling through to them whenever the
+    # findings count was merely absent made this sentence quote a number that
+    # contradicted the gate badge and the ledger on the same screen.
+    _findings_kpi = kpi.get("findings", {}) or {}
+    if "critical" in _findings_kpi:
+        findings_crit = _safe_int(_findings_kpi.get("critical")) or 0
+    else:
+        _rf_kpi = kpi.get("redflags", {}) or {}
+        findings_crit = (
+            _safe_int(_rf_kpi.get("CRITICAL"))
+            or _safe_int(_rf_kpi.get("critical"))
+            or 0
+        )
     if findings_crit > 0 and not (has_det_reason and "critical finding" in (det_verdict_reason or "").lower()):
         facts.append(f"{findings_crit} critical finding(s)")
 

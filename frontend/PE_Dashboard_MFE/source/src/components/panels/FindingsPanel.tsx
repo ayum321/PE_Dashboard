@@ -7,8 +7,7 @@ import { FinalJudgmentCard } from './FinalJudgmentCard';
 import { PeReviewSummary } from './PeReviewSummary';
 import { FindingsDataGrid, FindingItem } from '../shared/FindingsDataGrid';
 import { WorkflowHeadroomCard } from '../shared/WorkflowHeadroomCard';
-import { SeverityDonutChart } from '../shared/SeverityDonutChart';
-import { KpiStatCard } from '../shared/KpiStatCard';
+import { FindingsCrux } from '../shared/FindingsCrux';
 
 interface TopAction {
   rank?: number;
@@ -41,6 +40,7 @@ export function FindingsPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<SeverityFilter>('all');
+  const [ledgerOpen, setLedgerOpen] = useState(false);
 
   const handleGenerate = async () => {
     setBusy(true);
@@ -158,28 +158,15 @@ export function FindingsPanel() {
       <PeReviewSummary />
 
       {data.findings && counts.all > 0 && (
-        <Box display="flex" alignItems="center" style={{ gap: 16, marginTop: 14, marginBottom: -8 }}>
-          <SeverityDonutChart counts={counts} size={100} />
-          <Box>
-            <Typography variant="subtitle2" style={{ fontWeight: 800, color: '#f0f4ff' }}>
-              Finding Severity Distribution
-            </Typography>
-            <Typography variant="caption" color="textSecondary">
-              {counts.critical} critical · {counts.warning} warning · {counts.info} info · {counts.ok} passed
-            </Typography>
-          </Box>
-          {rfcs != null && (
-            <KpiStatCard
-              label="RFCS"
-              value={rfcs.toFixed(0)}
-              sub="Failure-resource correlation"
-              accent={rfcs >= 50 ? '#f43f5e' : rfcs >= 25 ? '#f59e0b' : '#10d96e'}
-            />
-          )}
-        </Box>
+        <FindingsCrux
+          findings={findings}
+          counts={counts}
+          rfcs={rfcs}
+          onViewAll={() => { setFilter('critical'); setLedgerOpen(true); }}
+        />
       )}
 
-      {/* ═══ TIER 3: DENSE TABULAR FINDINGS GRID ═══ */}
+      {/* ═══ TIER 3: FULL LEDGER — opt-in, so the crux above stays the headline ═══ */}
       {!data.findings ? (
         <Paper
           elevation={0}
@@ -190,12 +177,28 @@ export function FindingsPanel() {
           </Typography>
         </Paper>
       ) : (
-        <FindingsDataGrid
-          findings={findings}
-          filter={filter}
-          onFilterChange={setFilter}
-          counts={counts}
-        />
+        <Box style={{ marginTop: 14 }}>
+          <button
+            type="button"
+            onClick={() => setLedgerOpen((v) => !v)}
+            aria-expanded={ledgerOpen}
+            style={{
+              all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 12, fontWeight: 700, color: '#91a7d8', padding: '6px 2px',
+            }}
+          >
+            <span style={{ transform: ledgerOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▸</span>
+            {ledgerOpen ? 'Hide' : 'Show'} full findings ledger ({counts.all})
+          </button>
+          {ledgerOpen && (
+            <FindingsDataGrid
+              findings={findings}
+              filter={filter}
+              onFilterChange={setFilter}
+              counts={counts}
+            />
+          )}
+        </Box>
       )}
     </Box>
   );

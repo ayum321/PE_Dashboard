@@ -418,10 +418,17 @@ def _build_narrative_context(payload: Dict[str, Any]) -> Dict[str, Any]:
         srv = r.get("servers") or res_ac.get("servers") or sc_res.get("servers") or []
         out["resource"] = {
             "kpis": r.get("kpis") or res_ac.get("kpis") or sc_res.get("kpis"),
+            # The Infrastructure table renders AVG from cpu_avg_pct/mem_avg_pct and
+            # PEAK from the *_max_pct fields. They were missing from this whitelist,
+            # so every row's AVG resolved to None and printed "N/A" no matter how
+            # complete the Azure telemetry was, while PEAK survived only because its
+            # fallback chain reaches cpu_pct.
             "servers": [
                 {k: s.get(k) for k in (
-                    "host", "type", "cpu_pct", "mem_pct",
-                    "disk_pct", "status", "dual_pressure", "agg_trap",
+                    "host", "type", "status", "dual_pressure", "agg_trap",
+                    "cpu_pct", "cpu_avg_pct", "cpu_max_pct",
+                    "mem_pct", "mem_avg_pct", "mem_max_pct",
+                    "disk_pct", "disk_max_pct",
                 ) if s.get(k) is not None}
                 for s in srv[:15]
             ],
