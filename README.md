@@ -82,7 +82,7 @@ mindmap
       Critical Path Job Analysis
     Pillar 3: Infrastructure and Resource
       Azure Monitor VM Telemetry
-      DB Memory and SGA/PGA Exhaustion
+      DB Host-Memory Pressure
       CPU Sizing and Role Limits
       Fleet Health Grade
     Pillar 4: Benchmark and UAT
@@ -103,7 +103,7 @@ mindmap
 
 ### 3. 🖥️ Infrastructure Utilization & Resource Health
 - Pulls Azure VM metrics (CPU %, Memory %, Disk I/O) across App, DB, and Integration tiers.
-- Enforces role-aware thresholds (e.g. DB Memory 80–92% expected band for SGA/PGA; >92% flagged for paging/OOM risk).
+- Enforces role-aware host-memory thresholds. The configured DB 80–92% used band is an operational profile; Azure host metrics do not prove how much memory belongs to Oracle SGA/PGA.
 - Assigns fleet health grades (A through F) and pinpoints memory leaks or under-provisioned virtual hardware.
 
 ### 4. 🧪 Performance Benchmarking & UAT Validation
@@ -228,7 +228,9 @@ $$\text{Composite Score} = \sum_{p \in \text{Pillars}} \left(\text{Score}_p \tim
 
 ### Sign-off Gating Hierarchy
 1. **Critical Blocker Rule**: If any unresolved `CRITICAL` finding exists (e.g. database RAM exhaustion or negative window buffer), the top-level decision is strictly **`BLOCKED`** or **`HOLD`**, regardless of composite numerical score.
-2. **Grade Mapping**:
+2. **Measurement Eligibility Rule**: A configured sentinel mismatch is retained as diagnostic runtime evidence but classified `MEASUREMENT_UNRESOLVED`; it is excluded from SLA compliance until the sentinels align or an approved fallback policy exists. Explicit `No SLA` and `NOT_OBSERVED` rows remain unscored.
+3. **Clean Approval Rule**: The exported audit is `clean_approved` only when both signers have names and valid dates, checklist claims have loaded evidence, and no critical resources, eligible SLA breaches, unresolved contracted measurements, open manual issues, or critical/high findings remain. Otherwise signatures are reported as approval/review with exceptions.
+4. **Grade Mapping**:
    - `A / A+` (Score $\ge 90$): **`GO`** — All pillars compliant, healthy buffer margins.
    - `B / B+` (Score $75 - 89$): **`GO WITH NOTES`** / **`HOLD`** — Minor risks under review.
    - `C / D / F` (Score $< 75$ or Criticals): **`BLOCKED`** / **`REMEDIATE`** — Immediate remediation required before production deployment.
@@ -309,16 +311,17 @@ docker-compose up --build
 ### Frontend Test Suite (Jest + React Testing Library)
 ```powershell
 cd frontend\PE_Dashboard_MFE\source
-# Run all 19 test suites
-npm test -- --watchAll=false
+# Run all frontend suites serially (stable on constrained Windows runners)
+npm test -- --watchAll=false --runInBand
 # TypeScript compilation check (0 errors)
 npx tsc --noEmit
 ```
 
-### Backend Scoring Validation Suite
+### Backend Integrity Suites
 ```powershell
-# Validates mathematical parity and boundary penalty caps
-python _test_final_judgment_scoring.py
+cd backend\PE_Dashboard_API\app
+python test_sla_regression_fixes.py
+python test_audit_report_integrity.py
 ```
 
 ---

@@ -62,10 +62,19 @@ export function GovernancePanel() {
   const checklistTotal = CHECKLIST_ITEMS.length;
   const checklistPct = Math.round((checklistDone / checklistTotal) * 100);
   const checklistComplete = checklistDone === checklistTotal;
-  // No live findings-engine blocker cross-check yet (would need the Findings
-  // page's decision payload wired in here too) — gated on checklist completion
-  // alone for now, same disclaimer-override UX as vanilla.
-  const blocked = !checklistComplete;
+  const workflowRows = ((data.slaMatrix?.workflow_summary || []) as Array<Record<string, unknown>>);
+  const resourceKpis = (data.resource?.kpis || {}) as Record<string, unknown>;
+  const resourceCritical = Number(resourceKpis.n_critical || 0);
+  const openIssues = issues.filter((i) => !['Resolved', 'Closed'].includes(i.Status));
+  const slaBlockers = workflowRows.filter((row) => {
+    const status = String(row.status || '').toUpperCase();
+    const state = String(row.measurement_state || '').toUpperCase();
+    return (row.status_eligible === true && status === 'BREACH')
+      || ['MEASUREMENT_UNRESOLVED', 'NOT_OBSERVED', 'RUNTIME_MISSING', 'SLA_CONTRACT_CONFLICT'].includes(status)
+      || ['ANCHOR_UNMATCHED', 'NOT_OBSERVED'].includes(state);
+  });
+  const evidenceBlockerCount = resourceCritical + openIssues.length + slaBlockers.length;
+  const blocked = !checklistComplete || evidenceBlockerCount > 0;
 
   const handleAddIssue = () => {
     if (!issueDraft.desc.trim()) { setDescError(true); return; }
@@ -112,7 +121,8 @@ export function GovernancePanel() {
     });
   };
 
-  const bothOk = approvals.pe.approved && approvals.customer.approved;
+  const bothOk = approvals.pe.approved && approvals.customer.approved
+    && Boolean(approvals.pe.name.trim()) && Boolean(approvals.customer.name.trim()) && !blocked;
   const custDisplayName = approvals.customer.name || (data.customerName ? `${data.customerName} (unsigned)` : '\u2014');
 
   const kpiCounts = useMemo(() => ({
@@ -342,7 +352,7 @@ export function GovernancePanel() {
           {blocked && (
             <>
               <Typography variant="caption" style={{ display: 'block', color: '#f59e0b', marginTop: 6 }}>
-                {'\u26a0 '}{checklistTotal - checklistDone} checklist item(s) incomplete.
+                {'\u26a0 '}{checklistTotal - checklistDone} checklist item(s) incomplete; {evidenceBlockerCount} evidence blocker(s) remain.
               </Typography>
               <Box display="flex" alignItems="flex-start" style={{ gap: 8, marginTop: 8, borderRadius: 8, border: '1px solid rgba(245,158,11,.4)', background: 'rgba(245,158,11,.05)', padding: 10 }}>
                 <input type="checkbox" checked={ackChecked} onChange={(e) => setAckChecked(e.target.checked)} style={{ accentColor: '#f59e0b', width: 16, height: 16, marginTop: 2 }} />
@@ -386,7 +396,7 @@ export function GovernancePanel() {
       {/* Go-Live banner */}
       <Box style={{ borderRadius: 16, border: `2px solid ${bothOk ? 'rgba(16,217,110,.5)' : 'rgba(245,158,11,.5)'}`, background: bothOk ? 'rgba(16,217,110,.1)' : 'rgba(245,158,11,.1)', padding: 20, textAlign: 'center', marginBottom: 16 }}>
         <Typography variant="h6" style={{ fontWeight: 800, color: bothOk ? '#10d96e' : '#f59e0b' }}>
-          Go-Live Sign-Off Status: {bothOk ? '\u2705 APPROVED' : '\u23f3 PENDING'}
+          Go-Live Sign-Off Status: {bothOk ? '\u2705 APPROVED' : (approvals.pe.approved && approvals.customer.approved ? '\u26a0 APPROVED WITH EXCEPTIONS' : '\u23f3 PENDING')}
         </Typography>
         <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 8 }}>
           PE: {approvals.pe.name || '\u2014'} &nbsp;|&nbsp; Customer: {custDisplayName}

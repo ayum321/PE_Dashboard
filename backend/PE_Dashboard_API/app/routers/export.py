@@ -69,6 +69,7 @@ class ExportRequest(BaseModel):
     # claims had zero supporting evidence in the exported document.
     sow:       Optional[Dict[str, Any]] = None
     benchmark: Optional[Dict[str, Any]] = None
+    sla_matrix: Optional[Dict[str, Any]] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -118,18 +119,19 @@ def _cpu_cell(cpu: float, stype: str) -> str:
 
 
 def _mem_cell(mem: float, stype: str, mem_status: str | None) -> str:
-    """Role-aware memory cell. DB servers pre-allocate the SGA/PGA band
-    (DB_MEM_EXPECTED_LO–HI) by design, so memory inside that band is EXPECTED,
-    not a warning — matching resource_calculator's grader. Other roles fall back
-    to the global MEM warn/crit thresholds."""
+    """Role-aware host-memory-used cell matching the upstream grader.
+
+    The DB band is configured policy for host memory; this evidence does not
+    distinguish Oracle SGA, PGA, OS cache, or other processes.
+    """
     if mem <= 0:
         return '<span class="tag tag-gray">N/A</span>'
     if (stype or "").upper() == "DB":
         live = (mem_status or "").upper()
         if live == "DB_HIGH" or (not live and mem > _DB_MEM_HI):
-            cls, sub = "tag-red", f"&gt; {_g(_DB_MEM_HI)}% SGA ceiling"
+            cls, sub = "tag-red", f"&gt; {_g(_DB_MEM_HI)}% configured DB host-memory band"
         else:
-            cls, sub = "tag-green", f"SGA band {_g(_DB_MEM_LO)}–{_g(_DB_MEM_HI)}%"
+            cls, sub = "tag-green", f"configured DB host-memory band {_g(_DB_MEM_LO)}–{_g(_DB_MEM_HI)}%"
         return (f'<span class="tag {cls}">{mem:.1f}%</span>'
                 f'<div class="dim micro">{sub}</div>')
     return _metric_cell(mem, MEM_OK, MEM_WARN, f"warn {_g(MEM_OK)}/{_g(MEM_WARN)}")
@@ -273,6 +275,7 @@ def _srv_rows(servers: List[dict], vms_by_host: Dict[str, dict] | None = None) -
         detail = vms_by_host.get(_host_key(host_raw))
         stype = (s.get("type") or "APP").upper()
         stype_esc = _esc(stype)
+        environment = _esc(s.get("environment") or s.get("env") or "Unknown")
         img_only = s.get("image_only", False)
         if img_only or (cpu == 0 and mem == 0 and disk == 0 and not detail):
             status = '<span class="tag tag-gray">IMAGE ONLY</span>'
@@ -289,7 +292,7 @@ def _srv_rows(servers: List[dict], vms_by_host: Dict[str, dict] | None = None) -
                 if detail else "")
         rows.append(f"""<tr id="{_host_anchor(host_raw)}">
           <td class="host-cell"><b>{host.split(".")[0]}</b> {jump}<br><span class="dim">{sub}</span></td>
-          <td><span class="tag {_ROLE_TAG.get(stype, 'tag-gray')}">{stype_esc}</span></td>
+          <td><span class="tag {_ROLE_TAG.get(stype, 'tag-gray')}">{stype_esc}</span><div class="dim micro">{environment}</div></td>
           <td>{cpu_td}</td><td>{mem_td}</td><td>{dsk_td}</td>
           <td>{status}</td>
         </tr>""")
@@ -500,7 +503,7 @@ def _top_rows(top_jobs: List[dict]) -> str:
         if sla <= 0:
             return "SLA_MISSING"
         buffer_value = buffer_pct if buffer_pct is not None else (sla - peak) / sla * 100
-        if buffer_value < 0:
+        if buffer_value <= 0:
             return "BREACH"
         if buffer_value <= float(pe_config.SLA_ATRISK_PCT):
             return "AT_RISK"
@@ -565,6 +568,57 @@ def _top_rows(top_jobs: List[dict]) -> str:
     return "".join(rows)
 
 
+def _workflow_rows(workflows: List[dict]) -> str:
+    """Render canonical workflow SLA results without inventing missing values."""
+    if not workflows:
+        return "<tr><td colspan='7' class='dim' style='text-align:center;padding:20px'>No workflow SLA inventory</td></tr>"
+    status_tags = {
+        "BREACH": ("tag-red", "BREACH"), "AT_RISK": ("tag-amber", "AT RISK"),
+        "LONG_JOB": ("tag-amber", "LONG JOB"), "OK": ("tag-green", "OK"),
+        "MEASUREMENT_UNRESOLVED": ("tag-amber", "MEASUREMENT UNRESOLVED"),
+        "NOT_OBSERVED": ("tag-gray", "NOT OBSERVED"),
+        "SLA_UNDECLARED": ("tag-amber", "NO SLA"), "NO_SLA": ("tag-amber", "NO SLA"),
+        "RUNTIME_MISSING": ("tag-gray", "RUNTIME MISSING"),
+        "SLA_CONTRACT_CONFLICT": ("tag-red", "CONTRACT CONFLICT"),
+    }
+    source_labels = {
+        "batch_sla_xlsx": "Workbook contract", "sla_matrix": "Contracted",
+        "sow_extracted": "SOW contract", "sla_undeclared": "Explicit No SLA",
+    }
+    rows: list[str] = []
+    for row in workflows[:30]:
+        status_key = str(row.get("status") or "NOT_ASSESSED").upper()
+        tag_class, status_text = status_tags.get(status_key, ("tag-gray", status_key.replace("_", " ")))
+        runtime = row.get("runtime_h")
+        sla = row.get("sla_h")
+        buffer_pct = row.get("buffer_pct")
+        source_key = str(row.get("sla_source") or "").lower()
+        if source_key.startswith("global_default_"):
+            source = f"Assumed global default ({source_key.removeprefix('global_default_').upper()})"
+        else:
+            source = source_labels.get(source_key, source_key.replace("_", " ").title() or "Not supplied")
+        tier = str(row.get("tier") or "UNKNOWN").upper()
+        name = _esc(row.get("workflow_name") or row.get("sub_application") or "Unknown workflow")
+        batch_type = _esc(row.get("batch_type") or "UNKNOWN")
+        runtime_cell = f"{float(runtime):.3f}h" if runtime is not None else "—"
+        sla_cell = f"{float(sla):.2f}h" if sla is not None else "—"
+        buffer_cell = f"{float(buffer_pct):.1f}%" if buffer_pct is not None else "—"
+        runs = int(_f(row.get("total_runs", 0)))
+        reason = str(row.get("measurement_reason_code") or "").replace("_", " ").title()
+        if status_key == "MEASUREMENT_UNRESOLVED" and row.get("indicative_buffer_pct") is not None:
+            reason += f"; diagnostic only {float(row['indicative_buffer_pct']):.1f}%"
+        flag = f'<span class="tag tag-gray tag-sm">{_esc(reason)}</span>' if reason else '<span class="dim micro">—</span>'
+        colour = {"BREACH": "var(--red)", "AT_RISK": "var(--red)", "LONG_JOB": "var(--amber)"}.get(status_key, "var(--ink-2)")
+        rows.append(f"""<tr>
+          <td><b>{name}</b> <span class="tag tag-blue tag-sm">{batch_type}</span></td>
+          <td>{runtime_cell}</td><td class="dim">{runs}</td>
+          <td class="dim">{sla_cell} <span class="tag tag-gray tag-sm">{_esc(tier)} · {_esc(source)}</span></td>
+          <td style="color:{colour};font-weight:700;">{buffer_cell}</td>
+          <td><span class="tag {tag_class}">{_esc(status_text)}</span></td><td>{flag}</td>
+        </tr>""")
+    return "".join(rows)
+
+
 def _sow_status(pct: float) -> str:
     """Classify SOW consumption % against the PE standard process window.
 
@@ -598,9 +652,9 @@ def _sow_resolve(m: dict) -> tuple[float, float, str]:
     the single source both _sow_rows() and the overall-status fallback use,
     so the per-row statuses and the header badge can never disagree.
     """
-    sow_v  = _f(m.get("sow", 0))
+    sow_v  = _f(m.get("commitment", m.get("sow", 0)))
     act_v  = _f(m.get("actual", 0))
-    pct    = _f(m.get("pct", 0))
+    pct    = _f(m.get("pct_of_contract", m.get("pct", 0)))
     status_key = (m.get("status") or "").upper()
     if pct <= 0 and sow_v > 0 and act_v > 0:
         pct = round(act_v / sow_v * 100, 1)
@@ -619,7 +673,7 @@ def _sow_rows(metrics: List[dict]) -> str:
                 "for this engagement.</td></tr>")
     rows = []
     for m in metrics:
-        label  = _esc(m.get("label") or m.get("key") or "?")
+        label  = _esc(m.get("name") or m.get("label") or m.get("key") or "?")
         sow_v, act_v, pct, status_key = _sow_resolve(m)
         cls, label_txt = _SOW_STATUS_TAG.get(status_key, ('tag-gray', status_key or 'N/A'))
         pct_style = 'style="color:#ef4444;font-weight:700"' if status_key == "CRITICAL_OVER" else \
@@ -645,7 +699,7 @@ def _sow_ceiling_notice(metrics: List[dict]) -> str:
     for metric in metrics:
         sow_v, _actual, _pct, _status = _sow_resolve(metric)
         if sow_v > 0:
-            label = str(metric.get("label") or metric.get("key") or "?")
+            label = str(metric.get("name") or metric.get("label") or metric.get("key") or "?")
             buckets.setdefault(round(sow_v, 4), []).append(label)
     collisions = [(value, names) for value, names in buckets.items() if len(names) > 1]
     if not collisions:
@@ -685,7 +739,7 @@ def _sow_chart(metrics: List[dict]) -> str:
     for index, metric in enumerate(usable):
         sow_v, actual, pct, status = _sow_resolve(metric)
         y = 26 + index * 26
-        label = _esc(str(metric.get("label") or metric.get("key") or "?"))[:26]
+        label = _esc(str(metric.get("name") or metric.get("label") or metric.get("key") or "?"))[:26]
         color = band_color.get(str(status).upper(), "var(--green)")
         bar_w = max(2.0, min(track_w, pct / axis_max * track_w))
         pieces.append(f"<text x='8' y='{y + 12}' fill='var(--ink-2)' font-size='11'>{label}</text>")
@@ -803,6 +857,7 @@ def _latest_registry_metadata(
     meta = report.get("meta") if isinstance(report.get("meta"), dict) else {}
     batch = report.get("batch_sla") if isinstance(report.get("batch_sla"), dict) else {}
     summary = batch.get("buffer_summary") if isinstance(batch.get("buffer_summary"), dict) else {}
+    workload = batch.get("workload_summary") if isinstance(batch.get("workload_summary"), dict) else summary
     resource = report.get("resource_review") if isinstance(report.get("resource_review"), dict) else {}
     fleet = resource.get("fleet_summary") if isinstance(resource.get("fleet_summary"), dict) else {}
     sow = report.get("sow_capacity") if isinstance(report.get("sow_capacity"), dict) else {}
@@ -850,7 +905,7 @@ def _latest_registry_metadata(
     if not env and meta.get("env") and meta["env"] != "Not Detected":
         env = str(meta["env"]).strip()
 
-    pe_approved = sign_off in {"reviewed", "customer_approved"}
+    pe_approved = sign_off in {"reviewed", "reviewed_with_exceptions", "approved_with_exceptions", "clean_approved"}
     if legacy_ctx and "pe_approved" in legacy_ctx:
         pe_approved = bool(legacy_ctx["pe_approved"])
     elif isinstance(pe_info, dict) and "approved" in pe_info:
@@ -858,7 +913,7 @@ def _latest_registry_metadata(
     elif "pe_approved" in meta:
         pe_approved = bool(meta["pe_approved"])
 
-    cust_approved = sign_off == "customer_approved"
+    cust_approved = sign_off in {"approved_with_exceptions", "clean_approved"}
     if legacy_ctx and "cust_approved" in legacy_ctx:
         cust_approved = bool(legacy_ctx["cust_approved"])
     elif isinstance(cust_info, dict) and "approved" in cust_info:
@@ -873,8 +928,9 @@ def _latest_registry_metadata(
         except (ValueError, TypeError):
             checklist_mismatches = 0
     elif "checklist_mismatches" in meta:
+        value = meta["checklist_mismatches"]
         try:
-            checklist_mismatches = int(meta["checklist_mismatches"])
+            checklist_mismatches = len(value) if isinstance(value, list) else int(value)
         except (ValueError, TypeError):
             checklist_mismatches = 0
 
@@ -891,12 +947,12 @@ def _latest_registry_metadata(
         # the captured flags without fabricating display numbers.
         "sla_breach_count": summary.get("jobs_breach", summary.get("breach_count")),
         "sla_at_risk_count": summary.get("jobs_at_risk", summary.get("at_risk_count")),
-        "sla_total_jobs": summary.get("total_jobs"),
+        "sla_total_jobs": summary.get("inventory_count", summary.get("total_jobs")),
         "batch_metrics_captured": bool(summary),
         "batch_compliance_pct": summary.get("compliance_pct", summary.get("window_compliance_pct")),
-        "batch_total_jobs": summary.get("total_jobs"),
-        "batch_total_runs": summary.get("total_runs"),
-        "batch_total_hrs": summary.get("total_hrs"),
+        "batch_total_jobs": workload.get("total_jobs"),
+        "batch_total_runs": workload.get("total_runs"),
+        "batch_total_hrs": workload.get("total_hrs"),
         "batch_breach_count": summary.get("jobs_breach", summary.get("breach_count")),
         "batch_at_risk_count": summary.get("jobs_at_risk", summary.get("at_risk_count")),
         "batch_ok_count": summary.get("jobs_ok", summary.get("ok_count")),
@@ -1322,7 +1378,7 @@ def _explorer_chart(series: dict[str, list[tuple[datetime, float]]], cpu_ok: flo
 
 
 def _explorer_stats(detail: dict, series: dict[str, list[tuple[datetime, float]]]) -> str:
-    """Precomputed avg / p95 / peak per metric — read, never recalculated."""
+    """Precomputed summary stats with metric-correct adverse direction."""
     stats = detail.get("stats") if isinstance(detail.get("stats"), dict) else {}
     cells = []
     for metric, label, colour, _key in _EXPLORER_METRICS:
@@ -1332,16 +1388,17 @@ def _explorer_stats(detail: dict, series: dict[str, list[tuple[datetime, float]]
                 continue
             entry = {}
         mean = _number_or_none(entry.get("mean"))
-        p95 = _number_or_none(entry.get("p95"))
-        peak = _number_or_none(entry.get("max"))
-        if mean is None and p95 is None and peak is None:
+        is_available_memory = metric == "Available Memory Percentage"
+        tail = _number_or_none(entry.get("p5" if is_available_memory else "p95"))
+        extreme = _number_or_none(entry.get("min" if is_available_memory else "max"))
+        if mean is None and tail is None and extreme is None:
             continue
         def _fmt(value: float | None) -> str:
             return f"{value:.1f}%" if value is not None else "—"
         cells.append(
             f"<div class='mx-stat'><div class='mx-stat__k'><i style='background:{colour}'></i>{_esc(label)}</div>"
-            f"<div class='mx-stat__v tabnum'>{_fmt(peak)}</div>"
-            f"<div class='dim micro'>avg {_fmt(mean)} &middot; p95 {_fmt(p95)}</div></div>")
+            f"<div class='mx-stat__v tabnum'>{_fmt(extreme)}</div>"
+            f"<div class='dim micro'>{'low' if is_available_memory else 'peak'} &middot; avg {_fmt(mean)} &middot; {'p5' if is_available_memory else 'p95'} {_fmt(tail)}</div></div>")
     if not cells:
         return "<div class='dim'>No summary statistics were captured for this host.</div>"
     return f"<div class='mx-stats'>{''.join(cells)}</div>"
@@ -1389,7 +1446,7 @@ def _explorer_spikes(detail: dict) -> tuple[str, int]:
         duration = _number_or_none(spike.get("duration_min"))
         bits = [f"{_esc(short)} {severity.replace('_', ' ').upper()}"]
         if peak is not None:
-            bits.append(f"peak {peak:.1f}%")
+            bits.append(f"{'low-water' if metric == 'Available Memory Percentage' else 'peak'} {peak:.1f}%")
         if duration:
             bits.append(f"{duration:.0f} min")
         if when is not None:
@@ -1840,6 +1897,23 @@ def _priority_actions(batch_kpis: dict, servers: List[dict], sow_metrics: List[d
                    for _rank, priority, cls, text in actions[:8])
 
 
+def _frozen_priority_actions(actions: Any) -> str:
+    """Render the same frozen review items used by sign-off and the archive."""
+    if not isinstance(actions, list) or not actions:
+        return "<span class='tag tag-green'>No priority action is generated from the rendered evidence.</span>"
+    rows: list[str] = []
+    for action in actions[:12]:
+        if not isinstance(action, dict):
+            continue
+        priority = str(action.get("priority") or "P3").upper()
+        cls = "tag-red" if priority in {"P0", "P1"} else ("tag-amber" if priority == "P2" else "tag-blue")
+        observation = _esc(action.get("observation") or "Review item")
+        recommendation = _esc(action.get("recommended_action") or "")
+        text = f"{observation} <span class='dim'>{recommendation}</span>" if recommendation else observation
+        rows.append(f"<div class='action'><span class='tag {cls}'>{_esc(priority)}</span><span>{text}</span></div>")
+    return "".join(rows)
+
+
 def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """Build the original report context plus additive evidence.
 
@@ -1852,16 +1926,27 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
     sow, benchmark = body.sow or {}, body.benchmark or {}
     batch_kpis, resource_kpis = batch.get("kpis") or {}, resource.get("kpis") or {}
     top_jobs_data = batch.get("top_jobs") or batch.get("top_breaches") or []
-    sow_metrics, bench_rows_data = sow.get("metrics") or [], benchmark.get("rows") or []
+    workflow_block = report.get("workflow_sla") if isinstance(report.get("workflow_sla"), dict) else {}
+    workflow_rows = workflow_block.get("rows") if isinstance(workflow_block.get("rows"), list) else []
+    workflow_summary = workflow_block.get("summary") if isinstance(workflow_block.get("summary"), dict) else {}
+    use_workflow_sla = bool(workflow_rows)
+    frozen_actions = report.get("priority_actions") if isinstance(report.get("priority_actions"), list) else []
+    frozen_sow = report.get("sow_capacity") if isinstance(report.get("sow_capacity"), dict) else {}
+    sow_metrics = frozen_sow.get("metrics") if isinstance(frozen_sow.get("metrics"), list) else (sow.get("metrics") or [])
+    bench_rows_data = benchmark.get("rows") or []
     checklist, pe_info, cust_info = approvals.get("checklist", {}), approvals.get("pe", {}), approvals.get("customer", {})
     pe_approved, cust_approved = bool(pe_info.get("approved")), bool(cust_info.get("approved"))
-    both_ok, pe_override = pe_approved and cust_approved, bool(pe_info.get("override_blockers", False))
+    pe_override = bool(pe_info.get("override_blockers", False))
     raw_customer = str(approvals.get("customer_name", "") or "").strip()
     raw_env = str(approvals.get("env_type", "") or "Not Detected")
     customer, env = _esc(raw_customer or "Customer not specified"), _esc(raw_env)
-    comp_pct = _f(batch_kpis.get("compliance_pct", 0))
+    comp_source = workflow_summary if use_workflow_sla else batch_kpis
+    comp_raw = comp_source.get("compliance_pct")
+    comp_pct = _f(comp_raw) if comp_raw is not None else 0.0
     comp_col = "#22c55e" if comp_pct >= 99 else ("#f59e0b" if comp_pct >= 85 else "#ef4444")
-    n_breach, n_at_risk, n_ok_jobs = int(_f(batch_kpis.get("jobs_breach", 0))), int(_f(batch_kpis.get("jobs_at_risk", 0))), int(_f(batch_kpis.get("jobs_ok", 0)))
+    n_breach = int(_f(workflow_summary.get("breach_count", 0))) if use_workflow_sla else int(_f(batch_kpis.get("jobs_breach", 0)))
+    n_at_risk = int(_f(workflow_summary.get("at_risk_count", 0))) if use_workflow_sla else int(_f(batch_kpis.get("jobs_at_risk", 0)))
+    n_ok_jobs = int(_f(workflow_summary.get("ok_count", 0))) if use_workflow_sla else int(_f(batch_kpis.get("jobs_ok", 0)))
     n_jobs, total_hrs, total_runs = int(_f(batch_kpis.get("total_jobs", 0))), _f(batch_kpis.get("total_hrs", 0)), int(_f(batch_kpis.get("total_runs", 0)))
     fleet = _reconcile_fleet(resource_kpis, servers)
     fleet_grade, fleet_score = fleet["grade"], fleet["score"]
@@ -1891,7 +1976,13 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
     meta = report.get("meta") if isinstance(report.get("meta"), dict) else {}
     audit_window = meta.get("audit_window") if isinstance(meta.get("audit_window"), dict) else {}
     source_badges = [str(source.get("name")) for source in (meta.get("sources") or []) if isinstance(source, dict) and source.get("loaded")]
-    sign_status = str(meta.get("sign_off_status") or ("customer_approved" if both_ok else "draft")).replace("_", " ").title()
+    sign_key = str(meta.get("sign_off_status") or "draft")
+    sign_status = sign_key.replace("_", " ").title()
+    sign_clean = sign_key == "clean_approved"
+    sign_excepted = sign_key in {"approved_with_exceptions", "reviewed_with_exceptions"}
+    sign_label = "✅ APPROVED" if sign_clean else ("⚠ APPROVED WITH EXCEPTIONS" if sign_excepted else ("✓ REVIEWED" if sign_key == "reviewed" else "⏳ PENDING"))
+    sign_text = "APPROVED" if sign_clean else ("APPROVED WITH EXCEPTIONS" if sign_excepted else ("REVIEWED" if sign_key == "reviewed" else "PENDING"))
+    sign_blockers = meta.get("sign_off_blockers") if isinstance(meta.get("sign_off_blockers"), list) else []
     # Preserve the existing engagement-scoped product chips in the locked
     # header. This is intentionally the same config-store path as the legacy
     # renderer, not a new report-side interpretation of product scope.
@@ -1904,16 +1995,17 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
         reviewed_product_labels = list(_labels_for(_cfg_store.get("reviewed_products") or []))
     except Exception:
         reviewed_product_labels = []
-    evidence = {"batch": bool(top_jobs_data), "ctrlm": bool(top_jobs_data), "res": bool(resource_kpis), "res15": bool(resource_kpis), "data": bool(sow_metrics), "sow": bool(sow_metrics), "perf": bool(batch_perf), "ui": bool(bench_rows_data)}
+    evidence = {"batch": bool(top_jobs_data or workflow_rows), "ctrlm": bool(top_jobs_data or workflow_rows), "res": bool(resource_kpis), "res15": bool(vms_by_host), "data": bool(sow_metrics), "sow": bool(sow_metrics), "perf": bool(batch_perf), "ui": bool(bench_rows_data)}
     checklist_rows, checklist_mismatches = _checklist_rows(checklist, evidence)
     ctx = dict(
         customer=customer, env=env, gen_date=datetime.now().strftime("%d %b %Y, %I:%M %p"),
-        reviewed_product_labels=reviewed_product_labels, sign_color="#22c55e" if both_ok else "#f59e0b", sign_label="✅ APPROVED" if both_ok else "⏳ PENDING", sign_state="approved" if both_ok else "pending", sign_text="APPROVED" if both_ok else "PENDING",
+        reviewed_product_labels=reviewed_product_labels, sign_color="#22c55e" if sign_clean else "#f59e0b", sign_label=sign_label, sign_state="approved" if sign_clean else ("exception" if sign_excepted else "pending"), sign_text=sign_text, sign_blockers=[_esc(item) for item in sign_blockers],
         pe_name=_esc(pe_info.get("name") or "—"), cust_name=_esc(cust_info.get("name") or "—"), pe_tick="✅" if pe_approved else "⏳", cu_tick="✅" if cust_approved else "⏳", pe_approved=pe_approved, cust_approved=cust_approved, pe_date=_esc(pe_info.get("date") or ""), cust_date=_esc(cust_info.get("date") or ""), notes=_esc(approvals.get("notes") or ""), pe_override=pe_override,
         comp_pct=comp_pct, comp_col=comp_col, comp_deg=max(0.0, min(100.0, comp_pct)) * 3.6, n_breach=n_breach, n_ok_jobs=n_ok_jobs, n_jobs=n_jobs, total_hrs=total_hrs, total_runs=total_runs,
-        fleet_grade=fleet_grade, fleet_score=fleet_score, score_deg=max(0.0, min(100.0, fleet_score)) * 3.6, grade_color=grade_color, n_srv=n_srv, n_crit=n_crit, n_warn_s=n_warn_s, n_healthy=n_healthy, n_unknown=n_unknown, crit_pct_w=round(n_crit / total_servers * 100, 1), warn_pct_w=round(n_warn_s / total_servers * 100, 1), ok_pct_w=round(n_healthy / total_servers * 100, 1), unknown_pct_w=round(n_unknown / total_servers * 100, 1), n_issues=len(issues),
+        fleet_grade=fleet_grade, fleet_score=fleet_score, score_deg=max(0.0, min(100.0, fleet_score)) * 3.6, grade_color=grade_color, n_srv=n_srv, n_crit=n_crit, n_warn_s=n_warn_s, n_healthy=n_healthy, n_unknown=n_unknown, crit_pct_w=round(n_crit / total_servers * 100, 1), warn_pct_w=round(n_warn_s / total_servers * 100, 1), ok_pct_w=round(n_healthy / total_servers * 100, 1), unknown_pct_w=round(n_unknown / total_servers * 100, 1), n_issues=sum(str(issue.get("Status") or issue.get("status") or "").lower() not in {"resolved", "closed"} for issue in issues if isinstance(issue, dict)), n_review_items=len(frozen_actions),
         fleet_resolved=fleet["resolved"], fleet_source=_esc(fleet["source"]), fleet_disagreement=_esc(fleet["disagreement"]), fleet_graded=fleet["graded"],
-        srv_rows=_srv_rows(servers, vms_by_host), top_rows=_top_rows(top_jobs_data), n_jobs_shown=min(20, len(_split_jobs(top_jobs_data)[0])), n_jobs_product=_unique_job_count(_split_jobs(top_jobs_data)[0]), job_count_note=_job_count_note(top_jobs_data, n_jobs), iss_rows=_iss_rows(issues), checklist_rows=checklist_rows, checklist_mismatches=checklist_mismatches,
+        srv_rows=_srv_rows(servers, vms_by_host), top_rows=_workflow_rows(workflow_rows) if use_workflow_sla else _top_rows(top_jobs_data), n_jobs_shown=min(30, len(workflow_rows)) if use_workflow_sla else min(20, len(_split_jobs(top_jobs_data)[0])), n_jobs_product=len(workflow_rows) if use_workflow_sla else _unique_job_count(_split_jobs(top_jobs_data)[0]), job_count_note="" if use_workflow_sla else _job_count_note(top_jobs_data, n_jobs), iss_rows=_iss_rows([issue for issue in issues if isinstance(issue, dict) and str(issue.get("Status") or issue.get("status") or "").lower() not in {"resolved", "closed"}]), checklist_rows=checklist_rows, checklist_mismatches=checklist_mismatches,
+        sla_table_mode="workflow" if use_workflow_sla else "job", sla_inventory_count=len(workflow_rows), sla_scored_count=int(_f(workflow_summary.get("scored_count", 0))), sla_unresolved_count=int(_f(workflow_summary.get("unresolved_count", 0))), compliance_available=comp_raw is not None,
         daily_limit=DAILY_LIMIT_HRS, capture_days=pe_config.RESOURCE_CAPTURE_DAYS, cpu_ok_t=cpu_ok_t, cpu_warn_t=cpu_warn_t, mem_ok_t=mem_ok_t, mem_warn_t=mem_warn_t, disk_ok_t=disk_ok_t, disk_warn_t=disk_warn_t, role_cpu_label=role_cpu_label, db_mem_label=db_mem_label,
         sow_rows=_sow_rows(sow_metrics), n_sow=len(sow_metrics), sow_status=sow_status, sow_summary=_esc(sow.get("summary") or ""), sow_badge_color=sow_badge[0], sow_badge_text=sow_badge[1], sow_disclaimer=_esc(sow_disclaimer), sow_ceiling_notice=_sow_ceiling_notice(sow_metrics), sow_chart=_sow_chart(sow_metrics), sow_under_t=_g(pe_config.SOW_UNDER_PCT), sow_over_t=_g(pe_config.SOW_OVER_PCT), sow_over_crit_t=_g(pe_config.SOW_OVER_CRIT_PCT),
         bench_rows=_bench_rows(bench_rows_data), n_bench=len(bench_rows_data), n_bench_total=n_bench_total, bench_summary=_esc(benchmark.get("summary") or ""), bench_badge_color=bench_badge[0], bench_badge_text=bench_badge[1], has_batch_perf=has_batch_perf, n_batch_perf_regr=n_batch_perf_regr, n_batch_perf_total=int(_f(batch_perf.get("total_jobs", 0))), batch_perf_rows=_batch_perf_rows(batch_perf) if has_batch_perf else "",
@@ -1921,10 +2013,7 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
         executive_verdict=_esc(f"Batch SLA {comp_pct:.1f}% ({n_breach} breach(es)); resource fleet Grade {fleet_grade}"
                                f"{f' ({fleet_score:.1f}/100)' if fleet['resolved'] else ' — not resolved from the loaded evidence'}"
                                f"; {n_crit} critical / {n_warn_s} warning of {n_srv} host(s); SOW {sow_badge[1]}."),
-        priority_actions=_priority_actions(batch_kpis, servers, sow_metrics, sow_status, fleet,
-                                           {"disk_missing": explorer["disk_missing"],
-                                            "hosts_with_series": explorer["hosts_with_series"],
-                                            "n_srv": n_srv}),
+        priority_actions=_frozen_priority_actions(report.get("priority_actions")),
         mx_available=explorer["available"], mx_tabs=explorer["tabs"], mx_panels=explorer["panels"],
         mx_summary=_esc(explorer["summary"]), mx_data=explorer["data_json"], mx_hosts=explorer["hosts_with_series"],
         cadence_chart=_batch_cadence_svg(top_jobs_data),
@@ -1933,6 +2022,7 @@ def _locked_legacy_context(body: ExportRequest, report: dict[str, Any]) -> tuple
         job_setaside=_setaside_note(_split_jobs(top_jobs_data)[1]),
         infra_coverage=_infra_coverage(servers, resource, explorer),
         methodology_buffer="buffer_pct = (SLA hours - runtime hours) / SLA hours * 100",
+        sla_at_risk_t=_g(pe_config.SLA_ATRISK_PCT), sla_long_job_t=_g(pe_config.SLA_LONGJOB_PCT),
     )
     return ctx, raw_customer
 

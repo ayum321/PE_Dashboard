@@ -40,7 +40,10 @@ def main():
     payload = build_audit_report_payload(_body(), audit_id="AUD-CONTRACT")
     fleet = payload["resource_review"]["fleet_summary"]
     assert fleet["ok"] == 1 and fleet["warning"] == 1
-    assert payload["meta"]["sign_off_status"] == "customer_approved"
+    # Two checked boxes without signer identity, dates, or a completed
+    # checklist are acknowledgement only, never clean approval.
+    assert payload["meta"]["sign_off_status"] == "approved_with_exceptions"
+    assert payload["meta"]["sign_off_blockers"]
     assert [row["host"] for row in payload["resource_review"]["exception_table"]] == ["warn-host"]
     job = payload["batch_sla"]["top_jobs_table"][0]
     assert job["sub_app"] == "TEST_DAILY" and job["buffer_pct"] == 18.75 and job["status"] == "LONG_JOB"
@@ -53,7 +56,7 @@ def main():
     missing_kpis["resource"].pop("kpis")
     blocked = build_audit_report_payload(missing_kpis, audit_id="AUD-BLOCKED")
     assert blocked["resource_review"]["fleet_summary"] is None
-    assert blocked["meta"]["sign_off_status"] != "customer_approved"
+    assert blocked["meta"]["sign_off_status"] != "clean_approved"
 
     attach_prior_audit(payload, None)
     assert payload["deltas"]["state"] == "first_audit"

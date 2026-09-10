@@ -514,7 +514,8 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     <div class="banner__txt">
       <div class="banner__k">Overall Sign-off Verdict</div>
       <div class="banner__v">{{ sign_text }}</div>
-      <div class="micro" style="color:var(--ink-3);">Records the Performance Engineering and customer signatures only. It does not clear the findings below{% if n_issues or checklist_mismatches %} — {% if n_issues %}{{ n_issues }} open issue(s){% endif %}{% if n_issues and checklist_mismatches %} and {% endif %}{% if checklist_mismatches %}{{ checklist_mismatches }} unbacked checklist claim(s){% endif %} remain on this report{% endif %}.</div>
+      <div class="micro" style="color:var(--ink-3);">Signatures record acknowledgement; clean approval additionally requires complete evidence and no unresolved blockers{% if sign_blockers %} — {{ sign_blockers|length }} blocker(s) remain{% endif %}.</div>
+      {% if sign_blockers %}<div class="micro" style="color:var(--amber);margin-top:4px;">{{ sign_blockers|join(' · ') }}</div>{% endif %}
     </div>
     <div class="banner__date">
       <div><b>Customer:</b> {{ customer }}</div>
@@ -532,12 +533,12 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="stat__body">
         <div class="gauge" style="--deg:{{ comp_deg }};--gc:{{ comp_col }};">
           <div class="gauge__in">
-            <div class="gauge__big tabnum" style="color:{{ comp_col }};">{{ comp_pct }}%</div>
-            <div class="gauge__cap">Window</div>
+            <div class="gauge__big tabnum" style="color:{{ comp_col }};">{% if compliance_available %}{{ comp_pct }}%{% else %}—{% endif %}</div>
+            <div class="gauge__cap">{% if sla_table_mode == 'workflow' %}Scored workflow{% else %}Window{% endif %}</div>
           </div>
         </div>
         <div>
-          <div class="stat__sub"><span class="num">{{ n_ok_jobs }}</span> jobs on-time</div>
+          <div class="stat__sub"><span class="num">{{ n_ok_jobs }}</span> {% if sla_table_mode == 'workflow' %}workflow(s) OK{% else %}jobs on-time{% endif %}</div>
           <div class="stat__sub"><span class="num" style="color:{{ '#f43f5e' if n_breach else '#10d96e' }};">{{ n_breach }}</span> breaching</div>
         </div>
       </div>
@@ -573,12 +574,12 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     </div>
 
     <div class="stat">
-      <div class="stat__top" style="background:{{ '#f43f5e' if n_issues else '#10d96e' }};box-shadow:0 0 16px {{ '#f43f5e' if n_issues else '#10d96e' }};"></div>
-      <div class="stat__label">Open Issues</div>
+      <div class="stat__top" style="background:{{ '#f43f5e' if n_review_items else '#10d96e' }};box-shadow:0 0 16px {{ '#f43f5e' if n_review_items else '#10d96e' }};"></div>
+      <div class="stat__label">Open Review Items</div>
       <div class="stat__body">
         <div>
-          <span class="stat__value tabnum" style="color:{{ '#f43f5e' if n_issues else '#10d96e' }};">{{ n_issues }}</span>
-          <div class="stat__sub">{% if n_issues %}registered for review{% else %}none outstanding{% endif %}</div>
+          <span class="stat__value tabnum" style="color:{{ '#f43f5e' if n_review_items else '#10d96e' }};">{{ n_review_items }}</span>
+          <div class="stat__sub">{% if n_review_items %}generated and manually logged{% else %}none outstanding{% endif %}</div>
         </div>
       </div>
     </div>
@@ -627,14 +628,14 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">⚙️</div>
       <div>
         <div class="panel__t">Batch Execution &amp; SLA Compliance</div>
-        <div class="panel__s">Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the {{ daily_limit }}h configured default · buffer = (SLA − runtime) ÷ SLA</div>
+        <div class="panel__s">{% if sla_table_mode == 'workflow' %}Canonical workflow inventory from the SLA Matrix · unresolved and explicit No SLA rows are never assigned a fallback score{% else %}Graded against each job's contracted or adaptive SLA ceiling · legacy rows use the {{ daily_limit }}h configured default{% endif %} · buffer = (SLA − runtime) ÷ SLA</div>
       </div>
-      <div class="panel__count">{{ n_jobs_product }} product{% if n_jobs_product != n_jobs %} of {{ n_jobs }}{% endif %} jobs</div>
+      <div class="panel__count">{% if sla_table_mode == 'workflow' %}{{ sla_scored_count }} scored of {{ sla_inventory_count }} workflows{% else %}{{ n_jobs_product }} product{% if n_jobs_product != n_jobs %} of {{ n_jobs }}{% endif %} jobs{% endif %}</div>
     </div>
     <div class="panel__body panel__body--flush">
       <div style="padding:13px 20px 4px;border-bottom:1px solid var(--border-soft);">
-        <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px;">Peak runtime vs SLA ceiling</div>
-        {{ cadence_chart|safe }}
+        <div class="dim" style="font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px;">{% if sla_table_mode == 'workflow' %}Workflow runtime vs contractual SLA{% else %}Peak runtime vs SLA ceiling{% endif %}</div>
+        {% if sla_table_mode == 'workflow' %}<div class="micro dim">{{ sla_inventory_count }} in inventory · {{ sla_scored_count }} eligible for compliance · {{ sla_unresolved_count }} unresolved/not observed</div>{% else %}{{ cadence_chart|safe }}{% endif %}
       </div>
       {% if job_cadence_tabs %}
       <div class="mx-bar" id="job-tabs">{{ job_cadence_tabs|safe }}</div>
@@ -642,7 +643,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       {{ job_legend|safe }}
       <table id="job-table">
         <thead><tr>
-          <th>Job / Sub-application</th><th>Peak Runtime</th><th>Avg Runtime</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th><th>Flag</th>
+          <th>{% if sla_table_mode == 'workflow' %}Workflow{% else %}Job / Sub-application{% endif %}</th><th>{% if sla_table_mode == 'workflow' %}Measured Duration{% else %}Peak Runtime{% endif %}</th><th>{% if sla_table_mode == 'workflow' %}Runs{% else %}Avg Runtime{% endif %}</th><th>SLA Ceiling</th><th>Buffer</th><th>Status</th><th>Flag</th>
         </tr></thead>
         <tbody>{{ top_rows|safe }}</tbody>
       </table>
@@ -662,14 +663,14 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
       <div class="panel__icon">🖥️</div>
       <div>
         <div class="panel__t">Infrastructure Utilisation</div>
-        <div class="panel__s">Role-aware grading — CPU ceilings {{ role_cpu_label }} (ok/crit %) &nbsp;·&nbsp; DB memory tolerates the SGA/PGA band {{ db_mem_label }} &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
+        <div class="panel__s">Role-aware grading — CPU ceilings {{ role_cpu_label }} (ok/crit %) &nbsp;·&nbsp; DB host-memory used is compared with the configured band {{ db_mem_label }} &nbsp;·&nbsp; each cell shows the governing threshold; Health = live fleet grade</div>
       </div>
       <div class="panel__count">{{ n_srv }} servers</div>
     </div>
     <div class="panel__body panel__body--flush">
       <table>
         <thead><tr>
-          <th>Host</th><th>Role</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Health</th>
+          <th>Host</th><th>Role / Environment</th><th>CPU</th><th>Host memory used</th><th>Disk</th><th>Health</th>
         </tr></thead>
         <tbody>{{ srv_rows|safe }}</tbody>
       </table>
@@ -855,7 +856,8 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     <div class="panel__body" style="font-size:var(--fs-2);color:var(--ink-2);line-height:1.7;">
       <div><b style="color:var(--ink);">Job SLA:</b> each job peak runtime compared with its resolved SLA ceiling. <b style="color:var(--ink);">Window SLA:</b> each daily effective batch window compared with its resolved ceiling.</div>
       <div><b style="color:var(--ink);">Buffer:</b> <code>{{ methodology_buffer }}</code>.</div>
-      <div><b style="color:var(--ink);">Status bands:</b> OK &gt;40% buffer · LONG JOB 15–40% · AT RISK 0–15% · BREACH ≤0%. Memory is shown as available % (lower availability means more pressure).</div>
+      <div><b style="color:var(--ink);">Status bands:</b> OK &gt;{{ sla_long_job_t }}% buffer · LONG JOB &gt;{{ sla_at_risk_t }}% to ≤{{ sla_long_job_t }}% · AT RISK &gt;0% to ≤{{ sla_at_risk_t }}% · BREACH ≤0%.</div>
+      <div><b style="color:var(--ink);">Memory units:</b> infrastructure snapshot cells show host memory used % (higher is pressure); Metrics Explorer shows available memory % (lower is pressure). Neither metric is Oracle SGA/PGA usage.</div>
     </div>
   </section>
 
@@ -865,7 +867,7 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     <div>
       Thresholds —
       CPU <code>{{ role_cpu_label }}</code> (role ok/crit)
-      Mem <code>≤{{ mem_ok_t }}% warn · ≤{{ mem_warn_t }}% crit · DB SGA {{ db_mem_label }}</code>
+      Mem used <code>≥{{ mem_ok_t }}% warn · ≥{{ mem_warn_t }}% crit · DB configured band {{ db_mem_label }}</code>
       Disk <code>OK ≤{{ disk_ok_t }}% · Warn ≤{{ disk_warn_t }}%</code>
     </div>
   </footer>

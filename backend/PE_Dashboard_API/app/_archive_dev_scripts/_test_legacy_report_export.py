@@ -106,8 +106,9 @@ def main() -> None:
     assert "Disk peaked above its critical ceiling" in html
     assert "live role-aware status is healthy" in html
 
-    # The sign-off banner states what it does and does not clear.
-    assert "It does not clear the findings below" in html
+    # The sign-off banner consumes the evidence gate, not only raw checkboxes.
+    assert "clean approval additionally requires complete evidence" in html
+    assert "APPROVED WITH EXCEPTIONS" in html
 
     # SOW utilisation is charted, not only tabulated.
     assert "Consumption as a share of the contracted ceiling" in html

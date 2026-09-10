@@ -40,7 +40,6 @@ describe('analysis payloads', () => {
     expect(payload.batch).toBe(data.batch);
     expect(payload.sla_matrix).toBe(data.slaMatrix);
     expect(payload.resource).toBe(data.resource);
-    expect(payload.sla_matrix).toBe(data.slaMatrix);
     expect(payload.findings).toBe(data.findings);
     expect(payload.red_flags).toBe(data.redFlags);
   });
@@ -48,6 +47,7 @@ describe('analysis payloads', () => {
   it('uses the nested FastAPI export/archive contract so frozen reports retain all evidence', () => {
     const payload = buildExportPayload(data);
     expect(payload.batch).toBe(data.batch);
+    expect(payload.sla_matrix).toBe(data.slaMatrix);
     expect(payload.resource).toBe(data.resource);
     expect(payload.servers).toBe(data.resource?.servers);
     expect(payload.sow).toBe(data.sowCompare);

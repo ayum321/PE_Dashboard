@@ -388,8 +388,29 @@ class TestSlaRegressionFixes(unittest.TestCase):
         self.assertIsNone(unobs_row["duration_headroom_mins"])
         self.assertIsNone(unobs_row["buffer_pct"])
 
+    def test_unmatched_sentinels_are_diagnostic_and_not_scored(self):
+        config_store.set("_batch_sla_xlsx", {
+            "parser_version": "module-alias-v2",
+            "workflows": [{
+                "workflow": "PROD_ATTA", "module": "PROD_ATTA", "sla_hours": 3.0,
+                "sla_source": "batch_sla_xlsx", "first_job": "EXPECTED_START",
+                "last_job": "EXPECTED_END",
+            }],
+        })
+        df = pd.DataFrame([
+            {"Job_Name": "ACTUAL_A", "Sub_Application": "PROD_ATTA", "Start_Time": "2026-08-30 00:00:00", "End_Time": "2026-08-30 05:00:00"},
+            {"Job_Name": "ACTUAL_B", "Sub_Application": "PROD_ATTA", "Start_Time": "2026-08-30 05:00:00", "End_Time": "2026-08-30 12:00:00"},
+        ])
+        row = _compute_sla_matrix(df=df, sla_mode="daily", custom_sla_hrs=6.0).workflow_summary[0]
+        self.assertEqual(row["measurement_state"], "ANCHOR_UNMATCHED")
+        self.assertEqual(row["status"], "MEASUREMENT_UNRESOLVED")
+        self.assertFalse(row["status_eligible"])
+        self.assertAlmostEqual(row["runtime_h"], 12.0, places=2)
+        self.assertIsNone(row["buffer_pct"])
+        self.assertIsNone(row["duration_headroom_h"])
+        self.assertAlmostEqual(row["indicative_buffer_pct"], -300.0, places=1)
+
 
 if __name__ == "__main__":
     unittest.main()
-
 
