@@ -1003,6 +1003,113 @@ def is_utility_job(
     return False, matched_fail_reason
 
 
+def _utility_category(reason: str) -> str:
+    token = str(reason or "").split(":", 1)[-1].split("(", 1)[0].strip().lower()
+    if token in {"backup", "bkup", "_bkp", "restore", "db_backup", "db_restore"}:
+        return "BACKUP_RESTORE"
+    if "watch" in token:
+        return "FILE_WATCHER"
+    if token in {"heartbeat", "health_check", "ping_job", "zabbix_monitors"}:
+        return "MONITORING"
+    if any(part in token for part in ("batch_start", "batch_end", "batchstart", "batchend")):
+        return "BATCH_SENTINEL"
+    return "UTILITY"
+
+
+def resolve_job_exclusions(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Resolve one auditable all-metrics decision per job, then filter the frame.
+
+    Precedence is explicit: a reviewer include overrides an automatic rule, a
+    reviewer exclude removes any otherwise in-scope job, and automatic utility
+    rules apply when neither override exists. Compliance-only baseline-quality
+    decisions are intentionally handled later and never enter this registry.
+    """
+    if df is None or df.empty or "Job_Name" not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(), []
+
+    try:
+        from services import session_cache as _session_decisions
+        manual_exclusions_raw = _session_decisions.ac_get("manual_excluded_jobs") or []
+        manual_inclusions_raw = _session_decisions.ac_get("manual_included_jobs") or []
+        manual_audit = _session_decisions.ac_get("batch_manual_exclusion_audit") or []
+    except Exception:
+        manual_exclusions_raw, manual_inclusions_raw, manual_audit = [], [], []
+
+    canonical_names = {
+        str(name).strip().upper(): str(name).strip()
+        for name in df["Job_Name"].dropna().unique()
+        if str(name).strip()
+    }
+    manual_exclusions = {
+        key for value in manual_exclusions_raw
+        if (key := str(value).strip().upper()) in canonical_names
+    }
+    manual_inclusions = {
+        key for value in manual_inclusions_raw
+        if (key := str(value).strip().upper()) in canonical_names
+    }
+    manual_reasons = {
+        str(item.get("name") or "").strip().upper(): str(item.get("reason") or "").strip()
+        for item in manual_audit if isinstance(item, dict)
+    }
+    runtime_values = (
+        pd.to_numeric(df["run_time_hrs"], errors="coerce").fillna(0.0)
+        if "run_time_hrs" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    runtime = (
+        df.assign(_runtime=runtime_values)
+        .groupby("Job_Name", dropna=False)["_runtime"]
+        .agg(["mean", "max"])
+    )
+
+    decisions: list[dict[str, Any]] = []
+    excluded_keys: set[str] = set()
+    for raw_name, values in runtime.iterrows():
+        name = str(raw_name).strip()
+        key = name.upper()
+        automatic, automatic_reason = is_utility_job(name, float(values["mean"]), float(values["max"]))
+
+        if key in manual_inclusions:
+            excluded, source = False, "MANUAL_INCLUDE"
+            reason_code = "REVIEWER_INCLUDED"
+            reason = "Reviewer explicitly included this job for the current audit session."
+        elif key in manual_exclusions:
+            excluded, source = True, "MANUAL_EXCLUDE"
+            reason_code = "REVIEWER_EXCLUDED"
+            reason = manual_reasons.get(key) or "Reviewer excluded this job from all batch analysis for the current session."
+        elif automatic:
+            excluded, source = True, "AUTOMATIC"
+            reason_code = _utility_category(automatic_reason)
+            reason = (
+                "Backup/restore housekeeping is outside product batch performance analysis."
+                if reason_code == "BACKUP_RESTORE"
+                else f"Matched automatic non-product rule: {automatic_reason}."
+            )
+        else:
+            continue
+
+        if excluded:
+            excluded_keys.add(key)
+        decisions.append({
+            "job_key": _normalize_job_name(name).upper(),
+            "job_name": name,
+            "excluded": excluded,
+            "scope": "ALL_METRICS",
+            "source": source,
+            "reason_code": reason_code,
+            "reason": reason,
+            "rule_id": automatic_reason.split("(", 1)[0] if automatic_reason else None,
+            "avg_runtime_hrs": round(float(values["mean"]), 4),
+            "max_runtime_hrs": round(float(values["max"]), 4),
+        })
+
+    if not excluded_keys:
+        return df.copy(), decisions
+    keep = ~df["Job_Name"].astype(str).str.strip().str.upper().isin(excluded_keys)
+    return df.loc[keep].copy(), decisions
+
+
 # ─────────────────────────────────────────────────────────────────
 # build_top_jobs_df — name per Phase 3 brief
 # ─────────────────────────────────────────────────────────────────
@@ -2087,24 +2194,25 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     specific values.  Falls back to schedule-type ceiling, then pe_config
     default.  Source is tagged on every resolved value.
     """
-    # ── Stage 2A: Session-scoped reviewer job exclusions ───────────────────
-    # Active-review decisions from /batch/refresh, not persisted settings.
-    _user_excl_jobs: set = set()
-    try:
-        from services import session_cache as _session_excl
-        _excl_list = _session_excl.ac_get("manual_excluded_jobs") or []
-        if isinstance(_excl_list, list):
-            _user_excl_jobs = {str(j).strip() for j in _excl_list if j and str(j).strip()}
-    except Exception:
-        pass
-
-    df_analysis = df
-    if _user_excl_jobs and "Job_Name" in df.columns:
-        df_analysis = df[~df["Job_Name"].isin(_user_excl_jobs)].copy()
-        logger.debug(
-            "compute_metrics: %d user-excluded jobs removed from SLA analysis",
-            len(_user_excl_jobs),
-        )
+    # ── Stage 2A: Canonical all-metrics job scope ──────────────────────────
+    # Every KPI, trend, heatmap, regression, anomaly and narrative input below
+    # starts from this same post-decision frame.
+    df_analysis, _job_exclusion_registry = resolve_job_exclusions(df)
+    _user_excl_jobs = {
+        str(item["job_name"])
+        for item in _job_exclusion_registry
+        if item.get("excluded") and item.get("source") == "MANUAL_EXCLUDE"
+    }
+    _manual_included_jobs = {
+        str(item["job_name"])
+        for item in _job_exclusion_registry
+        if not item.get("excluded") and item.get("source") == "MANUAL_INCLUDE"
+    }
+    _global_excluded_jobs = {
+        str(item["job_name"])
+        for item in _job_exclusion_registry
+        if item.get("excluded")
+    }
 
     # ── Build SLA index once (per-job ceiling from uploaded contracts) ───────
     sla_index     = build_sla_index(df_analysis)
@@ -2143,8 +2251,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     # SLA window target → including them in compliance % inflates the denominator
     # with "never breach" rows that were never tracked.
     # UNKNOWN is intentionally KEPT in scope (Level 4 fallback → 6h default SLA).
-    _out_of_scope_subs: set = set(_user_excl_jobs)   # start with manually excluded
-    _out_of_scope_subs.update(cyclic_subs)           # cyclic = never had batch SLA
+    _out_of_scope_subs: set = set(cyclic_subs)       # cyclic = never had batch SLA
 
     # Track exclusion reasons per sub_app for frontend display
     _excl_sub_reasons: dict = {}   # sub_app → {"reason": "CYCLIC|...", "job_count": N, "peak_hrs": X}
@@ -2187,8 +2294,6 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         df_scope = df_analysis[
             ~df_analysis["Sub_Application"].astype(str).isin(_out_of_scope_subs)
         ].copy()
-        if df_scope.empty:
-            df_scope = df_analysis   # never scope away the entire batch
     else:
         df_scope = df_analysis
 
@@ -2797,13 +2902,6 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         if "Job_Name" in df.columns and "run_date" in df.columns
         else pd.DataFrame(columns=["run_date", "raw_job_count", "raw_run_count", "raw_total_hrs"])
     )
-    _raw_window_names = (
-        df.groupby("run_date")["Job_Name"]
-          .apply(lambda s: [str(v) for v in pd.unique(s.dropna().astype(str))])
-          .reset_index(name="raw_job_names")
-        if "Job_Name" in df.columns and "run_date" in df.columns
-        else pd.DataFrame(columns=["run_date", "raw_job_names"])
-    )
     # job_count / total_hrs are IN-SCOPE (post-exclusion). raw_job_count is the
     # full per-day count (every sub_app), so excluded_job_count = raw − in-scope
     # now reflects ALL removed jobs (user-excluded + cyclic + MONTHLY/OUTBOUND),
@@ -2820,10 +2918,6 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     else:
         window["raw_job_count"] = window["job_count"]
         window["raw_run_count"] = window["scope_run_count"]
-    if not _raw_window_names.empty:
-        window = window.merge(_raw_window_names, on="run_date", how="left")
-    else:
-        window["raw_job_names"] = [[] for _ in range(len(window))]
     window["raw_job_count"] = window["raw_job_count"].fillna(window["job_count"]).astype(int)
     if "raw_run_count" not in window.columns:
         window["raw_run_count"] = window["scope_run_count"]
@@ -2838,10 +2932,6 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     else:
         window["raw_total_hrs"] = window["total_hrs"]
     window["excluded_hrs"] = (window["raw_total_hrs"] - window["total_hrs"]).clip(lower=0).round(3)
-    window["raw_job_names"] = window["raw_job_names"].apply(
-        lambda v: [str(x) for x in v] if isinstance(v, list) else []
-    )
-
     elapsed_available  = False
     window_breach_days = 0
     worst_elapsed_kpi  = 0.0
@@ -3034,6 +3124,11 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
     # ── Per-job frame + compliance scope ─────────────────────────
     top_jobs = build_top_jobs_df(df_analysis, sla_index=sla_index)
+    if _manual_included_jobs and "Job_Name" in top_jobs.columns:
+        _included_keys = {name.strip().upper() for name in _manual_included_jobs}
+        _included_mask = top_jobs["Job_Name"].astype(str).str.strip().str.upper().isin(_included_keys)
+        top_jobs.loc[_included_mask, "is_utility"] = False
+        top_jobs.loc[_included_mask, "utility_reason"] = "reviewer_included"
 
     # Pattern-matched jobs that were NOT excluded because runtime exceeded the threshold.
     # These stay in scope, but we surface them as data-quality warnings so the user can
@@ -3072,12 +3167,14 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         _scope_jobs = _scope_jobs[
             ~_scope_jobs["Sub_Application"].astype(str).isin(_out_of_scope_subs)
         ]
-    if _scope_jobs.empty:
-        _scope_jobs = top_jobs   # fall back if scoping removed everything
 
-    t_jobs    = int(len(_scope_jobs))
-    j_breach  = int((_scope_jobs["buffer_status"] == "BREACH").sum())
-    j_at_risk = int((_scope_jobs["buffer_status"] == "AT_RISK").sum())
+    t_jobs = int(len(_scope_jobs))
+    if "buffer_status" in _scope_jobs.columns:
+        j_breach = int((_scope_jobs["buffer_status"] == "BREACH").sum())
+        j_at_risk = int((_scope_jobs["buffer_status"] == "AT_RISK").sum())
+    else:
+        j_breach = 0
+        j_at_risk = 0
     j_ok      = max(0, t_jobs - j_breach - j_at_risk)
 
     # F4 — Job SLA Compliance derived from the SAME scoped frame as the tiles.
@@ -3097,7 +3194,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         worst_job_sla = float(_wsla) if pd.notna(_wsla) and float(_wsla) > 0 else global_ceil
 
     # F6 — Anomaly detection (uses raw df — anomalies in excluded jobs still matter)
-    anomalies = detect_job_anomalies(df)
+    anomalies = detect_job_anomalies(df_analysis)
 
     # F3 — Fleet-level SLA buffer uses the worst job's OWN resolved SLA, not the
     # global ceiling. A WEEKLY job must be measured against its 8h ceiling, not
@@ -3119,16 +3216,16 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         fleet_sla_buffer["baseline_quality"] = str(worst_row.get("baseline_quality", "")) or None
 
     # ── Data coverage / confidence (raw df — full picture) ──────────────────
-    unique_dates = sorted(df["run_date"].unique())
+    unique_dates = sorted(df_analysis["run_date"].unique())
     date_span = (max(unique_dates) - min(unique_dates)).days + 1 if len(unique_dates) >= 2 else 1
     has_start   = "Start_Time" in df.columns and df["Start_Time"].notna().sum() > 0
     has_status  = "Status" in df.columns
     has_sub_app = "Sub_Application" in df.columns and (df["Sub_Application"] != "UNKNOWN").any()
-    ok_count    = int((df["Status"] == "OK").sum()) if has_status else 0
-    fail_count  = int((df["Status"] == "FAILED").sum()) if has_status else 0
+    ok_count    = int((df_analysis["Status"] == "OK").sum()) if has_status else 0
+    fail_count  = int((df_analysis["Status"] == "FAILED").sum()) if has_status else 0
     failure_jobs: list[dict[str, Any]] = []
     if has_status and fail_count:
-        _failed = df[df["Status"] == "FAILED"]
+        _failed = df_analysis[df_analysis["Status"] == "FAILED"]
         _failure_group_cols = [c for c in ("Sub_Application", "Job_Name") if c in _failed.columns]
         if _failure_group_cols:
             failure_jobs = (
@@ -3209,7 +3306,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         for _d in (str(x) for x in unique_dates):
             if _d in _wdates:
                 continue
-            _day_df = df[df["run_date"].astype(str) == _d]
+            _day_df = df_analysis[df_analysis["run_date"].astype(str) == _d]
             _subs = sorted(_day_df["Sub_Application"].astype(str).unique()) if "Sub_Application" in _day_df.columns else []
             _oos = [s for s in _subs if s in _out_of_scope_subs]
             _window_excluded_days.append({
@@ -3268,7 +3365,8 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "jobs_ok":          int(j_ok),
         "jobs_breach":      int(j_breach),
         "jobs_at_risk":     int(j_at_risk),
-        "total_runs":       int(len(df)),
+        "total_runs":       int(len(df_analysis)),
+        "raw_total_runs":   int(len(df)),
         # PROMPT 4: summed_runtime uses df_scope (all out-of-scope sub_apps
         # excluded) so the summed-runtime KPI agrees with the in-scope daily
         # picture and the window-compliance denominator.
@@ -3283,6 +3381,9 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         # heatmap/gantt/hourly-density chart even though it was correctly removed
         # from top_jobs/window/compliance. See build_batch_payload for the fix.
         "user_excluded_job_names": sorted(_user_excl_jobs),
+        "manual_included_job_names": sorted(_manual_included_jobs),
+        "global_excluded_job_names": sorted(_global_excluded_jobs),
+        "exclusion_registry": _job_exclusion_registry,
         "manual_exclusion_audit": _session_excl.ac_get("batch_manual_exclusion_audit", []) if "_session_excl" in locals() else [],
         # Sub-application rollup
         "sub_stats":        sub,
@@ -3837,19 +3938,17 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # BOTH the sub-app scope AND the job-name exclusion so every temporal
     # surface agrees with the Top-N table.
     _oos_subs = set(m.get("out_of_scope_subs", []))
-    _user_excl_names = set(m.get("user_excluded_job_names", []))
+    _global_excl_names = set(m.get("global_excluded_job_names", []))
     _df_payload_scope = df
     if _oos_subs and "Sub_Application" in df.columns:
         _df_payload_scope = _df_payload_scope[
             ~_df_payload_scope["Sub_Application"].astype(str).isin(_oos_subs)
         ]
-    if _user_excl_names and "Job_Name" in df.columns:
+    if _global_excl_names and "Job_Name" in df.columns:
         _df_payload_scope = _df_payload_scope[
-            ~_df_payload_scope["Job_Name"].isin(_user_excl_names)
+            ~_df_payload_scope["Job_Name"].astype(str).isin(_global_excl_names)
         ]
     _df_payload_scope = _df_payload_scope.copy()
-    if _df_payload_scope.empty:
-        _df_payload_scope = df
 
     # Addition 4 — Multi-application-per-folder detection
     # When a single Folder contains 2+ distinct Application values, each
@@ -3888,19 +3987,17 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     # Top 10 breaching jobs (buffer < 0); fall back to worst 10 by peak if none breaching.
     # Top 15 jobs by peak (used by the horizontal bar chart).
     #
-    # Utility jobs (is_utility=True) must NOT crowd out real batch jobs from these
-    # top-N views — a DB backup running 4h would otherwise take a top slot and push
-    # real batch jobs beyond position 15, making them invisible after frontend filtering.
-    # Fix: build top-N from non-utility jobs only, then append all utility jobs at the
-    # end so the frontend utility detection panel still has access to them.
-    if "is_utility" in top_jobs_df.columns:
+    # Global exclusions were resolved before aggregation, so top-N is a direct
+    # projection of the same canonical population as every other panel.
+    if top_jobs_df.empty or "buffer_pct" not in top_jobs_df.columns:
+        breaches_df = top_jobs_df.copy()
+        top15_df = top_jobs_df.copy()
+    elif "is_utility" in top_jobs_df.columns:
         _real_jobs_df = top_jobs_df[~top_jobs_df["is_utility"].fillna(False)]
-        _util_jobs_df = top_jobs_df[top_jobs_df["is_utility"].fillna(False)]
         breaches_df = _real_jobs_df[_real_jobs_df["buffer_pct"] < 0].head(10)
         if breaches_df.empty:
             breaches_df = _real_jobs_df.head(10)
-        # Top 15 real batch jobs + all utility jobs (for detection panel)
-        top15_df = pd.concat([_real_jobs_df.head(15), _util_jobs_df]).copy()
+        top15_df = _real_jobs_df.head(15).copy()
     else:
         breaches_df = top_jobs_df[top_jobs_df["buffer_pct"] < 0].head(10)
         if breaches_df.empty:
@@ -3925,8 +4022,8 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
     _n2 = lambda v: (round(float(v), 3) if pd.notna(v) else None)
     # Per-day failure count for chart overlay (failed ✕ marker)
     fail_by_date: dict = {}
-    if "Status" in df.columns:
-        fail_series = df[df["Status"] == "FAILED"].groupby("run_date").size()
+    if "Status" in _df_payload_scope.columns:
+        fail_series = _df_payload_scope[_df_payload_scope["Status"] == "FAILED"].groupby("run_date").size()
         fail_by_date = {str(d): int(n) for d, n in fail_series.items()}
     for _, r in window_df.iterrows():
         date_str = str(r["run_date"])
@@ -3997,7 +4094,6 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "raw_job_count": int(r.get("raw_job_count", r["job_count"])),
             "raw_run_count": int(r.get("raw_run_count", r.get("scope_run_count", r["job_count"]))),
             "excluded_job_count": int(r.get("excluded_job_count", max(int(r.get("raw_job_count", r["job_count"])) - int(r["job_count"]), 0))),
-            "raw_job_names": list(r.get("raw_job_names", [])) if isinstance(r.get("raw_job_names", []), list) else [],
             "breach":       bool(is_breach),
             "top_job":      top_job_per_day.get(date_str, ""),
             "has_failures": fail_by_date.get(date_str, 0) > 0,
@@ -4140,7 +4236,10 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
                 {"run_date": (m.get("elapsed_window_kpi") or {}).get("worst_date", ""),
                  "elapsed_hrs": (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0.0)}
                 if m["elapsed_available"] and (m.get("elapsed_window_kpi") or {}).get("worst_hrs", 0) > 0
-                else _worst_elapsed(window_records, valid_dates=set(unique_dates))
+                else _worst_elapsed(
+                    window_records,
+                    valid_dates={str(item.get("run_date")) for item in window_records},
+                )
             ),
             "avg_elapsed_hrs": (
                 round((m.get("elapsed_window_kpi") or {}).get("avg_hrs", 0.0), 3)
@@ -4173,6 +4272,7 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
             "date_span_days":   m["date_span_days"],
             "date_range":       m["date_range"],
             "total_runs":       m["total_runs"],
+            "raw_total_runs":   m.get("raw_total_runs", m["total_runs"]),
             "ok_runs":          m["ok_runs"],
             "fail_runs":        m["fail_runs"],
             "has_end_time":     m["elapsed_available"],
@@ -4198,6 +4298,9 @@ def build_batch_payload(df: pd.DataFrame) -> Dict[str, Any]:
         # distinct from out_of_scope_subs (Sub_Application-keyed). Lets the
         # frontend confirm which per-job exclusions the server already applied.
         "user_excluded_job_names": sorted(str(j) for j in m.get("user_excluded_job_names", [])),
+        "manual_included_job_names": sorted(str(j) for j in m.get("manual_included_job_names", [])),
+        "global_excluded_job_names": sorted(str(j) for j in m.get("global_excluded_job_names", [])),
+        "exclusion_registry": m.get("exclusion_registry") or [],
         "manual_exclusion_audit": m.get("manual_exclusion_audit") or [],
         # Keep optional numeric fields JSON-safe: pandas emits NaN/Inf floats unless
         # we round-trip through JSON first, which converts them to null for the API/UI.

@@ -17,6 +17,9 @@ jest.mock('../../api/dashboardApi', () => {
     getPeNarrative: jest.fn(),
     getFinalJudgment: jest.fn(),
     recomputeSlaMatrix: jest.fn(),
+    getReviewedProducts: jest.fn(),
+    getSessionRestore: jest.fn(),
+    getSowState: jest.fn(),
   };
 });
 
@@ -29,6 +32,9 @@ const api = require('../../api/dashboardApi') as {
   getPeNarrative: jest.Mock;
   getFinalJudgment: jest.Mock;
   recomputeSlaMatrix: jest.Mock;
+  getReviewedProducts: jest.Mock;
+  getSessionRestore: jest.Mock;
+  getSowState: jest.Mock;
 };
 
 const RICH_SLA_PAYLOAD = {
@@ -100,6 +106,9 @@ describe('SlaMatrixPanel', () => {
     api.getExecutiveDashboard.mockReset();
     api.getPeNarrative.mockReset();
     api.getFinalJudgment.mockReset();
+    api.getReviewedProducts.mockResolvedValue({ products: [] });
+    api.getSessionRestore.mockResolvedValue({});
+    api.getSowState.mockResolvedValue({});
   });
 
   it('builds a workbook-only matrix when a stale local API returns the legacy upload response', () => {
@@ -222,7 +231,7 @@ describe('SlaMatrixPanel', () => {
     expect(api.getExecutiveDashboard).toHaveBeenCalledTimes(1);
     expect(api.getPeNarrative).toHaveBeenCalledTimes(1);
     expect(api.getFinalJudgment).toHaveBeenCalledTimes(1);
-    expect(getByText(/Batch Review, PE Findings, executive dashboard, and final judgment refreshed/i)).toBeDefined();
+    expect(getByText(/PE Findings, review summary, executive dashboard, and final judgment refreshed/i)).toBeDefined();
   });
 
   it('keeps the SLA contract view when Ctrl-M evidence is not yet available', async () => {

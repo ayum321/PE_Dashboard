@@ -13,7 +13,7 @@ import {
   Typography,
   makeStyles,
 } from '@material-ui/core';
-import { getApiBaseUrl, getReportArchive } from '../../api/dashboardApi';
+import { getApiBaseUrl, getReportArchive, importReportArchive } from '../../api/dashboardApi';
 import { isValidCustomerName, normalizeCustomer, useOptionalAppData } from '../../context/AppDataContext';
 
 interface ArchiveRow {
@@ -165,18 +165,70 @@ export function ArchivePanel() {
   const data = appData?.data;
   const [reports, setReports] = useState<ArchiveRow[]>([]);
   const [busy, setBusy] = useState(true);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<RegistryFilter>('all');
   const [sort, setSort] = useState<RegistrySort>('recent');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const CACHE_KEY = 'pe_report_archive_cache';
+
   const loadReports = useCallback(async () => {
     setBusy(true); setError(null);
-    try { const result = await getReportArchive(); setReports((result.reports as ArchiveRow[]) || []); }
-    catch (fetchError) { setError(fetchError instanceof Error ? fetchError.message : 'Failed to load Review Registry.'); }
-    finally { setBusy(false); }
+    try {
+      const result = await getReportArchive();
+      const loaded = (result.reports as ArchiveRow[]) || [];
+      setReports(loaded);
+      if (loaded.length > 0) {
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify(loaded)); } catch {}
+      }
+    } catch (fetchError) {
+      try {
+        const cached = localStorage.getItem(CACHE_KEY);
+        if (cached) {
+          setReports(JSON.parse(cached));
+          setError('Operating in cached mode: could not reach backend server.');
+          return;
+        }
+      } catch {}
+      setError(fetchError instanceof Error ? fetchError.message : 'Failed to load Review Registry.');
+    } finally { setBusy(false); }
   }, []);
+
   useEffect(() => { void loadReports(); }, [loadReports]);
+
+  const handleFileImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    setNotice(null);
+    try {
+      const res = await importReportArchive(file);
+      if (res && res.ok) {
+        setNotice({
+          type: 'success',
+          message: `Successfully imported "${res.customer || file.name}" into the Review Registry.`,
+        });
+        await loadReports();
+      } else {
+        setNotice({
+          type: 'error',
+          message: (res as any)?.error || (res as any)?.detail || 'Failed to import report.',
+        });
+      }
+    } catch (importErr) {
+      setNotice({
+        type: 'error',
+        message: importErr instanceof Error ? importErr.message : 'Failed to import report.',
+      });
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
   const visibleReports = useMemo(() => {
     const query = search.trim().toLowerCase();
     const isCurrent = (cust: string) => Boolean(
@@ -204,8 +256,47 @@ export function ArchivePanel() {
   return <Paper className={`${classes.panel} kpi-card`} elevation={0}>
     <Box display="flex" alignItems="flex-start" justifyContent="space-between" style={{ gap: 16, flexWrap: 'wrap' }}>
       <Box><Typography variant="h6">Review Registry</Typography><Typography variant="body2" color="textSecondary" style={{ marginTop: 4 }}>The latest exported HTML audit per customer. Snapshot metrics are frozen at export time and never re-graded from a later session.</Typography></Box>
-      <Button size="small" variant="outlined" onClick={() => void loadReports()} disabled={busy}>Refresh registry</Button>
+      <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+        <input
+          type="file"
+          ref={fileInputRef}
+          accept=".html,.htm"
+          style={{ display: 'none' }}
+          onChange={handleFileImport}
+        />
+        <Button
+          size="small"
+          variant="contained"
+          color="primary"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={busy || importing}
+        >
+          {importing ? 'Importing…' : 'Import report'}
+        </Button>
+        <Button size="small" variant="outlined" onClick={() => void loadReports()} disabled={busy || importing}>
+          Refresh registry
+        </Button>
+      </Box>
     </Box>
+    {notice && (
+      <Box
+        style={{
+          marginTop: 12,
+          padding: '8px 12px',
+          borderRadius: 6,
+          border: `1px solid ${notice.type === 'success' ? '#10d96e' : '#f43f5e'}`,
+          background: notice.type === 'success' ? 'rgba(16,217,110,.12)' : 'rgba(244,63,94,.12)',
+          color: notice.type === 'success' ? '#10d96e' : '#f43f5e',
+          fontSize: 12,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}
+      >
+        <span>{notice.message}</span>
+        <Button size="small" style={{ color: 'inherit', minWidth: 'auto', padding: '0 4px' }} onClick={() => setNotice(null)}>✕</Button>
+      </Box>
+    )}
     <Box className={classes.summary} aria-label="Review Registry summary">
       <SummaryCard label="Customers reviewed" value={String(reports.length)} note="Latest export per customer" />
       <SummaryCard label="Signed off" value={String(summary.signed)} note="PE and customer approval recorded" tone="green" />

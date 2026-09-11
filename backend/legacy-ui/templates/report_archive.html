@@ -143,6 +143,8 @@ tbody tr.row--attention:hover { background:rgba(245,158,11,.065); }
       <p class="lede">The latest <strong>exported HTML audit</strong> for every reviewed customer. Each record keeps its export-time batch, resource, SOW, benchmark, and issue snapshot alongside direct report access.</p>
     </div>
     <div class="head-actions">
+      <input id="importFileInput" type="file" accept=".html,.htm" style="display:none" />
+      <button id="importReportBtn" class="dashboard-link" type="button" style="cursor:pointer;border:none">Import report</button>
       <button id="resetSession" class="reset-session" type="button">Reset active dashboard</button>
       <a class="dashboard-link" href="/">Open dashboard</a>
     </div>
@@ -578,6 +580,32 @@ async function resetDashboardSession() {
 }
 
 document.getElementById("resetSession").addEventListener("click", resetDashboardSession);
+
+document.getElementById("importReportBtn")?.addEventListener("click", () => {
+  document.getElementById("importFileInput")?.click();
+});
+document.getElementById("importFileInput")?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const status = document.getElementById("resetStatus");
+  status.textContent = "Importing report…";
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("/api/report-archive/import", { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Import failed (${res.status})`);
+    }
+    const data = await res.json();
+    status.textContent = `Successfully imported "${data.customer || file.name}" into Review Registry.`;
+    await load();
+  } catch (err) {
+    status.textContent = `Import failed: ${err.message}`;
+  } finally {
+    e.target.value = "";
+  }
+});
 
 async function load() {
   try {

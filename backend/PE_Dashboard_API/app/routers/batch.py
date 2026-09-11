@@ -160,6 +160,12 @@ class BatchResponse(BaseModel):
     longpole_matrix: Optional[Dict[str, Any]] = None
     # Explicit analyst exclusions that define the in-scope batch KPI population.
     user_excluded_job_names: List[str] = Field(default_factory=list)
+    # Reviewer includes override automatic exclusions for this audit session.
+    manual_included_job_names: List[str] = Field(default_factory=list)
+    # Complete set removed before aggregation (automatic + reviewer decisions).
+    global_excluded_job_names: List[str] = Field(default_factory=list)
+    # One server-authoritative decision record per automatic/manual override.
+    exclusion_registry: List[Dict[str, Any]] = Field(default_factory=list)
     # Session-only reviewer decision trail; never persisted as configuration.
     manual_exclusion_audit: List[Dict[str, str]] = Field(default_factory=list)
     # Concurrent-job evidence: which distinct jobs genuinely overlapped in
@@ -181,8 +187,9 @@ class BatchJsonRequest(BaseModel):
 
 
 class BatchRefreshRequest(BaseModel):
-    """Session-only reviewer exclusions supplied when Batch Review is refreshed."""
+    """Session-only reviewer scope overrides supplied when Batch Review refreshes."""
     manual_exclusions: List[Dict[str, str]] = Field(default_factory=list)
+    manual_inclusions: List[str] = Field(default_factory=list)
 
 
 # ── Helpers ─────────────────────────────────────────────────────
@@ -286,7 +293,7 @@ def _payload_to_response(
             # config_store["exclude_jobs"]; using raw cached rows here previously
             # reintroduced excluded jobs only on the Matrix page after refresh.
             matrix_df = df
-            excluded_job_names = set(payload.get("user_excluded_job_names") or [])
+            excluded_job_names = set(payload.get("global_excluded_job_names") or [])
             if excluded_job_names and "Job_Name" in matrix_df.columns:
                 matrix_df = matrix_df[
                     ~matrix_df["Job_Name"].astype(str).isin(excluded_job_names)
@@ -337,6 +344,9 @@ def _payload_to_response(
         failure_jobs=payload.get("failure_jobs"),
         longpole_matrix=payload.get("longpole_matrix"),
         user_excluded_job_names=payload.get("user_excluded_job_names") or [],
+        manual_included_job_names=payload.get("manual_included_job_names") or [],
+        global_excluded_job_names=payload.get("global_excluded_job_names") or [],
+        exclusion_registry=payload.get("exclusion_registry") or [],
         manual_exclusion_audit=payload.get("manual_exclusion_audit") or [],
         concurrency=payload.get("concurrency"),
         customer_status=customer_fields.get("customer_status"),
@@ -681,17 +691,44 @@ def refresh_batch(body: BatchRefreshRequest | None = None) -> BatchResponse:
     # Reviewer exclusions belong to this audit session, never persistent configuration.
     if body is not None:
         known_names = {str(name).strip().upper(): str(name).strip() for name in df.get("Job_Name", pd.Series(dtype=str)).dropna().unique() if str(name).strip()}
+        requested_names = {
+            str(item.get("name") or "").strip()
+            for item in body.manual_exclusions
+            if str(item.get("name") or "").strip()
+        } | {
+            str(name or "").strip()
+            for name in body.manual_inclusions
+            if str(name or "").strip()
+        }
+        unknown_names = sorted(name for name in requested_names if name.upper() not in known_names)
+        if unknown_names:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "One or more reviewer override names are not present in the cached Ctrl-M data.",
+                    "unknown_job_names": unknown_names,
+                },
+            )
+
+        included = sorted({
+            known_names[str(name).strip().upper()]
+            for name in body.manual_inclusions
+            if str(name or "").strip()
+        })
+        included_keys = {name.upper() for name in included}
         audit: list[dict[str, str]] = []
         for item in body.manual_exclusions:
             canonical = known_names.get(str(item.get("name") or "").strip().upper())
-            if canonical:
+            if canonical and canonical.upper() not in included_keys:
                 audit.append({"name": canonical, "reason": str(item.get("reason") or "").strip(), "scope": "ALL_BATCH_METRICS", "recorded_at": pd.Timestamp.now(tz="UTC").isoformat()})
         by_name = {item["name"].upper(): item for item in audit}
         audit = [by_name[key] for key in sorted(by_name)]
         _sc.ac_set("batch_manual_exclusion_audit", audit)
         _sc.ac_set("manual_excluded_jobs", [item["name"] for item in audit])
+        _sc.ac_set("manual_included_jobs", included)
 
     payload = build_batch_payload(df)
+    _sc.invalidate_batch_derived_evidence()
     filename = (_sc.get("last_batch") or {}).get("filename") or "cached_batch.csv"
     customer = _sc.ac_get("customer_name")
     return _payload_to_response(filename, payload, df=df, customer_name=customer)

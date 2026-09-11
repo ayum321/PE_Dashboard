@@ -17,6 +17,7 @@ import HighchartsReact from 'highcharts-react-official';
 import { useAppData } from '../../context/AppDataContext';
 import { KpiStatCard } from '../shared/KpiStatCard';
 import { refreshBatch } from '../../api/dashboardApi';
+import { useDerivedEvidenceRefresh } from '../../hooks/useDerivedEvidenceRefresh';
 
 interface BatchKpis {
   compliance_pct?: number;
@@ -89,7 +90,6 @@ interface WindowPoint {
   excluded_job_count?: number;
   excluded_hrs?: number;
   raw_total_hrs?: number;
-  raw_job_names?: string[];
   spike?: {
     is_spike?: boolean;
     z_score?: number;
@@ -175,6 +175,19 @@ interface ExcludedJobRaw {
   job_name?: string;
   name?: string;
   reason?: string;
+}
+
+interface ExclusionDecision {
+  job_key: string;
+  job_name: string;
+  excluded: boolean;
+  scope: 'ALL_METRICS';
+  source: 'AUTOMATIC' | 'MANUAL_EXCLUDE' | 'MANUAL_INCLUDE';
+  reason_code: string;
+  reason: string;
+  rule_id?: string | null;
+  avg_runtime_hrs?: number;
+  max_runtime_hrs?: number;
 }
 
 interface ConcurrencyBurst {
@@ -431,15 +444,15 @@ interface PatternDetectionItem {
 
 export function BatchPanel() {
   const classes = useStyles();
-  const { data, setBatch } = useAppData();
-  const [manualInclude, setManualInclude] = useState<Set<string>>(new Set());
-  const [manualExcludeReasons, setManualExcludeReasons] = useState<Map<string, string>>(new Map());
-  const [manualExclude, setManualExclude] = useState<Set<string>>(new Set());
+  const { data, setBatch, setSlaMatrix } = useAppData();
   const [excludedDetailOpen, setExcludedDetailOpen] = useState(false);
   const [excludedFilter, setExcludedFilter] = useState('');
   const [addJobName, setAddJobName] = useState('');
   const [addJobReason, setAddJobReason] = useState('');
   const [exclusionsBusy, setExclusionsBusy] = useState(false);
+  const [exclusionError, setExclusionError] = useState('');
+  const [exclusionNotice, setExclusionNotice] = useState('');
+  const { refreshDerivedEvidence } = useDerivedEvidenceRefresh();
 
   const kpis = (data.batch?.kpis || {}) as BatchKpis;
   const slaThresholds = _configuredSlaThresholds((data.batch || {}) as Record<string, unknown>);
@@ -466,6 +479,23 @@ export function BatchPanel() {
   const hourHeatmap = data.batch?.hour_heatmap as HourHeatmapData | undefined;
   const sowCompare = data.sowCompare as { metrics?: { sow?: number; actual?: number; pct?: number; label?: string }[] } | null;
   const benchmarkPerf = (data.benchmark as { batch_perf_summary?: Record<string, unknown>; filename?: string } | null)?.batch_perf_summary;
+  const exclusionRegistry = ((data.batch?.exclusion_registry as ExclusionDecision[]) || []).slice();
+  const manualExclude = useMemo(
+    () => new Set<string>(((data.batch?.user_excluded_job_names as string[]) || []).map(String)),
+    [data.batch],
+  );
+  const manualInclude = useMemo(
+    () => new Set<string>(((data.batch?.manual_included_job_names as string[]) || []).map(String)),
+    [data.batch],
+  );
+  const manualExcludeReasons = useMemo(() => {
+    const reasons = new Map<string, string>();
+    const audit = (data.batch?.manual_exclusion_audit as { name?: string; reason?: string }[]) || [];
+    audit.forEach((item) => {
+      if (item.name) reasons.set(item.name, item.reason || '');
+    });
+    return reasons;
+  }, [data.batch]);
 
   // ── ENV chip — TEST/UAT vs PROD badge, ported from renderBatchKpis() FIX 6.3 ──
   const envValue = (kpis.batch_env || kpis.env_type || '').toUpperCase();
@@ -475,16 +505,23 @@ export function BatchPanel() {
       ? { label: 'PROD', color: '#10d96e', title: '' }
       : null;
 
-  // ── Unified exclusion rows — merges auto utility-pattern exclusions (top_jobs
-  // is_utility) with backend compliance-only exclusions (data_coverage.excluded_jobs)
-  // into one table, ported from _buildUnifiedExclusionRows() (app.js). ──
+  // ── Unified exclusion rows — all-metrics decisions come from the canonical
+  // backend registry; baseline-quality exclusions remain compliance-only. ──
   const unifiedExclusions = useMemo<UnifiedExclusionRow[]>(() => {
     const rows = new Map<string, UnifiedExclusionRow>();
+    exclusionRegistry.filter((decision) => decision.excluded).forEach((decision) => {
+      rows.set(decision.job_name.toUpperCase(), {
+        name: decision.job_name,
+        category: decision.reason_code || 'UTILITY',
+        why: decision.reason,
+        scope: 'ALL_METRICS',
+        isUtil: true,
+      });
+    });
+    // Compatibility for an older API process that has not emitted the registry.
     const allTopJobs = (data.batch?.top_jobs as TopJobRow[]) || [];
-    allTopJobs.filter((j) => j.is_utility).forEach((j) => {
+    allTopJobs.filter((j) => j.is_utility && exclusionRegistry.length === 0).forEach((j) => {
       const name = j.Job_Name;
-      if (manualInclude.has(name)) return;
-      const customReason = manualExcludeReasons.get(name);
       const reason = j.utility_reason || 'utility pattern';
       rows.set(name.toUpperCase(), {
         name,
@@ -492,7 +529,7 @@ export function BatchPanel() {
         // STRONG_UTILITY:FILE_WATCHER) — NOT a generic "UTILITY" label. Verified against
         // the real dashboard's _exclusionCategory() output on live Dawnfoods data.
         category: _exclusionCategory(reason),
-        why: customReason || _exclusionWhy(reason),
+        why: _exclusionWhy(reason),
         scope: 'ALL_METRICS',
         isUtil: true,
       });
@@ -526,9 +563,9 @@ export function BatchPanel() {
       if (a.category !== b.category) return a.category.localeCompare(b.category);
       return a.name.localeCompare(b.name);
     });
-  }, [data.batch, manualInclude, manualExclude, manualExcludeReasons, dataCoverage]);
+  }, [data.batch, exclusionRegistry, manualExclude, manualExcludeReasons, dataCoverage]);
 
-  const includedBackJobs = ((data.batch?.top_jobs as TopJobRow[]) || []).filter((j) => j.is_utility && manualInclude.has(j.Job_Name));
+  const includedBackJobs = exclusionRegistry.filter((decision) => !decision.excluded && decision.source === 'MANUAL_INCLUDE');
   const filteredExclusions = unifiedExclusions.filter((row) =>
     !excludedFilter.trim() || row.name.toLowerCase().includes(excludedFilter.trim().toLowerCase()));
   const byCat = new Map<string, number>();
@@ -539,43 +576,68 @@ export function BatchPanel() {
 
   const applyExclusions = async (nextInclude: Set<string>, nextExclude: Set<string>, nextReasons: Map<string, string>) => {
     setExclusionsBusy(true);
+    setExclusionError('');
+    setExclusionNotice('');
     try {
       const manualExclusions = Array.from(nextExclude).map((name) => ({ name, reason: nextReasons.get(name) || '' }));
-      const refreshed = await refreshBatch(manualExclusions);
-      setBatch(refreshed);
-    } catch {
-      // Refresh failed — local state still updates below so the UI reflects intent.
+      const refreshed = await refreshBatch(manualExclusions, Array.from(nextInclude));
+      setBatch(refreshed, { invalidateDerived: true });
+      const refreshedSlaMatrix = refreshed.sla_matrix && typeof refreshed.sla_matrix === 'object' && !Array.isArray(refreshed.sla_matrix)
+        ? refreshed.sla_matrix as Record<string, unknown>
+        : data.slaMatrix;
+      if (refreshedSlaMatrix !== data.slaMatrix) setSlaMatrix(refreshedSlaMatrix);
+      const status = await refreshDerivedEvidence({
+        ...data,
+        batch: refreshed,
+        slaMatrix: refreshedSlaMatrix,
+        findings: null,
+        redFlags: null,
+        peNarrative: null,
+        executive: null,
+        finalJudgment: null,
+      });
+      setExclusionNotice(status);
+      return true;
+    } catch (error) {
+      setExclusionError(error instanceof Error ? error.message : 'Could not recompute batch analysis.');
+      return false;
     } finally {
       setExclusionsBusy(false);
     }
   };
 
-  const handleReinclude = (name: string) => {
+  const handleReinclude = async (name: string) => {
+    if (!globalThis.confirm(`Re-include ${name} in every batch calculation and finding?`)) return;
     const nextExclude = new Set(manualExclude); nextExclude.delete(name);
     const nextInclude = new Set(manualInclude).add(name);
     const nextReasons = new Map(manualExcludeReasons); nextReasons.delete(name);
-    setManualExclude(nextExclude); setManualInclude(nextInclude); setManualExcludeReasons(nextReasons);
-    applyExclusions(nextInclude, nextExclude, nextReasons);
+    await applyExclusions(nextInclude, nextExclude, nextReasons);
   };
-  const handleReexclude = (name: string) => {
+  const handleReexclude = async (name: string) => {
     const nextInclude = new Set(manualInclude); nextInclude.delete(name);
-    setManualInclude(nextInclude);
-    applyExclusions(nextInclude, manualExclude, manualExcludeReasons);
+    await applyExclusions(nextInclude, manualExclude, manualExcludeReasons);
   };
-  const handleAddManualExclude = () => {
+  const handleAddManualExclude = async () => {
     const val = addJobName.trim();
     if (!val) return;
     const nextExclude = new Set(manualExclude).add(val);
     const nextInclude = new Set(manualInclude); nextInclude.delete(val);
     const nextReasons = new Map(manualExcludeReasons);
     if (addJobReason.trim()) nextReasons.set(val, addJobReason.trim()); else nextReasons.delete(val);
-    setManualExclude(nextExclude); setManualInclude(nextInclude); setManualExcludeReasons(nextReasons);
-    setAddJobName(''); setAddJobReason('');
-    applyExclusions(nextInclude, nextExclude, nextReasons);
+    if (await applyExclusions(nextInclude, nextExclude, nextReasons)) {
+      setAddJobName(''); setAddJobReason('');
+    }
   };
-  const handleResetAllExclusions = () => {
-    setManualInclude(new Set()); setManualExclude(new Set()); setManualExcludeReasons(new Map());
-    applyExclusions(new Set(), new Set(), new Map());
+  const handleResetAllExclusions = async () => {
+    await applyExclusions(new Set(), new Set(), new Map());
+  };
+  const handleExcludeFromAnalysis = async (name: string, origin: string) => {
+    if (!globalThis.confirm(`Exclude ${name} from every batch metric and finding for this review?`)) return;
+    const nextExclude = new Set(manualExclude).add(name);
+    const nextInclude = new Set(manualInclude); nextInclude.delete(name);
+    const nextReasons = new Map(manualExcludeReasons);
+    nextReasons.set(name, `Reviewer excluded from ${origin}.`);
+    await applyExclusions(nextInclude, nextExclude, nextReasons);
   };
 
   // ── Effective Window KPI \u2014 the SLA-binding LONGEST CONTIGUOUS block per day
@@ -1262,7 +1324,7 @@ export function BatchPanel() {
                 />
                 <Button size="small" variant="outlined" onClick={handleAddManualExclude} disabled={exclusionsBusy}>＋ Exclude</Button>
                 <Box display="flex" style={{ marginLeft: 'auto', gap: 8 }}>
-                  <Button size="small" onClick={handleResetAllExclusions} disabled={exclusionsBusy} style={{ color: '#f43f5e' }}>Reset all</Button>
+                  <Button size="small" onClick={handleResetAllExclusions} disabled={exclusionsBusy} style={{ color: '#f43f5e' }}>Reset reviewer overrides</Button>
                   <Button
                     size="small"
                     onClick={() => {
@@ -1322,9 +1384,9 @@ export function BatchPanel() {
               {includedBackJobs.length > 0 && (
                 <Box display="flex" alignItems="center" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(33,48,96,.2)' }}>
                   <Typography variant="caption" style={{ fontWeight: 700, color: '#6b7db3' }}>↩ Manually re-included ({includedBackJobs.length}):</Typography>
-                  {includedBackJobs.map((j) => (
-                    <Button key={j.Job_Name} size="small" onClick={() => handleReexclude(j.Job_Name)} style={{ color: '#10d96e', fontFamily: 'monospace', fontSize: 10.5 }}>
-                      {j.Job_Name} ✕
+                  {includedBackJobs.map((decision) => (
+                    <Button key={decision.job_name} size="small" onClick={() => handleReexclude(decision.job_name)} style={{ color: '#10d96e', fontFamily: 'monospace', fontSize: 10.5 }}>
+                      {decision.job_name} ✕
                     </Button>
                   ))}
                 </Box>
@@ -1332,6 +1394,17 @@ export function BatchPanel() {
             </Box>
           )}
         </Box>
+      )}
+
+      {exclusionError && (
+        <Typography role="alert" variant="caption" style={{ display: 'block', color: '#f43f5e', marginTop: 8, marginBottom: 8 }}>
+          {exclusionError}
+        </Typography>
+      )}
+      {exclusionNotice && !exclusionError && (
+        <Typography role="status" variant="caption" style={{ display: 'block', color: '#2dd4bf', marginTop: 8, marginBottom: 8 }}>
+          {exclusionNotice}
+        </Typography>
       )}
 
       {/* ── Concurrent Jobs Evidence — ported from renderBatchConcurrencyEvidence() (app.js).
@@ -1562,6 +1635,7 @@ export function BatchPanel() {
                     <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 8, textAlign: 'center' }} title="Average single-run minutes">avg</th>
                     <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 4, textAlign: 'center' }} title="Longest single run">max</th>
                     <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 4, textAlign: 'center' }} title="Average runtime as % of the typical daily busy window">share</th>
+                    <th className="batch-heatmap-stat-heading" style={{ paddingLeft: 4, textAlign: 'center' }}>action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1595,6 +1669,11 @@ export function BatchPanel() {
                         <td className="batch-longpole-stat" style={{ textAlign: 'center', fontFamily: 'monospace', color: 'rgba(255,255,255,.8)', paddingLeft: 4 }}>{row.max_min.toFixed(0)}</td>
                         <td className="batch-longpole-stat batch-longpole-share" style={{ textAlign: 'center', fontFamily: 'monospace', fontWeight: 700, color: shareColor, paddingLeft: 4 }}>
                           {row.window_share_pct ? `${row.window_share_pct.toFixed(0)}%` : '\u2014'}
+                        </td>
+                        <td style={{ textAlign: 'center', paddingLeft: 4 }}>
+                          <Button size="small" disabled={exclusionsBusy} onClick={() => handleExcludeFromAnalysis(row.job, 'Long-Pole Job Consistency')} title={`Exclude ${row.job} from all batch analysis`}>
+                            Exclude
+                          </Button>
                         </td>
                       </tr>
                     );
@@ -1657,10 +1736,11 @@ export function BatchPanel() {
                 <TableCell align="right">Buffer %</TableCell>
                 <TableCell align="right">SLA used</TableCell>
                 <TableCell>Status</TableCell>
+                <TableCell align="right">Action</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {topBreaches.slice(0, 9).map((job, index) => {
+              {topBreaches.slice(0, shown).map((job, index) => {
                 const buffer = job.buffer_pct;
                 const color = STATUS_COLOR[job.buffer_status] || '#6b7db3';
                 const overlapTone = _overlapTone(job);
@@ -1689,6 +1769,11 @@ export function BatchPanel() {
                       <span className="metric-badge" style={{ color, borderColor: `${color}40`, background: `${color}1f` }}>
                         {job.buffer_status}
                       </span>
+                    </TableCell>
+                    <TableCell align="right">
+                      <Button size="small" disabled={exclusionsBusy} onClick={() => handleExcludeFromAnalysis(job.Job_Name, title)} title={`Exclude ${job.Job_Name} from all batch analysis`}>
+                        Exclude
+                      </Button>
                     </TableCell>
                   </TableRow>
                 );

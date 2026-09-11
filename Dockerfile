@@ -1,4 +1,4 @@
-﻿# PE Dashboard API image
+# PE Dashboard API image
 # Build from repository root: docker build -f backend/PE_Dashboard_API/Dockerfile .
 FROM python:3.12-slim
 
@@ -6,7 +6,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PE_STATE_DIR=/tmp/pe_dashboard_state \
+    PE_STATE_DIR=/data \
     PE_UI_MODE=api \
     PE_COOKIE_SECURE=true \
     HOME=/home/stratosphere \

@@ -339,9 +339,15 @@ export const recomputeSlaMatrix = (
     customer,
   });
 
-/** Re-run batch KPIs from the cached Ctrl-M rows with current manual job exclusions. */
-export const refreshBatch = (manualExclusions: { name: string; reason: string }[] = []): Promise<DashboardPayload> =>
-  postDashboardPayload('/api/batch/refresh', { manual_exclusions: manualExclusions });
+/** Re-run every batch metric from cached Ctrl-M rows with reviewer scope overrides. */
+export const refreshBatch = (
+  manualExclusions: { name: string; reason: string }[] = [],
+  manualInclusions: string[] = [],
+): Promise<DashboardPayload> =>
+  postDashboardPayload('/api/batch/refresh', {
+    manual_exclusions: manualExclusions,
+    manual_inclusions: manualInclusions,
+  });
 
 export const getConfig = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/config');
 
@@ -352,6 +358,15 @@ export const clearSession = (): Promise<DashboardPayload> =>
   postDashboardPayload('/api/clear-session', {});
 
 export const getReportArchive = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/report-archive');
+
+export const importReportArchive = (file: File): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request<DashboardPayload>('/api/report-archive/import', {
+    method: 'POST',
+    body: formData,
+  });
+};
 
 export const getSowBaseline = (): Promise<DashboardPayload> => request<DashboardPayload>('/api/sow/baseline');
 

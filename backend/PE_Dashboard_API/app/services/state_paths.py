@@ -18,8 +18,19 @@ def get_state_dir() -> Path:
         return _RESOLVED_STATE_DIR
 
     candidates: list[Path] = []
-    if raw_env:
+    # If raw_env is explicitly set to something other than the legacy ephemeral default, try it first
+    if raw_env and raw_env not in ("/tmp/pe_dashboard_state", ""):
         candidates.append(Path(raw_env).expanduser().resolve())
+
+    # In Linux container environments, prioritize persistent mount /data
+    if os.name != "nt":
+        candidates.append(Path("/data"))
+        candidates.append(Path("/data/pe_dashboard_state"))
+
+    if raw_env:
+        resolved_raw = Path(raw_env).expanduser().resolve()
+        if resolved_raw not in candidates:
+            candidates.append(resolved_raw)
 
     # Fallback candidates
     if os.name == "nt":

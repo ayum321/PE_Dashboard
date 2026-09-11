@@ -1,4 +1,4 @@
-import React, { ChangeEvent, useMemo, useRef, useState } from 'react';
+import React, { ChangeEvent, useMemo, useState } from 'react';
 import { Link, useHistory } from 'react-router-dom';
 import {
   Box,
@@ -17,18 +17,13 @@ import Highcharts from '../../theme/highchartsSetup';
 import HighchartsReact from 'highcharts-react-official';
 import {
   DashboardPayload,
-  generateFindings,
-  getExecutiveDashboard,
-  getFinalJudgment,
-  getPeNarrative,
-  getRedFlags,
   recomputeSlaMatrix,
   refreshBatch,
   uploadBatchSlaXlsx,
   workbookSlaSnapshotFromUpload,
 } from '../../api/dashboardApi';
-import { AppData, useAppData } from '../../context/AppDataContext';
-import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
+import { useAppData } from '../../context/AppDataContext';
+import { useDerivedEvidenceRefresh } from '../../hooks/useDerivedEvidenceRefresh';
 import { SectionBanner } from '../shared/SectionBanner';
 import { KpiStatCard } from '../shared/KpiStatCard';
 
@@ -388,8 +383,7 @@ export function SlaMatrixPanel() {
   const classes = useStyles();
   const history = useHistory();
   const {
-    data, setBatch, setSlaMatrix, setFindings, setRedFlags, setPeNarrative,
-    setExecutive, setFinalJudgment,
+    data, setBatch, setSlaMatrix,
   } = useAppData();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -401,55 +395,7 @@ export function SlaMatrixPanel() {
   const [customCeilingInput, setCustomCeilingInput] = useState('');
   const [showCustomCeilingBox, setShowCustomCeilingBox] = useState(false);
   const [recomputingCeiling, setRecomputingCeiling] = useState(false);
-  const derivedRefreshId = useRef(0);
-
-  const clearDerivedEvidence = () => {
-    setFindings(null);
-    setRedFlags(null);
-    setPeNarrative(null);
-    setExecutive(null);
-    setFinalJudgment(null);
-  };
-
-  // Keep direct SLA Matrix uploads on the same evidence cascade as Upload &
-  // Intake. State setters are deliberately driven from the returned payload,
-  // not React's asynchronous state update, so no screen can see mixed old/new
-  // batch and SLA evidence during the refresh.
-  const refreshDerivedEvidence = async (nextData: AppData): Promise<string> => {
-    const refreshId = ++derivedRefreshId.current;
-    const stillCurrent = () => refreshId === derivedRefreshId.current;
-    const payload = buildAnalysisPayload(nextData);
-    let findings: DashboardPayload | null = null;
-    let redFlags: DashboardPayload | null = null;
-    let executive: DashboardPayload | null = null;
-    const unavailable: string[] = [];
-
-    try {
-      findings = await generateFindings(payload);
-      if (stillCurrent()) setFindings(findings);
-    } catch { unavailable.push('findings'); }
-    try {
-      redFlags = await getRedFlags(payload);
-      if (stillCurrent()) setRedFlags(redFlags);
-    } catch { unavailable.push('questions'); }
-    try {
-      executive = await getExecutiveDashboard({ ...payload, sla_data: nextData.slaMatrix, findings: findings?.findings });
-      if (stillCurrent()) setExecutive(executive);
-    } catch { unavailable.push('executive view'); }
-    try {
-      const narrative = await getPeNarrative(buildPeNarrativePayload(nextData, { findings, redFlags }));
-      if (stillCurrent()) setPeNarrative(narrative);
-    } catch { unavailable.push('PE review summary'); }
-    try {
-      const judgment = await getFinalJudgment(buildFinalJudgmentPayload(nextData, { findings, redFlags, executive }));
-      if (stillCurrent()) setFinalJudgment(judgment);
-    } catch { unavailable.push('final judgment'); }
-
-    if (!stillCurrent()) return 'A newer upload is reconciling the shared evidence.';
-    return unavailable.length
-      ? `Batch Review refreshed; ${unavailable.join(', ')} can be refreshed from PE Findings.`
-      : 'Batch Review, PE Findings, executive dashboard, and final judgment refreshed.';
-  };
+  const { clearDerivedEvidence, refreshDerivedEvidence } = useDerivedEvidenceRefresh();
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

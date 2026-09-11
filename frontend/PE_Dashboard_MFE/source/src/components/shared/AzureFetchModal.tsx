@@ -270,18 +270,22 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   }, [invalidateAzureSession]);
 
   useEffect(() => {
+    if (open && discoveredVms.length === 0) setStep(1);
+  }, [open, discoveredVms.length]);
+
+  useEffect(() => {
+    if (open && customerName) {
+      setSearchQuery((current) => current || customerName);
+    }
+  }, [open, customerName]);
+
+  useEffect(() => {
     if (!open) {
       modalGeneration.current += 1;
       cancelSubscriptionLoads();
       return;
     }
     const modalToken = ++modalGeneration.current;
-    if (discoveredVms.length === 0) {
-      setStep(1);
-    }
-    if (customerName && !searchQuery) {
-      setSearchQuery(customerName);
-    }
     setFetchStatus(null);
     setDiscoverStatus(null);
     setSubscriptionsWarming(false);

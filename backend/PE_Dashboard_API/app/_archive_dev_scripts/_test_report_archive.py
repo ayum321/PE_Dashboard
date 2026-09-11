@@ -565,6 +565,56 @@ def test_export_route_archives_reviewer_names_and_recovers_missing_names() -> No
         _restore_archive(root, original)
 
 
+def test_import_html_report_adds_to_registry() -> None:
+    root, original = _isolate_archive()
+    try:
+        sample_html = """<!DOCTYPE html><html><head><title>PE Audit Report — Sample Import Corp</title></head>
+        <body>
+        <span><b>Customer:</b> Sample Import Corp</span>
+        <span><b>Environment:</b> Staging</span>
+        <div class="appr__role">Performance Engineer</div>
+        <div class="appr__name">Test Engineer</div>
+        <div class="appr__status" style="color:#10d96e;">✅ Approved</div>
+        <div class="appr__role">Customer</div>
+        <div class="appr__name">Client Lead</div>
+        <div class="appr__status" style="color:#10d96e;">✅ Approved</div>
+        <div class="stat__label">Batch SLA Compliance</div>
+        <div class="gauge__big">98.5%</div>
+        <div class="stat__label">Fleet Health</div>
+        <div class="gauge__big">A</div>
+        <div class="gauge__cap tabnum">92.0/100</div>
+        <span class="num">12</span> servers
+        <span class="check check--mismatch">⚠</span>
+        </body></html>"""
+
+        app = FastAPI()
+        app.include_router(archive_router, prefix="/api")
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/report-archive/import",
+            files={"file": ("PE_Audit_Sample_Import_Corp.html", sample_html.encode("utf-8"), "text/html")},
+        )
+        _assert(response.status_code == 200, f"import endpoint returned {response.status_code}: {response.text}")
+        body = response.json()
+        _assert(body.get("ok") is True, f"import failed: {body}")
+        _assert(body.get("customer") == "Sample Import Corp", f"unexpected customer: {body}")
+
+        reports = report_archive.list_reports()
+        _assert(len(reports) == 1, f"expected 1 report in registry, got {len(reports)}")
+        rep = reports[0]
+        _assert(rep["customer"] == "Sample Import Corp", f"expected Sample Import Corp, got {rep['customer']}")
+        _assert(rep["pe_name"] == "Test Engineer", f"expected Test Engineer, got {rep['pe_name']}")
+        _assert(rep["cust_name"] == "Client Lead", f"expected Client Lead, got {rep['cust_name']}")
+        _assert(rep["resource_fleet_grade"] == "A", f"expected grade A, got {rep['resource_fleet_grade']}")
+        _assert(rep["resource_fleet_score"] == 92.0, f"expected score 92.0, got {rep['resource_fleet_score']}")
+        _assert(rep["batch_compliance_pct"] == 98.5, f"expected compliance 98.5, got {rep['batch_compliance_pct']}")
+        _assert(rep["checklist_mismatches"] == 1, f"expected 1 mismatch, got {rep['checklist_mismatches']}")
+        print("  [OK] import HTML report parses and populates Review Registry")
+    finally:
+        _restore_archive(root, original)
+
+
 def main() -> None:
     print("Report archive regression suite")
     print("-" * 60)
@@ -583,6 +633,7 @@ def main() -> None:
     test_exported_fleet_score_matches_the_frozen_archive_value()
     test_registry_template_compacts_rows_and_filters_independent_facts()
     test_export_route_archives_reviewer_names_and_recovers_missing_names()
+    test_import_html_report_adds_to_registry()
     print("-" * 60)
     print("REPORT ARCHIVE CHECKS PASSED")
 

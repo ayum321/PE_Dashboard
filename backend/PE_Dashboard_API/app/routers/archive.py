@@ -7,7 +7,7 @@ files created by routers/export.py's save-on-generate hook.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from services import report_archive
@@ -58,3 +58,23 @@ async def download_archive_report(slug: str):
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+@router.post("/report-archive/import", summary="Import an exported HTML report into Review Registry")
+async def import_archive_report(file: UploadFile = File(...)):
+    try:
+        content_bytes = await file.read()
+        html_text = content_bytes.decode("utf-8", errors="replace")
+        result = report_archive.import_html_report(html_text, filename=file.filename or "")
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "Failed to import report"),
+                headers=_ARCHIVE_HEADERS,
+            )
+        return JSONResponse(content=result, headers=_ARCHIVE_HEADERS)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc), headers=_ARCHIVE_HEADERS)
+

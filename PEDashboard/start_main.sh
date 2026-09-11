@@ -12,8 +12,9 @@ echo " PE Audit Dashboard Agent API"
 echo " Starting on port ${PORT}"
 echo "=============================================="
 
-# Ensure writable state directory
-export PE_STATE_DIR=${PE_STATE_DIR:-/tmp/pe_dashboard_state}
+# Ensure writable state directory (prefer persistent mount /data, fallback to /tmp)
+export PE_STATE_DIR=${PE_STATE_DIR:-/data}
+mkdir -p "${PE_STATE_DIR}" 2>/dev/null || export PE_STATE_DIR=/tmp/pe_dashboard_state
 mkdir -p "${PE_STATE_DIR}" 2>/dev/null || true
 echo "PE_STATE_DIR: ${PE_STATE_DIR}"
 

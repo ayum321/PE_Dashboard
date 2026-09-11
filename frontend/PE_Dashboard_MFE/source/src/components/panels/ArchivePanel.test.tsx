@@ -56,4 +56,16 @@ describe('ArchivePanel', () => {
     expect(await findByText('Ayush Mathur')).toBeDefined();
     expect(await findByText('Antony Castaldi')).toBeDefined();
   });
+
+  it('renders the Import report and Refresh registry buttons', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ reports: [] }),
+    } as Response);
+
+    const { findByText } = render(<ArchivePanel />);
+
+    expect(await findByText('Import report')).toBeDefined();
+    expect(await findByText('Refresh registry')).toBeDefined();
+  });
 });

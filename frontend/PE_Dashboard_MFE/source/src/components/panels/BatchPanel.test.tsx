@@ -1,8 +1,19 @@
 import React, { useEffect } from 'react';
-import { render } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppDataProvider, useAppData } from '../../context/AppDataContext';
+import * as api from '../../api/dashboardApi';
 import { BatchPanel } from './BatchPanel';
+
+jest.mock('../../api/dashboardApi', () => ({
+  ...jest.requireActual('../../api/dashboardApi'),
+  refreshBatch: jest.fn(),
+  generateFindings: jest.fn(),
+  getRedFlags: jest.fn(),
+  getExecutiveDashboard: jest.fn(),
+  getPeNarrative: jest.fn(),
+  getFinalJudgment: jest.fn(),
+}));
 
 const RICH_BATCH_PAYLOAD = {
   filename: 'ctrlm_export.csv',
@@ -69,13 +80,38 @@ const RICH_BATCH_PAYLOAD = {
   sla_source: { type: 'sla_matrix', daily_hrs: 6, adaptive_active: false, adaptive_job_count: 0, adaptive_total_jobs: 0, resolved_ceilings: [6, 8] },
 };
 
-function BatchDataInjector({ children }: { children: React.ReactNode }) {
-  const { setBatch } = useAppData();
-  useEffect(() => { setBatch(RICH_BATCH_PAYLOAD as never); }, [setBatch]);
+function BatchDataInjector({ children, batch = RICH_BATCH_PAYLOAD, withStaleFindings = false }: {
+  children: React.ReactNode;
+  batch?: Record<string, unknown>;
+  withStaleFindings?: boolean;
+}) {
+  const { setBatch, setFindings } = useAppData();
+  useEffect(() => {
+    setBatch(batch);
+    if (withStaleFindings) setFindings({ marker: 'stale' });
+  }, [batch, setBatch, setFindings, withStaleFindings]);
   return <>{children}</>;
 }
 
+function EvidenceState() {
+  const { data } = useAppData();
+  return (
+    <>
+      <output data-testid="evidence-state">{String(data.findings?.marker || 'none')}</output>
+      <output data-testid="sla-state">{String(data.slaMatrix?.marker || 'none')}</output>
+    </>
+  );
+}
+
 describe('BatchPanel', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (api.getRedFlags as jest.Mock).mockResolvedValue({ marker: 'red-flags' });
+    (api.getExecutiveDashboard as jest.Mock).mockResolvedValue({ marker: 'executive' });
+    (api.getPeNarrative as jest.Mock).mockResolvedValue({ marker: 'narrative' });
+    (api.getFinalJudgment as jest.Mock).mockResolvedValue({ marker: 'judgment' });
+  });
+
   it('shows the empty state when no batch data has been uploaded', () => {
     window['env'] = { LOCAL_APP_NAME: 'Local MFE' };
     const { getByText } = render(
@@ -116,5 +152,102 @@ describe('BatchPanel', () => {
     expect(container.querySelector('.batch-sla-cell--watch')).not.toBeNull();
     expect(container.querySelector('.batch-longpole-cell--longest')).not.toBeNull();
     expect(container.querySelector('.batch-longpole-row--attention')).not.toBeNull();
+  });
+
+  it('renders all ten performance regressions', () => {
+    const regressions = Array.from({ length: 10 }, (_, index) => ({
+      Job_Name: `REGRESSION_${index + 1}`,
+      Sub_Application: 'FIN',
+      peak_hrs: 7 + index,
+      avg_hrs: 6 + index,
+      total_hrs: 20 + index,
+      sla_hrs: 6,
+      buffer_pct: -10 - index,
+      buffer_status: 'BREACH',
+    }));
+    const batch = {
+      ...RICH_BATCH_PAYLOAD,
+      top_breaches: regressions,
+      sla_source: { ...RICH_BATCH_PAYLOAD.sla_source, adaptive_active: true },
+    };
+    const { container, getByText } = render(
+      <MemoryRouter>
+        <AppDataProvider>
+          <BatchDataInjector batch={batch}>
+            <BatchPanel />
+          </BatchDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
+    );
+
+    expect(getByText('Top 10 Performance Regressions')).toBeDefined();
+    expect(container.querySelectorAll('[aria-label="Top breaching jobs table"] tbody tr')).toHaveLength(10);
+  });
+
+  it('applies a row exclusion, clears stale findings immediately, and rebuilds dependent evidence', async () => {
+    let resolveFindings: (value: Record<string, unknown>) => void = () => undefined;
+    const findingsPending = new Promise<Record<string, unknown>>((resolve) => { resolveFindings = resolve; });
+    const refreshed = {
+      ...RICH_BATCH_PAYLOAD,
+      sla_matrix: { marker: 'scoped-sla' },
+      top_breaches: [],
+      longpole_matrix: { ...RICH_BATCH_PAYLOAD.longpole_matrix, jobs: [], rows: [], cells: [], has_data: false },
+      user_excluded_job_names: ['JOB_A'],
+      exclusion_registry: [{
+        job_name: 'JOB_A', excluded: true, scope: 'ALL_METRICS', source: 'MANUAL_EXCLUDE',
+        reason_code: 'REVIEWER_EXCLUDED', reason: 'Reviewer excluded from Long-Pole Job Consistency.',
+      }],
+    };
+    (api.refreshBatch as jest.Mock).mockResolvedValue(refreshed);
+    (api.generateFindings as jest.Mock).mockReturnValue(findingsPending);
+    const confirmSpy = jest.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { getAllByTitle, getByTestId } = render(
+      <MemoryRouter>
+        <AppDataProvider>
+          <BatchDataInjector withStaleFindings>
+            <EvidenceState />
+            <BatchPanel />
+          </BatchDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(getByTestId('evidence-state').textContent).toBe('stale'));
+    fireEvent.click(getAllByTitle('Exclude JOB_A from all batch analysis')[0]);
+
+    await waitFor(() => expect(api.refreshBatch).toHaveBeenCalledWith(
+      [{ name: 'JOB_A', reason: 'Reviewer excluded from Long-Pole Job Consistency.' }],
+      [],
+    ));
+    await waitFor(() => expect(getByTestId('evidence-state').textContent).toBe('none'));
+    await waitFor(() => expect(getByTestId('sla-state').textContent).toBe('scoped-sla'));
+
+    await act(async () => { resolveFindings({ marker: 'fresh' }); });
+    await waitFor(() => expect(getByTestId('evidence-state').textContent).toBe('fresh'));
+    await waitFor(() => expect(api.getFinalJudgment).toHaveBeenCalledTimes(1));
+    confirmSpy.mockRestore();
+  });
+
+  it('keeps confirmed evidence unchanged and shows a visible alert when exclusion refresh fails', async () => {
+    (api.refreshBatch as jest.Mock).mockRejectedValue(new Error('Unknown job: JOB_A'));
+    const confirmSpy = jest.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { getAllByTitle, getByRole, getByTestId } = render(
+      <MemoryRouter>
+        <AppDataProvider>
+          <BatchDataInjector withStaleFindings>
+            <EvidenceState />
+            <BatchPanel />
+          </BatchDataInjector>
+        </AppDataProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(getByTestId('evidence-state').textContent).toBe('stale'));
+    fireEvent.click(getAllByTitle('Exclude JOB_A from all batch analysis')[0]);
+
+    await waitFor(() => expect(getByRole('alert').textContent).toContain('Unknown job: JOB_A'));
+    expect(getByTestId('evidence-state').textContent).toBe('stale');
+    expect(api.generateFindings).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 });

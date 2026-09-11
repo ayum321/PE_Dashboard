@@ -313,12 +313,17 @@ CTRLM_COLUMN_MAP: dict = {
 # The rules are split into:
 #   - STRONG tokens: name match alone is sufficient
 #   - RUNTIME-gated patterns: name match plus runtime threshold is required
+MANDATORY_STRONG_UTILITY_TOKENS: frozenset[str] = frozenset({
+    "backup", "bkup", "_bkp", "restore",
+})
 DEFAULT_STRONG_UTILITY_TOKENS: frozenset[str] = frozenset({
     "file_watcher", "filewatcher", "ctrl_m_file_watcher",
     "ping_job", "heartbeat", "health_check",
     "export_outbound", "outbound_export",
     "move_file_to_outbox", "outbound_file",
-})
+    # Backup/restore work is infrastructure housekeeping, not product batch
+    # processing. Runtime must not promote it into SLA/regression analysis.
+}) | MANDATORY_STRONG_UTILITY_TOKENS
 
 # AKA "UTILITY_PATTERN_THRESHOLDS": name-match pattern → max runtime (hours)
 # below which the job is a housekeeping utility, not real batch work. Exceeding
@@ -354,10 +359,7 @@ DEFAULT_RUNTIME_GATED_UTILITY: dict[str, float] = {
     "zabbix_monitors": 0.05,    # monitoring check-in ping
     "export_": 0.05,            # generic export/outbound utility — real data exports
     "_export": 0.05,            # that legitimately take longer are NOT excluded (see above)
-    "db_backup": 0.25,          # DB-level backup/restore/cleanup — larger I/O than a single table op
-    "db_restore": 0.25,
     "db_cleanup": 0.25,
-    "backup": 0.10,             # broad keyword match — looser ceiling avoids false-excluding real backup jobs
 }
 
 # Mutable runtime copies used by the app. Legacy UTILITY_JOB_PATTERNS remains
@@ -680,7 +682,10 @@ def reload() -> None:
     _legacy = _cfg("utility_job_patterns")
 
     if isinstance(_strong, (list, set, tuple)) and _strong:
-        STRONG_UTILITY_TOKENS = {_norm_token(v) for v in _strong if str(v).strip()}
+        STRONG_UTILITY_TOKENS = (
+            {_norm_token(v) for v in _strong if str(v).strip()}
+            | set(MANDATORY_STRONG_UTILITY_TOKENS)
+        )
 
     if isinstance(_runtime, dict) and _runtime:
         _rt: dict[str, float] = {}
@@ -703,7 +708,7 @@ def reload() -> None:
             } | {
                 t for t in _legacy_norm
                 if t not in DEFAULT_RUNTIME_GATED_UTILITY and t not in DEFAULT_STRONG_UTILITY_TOKENS
-            }
+            } | set(MANDATORY_STRONG_UTILITY_TOKENS)
             RUNTIME_GATED_UTILITY = {
                 pat: thr for pat, thr in RUNTIME_GATED_UTILITY.items()
                 if pat in _legacy_norm

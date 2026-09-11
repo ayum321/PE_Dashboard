@@ -95,6 +95,14 @@ const EMPTY_APP_DATA: AppData = {
   reviewedProducts: [],
 };
 
+const EMPTY_DERIVED_EVIDENCE = {
+  findings: null,
+  redFlags: null,
+  peNarrative: null,
+  executive: null,
+  finalJudgment: null,
+};
+
 const isDashboardPayload = (value: unknown): value is DashboardPayload =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -151,7 +159,7 @@ interface AppDataContextValue {
   lastSyncTime: number | null;
   isLiveSyncing: boolean;
   syncLiveState: () => Promise<void>;
-  setBatch: (value: DashboardPayload | null) => void;
+  setBatch: (value: DashboardPayload | null, options?: { invalidateDerived?: boolean }) => void;
   setResource: (value: (DashboardPayload & { servers: ResourceServer[] }) | null) => void;
   setSlaMatrix: (value: DashboardPayload | null) => void;
   setBenchmark: (value: DashboardPayload | null) => void;
@@ -162,6 +170,7 @@ interface AppDataContextValue {
   setPeNarrative: (value: DashboardPayload | null) => void;
   setExecutive: (value: DashboardPayload | null) => void;
   setFinalJudgment: (value: DashboardPayload | null) => void;
+  clearDerivedEvidence: () => void;
   setCustomerName: (value: string | null, verifiedByResource?: boolean) => void;
   setIssues: (value: IssueRecord[]) => void;
   setApprovals: (value: ApprovalsState) => void;
@@ -339,8 +348,9 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     };
   }, [syncLiveState]);
 
-  const setBatch = useCallback((value: DashboardPayload | null) => {
+  const setBatch = useCallback((value: DashboardPayload | null, options?: { invalidateDerived?: boolean }) => {
     setData((prev) => {
+      const derivedReset = options?.invalidateDerived ? EMPTY_DERIVED_EVIDENCE : {};
       const rawCustomer = typeof (value as any)?.customer_name === 'string'
         ? (value as any).customer_name.trim()
         : null;
@@ -352,6 +362,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       if (prev.resource && hasDashboardPayload(prev.resource)) {
         return {
           ...prev,
+          ...derivedReset,
           batch: value,
         };
       }
@@ -367,6 +378,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       const activeCustomer = isValidCustomerName(prev.customerName) ? prev.customerName : incomingCustomer;
       return {
         ...prev,
+        ...derivedReset,
         batch: value,
         customerName: activeCustomer,
       };
@@ -492,6 +504,11 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
     [],
   );
 
+  const clearDerivedEvidence = useCallback(
+    () => setData((prev) => ({ ...prev, ...EMPTY_DERIVED_EVIDENCE })),
+    [],
+  );
+
   const setCustomerName = useCallback(
     (value: string | null, verifiedByResource?: boolean) => {
       setData((prev) => {
@@ -564,6 +581,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setPeNarrative,
       setExecutive,
       setFinalJudgment,
+      clearDerivedEvidence,
       setCustomerName,
       setIssues,
       setApprovals,
@@ -586,6 +604,7 @@ export const AppDataProvider = ({ children }: { children: React.ReactNode }) => 
       setPeNarrative,
       setExecutive,
       setFinalJudgment,
+      clearDerivedEvidence,
       setCustomerName,
       setIssues,
       setApprovals,

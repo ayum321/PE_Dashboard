@@ -1,15 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, Button, Paper, Typography, makeStyles } from '@material-ui/core';
 import { useHistory } from 'react-router-dom';
 import {
   DashboardPayload,
   disconnectAzure,
   getAzureAuthStatus,
-  getExecutiveDashboard,
-  getFinalJudgment,
-  getPeNarrative,
-  getRedFlags,
-  generateFindings,
   parseSow,
   processBatchMulti,
   processResource,
@@ -20,7 +15,7 @@ import {
   workbookSlaSnapshotFromUpload,
 } from '../../api/dashboardApi';
 import { AppData, isValidCustomerName, useAppData } from '../../context/AppDataContext';
-import { buildAnalysisPayload, buildFinalJudgmentPayload, buildPeNarrativePayload } from '../../utils/buildAnalysisPayload';
+import { useDerivedEvidenceRefresh } from '../../hooks/useDerivedEvidenceRefresh';
 import { BatchIcon, BenchmarkIcon, ResourceIcon, SlaMatrixIcon, SowIcon } from '../../theme/icons';
 import { AzureFetchMeta, AzureFetchModal } from '../shared/AzureFetchModal';
 import { UploadTile } from '../shared/UploadTile';
@@ -142,18 +137,13 @@ export function UploadPanel() {
     setBenchmark,
     setSowBaseline,
     setCustomerName,
-    setFindings,
-    setRedFlags,
-    setPeNarrative,
-    setExecutive,
-    setFinalJudgment,
   } = useAppData();
   const [azureAuth, setAzureAuth] = useState<Record<string, unknown> | null>(null);
   const [azureBusy, setAzureBusy] = useState(false);
   const [azureModalOpen, setAzureModalOpen] = useState(false);
   const [azureMessage, setAzureMessage] = useState<string | null>(null);
   const [uploads, setUploads] = useState<Partial<Record<UploadKey, IntakeUpload>>>({});
-  const derivedRefreshId = useRef(0);
+  const { clearDerivedEvidence, refreshDerivedEvidence } = useDerivedEvidenceRefresh();
 
   const beginUpload = (key: UploadKey, files: File[], title: string) => {
     const total = files.reduce((sum, file) => sum + file.size, 0);
@@ -200,74 +190,6 @@ export function UploadPanel() {
   useEffect(() => {
     getAzureAuthStatus().then(setAzureAuth).catch(() => undefined);
   }, []);
-
-  /**
-   * Mirrors the local dashboard's evidence cascade.  Each API receives the
-   * just-uploaded in-memory value rather than waiting for React state to flush,
-   * so navigating to any analysis screen cannot show the previous engagement.
-   */
-  const refreshDerivedEvidence = async (nextData: AppData): Promise<string> => {
-    const refreshId = ++derivedRefreshId.current;
-    const stillCurrent = () => refreshId === derivedRefreshId.current;
-    const payload = buildAnalysisPayload(nextData);
-    let findings: Record<string, unknown> | null = null;
-    let redFlags: Record<string, unknown> | null = null;
-    let executive: Record<string, unknown> | null = null;
-    const unavailable: string[] = [];
-
-    try {
-      findings = await generateFindings(payload);
-      if (stillCurrent()) setFindings(findings);
-    } catch {
-      unavailable.push('findings');
-    }
-
-    try {
-      redFlags = await getRedFlags(payload);
-      if (stillCurrent()) setRedFlags(redFlags);
-    } catch {
-      unavailable.push('questions');
-    }
-
-    try {
-      executive = await getExecutiveDashboard({
-        ...payload,
-        sla_data: nextData.slaMatrix,
-        findings: findings?.findings,
-      });
-      if (stillCurrent()) setExecutive(executive);
-    } catch {
-      unavailable.push('executive view');
-    }
-
-    try {
-      const narrative = await getPeNarrative(buildPeNarrativePayload(nextData, { findings, redFlags }));
-      if (stillCurrent()) setPeNarrative(narrative);
-    } catch {
-      unavailable.push('PE review summary');
-    }
-
-    try {
-      const judgment = await getFinalJudgment(buildFinalJudgmentPayload(nextData, { findings, redFlags, executive }));
-      if (stillCurrent()) setFinalJudgment(judgment);
-    } catch {
-      unavailable.push('final judgment');
-    }
-
-    if (!stillCurrent()) return 'A newer intake upload is reconciling the shared evidence.';
-
-    return unavailable.length
-      ? `Batch evidence is ready; ${unavailable.join(', ')} can be refreshed from PE Findings.`
-      : 'PE Findings, review summary, executive dashboard, and final judgment refreshed.';
-  };
-
-  const clearDerivedEvidence = () => {
-    setFindings(null);
-    setRedFlags(null);
-    setPeNarrative(null);
-    setExecutive(null);
-    setFinalJudgment(null);
-  };
 
   const handleBatchUpload = async (files: File[]) => {
     beginUpload('batch', files, 'Ctrl-M execution history');

@@ -646,3 +646,175 @@ def get_report(slug: str) -> Optional[dict[str, Any]]:
     record["html"] = fpath.read_text(encoding="utf-8")
     return record
 
+
+def parse_exported_html(html_text: str, filename: str = "") -> tuple[str, dict[str, Any]]:
+    """Extract structured registry metadata from a rendered PE Audit HTML report."""
+    # Customer name
+    m_cust = (
+        re.search(r'<span><b>Customer:</b>\s*([^<]+)<', html_text, re.IGNORECASE) or
+        re.search(r'<div><b>Customer:</b>\s*([^<]+)<', html_text, re.IGNORECASE) or
+        re.search(r'<div class="cust-name">([^<]+)</div>', html_text, re.IGNORECASE) or
+        re.search(r'<title>PE Audit Report\s*[—–-]\s*([^<]+)</title>', html_text, re.IGNORECASE)
+    )
+    customer = m_cust.group(1).strip() if m_cust else ""
+    if not customer and filename:
+        m_fn = re.search(r'PE_Audit_(.+?)_\d{4}', filename)
+        if m_fn:
+            customer = m_fn.group(1).replace("_", " ").strip()
+    if not customer:
+        customer = "Unknown Customer"
+
+    # Environment
+    m_env = (
+        re.search(r'<span><b>Environment:</b>\s*([^<]+)<', html_text, re.IGNORECASE) or
+        re.search(r'<div><b>Environment:</b>\s*([^<]+)<', html_text, re.IGNORECASE) or
+        re.search(r'Environment:\s*([^<,\n\r]+)', html_text, re.IGNORECASE) or
+        re.search(r'<span class="chip"><span class="dot"></span>([^<]+)</span>', html_text, re.IGNORECASE)
+    )
+    env = m_env.group(1).strip() if m_env else "Not detected"
+
+    # Generated timestamp
+    m_gen = (
+        re.search(r'<span><b>Generated:</b>\s*([^<]+)<', html_text, re.IGNORECASE) or
+        re.search(r'generated\s*([0-9]{1,2}\s+[A-Za-z]{3}\s+[0-9]{4}[^<,]*)', html_text, re.IGNORECASE)
+    )
+    generated_raw = m_gen.group(1).strip() if m_gen else ""
+    generated_at = ""
+    if generated_raw:
+        for fmt in ("%d %b %Y, %I:%M %p", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(generated_raw.split("+")[0].strip(), fmt)
+                generated_at = dt.replace(tzinfo=timezone.utc).isoformat()
+                break
+            except Exception:
+                continue
+    if not generated_at:
+        generated_at = datetime.now(timezone.utc).isoformat()
+
+    # Approvals: PE and Customer
+    m_pe = re.search(
+        r'<div class="appr__role">\s*(?:Performance Engineer|PE)\s*</div>\s*<div class="appr__name">\s*([^<]+)<',
+        html_text, re.IGNORECASE
+    )
+    pe_raw = m_pe.group(1).strip() if m_pe else ""
+    pe_name = pe_raw if pe_raw and pe_raw not in ("—", "Not recorded") else "Not recorded"
+    pe_block_idx = html_text.find("appr__role\">Performance Engineer")
+    pe_approved = 0
+    if pe_block_idx >= 0:
+        pe_block = html_text[pe_block_idx:pe_block_idx + 400]
+        pe_approved = 1 if "Approved" in pe_block else 0
+
+    m_cust_appr = re.search(
+        r'<div class="appr__role">\s*Customer\s*</div>\s*<div class="appr__name">\s*([^<]+)<',
+        html_text, re.IGNORECASE
+    )
+    cust_raw = m_cust_appr.group(1).strip() if m_cust_appr else ""
+    cust_name = cust_raw if cust_raw and cust_raw not in ("—", "Not recorded") else "Not recorded"
+    cust_block_idx = html_text.find("appr__role\">Customer")
+    cust_approved = 0
+    if cust_block_idx >= 0:
+        cust_block = html_text[cust_block_idx:cust_block_idx + 400]
+        cust_approved = 1 if "Approved" in cust_block else 0
+
+    # Checklist gaps
+    gaps = len(re.findall(r'check--mismatch', html_text))
+
+    # Batch SLA Compliance
+    m_sla = re.search(r'Batch SLA Compliance</div>[\s\S]*?<div class="gauge__big[^"]*"[^>]*>\s*([\d\.]+)%', html_text)
+    compliance_pct = float(m_sla.group(1)) if m_sla else None
+
+    # Jobs on time & breaches
+    m_ontime = re.search(r'<span class="num">(\d+)</span>\s*jobs on-time', html_text)
+    m_breach = re.search(r'<span class="num"[^>]*>(\d+)</span>\s*breaching', html_text)
+    sla_breach_count = int(m_breach.group(1)) if m_breach else 0
+    sla_ok_count = int(m_ontime.group(1)) if m_ontime else 0
+
+    m_jobs = re.search(r'<span class="stat__value[^"]*">(\d+)</span>\s*<span class="stat__unit">jobs</span>', html_text)
+    sla_total_jobs = int(m_jobs.group(1)) if m_jobs else (sla_ok_count + sla_breach_count)
+
+    m_runs = re.search(r'<span class="num">(\d+)</span>\s*runs', html_text)
+    batch_total_runs = int(m_runs.group(1)) if m_runs else None
+
+    m_hrs = re.search(r'<span class="num">([\d\.]+)</span>\s*h runtime', html_text)
+    batch_total_hrs = float(m_hrs.group(1)) if m_hrs else None
+
+    # Fleet Health
+    m_fleet_grade = re.search(r'Fleet Health</div>[\s\S]*?<div class="gauge__big[^"]*"[^>]*>\s*([A-F])\s*<', html_text)
+    fleet_grade = m_fleet_grade.group(1).strip() if m_fleet_grade else None
+
+    m_fleet_score = re.search(r'Fleet Health</div>[\s\S]*?<div class="gauge__cap[^"]*"[^>]*>\s*([\d\.]+)/100', html_text)
+    fleet_score = float(m_fleet_score.group(1)) if m_fleet_score else None
+
+    m_servers = re.search(r'<span class="num">(\d+)</span>\s*servers', html_text)
+    total_servers = int(m_servers.group(1)) if m_servers else None
+
+    m_crit = re.search(r'(\d+)\s*crit', html_text)
+    critical_count = int(m_crit.group(1)) if m_crit else 0
+
+    m_warn = re.search(r'(\d+)\s*warn', html_text)
+    warning_count = int(m_warn.group(1)) if m_warn else 0
+
+    # SOW status
+    sow_status = None
+    if "SOW volume" in html_text or "SOW" in html_text:
+        if "CRITICAL_OVER" in html_text or "CRITICAL OVER" in html_text:
+            sow_status = "CRITICAL_OVER"
+        elif "OVER CONTRACT" in html_text or "OVER" in html_text:
+            sow_status = "OVER"
+        elif "OPTIMAL" in html_text:
+            sow_status = "OPTIMAL"
+        elif "ACCEPTABLE" in html_text:
+            sow_status = "ACCEPTABLE"
+        else:
+            sow_status = "NOT ASSESSED"
+
+    meta = {
+        "generated_at": generated_at,
+        "env": env,
+        "pe_name": pe_name,
+        "pe_approved": pe_approved,
+        "cust_name": cust_name,
+        "cust_approved": cust_approved,
+        "checklist_mismatches": gaps,
+        "sla_breach_count": sla_breach_count,
+        "sla_at_risk_count": 0,
+        "sla_total_jobs": sla_total_jobs,
+        "batch_metrics_captured": 1 if compliance_pct is not None else 0,
+        "batch_compliance_pct": compliance_pct,
+        "batch_total_jobs": sla_total_jobs,
+        "batch_total_runs": batch_total_runs,
+        "batch_total_hrs": batch_total_hrs,
+        "batch_breach_count": sla_breach_count,
+        "batch_ok_count": sla_ok_count,
+        "resource_metrics_captured": 1 if fleet_grade is not None else 0,
+        "resource_fleet_grade": fleet_grade,
+        "resource_fleet_score": fleet_score,
+        "resource_total_servers": total_servers,
+        "resource_critical_count": critical_count,
+        "resource_warning_count": warning_count,
+        "sow_metrics_captured": 1 if sow_status else 0,
+        "sow_status": sow_status,
+        "sow_metrics_count": 0,
+        "benchmark_metrics_captured": 0,
+        "issues_count": 0,
+    }
+    return customer, meta
+
+
+def import_html_report(html_text: str, filename: str = "") -> dict[str, Any]:
+    """Ingest a rendered PE Audit HTML report and add/update it in the Review Registry."""
+    if not html_text or "<html" not in html_text.lower():
+        return {"ok": False, "error": "Supplied content is not a valid HTML document."}
+
+    customer, meta = parse_exported_html(html_text, filename=filename)
+    if not customer or customer == "Unknown Customer":
+        return {"ok": False, "error": "Could not identify customer name in the HTML report."}
+
+    res = save(customer, html_text, meta)
+    if not res.get("ok"):
+        return res
+
+    res["customer"] = customer
+    return res
+
+

@@ -56,6 +56,10 @@ _PERSIST_PLAIN_KEYS = {
     "last_red_flags", "last_smart_findings", "last_findings",
     "last_benchmark", "last_benchmark_ui", "last_benchmark_batch",
 }
+_BATCH_DERIVED_KEYS = {
+    "last_findings", "last_smart_findings", "last_red_flags",
+    "last_pe_narrative", "last_executive", "last_final_judgment",
+}
 # SOW / engagement-identity slots are intentionally EXCLUDED from this set.
 # They must be re-uploaded for each engagement and must never bleed across
 # customer sessions via the .pe_cache.json file.
@@ -240,6 +244,14 @@ def clear() -> None:
                 os.remove(_CACHE_FILE)
         except Exception:
             pass
+
+
+def invalidate_batch_derived_evidence() -> None:
+    """Remove conclusions that must be recomputed after batch scope changes."""
+    with _lock:
+        for key in _BATCH_DERIVED_KEYS:
+            _state.pop(key, None)
+        _flush()
 
 
 _active_customer_name: Optional[str] = None
