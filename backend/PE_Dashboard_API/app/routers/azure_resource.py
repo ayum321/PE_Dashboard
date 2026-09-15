@@ -879,6 +879,16 @@ def fetch_azure_resources(body: AzureFetchRequest, request: Request, response: R
     except Exception:
         pass
 
+    # ── Evidence Vault: stage telemetry snapshot as proof ────────
+    try:
+        from services import evidence_vault as _ev
+        _ev.stage_telemetry_snapshot(
+            customer=target_cust or "staging",
+            telemetry_data=payload,
+        )
+    except Exception:
+        pass
+
     return payload
 
 
@@ -1197,6 +1207,16 @@ async def fetch_azure_resources_stream(body: AzureFetchRequest, request: Request
                     session_cache.ensure_customer(target_cust)
                 session_cache.set("last_resource", payload)
                 session_cache.ac_set("resource_summary", payload)
+            except Exception:
+                pass
+
+            # ── Evidence Vault: stage telemetry snapshot as proof ────────
+            try:
+                from services import evidence_vault as _ev
+                _ev.stage_telemetry_snapshot(
+                    customer=target_cust or "staging",
+                    telemetry_data=payload,
+                )
             except Exception:
                 pass
 

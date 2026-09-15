@@ -239,6 +239,18 @@ async def parse_sow(file: UploadFile = File(...)) -> dict:
                     config_store.set(_SOW_KEY, baseline)
         except Exception:
             pass
+        # ── Evidence Vault: stage SOW contract document as proof ──────
+        try:
+            from services import evidence_vault as _ev
+            cust_name = customer_fields.get("customer_name") or meta.get("customer_name") or "staging"
+            _ev.stage_document(
+                customer=cust_name,
+                document_type="sow_contract",
+                filename=file.filename or "sow_contract.pdf",
+                raw_bytes=raw,
+            )
+        except Exception:
+            pass
         # Return flat volume dict (backward compat) merged with contract enrichments
         volumes = contract.get("raw_volumes") or {}
         return {**volumes, "_contract": contract, **customer_fields}

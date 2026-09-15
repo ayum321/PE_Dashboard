@@ -597,3 +597,76 @@ export const postCustomerOverride = (name: string): Promise<CustomerOverrideResp
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   });
+
+export interface EvidenceDocument {
+  doc_id: string;
+  customer_slug: string;
+  audit_id?: string | null;
+  document_type: string;
+  document_label: string;
+  filename: string;
+  file_size_bytes: number;
+  file_hash: string;
+  uploaded_at: string;
+  is_frozen?: number | boolean;
+}
+
+export interface ArchiveDocumentsResponse {
+  customer_slug: string;
+  documents: EvidenceDocument[];
+  documents_count: number;
+  package_available: boolean;
+  package_name?: string | null;
+}
+
+export interface StagedEvidenceResponse {
+  documents: EvidenceDocument[];
+  customer?: string | null;
+  count?: number;
+  message?: string;
+  error?: string;
+}
+
+export const getReportDocuments = (slug: string): Promise<ArchiveDocumentsResponse> =>
+  request<ArchiveDocumentsResponse>(`/api/report-archive/${encodeURIComponent(slug)}/documents`);
+
+export const getReportDocumentDownloadUrl = (slug: string, docId: string): string =>
+  `${getApiBaseUrl()}/api/report-archive/${encodeURIComponent(slug)}/documents/${encodeURIComponent(docId)}/download`;
+
+export const getAuditPackageDownloadUrl = (slug: string): string =>
+  `${getApiBaseUrl()}/api/report-archive/${encodeURIComponent(slug)}/package/download`;
+
+export const getStagedEvidence = (): Promise<StagedEvidenceResponse> =>
+  request<StagedEvidenceResponse>('/api/evidence/staged');
+
+export const stageEvidenceDocument = (
+  file: File,
+  documentType = 'other',
+  label = '',
+  onProgress?: UploadProgressHandler,
+): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('document_type', documentType);
+  if (label) formData.append('label', label);
+  return requestWithProgress<DashboardPayload>('/api/evidence/upload', formData, onProgress);
+};
+
+export const attachEvidenceToArchive = (
+  slug: string,
+  file: File,
+  documentType = 'other',
+  label = '',
+  onProgress?: UploadProgressHandler,
+): Promise<DashboardPayload> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('document_type', documentType);
+  if (label) formData.append('label', label);
+  return requestWithProgress<DashboardPayload>(
+    `/api/report-archive/${encodeURIComponent(slug)}/documents/attach`,
+    formData,
+    onProgress,
+  );
+};
+

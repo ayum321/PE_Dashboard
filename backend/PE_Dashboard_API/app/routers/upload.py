@@ -22,6 +22,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from services import config_store
+from services import evidence_vault as _ev
 from services.customer_identity import (
     identify as identify_customer,
     is_valid_customer_name,
@@ -181,6 +182,16 @@ async def smart_upload(file: UploadFile = File(...)) -> SmartUploadResponse:
                 session_cache.set("last_batch", data)
                 if data.get("kpis"):
                     session_cache.ac_set("batch_kpis", data["kpis"])
+            except Exception:
+                pass
+            # ── Evidence Vault: stage Ctrl-M file as proof ────────────
+            try:
+                _ev.stage_document(
+                    customer=cust_name or "staging",
+                    document_type="ctrlm_history",
+                    filename=file.filename,
+                    raw_bytes=raw,
+                )
             except Exception:
                 pass
 
@@ -545,7 +556,19 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
     # Persist workflow SLA rows for the 3-tier SLA resolver
     config_store.set("_batch_sla_xlsx", result)
 
-    # ── Extract per-schedule MAX ceilings from workflows → config_store ───
+    # ── Evidence Vault: stage BatchSLA workbook as proof ──────────
+    try:
+        from services.customer_identity import get_active as _get_cust
+        _ev.stage_document(
+            customer=_get_cust() or "staging",
+            document_type="batch_sla",
+            filename=file.filename,
+            raw_bytes=raw,
+        )
+    except Exception:
+        pass
+
+    # ── Extract per-schedule MAX ceilings from workflows -> config_store ───
     # Use MAX (widest) SLA per schedule type as the global batch window ceiling.
     # Per-workflow compliance is handled by workflow_sla_summary.
     _SLA_KEY_MAP = {
@@ -639,3 +662,56 @@ async def upload_batch_sla(file: UploadFile = File(...)) -> dict:
         # was already uploaded; None when batch hasn't been processed yet.
         "updated_batch_kpis": _updated_batch_kpis,
     }
+
+
+# ── /api/evidence/staged — list documents staged for current session ─────────
+@router.get(
+    "/evidence/staged",
+    status_code=status.HTTP_200_OK,
+    summary="List source documents currently staged in the Evidence Vault for the active customer",
+)
+async def get_staged_evidence() -> dict:
+    """Return all documents staged for the active customer's evidence vault."""
+    try:
+        from services.customer_identity import get_active as _get_cust
+        customer = _get_cust() or ""
+        if not customer:
+            return {"documents": [], "customer": None, "message": "No active customer identified yet."}
+        docs = _ev.get_staged_documents(customer)
+        return {"documents": docs, "customer": customer, "count": len(docs)}
+    except Exception as exc:
+        return {"documents": [], "customer": None, "error": str(exc)}
+
+
+# ── /api/evidence/upload — generic supplementary document staging ────────────
+@router.post(
+    "/evidence/upload",
+    status_code=status.HTTP_200_OK,
+    summary="Upload a supplementary evidence document (waiver, architecture doc, memo)",
+)
+async def upload_evidence_document(
+    file: UploadFile = File(...),
+    document_type: str = "other",
+    label: str = "",
+) -> dict:
+    """Stage an ad-hoc evidence document for the current customer engagement."""
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit.")
+    try:
+        from services.customer_identity import get_active as _get_cust
+        customer = _get_cust() or "staging"
+        result = _ev.stage_document(
+            customer=customer,
+            document_type=document_type or "other",
+            filename=file.filename,
+            raw_bytes=raw,
+            label=label or None,
+        )
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Evidence staging failed: {exc}") from exc

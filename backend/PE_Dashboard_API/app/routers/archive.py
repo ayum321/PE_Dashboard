@@ -8,9 +8,9 @@ files created by routers/export.py's save-on-generate hook.
 from __future__ import annotations
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from services import report_archive
+from services import evidence_vault, report_archive
 
 router = APIRouter()
 
@@ -77,4 +77,86 @@ async def import_archive_report(file: UploadFile = File(...)):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc), headers=_ARCHIVE_HEADERS)
+
+
+# ── Evidence Vault Endpoints ──────────────────────────────────────────────────
+@router.get("/report-archive/{slug}/documents", summary="List preserved evidence documents for an archived audit")
+async def list_archive_documents(slug: str):
+    docs = evidence_vault.list_audit_documents(slug)
+    pkg = evidence_vault.get_latest_audit_package_zip(slug)
+    return JSONResponse(
+        content={
+            "customer_slug": slug,
+            "documents": docs,
+            "documents_count": len(docs),
+            "package_available": pkg is not None,
+            "package_name": pkg[1] if pkg else None,
+        },
+        headers=_ARCHIVE_HEADERS,
+    )
+
+
+@router.get("/report-archive/{slug}/documents/{doc_id}/download", summary="Download a preserved evidence document")
+async def download_evidence_document(slug: str, doc_id: str):
+    doc = evidence_vault.get_document(doc_id, customer_slug=slug)
+    if not doc or not doc.get("absolute_path"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Evidence document '{doc_id}' not found for '{slug}'",
+            headers=_ARCHIVE_HEADERS,
+        )
+    return FileResponse(
+        path=doc["absolute_path"],
+        filename=doc["filename"],
+        headers=_ARCHIVE_HEADERS,
+    )
+
+
+@router.get("/report-archive/{slug}/package/download", summary="Download full PE Audit ZIP Package")
+async def download_audit_package(slug: str):
+    pkg = evidence_vault.get_latest_audit_package_zip(slug)
+    if not pkg:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No audit package ZIP available for '{slug}'",
+            headers=_ARCHIVE_HEADERS,
+        )
+    zip_path, zip_name = pkg
+    return FileResponse(
+        path=str(zip_path),
+        filename=zip_name,
+        media_type="application/zip",
+        headers=_ARCHIVE_HEADERS,
+    )
+
+
+@router.post("/report-archive/{slug}/documents/attach", summary="Attach supplementary proof to an archived audit")
+async def attach_archive_document(
+    slug: str,
+    file: UploadFile = File(...),
+    document_type: str = "other",
+    label: str = "",
+):
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided.", headers=_ARCHIVE_HEADERS)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.", headers=_ARCHIVE_HEADERS)
+    if len(raw) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit.", headers=_ARCHIVE_HEADERS)
+
+    result = evidence_vault.attach_document_to_archive(
+        customer=slug,
+        filename=file.filename,
+        raw_bytes=raw,
+        document_type=document_type or "other",
+        label=label or None,
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("error", "Failed to attach document"),
+            headers=_ARCHIVE_HEADERS,
+        )
+    return JSONResponse(content=result, headers=_ARCHIVE_HEADERS)
 

@@ -74,6 +74,7 @@ _META_COLS = (
     "benchmark_metrics_captured", "benchmark_total_transactions",
     "benchmark_sla_breach_count", "benchmark_degraded_count",
     "batch_perf_regression_count", "batch_perf_total_jobs", "issues_count",
+    "documents_count",
 )
 
 # Additive migration map for local SQLite files created before export snapshots
@@ -104,6 +105,7 @@ _SNAPSHOT_COLUMN_DEFINITIONS = (
     ("batch_perf_regression_count", "INTEGER"),
     ("batch_perf_total_jobs", "INTEGER"),
     ("issues_count", "INTEGER"),
+    ("documents_count", "INTEGER DEFAULT 0"),
 )
 
 _LIST_COLS = (
@@ -172,6 +174,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         batch_perf_regression_count INTEGER,
         batch_perf_total_jobs  INTEGER,
         issues_count           INTEGER,
+        documents_count        INTEGER DEFAULT 0,
         file_path             TEXT NOT NULL,
         file_hash             TEXT NOT NULL,
         file_size_bytes       INTEGER NOT NULL
@@ -191,6 +194,22 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS ix_report_payload_snapshots_customer_generated
         ON report_payload_snapshots(customer_slug, generated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS report_evidence_documents (
+        doc_id          TEXT PRIMARY KEY,
+        customer_slug   TEXT NOT NULL,
+        audit_id        TEXT,
+        document_type   TEXT NOT NULL,
+        document_label  TEXT NOT NULL,
+        filename        TEXT NOT NULL,
+        file_size_bytes INTEGER NOT NULL,
+        file_hash       TEXT NOT NULL,
+        file_path       TEXT NOT NULL,
+        uploaded_at     TEXT NOT NULL,
+        is_frozen       INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS ix_evidence_slug_audit
+        ON report_evidence_documents(customer_slug, audit_id);
     """)
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(reports)")}
     for name, definition in _SNAPSHOT_COLUMN_DEFINITIONS:
@@ -422,6 +441,7 @@ def save(customer: str, html: str, meta: dict[str, Any]) -> dict[str, Any]:
             "batch_perf_regression_count": _snapshot_count(meta, "benchmark_metrics_captured", "batch_perf_regression_count"),
             "batch_perf_total_jobs": _snapshot_count(meta, "benchmark_metrics_captured", "batch_perf_total_jobs"),
             "issues_count": _finite_count(meta.get("issues_count")),
+            "documents_count": _finite_count(meta.get("documents_count")) or 0,
         })
 
         with _lock:
@@ -440,6 +460,7 @@ def save(customer: str, html: str, meta: dict[str, Any]) -> dict[str, Any]:
                     benchmark_metrics_captured, benchmark_total_transactions,
                     benchmark_sla_breach_count, benchmark_degraded_count,
                     batch_perf_regression_count, batch_perf_total_jobs, issues_count,
+                    documents_count,
                     file_path, file_hash, file_size_bytes)
                 VALUES (:customer_slug, :customer, :generated_at, :env,
                     :pe_approved, :cust_approved, :pe_name, :cust_name,
@@ -454,6 +475,7 @@ def save(customer: str, html: str, meta: dict[str, Any]) -> dict[str, Any]:
                     :benchmark_metrics_captured, :benchmark_total_transactions,
                     :benchmark_sla_breach_count, :benchmark_degraded_count,
                     :batch_perf_regression_count, :batch_perf_total_jobs, :issues_count,
+                    :documents_count,
                     :file_path, :file_hash, :file_size_bytes)
                 ON CONFLICT(customer_slug) DO UPDATE SET
                     customer=excluded.customer, generated_at=excluded.generated_at,
@@ -488,6 +510,7 @@ def save(customer: str, html: str, meta: dict[str, Any]) -> dict[str, Any]:
                     batch_perf_regression_count=excluded.batch_perf_regression_count,
                     batch_perf_total_jobs=excluded.batch_perf_total_jobs,
                     issues_count=excluded.issues_count,
+                    documents_count=excluded.documents_count,
                     file_path=excluded.file_path, file_hash=excluded.file_hash,
                     file_size_bytes=excluded.file_size_bytes
             """, row)
@@ -615,6 +638,17 @@ def _recover_report_metadata(row: dict[str, Any], conn: sqlite3.Connection) -> d
             conn.commit()
         except Exception as exc:
             logger.debug("report_archive: failed updating DB row for %s — %s", slug, exc)
+
+    if not row.get("documents_count"):
+        try:
+            cnt_cur = conn.execute("SELECT COUNT(*) FROM report_evidence_documents WHERE customer_slug = ?", (slug,))
+            cnt = cnt_cur.fetchone()[0]
+            if cnt > 0:
+                row["documents_count"] = cnt
+                conn.execute("UPDATE reports SET documents_count = ? WHERE customer_slug = ?", (cnt, slug))
+                conn.commit()
+        except Exception:
+            pass
 
     return row
 

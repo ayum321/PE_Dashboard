@@ -972,6 +972,7 @@ def _latest_registry_metadata(
         "batch_perf_regression_count": benchmark.get("batch_perf_regression_count"),
         "batch_perf_total_jobs": benchmark.get("batch_perf_total_jobs"),
         "issues_count": meta.get("issues_logged_count"),
+        "documents_count": int(meta.get("documents_count") or 0),
     }
 
 
@@ -2067,10 +2068,31 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             if not attached.get("ok"):
                 archive_status = "payload_saved_html_failed"
             else:
+                docs_count = 0
+                try:
+                    from services import evidence_vault as _ev
+                    ev_res = _ev.freeze_evidence_to_audit(
+                        customer=customer,
+                        audit_id=audit_id,
+                        meta=legacy_ctx,
+                        html_content=rendered_html,
+                        payload_content=report,
+                    )
+                    if ev_res.get("ok"):
+                        docs_count = int(ev_res.get("documents_count", 0))
+                except Exception as ev_err:
+                    import logging
+                    logging.getLogger("pe_dashboard.export").warning(
+                        "export_report: evidence freezing error: %s", ev_err
+                    )
+
+                meta_dict = _latest_registry_metadata(report, legacy_ctx=legacy_ctx, body=export_body)
+                if docs_count > 0:
+                    meta_dict["documents_count"] = docs_count
                 latest = report_archive.save(
                     customer,
                     rendered_html,
-                    _latest_registry_metadata(report, legacy_ctx=legacy_ctx, body=export_body),
+                    meta_dict,
                 )
                 archive_status = "saved" if latest.get("ok") else "failed"
 

@@ -1,9 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Button, Paper, TextField, Typography, makeStyles } from '@material-ui/core';
 import { useAppData } from '../../context/AppDataContext';
 import { ApprovalsState, IssueRecord } from '../../context/AppDataContext';
 import { buildExportPayload } from '../../utils/buildAnalysisPayload';
-import { exportReportWithStatus } from '../../api/dashboardApi';
+import { EvidenceDocument, exportReportWithStatus, getStagedEvidence } from '../../api/dashboardApi';
 
 const useStyles = makeStyles((theme) => ({
   panel: { padding: theme.spacing(3) },
@@ -54,6 +54,79 @@ export function GovernancePanel() {
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
+  const [stagedDocs, setStagedDocs] = useState<EvidenceDocument[]>([]);
+  const [loadingStaged, setLoadingStaged] = useState(false);
+
+  const loadStagedDocs = useCallback(async () => {
+    setLoadingStaged(true);
+    try {
+      const res = await getStagedEvidence();
+      setStagedDocs(res.documents || []);
+    } catch {
+      // ignore
+    } finally {
+      setLoadingStaged(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStagedDocs();
+  }, [loadStagedDocs]);
+
+  const bundleItems = useMemo(() => {
+    const findDoc = (type: string) => stagedDocs.find((d) => d.document_type === type);
+    const batchSlaDoc = findDoc('batch_sla');
+    const ctrlmDoc = findDoc('ctrlm_history');
+    const sowDoc = findDoc('sow_contract');
+    const benchmarkDoc = findDoc('benchmark');
+    const azureDoc = findDoc('azure_telemetry');
+
+    const hasBatchSla = Boolean(batchSlaDoc || data.slaMatrix?.filename || data.slaMatrix?.explicit_sla_matrix);
+    const hasCtrlm = Boolean(ctrlmDoc || data.batch?.filename || data.batch?.kpis);
+    const hasSow = Boolean(sowDoc || (data.sowBaseline && Object.keys(data.sowBaseline).length > 0));
+    const hasBenchmark = Boolean(benchmarkDoc || data.benchmark?.filename);
+    const hasAzure = Boolean(azureDoc || (Array.isArray((data.resource as any)?.servers) && (data.resource as any).servers.length > 0));
+
+    return [
+      {
+        key: 'batch_sla',
+        label: 'Batch SLA Matrix',
+        ready: hasBatchSla,
+        status: batchSlaDoc ? 'Staged in Vault' : hasBatchSla ? 'In Session' : 'Not Loaded',
+        detail: batchSlaDoc?.filename || (typeof data.slaMatrix?.filename === 'string' ? data.slaMatrix.filename : 'Tier-1 SLA contracts (BatchSLA_info.xlsx)'),
+      },
+      {
+        key: 'ctrlm',
+        label: 'Ctrl-M Execution History',
+        ready: hasCtrlm,
+        status: ctrlmDoc ? 'Staged in Vault' : hasCtrlm ? 'In Session' : 'Not Loaded',
+        detail: ctrlmDoc?.filename || (typeof data.batch?.filename === 'string' ? data.batch.filename : '30-day workflow run history (.csv/.xlsx)'),
+      },
+      {
+        key: 'sow',
+        label: 'SOW Contract & Ramp',
+        ready: hasSow,
+        status: sowDoc ? 'Staged in Vault' : hasSow ? 'In Session' : 'Not Loaded',
+        detail: sowDoc?.filename || 'Contracted DFU/SKU volume ceilings (.pdf/.docx)',
+      },
+      {
+        key: 'benchmark',
+        label: 'Benchmark / UAT Report',
+        ready: hasBenchmark,
+        status: benchmarkDoc ? 'Staged in Vault' : hasBenchmark ? 'In Session' : 'Optional',
+        detail: benchmarkDoc?.filename || (typeof data.benchmark?.filename === 'string' ? data.benchmark.filename : 'UAT UI performance comparison matrix (.xlsx)'),
+      },
+      {
+        key: 'azure',
+        label: 'Azure Telemetry Snapshot',
+        ready: hasAzure,
+        status: azureDoc ? 'Staged in Vault' : hasAzure ? 'In Session' : 'Not Sourced',
+        detail: azureDoc?.filename || (hasAzure ? `${(data.resource as any).servers.length} VM metrics captured` : 'Live CPU/RAM/Disk infrastructure telemetry'),
+      },
+    ];
+  }, [data.batch?.filename, data.batch?.kpis, data.benchmark?.filename, data.resource, data.slaMatrix?.explicit_sla_matrix, data.slaMatrix?.filename, data.sowBaseline, stagedDocs]);
+
+  const stagedCount = bundleItems.filter((b) => b.ready).length;
 
   const issues = data.issues;
   const approvals = data.approvals;
@@ -195,6 +268,7 @@ export function GovernancePanel() {
               ? 'Report exported, but Review Registry could not save the frozen snapshot. The downloaded HTML is still valid.'
               : 'Report exported. Archive status was not returned by the server; refresh Review Registry to confirm the save.',
       );
+      void loadStagedDocs();
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed.');
     } finally {
@@ -391,6 +465,62 @@ export function GovernancePanel() {
           onChange={(e) => setApprovals({ ...approvals, notes: e.target.value })}
           InputProps={{ style: { background: '#0a0f1e', color: '#f0f4ff', fontSize: 13 } }}
         />
+      </Box>
+
+      {/* Audit Evidence Bundle (Staged for Sealing) */}
+      <Box className={classes.card} style={{ marginBottom: 16 }}>
+        <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" style={{ gap: 8, marginBottom: 10 }}>
+          <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+            <Typography variant="subtitle2" style={{ fontWeight: 800, color: '#f0f4ff', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>📦</span> Audit Evidence Bundle (Staged for Sealing)
+            </Typography>
+            <span style={{ fontSize: 10, fontWeight: 750, padding: '2px 8px', borderRadius: 4, background: stagedCount > 0 ? 'rgba(16,217,110,.15)' : 'rgba(245,158,11,.15)', color: stagedCount > 0 ? '#10d96e' : '#f59e0b', border: `1px solid ${stagedCount > 0 ? 'rgba(16,217,110,.35)' : 'rgba(245,158,11,.35)'}` }}>
+              {stagedCount} of 5 pillars staged
+            </span>
+          </Box>
+          <Button
+            size="small"
+            style={{ color: '#60a5fa', textTransform: 'none', fontSize: 11 }}
+            onClick={() => void loadStagedDocs()}
+            disabled={loadingStaged}
+          >
+            {loadingStaged ? 'Checking…' : '↻ Refresh staged proof'}
+          </Button>
+        </Box>
+
+        <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginBottom: 12 }}>
+          Raw source files gathered in this active session. Clicking "Export HTML Report" will cryptographically freeze these files into the Review Registry vault with SHA-256 receipts and package a downloadable Audit ZIP.
+        </Typography>
+
+        <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 8 }}>
+          {bundleItems.map((item) => (
+            <Box
+              key={item.key}
+              style={{
+                borderRadius: 8,
+                padding: '8px 12px',
+                background: item.ready ? 'rgba(16,217,110,.06)' : 'rgba(148,163,184,.04)',
+                border: `1px solid ${item.ready ? 'rgba(16,217,110,.25)' : 'rgba(148,163,184,.18)'}`,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <Box style={{ minWidth: 0 }}>
+                <Typography variant="caption" style={{ fontWeight: 750, color: item.ready ? '#f0f4ff' : '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>{item.ready ? '✅' : '⚪'}</span> {item.label}
+                </Typography>
+                <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 10, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.detail}
+                </Typography>
+              </Box>
+              <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: item.ready ? 'rgba(16,217,110,.12)' : 'rgba(148,163,184,.08)', color: item.ready ? '#10d96e' : '#64748b' }}>
+                {item.status}
+              </span>
+            </Box>
+          ))}
+        </Box>
       </Box>
 
       {/* Go-Live banner */}

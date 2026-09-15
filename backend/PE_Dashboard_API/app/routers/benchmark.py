@@ -1983,6 +1983,19 @@ async def benchmark_upload(
         session_cache.set("last_benchmark", resp.model_dump())
     except Exception:
         pass
+    # ── Evidence Vault: stage Benchmark file as proof ────────────
+    try:
+        from services import evidence_vault as _ev
+        from services.customer_identity import get_active as _get_cust
+        cust_name = _get_cust() or "staging"
+        _ev.stage_document(
+            customer=cust_name,
+            document_type="benchmark",
+            filename=file.filename or "benchmark_report.xlsx",
+            raw_bytes=raw,
+        )
+    except Exception:
+        pass
     try:
         from services.ai_narrator import narrate
         text, model = narrate("benchmark", {

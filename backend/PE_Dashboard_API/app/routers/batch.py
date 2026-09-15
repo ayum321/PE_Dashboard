@@ -484,6 +484,17 @@ async def process_batch(file: UploadFile = File(...)) -> BatchResponse:
         ) from exc
 
     customer_fields = _resolve_batch_customer(file.filename, df)
+    # ── Evidence Vault: stage Ctrl-M file as proof ────────────────
+    try:
+        from services import evidence_vault as _ev
+        _ev.stage_document(
+            customer=customer_fields.get("customer_name") or "staging",
+            document_type="ctrlm_history",
+            filename=file.filename,
+            raw_bytes=raw,
+        )
+    except Exception:
+        pass
     return _payload_to_response(
         file.filename,
         payload,
@@ -522,6 +533,7 @@ async def process_batch_multi(
 
     frames: list[pd.DataFrame] = []
     filenames: list[str] = []
+    raw_files_to_stage: list[tuple[str, bytes]] = []
 
     for f in files:
         if not f.filename:
@@ -555,6 +567,7 @@ async def process_batch_multi(
             df["_source_file"] = f.filename
             frames.append(df)
             filenames.append(f.filename)
+            raw_files_to_stage.append((f.filename, raw))
 
     if not frames:
         raise HTTPException(status_code=400, detail="All uploaded files were empty or unparseable.")
@@ -590,6 +603,19 @@ async def process_batch_multi(
 
     combined_name = " + ".join(filenames)
     customer_fields = _resolve_batch_customer(combined_name, merged)
+    # ── Evidence Vault: stage Ctrl-M multi files as proof ────────
+    try:
+        from services import evidence_vault as _ev
+        cust = customer_fields.get("customer_name") or "staging"
+        for fname, raw_b in raw_files_to_stage:
+            _ev.stage_document(
+                customer=cust,
+                document_type="ctrlm_history",
+                filename=fname,
+                raw_bytes=raw_b,
+            )
+    except Exception:
+        pass
     return _payload_to_response(
         combined_name,
         payload,
