@@ -2062,6 +2062,11 @@ async def export_report(request: Request, body: ExportRequest) -> HTMLResponse:
             archive_status = "payload_saved" if snapshot.get("ok") else "failed"
 
         legacy_ctx, raw_customer = _locked_legacy_context(body, report)
+        try:
+            from services import evidence_vault as _ev
+            legacy_ctx["evidence_documents"] = _ev.get_staged_documents(customer)
+        except Exception:
+            legacy_ctx["evidence_documents"] = []
         rendered_html = templates.get_template("report_export.html").render(**legacy_ctx)
         if archive_status == "payload_saved":
             attached = report_archive.attach_snapshot_html(customer, audit_id, rendered_html)

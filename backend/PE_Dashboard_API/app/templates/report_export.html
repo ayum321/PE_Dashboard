@@ -844,6 +844,44 @@ td b, .host-cell b{color:var(--ink); font-weight:700;}
     </div>
   </section>
 
+  <!-- ── Preserved review evidence and raw documents ──────── -->
+  {% if evidence_documents and evidence_documents|length > 0 %}
+  <section class="panel" style="--accent:#3b82f6;">
+    <div class="panel__head">
+      <div class="panel__icon">🔒</div>
+      <div>
+        <div class="panel__t">Preserved Review Evidence &amp; Source Documents</div>
+        <div class="panel__s">Cryptographic SHA-256 receipts of raw files evaluated during this audit sign-off</div>
+      </div>
+      <div class="panel__count">{{ evidence_documents|length }} files sealed</div>
+    </div>
+    <div class="panel__body" style="padding:0;">
+      <table>
+        <thead>
+          <tr>
+            <th>Document Type</th>
+            <th>Original Filename</th>
+            <th>File Size</th>
+            <th>Uploaded / Staged</th>
+            <th>SHA-256 Fingerprint (Integrity Receipt)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for doc in evidence_documents %}
+          <tr>
+            <td><b style="color:var(--cyan);">{{ doc.document_label or doc.document_type }}</b></td>
+            <td><code>{{ doc.filename }}</code></td>
+            <td style="font-family:monospace;">{{ (doc.file_size_bytes / 1024)|round(1) }} KB</td>
+            <td style="font-size:var(--fs-2);color:var(--ink-2);">{{ doc.uploaded_at }}</td>
+            <td style="font-family:monospace;font-size:11px;color:var(--ink-3);">{{ doc.file_hash }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
   <!-- Additive methodology; all original labels and threshold text remain unchanged. -->
   <section class="panel" style="--accent:#6b7a9c;">
     <div class="panel__head">
