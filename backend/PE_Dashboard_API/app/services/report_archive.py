@@ -58,7 +58,7 @@ def _snapshots_dir() -> Path:
     return _ROOT / "data" / "report_snapshots"
 
 
-_lock: threading.Lock = threading.Lock()
+_lock: threading.RLock = threading.RLock()
 _conn: Optional[sqlite3.Connection] = None
 
 _META_COLS = (
@@ -653,12 +653,44 @@ def _recover_report_metadata(row: dict[str, Any], conn: sqlite3.Connection) -> d
     return row
 
 
+def _sync_disk_reports(conn: sqlite3.Connection) -> None:
+    """Auto-discover any .html report files on disk and ensure they are indexed in SQLite.
+
+    Guarantees that even if SQLite is recreated or starts fresh, any reports
+    physically stored on disk or persistent mounts are never lost from the UI.
+    """
+    try:
+        fdir = _files_dir()
+        if not fdir.is_dir():
+            return
+
+        cur = conn.execute("SELECT customer_slug FROM reports")
+        existing_slugs = {row[0] for row in cur.fetchall()}
+
+        for p in sorted(fdir.glob("*.html")):
+            slug = _slugify(p.stem)
+            if slug not in existing_slugs:
+                try:
+                    html_text = p.read_text(encoding="utf-8", errors="replace")
+                    customer, meta = parse_exported_html(html_text, filename=p.name)
+                    if customer and customer != "Unknown Customer":
+                        save(customer, html_text, meta)
+                        existing_slugs.add(slug)
+                except Exception as ex:
+                    logger.debug("report_archive: failed auto-indexing %s: %s", p, ex)
+    except Exception as exc:
+        logger.debug("report_archive: _sync_disk_reports failed: %s", exc)
+
+
+
 def list_reports() -> list[dict[str, Any]]:
     with _lock:
         conn = _connect()
+        _sync_disk_reports(conn)
         cur = conn.execute(f"SELECT {', '.join(_LIST_COLS)} FROM reports ORDER BY generated_at DESC")
         raw_rows = [dict(zip(_LIST_COLS, row)) for row in cur.fetchall()]
         return [_recover_report_metadata(row, conn) for row in raw_rows]
+
 
 
 def get_report(slug: str) -> Optional[dict[str, Any]]:
