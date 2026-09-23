@@ -1010,6 +1010,9 @@ export function ResourcePanel() {
   const [inspectedSpike, setInspectedSpike] = useState<DeepDiveSpike | null>(null);
   const [hideHealthyServers, setHideHealthyServers] = useState<boolean>(false);
   const [activeScopeTab, setActiveScopeTab] = useState<'all' | 'investigation' | 'healthy'>('all');
+  const [deepDiveHostSearch, setDeepDiveHostSearch] = useState('');
+  const [deepDiveHostRole, setDeepDiveHostRole] = useState('all');
+  const [deepDiveHostEnv, setDeepDiveHostEnv] = useState('all');
   const [headroomGrowth, setHeadroomGrowth] = useState<number>(1.0);
   const [showBatchOverlay, setShowBatchOverlay] = useState<boolean>(true);
   const [expandedRecurringRows, setExpandedRecurringRows] = useState<Set<number>>(new Set());
@@ -1694,6 +1697,39 @@ export function ResourcePanel() {
   // middle. Dim matching positions and highlight differing positions so the
   // eye lands on the characters that identify the actual host.
   const hostNames = useMemo(() => Object.keys(deepDive?.vms || {}), [deepDive]);
+
+  // Host selection is independent of anomaly classification and card filters.
+  // A VM with no detected event still has a time series the user can inspect.
+  const deepDiveHosts = useMemo(() => {
+    const returned = Object.entries(deepDive?.vms || {});
+    const hosts = returned.map(([name, vmData]) => {
+      const matchedServer = servers.find((server) =>
+        (server.resource_id && server.resource_id === vmData.resource_id) || server.host.split('.')[0] === name);
+      const spikeCount = Object.values(vmData.spikes || {}).reduce((count, spikes) => count + spikes.length, 0);
+      return { name, role: matchedServer?.type || inferRole(name), env: matchedServer?.environment || inferEnv(name), spikeCount, hasTelemetry: true };
+    });
+    // Keep selected resources visible even if Azure returned no series for one.
+    for (const server of servers) {
+      const name = server.host.split('.')[0];
+      if (returned.some(([vmName, vmData]) => vmName === name || (server.resource_id && vmData.resource_id === server.resource_id))) continue;
+      hosts.push({ name, role: server.type || inferRole(name), env: server.environment || inferEnv(name), spikeCount: 0, hasTelemetry: false });
+    }
+    return hosts;
+  }, [deepDive, servers]);
+  const deepDiveSpikeHostCount = deepDiveHosts.filter((host) => host.spikeCount > 0).length;
+  const deepDiveNoEventCount = deepDiveHosts.filter((host) => host.hasTelemetry && host.spikeCount === 0).length;
+  const visibleDeepDiveHosts = deepDiveHosts.filter((host) =>
+    host.name.toLowerCase().includes(deepDiveHostSearch.trim().toLowerCase()) &&
+    (deepDiveHostRole === 'all' || host.role.toUpperCase() === deepDiveHostRole) &&
+    (deepDiveHostEnv === 'all' || host.env.toUpperCase() === deepDiveHostEnv));
+
+  const selectDeepDiveHost = (name: string, hasSpikes: boolean) => {
+    setDeepDiveVm(name);
+    setCorrelatedVms(new Set());
+    setInspectedSpike(null);
+    setActiveScopeTab(hasSpikes ? 'investigation' : 'healthy');
+    setTimeout(() => document.getElementById('pe-selected-server-detail')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 100);
+  };
 
   const renderHostId = (name: string, key?: string | number) => (
     <span key={key} style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
@@ -2481,7 +2517,7 @@ export function ResourcePanel() {
           <Box display="flex" alignItems="center" justifyContent="space-between" style={{ flexWrap: 'wrap', gap: 8 }}>
             <Box>
               <Typography variant="subtitle2">Metrics Deep Dive {'\u2014'} Time-Series &amp; Anomaly Detection</Typography>
-              <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>Critical anomalies only {'\u2014'} normal &amp; moderate filtered out. Pattern detection across fleet (z-score {'\u2265'} 3{'\u03c3'})</Typography>
+              <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>Inspect time-series for every analyzed server. Detected anomaly events are highlighted in the selected server's chart.</Typography>
               <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, opacity: 0.8 }}>Metric source: Azure Monitor Average + timestamp-aligned Maximum aggregation, with automatic grain by selected time range.</Typography>
             </Box>
             <Button size="small" variant="contained" color="primary" onClick={() => handleLoadDeepDive()} disabled={deepDiveBusy}>
@@ -2533,7 +2569,7 @@ export function ResourcePanel() {
                 return (
                   <Box style={{ marginTop: 12, borderRadius: 10, border: `1px solid ${color}66`, background: `${color}1a`, padding: 12 }}>
                     <Typography variant="body2" style={{ color, fontWeight: 700 }}>
-                      {hasCritical ? `${s.total_critical} Critical Anomal${s.total_critical > 1 ? 'ies' : 'y'} \u2014 ${s.affected_vms} VM(s) Affected` : 'Fleet Healthy \u2014 No Critical Anomalies'}
+                      {hasCritical ? `${s.total_critical} Critical Anomal${s.total_critical > 1 ? 'ies' : 'y'} \u2014 ${s.affected_vms} VM(s) Affected` : 'No critical spike events detected'}
                     </Typography>
                     <Typography variant="caption" color="textSecondary">
                       {s.vm_count} VM(s) analyzed over {s.hours_back}h{blNote}.{tzNote}
@@ -2668,6 +2704,63 @@ export function ResourcePanel() {
                 </Box>
               )}
 
+              {/* Keep every analyzed host selectable, including hosts without detector events. */}
+              <Box style={{ marginTop: 14, border: '1px solid #2b4865', borderRadius: 10, background: 'rgba(15,30,50,.65)', padding: 12 }}>
+                <Box display="flex" alignItems="center" justifyContent="space-between" style={{ gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <Box>
+                    <Typography variant="subtitle2" style={{ fontWeight: 800, color: '#e6f0ff' }}>Select a server to inspect its time-series</Typography>
+                    <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 10 }}>
+                      {visibleDeepDiveHosts.length} of {deepDiveHosts.length} selected servers shown; {deepDiveSpikeHostCount} have detected events in this window.
+                    </Typography>
+                  </Box>
+                  <Box display="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    <input
+                      type="search"
+                      aria-label="Search analyzed servers"
+                      placeholder="Find server name"
+                      value={deepDiveHostSearch}
+                      onChange={(event) => setDeepDiveHostSearch(event.target.value)}
+                      style={{ minWidth: 190, padding: '7px 10px', borderRadius: 6, border: '1px solid #3b5571', background: '#0d1b2e', color: '#e6f0ff', fontSize: 12 }}
+                    />
+                    <select aria-label="Filter analyzed servers by role" value={deepDiveHostRole} onChange={(event) => setDeepDiveHostRole(event.target.value)} style={ddSelectStyle}>
+                      <option value="all">All roles</option><option value="APP">APP</option><option value="SRE">SRE</option><option value="DB">DB</option>
+                    </select>
+                    <select aria-label="Filter analyzed servers by environment" value={deepDiveHostEnv} onChange={(event) => setDeepDiveHostEnv(event.target.value)} style={ddSelectStyle}>
+                      <option value="all">All environments</option><option value="PROD">PROD</option><option value="TEST">TEST</option>
+                    </select>
+                  </Box>
+                </Box>
+                <Box display="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 7 }}>
+                  {visibleDeepDiveHosts.map((host) => {
+                    const selected = deepDiveVm === host.name;
+                    return (
+                      <button
+                        key={host.name}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => selectDeepDiveHost(host.name, host.spikeCount > 0)}
+                        style={{ textAlign: 'left', padding: '9px 11px', borderRadius: 7, border: `1px solid ${selected ? '#38bdf8' : '#2b4865'}`, background: selected ? 'rgba(56,189,248,.14)' : '#12233a', color: '#e6f0ff', cursor: 'pointer', minWidth: 0 }}
+                      >
+                        <span style={{ display: 'block', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13, fontWeight: 800, overflowWrap: 'anywhere' }}>{host.name}</span>
+                        <span style={{ display: 'block', marginTop: 3, color: host.spikeCount > 0 ? '#fbbf24' : '#9eb2cc', fontSize: 10 }}>
+                          {host.role} {'\u00b7'} {host.env} {'\u00b7'} {!host.hasTelemetry ? 'No time-series returned' : host.spikeCount > 0 ? `${host.spikeCount} detected event${host.spikeCount === 1 ? '' : 's'}` : 'No detected event'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {deepDiveHosts.length > 0 && visibleDeepDiveHosts.length === 0 && (
+                    <Typography variant="caption" color="textSecondary">No server matches these filters.</Typography>
+                  )}
+                </Box>
+              </Box>
+
+              {deepDiveVm && !deepDive.vms?.[deepDiveVm] && (
+                <Box id="pe-selected-server-detail" style={{ marginTop: 12, padding: 12, border: '1px solid #8a6735', borderRadius: 8, background: 'rgba(245,158,11,.08)' }}>
+                  <Typography variant="body2" style={{ fontWeight: 700, color: '#fbbf24' }}>{deepDiveVm}: no time-series returned for this selected server</Typography>
+                  <Typography variant="caption" color="textSecondary">Check Azure metric coverage or reload the selected time range. No spike conclusion is available for this host.</Typography>
+                </Box>
+              )}
+
               {/* Investigation Scope Tabs & Dedicated Hide Normal Servers Toggle */}
               <Box display="flex" alignItems="center" justifyContent="space-between" style={{ marginTop: 14, borderBottom: '1px solid #213060', paddingBottom: 6, flexWrap: 'wrap', gap: 8 }}>
                 <Box display="flex" alignItems="center" style={{ gap: 6 }}>
@@ -2675,19 +2768,19 @@ export function ResourcePanel() {
                     onClick={() => setActiveScopeTab('all')}
                     style={ddPillStyle(activeScopeTab === 'all')}
                   >
-                    All Servers ({ddCards.critical.length + ddCards.clean.length})
+                    All Servers ({deepDiveHosts.length})
                   </button>
                   <button
                     onClick={() => setActiveScopeTab('investigation')}
                     style={ddPillStyle(activeScopeTab === 'investigation')}
                   >
-                    🚨 Requires Investigation ({ddCards.critical.length})
+                    🚨 Detected Events ({deepDiveSpikeHostCount})
                   </button>
                   <button
                     onClick={() => setActiveScopeTab('healthy')}
                     style={ddPillStyle(activeScopeTab === 'healthy')}
                   >
-                    ✅ Normal Servers ({ddCards.clean.length})
+                    No Detected Events ({deepDiveNoEventCount})
                   </button>
                 </Box>
                 <button
@@ -2706,9 +2799,9 @@ export function ResourcePanel() {
                     color: hideHealthyServers ? '#93c5fd' : '#10d96e',
                     cursor: 'pointer',
                   }}
-                  title={hideHealthyServers ? 'Expand healthy servers table' : 'Hide healthy servers to focus exclusively on anomalies'}
+                  title={hideHealthyServers ? 'Expand no-event servers table' : 'Hide servers without detected events from the lower table'}
                 >
-                  {hideHealthyServers ? '👁️ Show Healthy Servers' : '👁️‍🗨️ Hide Healthy Servers'}
+                  {hideHealthyServers ? 'Show No-Event List' : 'Hide No-Event List'}
                 </button>
               </Box>
 
@@ -2719,11 +2812,11 @@ export function ResourcePanel() {
                   <Box display="flex" alignItems="center" style={{ gap: 8 }}>
                     <span>{'\ud83d\udea8'}</span>
                     <Typography variant="subtitle2" style={{ color: '#f43f5e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>
-                      {'Requires Investigation \u2014 '}{ddCards.critical.length} Server{ddCards.critical.length > 1 ? 's' : ''}
+                      {'Detected Events \u2014 '}{ddCards.critical.length} Server{ddCards.critical.length > 1 ? 's' : ''}
                     </Typography>
                   </Box>
                   <Typography variant="caption" color="textSecondary" style={{ display: 'block', fontSize: 9, marginTop: 2 }}>
-                    {ddCards.critical.length} of {ddCards.critical.length + ddCards.clean.length} analyzed VM(s) flagged {'\u2014'} the remaining {ddCards.clean.length} reported no spikes in this window.
+                    {deepDiveSpikeHostCount} of {deepDiveHosts.length} selected VM(s) have detected events in this window; {ddCards.critical.length} shown by the card filters.
                   </Typography>
 
                   <Box display="flex" alignItems="center" style={{ gap: 16, flexWrap: 'wrap', padding: '8px 0' }}>
@@ -2759,7 +2852,7 @@ export function ResourcePanel() {
                     </label>
                   </Box>
 
-                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginBottom: 8, fontSize: 9 }}>Tip: click any card to open its anomaly table and time-series panel.</Typography>
+                  <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginBottom: 8, fontSize: 9 }}>Select any server above to open its time-series, whether or not it has detected events.</Typography>
 
                   <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
                     {ddCards.critical.map((c) => {
@@ -2829,7 +2922,7 @@ export function ResourcePanel() {
 
               {/* Detail panel for the selected card or selected clean VM */}
               {ddDetail && (
-                <Box style={{
+                <Box id="pe-selected-server-detail" style={{
                   marginTop: 12,
                   borderRadius: 10,
                   border: ddDetail.rows.length > 0 ? '1px solid rgba(244,63,94,.25)' : '1px solid rgba(59,130,246,.25)',
@@ -2844,7 +2937,7 @@ export function ResourcePanel() {
                     <Typography variant="caption" color="textSecondary">
                       {ddDetail.rows.length > 0
                         ? `${ddDetail.rows.length} event${ddDetail.rows.length !== 1 ? 's' : ''} on ${deepDiveVm}`
-                        : `Normal baseline on ${deepDiveVm}`}
+                        : `No detected spike events on ${deepDiveVm}`}
                     </Typography>
                     {ddDetail.ctrlMActive ? (
                       <span className="metric-badge metric-badge-teal" style={{ fontSize: 8 }} title="Ctrl-M batch job runs are loaded — each spike below is time-joined against overlapping job windows.">{'\ud83d\udd17'} Ctrl-M correlation active</span>
@@ -3234,36 +3327,34 @@ export function ResourcePanel() {
                     style={{
                       marginTop: 12,
                       borderRadius: 8,
-                      border: '1px solid rgba(16,217,110,.25)',
-                      background: 'rgba(16,217,110,.05)',
+                    border: '1px solid rgba(56,189,248,.25)',
+                    background: 'rgba(56,189,248,.05)',
                       padding: '8px 14px',
                     }}
                   >
                     <Box display="flex" alignItems="center" style={{ gap: 8 }}>
-                      <span>{'✅'}</span>
-                      <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 11, fontWeight: 700 }}>
-                        Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal (Hidden)
+                      <Typography variant="subtitle2" style={{ color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 11, fontWeight: 700 }}>
+                        No Detected Events {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} (Hidden)
                       </Typography>
                       <Typography variant="caption" color="textSecondary" style={{ fontSize: 10 }}>
-                        All metrics operating within nominal baseline
+                        Time-series remains available from the server selector above
                       </Typography>
                     </Box>
                     <Button
                       size="small"
                       variant="outlined"
                       onClick={() => setHideHealthyServers(false)}
-                      style={{ color: '#10d96e', borderColor: 'rgba(16,217,110,.4)', fontSize: 10, textTransform: 'none', padding: '2px 10px' }}
+                      style={{ color: '#38bdf8', borderColor: 'rgba(56,189,248,.4)', fontSize: 10, textTransform: 'none', padding: '2px 10px' }}
                     >
-                      Show Healthy Servers ({ddCards.clean.length}) ▾
+                      Show No-Event Servers ({ddCards.clean.length}) ▾
                     </Button>
                   </Box>
                 ) : (
-                  <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(16,217,110,.2)', background: 'rgba(16,217,110,.05)', padding: 12 }}>
+                  <Box style={{ marginTop: 12, borderRadius: 10, border: '1px solid rgba(56,189,248,.2)', background: 'rgba(56,189,248,.05)', padding: 12 }}>
                     <Box display="flex" alignItems="center" justifyContent="space-between">
                       <Box display="flex" alignItems="center" style={{ gap: 8 }}>
-                        <span>{'✅'}</span>
-                        <Typography variant="subtitle2" style={{ color: '#10d96e', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>
-                          Healthy {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''} Normal
+                        <Typography variant="subtitle2" style={{ color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 11 }}>
+                          No Detected Events {'\u2014'} {ddCards.clean.length} Server{ddCards.clean.length > 1 ? 's' : ''}
                         </Typography>
                         <span style={{ fontSize: 9, color: '#6b7db3', marginLeft: 8 }}>click a row to inspect time-series</span>
                       </Box>
@@ -3305,10 +3396,10 @@ export function ResourcePanel() {
                               selected={isSelected}
                               style={{ cursor: 'pointer', background: isSelected ? 'rgba(59,130,246,.15)' : undefined }}
                             >
-                              <TableCell style={{ fontFamily: 'monospace', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#60a5fa' : undefined }}>{vmName}</TableCell>
+                              <TableCell style={{ fontFamily: 'monospace', fontWeight: 800, color: isSelected ? '#60a5fa' : '#e6edff' }}>{vmName}</TableCell>
                               <TableCell style={{ color: '#3b82f6', fontSize: 11 }}>{cpuS ? `avg ${cpuS.mean}% \u00b7 max ${cpuS.max}%` : '\u2014'}</TableCell>
                               <TableCell style={{ color: '#22d3ee', fontSize: 11 }}>{memS ? `avail ${memS.mean}% \u00b7 min ${memS.min}%` : '\u2014'}</TableCell>
-                              <TableCell style={{ color: '#10d96e', fontSize: 11 }}>{'\u2713'} Normal</TableCell>
+                              <TableCell style={{ color: '#9eb2cc', fontSize: 11 }}>No detected event</TableCell>
                             </TableRow>
                           );
                         })}

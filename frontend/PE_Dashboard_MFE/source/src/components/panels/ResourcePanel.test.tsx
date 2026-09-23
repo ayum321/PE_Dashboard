@@ -250,6 +250,51 @@ describe('ResourcePanel', () => {
     expect(screen.getByText(/Unified Time-Series/i)).toBeDefined();
   });
 
+  it('lets a user select the time-series for any of eight servers, including hosts without detected events', async () => {
+    const deepDive = buildDeepDive();
+    const resource = buildResource(deepDive);
+    for (let index = 2; index <= 8; index += 1) {
+      const name = `vm-healthy-${index}`;
+      deepDive.vms[name] = { ...deepDive.vms['vm-critical'], resource_id: `vm-${index}`, spikes: { 'Percentage CPU': [] } };
+      resource.servers.push({ ...resource.servers[0], host: `${name}.contoso.local`, resource_id: `vm-${index}`, type: index === 8 ? 'DB' : 'APP', environment: index === 8 ? 'TEST' : 'PROD', status: 'Healthy' });
+    }
+    deepDive.summary.vm_count = 8;
+
+    render(
+      <AppDataProvider>
+        <SeededResourcePanel resource={resource} />
+      </AppDataProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText(/8 of 8 selected servers shown/)).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /vm-healthy-8/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /vm-healthy-8/ }));
+    await waitFor(() => expect(screen.getByText(/No detected spike events on vm-healthy-8/)).toBeInTheDocument());
+    expect(screen.getByText(/Unified Time-Series.*vm-healthy-8/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('combobox', { name: /Filter analyzed servers by role/ }), { target: { value: 'DB' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Filter analyzed servers by environment/ }), { target: { value: 'TEST' } });
+    expect(screen.getByText(/1 of 8 selected servers shown/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /vm-healthy-8/ })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: /Filter analyzed servers by role/ }), { target: { value: 'all' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Filter analyzed servers by environment/ }), { target: { value: 'all' } });
+
+    fireEvent.change(screen.getByRole('searchbox', { name: /Search analyzed servers/ }), { target: { value: 'vm-critical' } });
+    expect(screen.getByRole('button', { name: /vm-critical/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /vm-healthy-8/ })).toBeNull();
+  }, 15000);
+
+  it('keeps a selected server visible when Azure returns no time-series for it', async () => {
+    const resource = buildResource(buildDeepDive());
+    resource.servers.push({ ...resource.servers[0], host: 'vm-missing.contoso.local', resource_id: 'vm-2', status: 'Healthy' });
+    render(<AppDataProvider><SeededResourcePanel resource={resource} /></AppDataProvider>);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /vm-missing/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /vm-missing/ }));
+    expect(screen.getByText(/vm-missing: no time-series returned/)).toBeInTheDocument();
+    expect(screen.getByText(/No spike conclusion is available for this host/)).toBeInTheDocument();
+  }, 10000);
+
   it('ignores stale deep-dive responses after a remount starts a newer request', async () => {
     const first = deferred<ReturnType<typeof buildDeepDive>>();
     const second = deferred<ReturnType<typeof buildDeepDive>>();
