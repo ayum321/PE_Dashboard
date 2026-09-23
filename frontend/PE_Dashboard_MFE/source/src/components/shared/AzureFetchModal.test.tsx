@@ -151,8 +151,7 @@ describe('AzureFetchModal', () => {
     // Filter to Costco Wholesale
     fireEvent.click(getAllByText('Costco Wholesale')[0]);
     await waitFor(() => {
-      expect(getByText('1 of 1 visible')).toBeDefined();
-      expect(getByText(/selected \(3 of 3 total\)/)).toBeDefined();
+      expect(getByText(/3 total selected/)).toBeDefined();
     });
 
     // Toggle the customer group checkbox for Costco to unselect it
@@ -161,20 +160,18 @@ describe('AzureFetchModal', () => {
 
     fireEvent.click(costcoGroupCheckbox);
     await waitFor(() => {
-      expect(getByText('0 of 1 visible')).toBeDefined();
-      expect(getByText(/selected \(2 of 3 total\)/)).toBeDefined();
-      expect(getByText('Clear 2 hidden')).toBeDefined();
+      expect(getByText(/2 total selected/)).toBeDefined();
+      expect(getByText(/0 visible in current filter/)).toBeDefined();
     });
 
-    // Fetch button should be disabled when 0 visible are selected under active filter
+    // Fetch button should remain ENABLED because 2 VMs across other filters are selected
     const fetchButton = getByText('Fetch Metrics').closest('button');
-    expect(fetchButton).toBeDisabled();
+    expect(fetchButton).not.toBeDisabled();
 
     // Toggle back on via master visible checkbox
     fireEvent.click(masterCheckbox);
     await waitFor(() => {
-      expect(getByText('1 of 1 visible')).toBeDefined();
-      expect(getByText(/selected \(3 of 3 total\)/)).toBeDefined();
+      expect(getByText(/3 total selected/)).toBeDefined();
       expect(fetchButton).not.toBeDisabled();
     });
   });

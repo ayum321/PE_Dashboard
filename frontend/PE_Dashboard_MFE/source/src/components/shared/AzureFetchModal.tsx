@@ -641,16 +641,6 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
     });
   };
 
-  const clearHiddenSelection = () => {
-    const visibleIds = new Set(filteredVms.map((v) => v.resource_id));
-    setSelectedVmIds((prev) => {
-      const next = new Set<string>();
-      prev.forEach((id) => {
-        if (visibleIds.has(id)) next.add(id);
-      });
-      return next;
-    });
-  };
 
   const toggleCustomerSelection = (customer: string, forceSelect?: boolean) => {
     const vmsInGroup = groupedFiltered.get(customer) || [];
@@ -729,16 +719,10 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
   };
 
   const handleFetch = async () => {
-    const visibleSelectedCount = filteredVms.filter((v) => selectedVmIds.has(v.resource_id)).length;
-    const hasFilter = filteredVms.length !== discoveredVms.length;
-    if (hasFilter && visibleSelectedCount === 0) {
-      setFetchStatus('No visible VMs selected. Select at least one visible VM or click "Show hidden" to reset filters.');
-      return;
-    }
     const selectedVms = discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
 
     if (!selectedVms.length) {
-      setFetchStatus(hasFilter ? 'No visible VMs selected. Select at least one visible VM or reset filters.' : 'Select at least one VM to fetch metrics for.');
+      setFetchStatus('Select at least one VM to fetch metrics for.');
       return;
     }
     const targetIds = selectedVms.map((v) => v.resource_id);
@@ -1470,8 +1454,7 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
               {(() => {
                 const visibleSelectedCount = filteredVms.filter((v) => selectedVmIds.has(v.resource_id)).length;
                 const hasFilter = filteredVms.length !== discoveredVms.length;
-                const hiddenSelectedCount = Math.max(0, selectedVmIds.size - visibleSelectedCount);
-                const disableFetch = fetchBusy || !selectedVmIds.size || (hasFilter && visibleSelectedCount === 0);
+                const disableFetch = fetchBusy || !selectedVmIds.size;
 
                 const selectedVms = discoveredVms.filter((v) => selectedVmIds.has(v.resource_id));
                 const newSelectedCount = selectedVms.filter((v) => !isVmInFleet(v)).length;
@@ -1498,7 +1481,12 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                       <Typography variant="caption" color="textSecondary">
                         {hasFilter ? (
                           <>
-                            <span style={{ color: '#f0f4ff', fontWeight: 700 }}>{visibleSelectedCount} of {filteredVms.length} visible</span> selected ({selectedVmIds.size} of {discoveredVms.length} total)
+                            <span style={{ color: '#f0f4ff', fontWeight: 700 }}>
+                              {selectedVmIds.size} total selected
+                            </span>
+                            {visibleSelectedCount !== selectedVmIds.size && (
+                              <span> ({visibleSelectedCount} visible in current filter)</span>
+                            )}
                           </>
                         ) : (
                           <>
@@ -1511,44 +1499,6 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                           </span>
                         )}
                       </Typography>
-                      {hasFilter && hiddenSelectedCount > 0 && (
-                        <Box display="flex" alignItems="center" style={{ gap: 6 }}>
-                          <Button
-                            size="small"
-                            onClick={resetFilters}
-                            style={{
-                              fontSize: 10,
-                              color: '#38bdf8',
-                              padding: '2px 8px',
-                              textTransform: 'none',
-                              border: '1px solid rgba(56,189,248,.45)',
-                              borderRadius: 4,
-                              fontWeight: 700,
-                              background: 'rgba(56,189,248,.12)',
-                              cursor: 'pointer',
-                            }}
-                            title="Reset filters to make all hidden selected VMs visible in the table"
-                          >
-                            👁 Show {hiddenSelectedCount} hidden
-                          </Button>
-                          <Button
-                            size="small"
-                            onClick={clearHiddenSelection}
-                            style={{
-                              fontSize: 9,
-                              color: '#f87171',
-                              padding: '1px 6px',
-                              textTransform: 'none',
-                              border: '1px solid rgba(248,113,113,.3)',
-                              borderRadius: 4,
-                              cursor: 'pointer',
-                            }}
-                            title="Remove selected VMs that are hidden by active filters"
-                          >
-                            Clear {hiddenSelectedCount} hidden
-                          </Button>
-                        </Box>
-                      )}
                     </Box>
                     <Box display="flex" style={{ marginLeft: 'auto', gap: 8 }}>
                       <Button
@@ -1556,7 +1506,6 @@ export function AzureFetchModal({ open, autoStartAuth = false, onClose, onFetche
                         color="primary"
                         onClick={handleFetch}
                         disabled={disableFetch}
-                        title={hasFilter && visibleSelectedCount === 0 && selectedVmIds.size > 0 ? 'Select at least one visible VM to fetch, or reset filters.' : undefined}
                       >
                         {fetchBusy ? <CircularProgress size={16} color="inherit" /> : fetchBtnText}
                       </Button>
