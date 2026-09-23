@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from services.azure_monitor import _detect_spikes
+from services.azure_monitor import _detect_patterns, _detect_spikes
 
 
 def _points(values, offsets):
@@ -13,6 +13,64 @@ def _points(values, offsets):
 
 
 class AzureMonitorSpikeDurationTests(unittest.TestCase):
+    def test_shared_spike_windows_keep_dates_and_contributing_events(self):
+        base = datetime(2026, 9, 20, 13, 7, tzinfo=timezone.utc)
+
+        def spike(when, severity="critical"):
+            return {
+                "peak_time": when.isoformat(),
+                "start": (when - timedelta(minutes=2)).isoformat(),
+                "end": (when + timedelta(minutes=2)).isoformat(),
+                "peak": 82.0,
+                "z_score": 3.5,
+                "severity": severity,
+            }
+
+        patterns = _detect_patterns({
+            "app-1": {"Percentage CPU": [spike(base), spike(base + timedelta(days=1))]},
+            "db-1": {"Percentage CPU": [spike(base + timedelta(minutes=10)),
+                                         spike(base + timedelta(days=1, minutes=10))]},
+            "noise": {"Percentage CPU": [spike(base + timedelta(minutes=5), "normal")]},
+        }, hours_back=48)
+        shared = [item for item in patterns if item["type"] == "cross_vm_correlation"]
+
+        self.assertEqual(len(shared), 2)
+        self.assertNotEqual(shared[0]["peak_start_utc"], shared[1]["peak_start_utc"])
+        self.assertEqual([item["count"] for item in shared], [2, 2])
+        self.assertEqual({event["vm"] for event in shared[0]["spike_events"]}, {"app-1", "db-1"})
+        self.assertEqual(shared[0]["peak_end_utc"], (base + timedelta(minutes=10)).isoformat())
+
+    def test_shared_warning_spikes_do_not_become_critical(self):
+        base = datetime(2026, 9, 20, 13, 7, tzinfo=timezone.utc)
+        spikes = {
+            vm: {"Percentage CPU": [{
+                "peak_time": (base + timedelta(minutes=offset)).isoformat(),
+                "peak": 65.0,
+                "z_score": 2.0,
+                "severity": "warning",
+            }]}
+            for vm, offset in (("app-1", 0), ("app-2", 5))
+        }
+        shared = [item for item in _detect_patterns(spikes) if item["type"] == "cross_vm_correlation"]
+        self.assertEqual(len(shared), 1)
+        self.assertEqual(shared[0]["severity"], "warning")
+
+    def test_test_spike_cannot_bridge_two_prod_spikes(self):
+        base = datetime(2026, 9, 20, 13, tzinfo=timezone.utc)
+        spikes = {
+            vm: {"Percentage CPU": [{
+                "peak_time": (base + timedelta(minutes=minute)).isoformat(),
+                "peak": 85.0,
+                "z_score": 3.5,
+                "severity": "critical",
+            }]}
+            for vm, minute in (("prod-app-1", 0), ("test-app-1", 10), ("prod-app-2", 20))
+        }
+        environments = {"prod-app-1": "PROD", "test-app-1": "TEST", "prod-app-2": "PROD"}
+        shared = [item for item in _detect_patterns(spikes, vm_environments=environments)
+                  if item["type"] == "cross_vm_correlation"]
+        self.assertEqual(shared, [])
+
     def test_missing_bucket_does_not_create_multi_day_duration(self):
         # Two high runs are separated by a six-hour telemetry gap. The detector
         # must report two observed runs, not one wall-clock run spanning the gap.
@@ -122,4 +180,3 @@ class AzureMonitorSpikeDurationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

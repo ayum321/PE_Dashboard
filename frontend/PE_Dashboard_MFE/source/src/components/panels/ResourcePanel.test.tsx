@@ -5,6 +5,7 @@ import { AppDataProvider } from '../../context/AppDataContext';
 import {
   buildFleetHeatmapView,
   durationMinutesFromBounds,
+  escapeChartText,
   fleetHeatmapCellLabel,
   formatRecurringDurations,
   formatSpikeWindow,
@@ -13,7 +14,9 @@ import {
   normalMetricLabels,
   preferredFleetHeatmapMetric,
   ResourcePanel,
+  scopeCrossServerCorrelations,
   selectDominantMetric,
+  SharedSpikeWindows,
   withGapBreaks,
 } from './ResourcePanel';
 import { useAppData } from '../../context/AppDataContext';
@@ -262,7 +265,7 @@ describe('ResourcePanel', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: /Load Time-Series/i })).toBeDefined());
     fireEvent.click(screen.getByRole('button', { name: /Load Time-Series/i }));
-    expect(mockedFetchAzureTimeseries).toHaveBeenNthCalledWith(1, expect.objectContaining({ hours_back: 24 }));
+    expect(mockedFetchAzureTimeseries).toHaveBeenNthCalledWith(1, expect.objectContaining({ hours_back: 24, vm_environments: { 'vm-1': 'PROD' } }));
 
     fireEvent.click(screen.getByRole('button', { name: /toggle panel/i }));
     fireEvent.click(screen.getByRole('button', { name: /toggle panel/i }));
@@ -349,14 +352,62 @@ describe('ResourcePanel', () => {
     expect(fleetHeatmapCellLabel(83, 'cpu')).toMatch(/83\.0% utilized.*higher utilization is higher risk/i);
   });
 
-  it('groups cross-server correlation evidence by time and metric without inventing pairs', () => {
+  it('keeps separate dated cross-server occurrences even at the same clock time', () => {
     const groups = groupCrossServerCorrelations([
-      { type: 'cross_vm_correlation', time_utc: '01:30', metrics: ['Percentage CPU'], vms: ['app-1', 'db-1'], count: 2, severity: 'critical' },
-      { type: 'cross_vm_correlation', time_utc: '01:30', metrics: ['Percentage CPU'], vms: ['DB-1.', 'sre-1'], count: 2, severity: 'critical' },
+      { type: 'cross_vm_correlation', time_utc: '01:30', peak_start_utc: '2026-09-20T01:30:00Z', peak_end_utc: '2026-09-20T01:40:00Z', metrics: ['Percentage CPU'], vms: ['app-1', 'db-1'], count: 2, severity: 'critical', spike_events: [{ vm: 'app-1', metric: 'Percentage CPU', peak_time: '2026-09-20T01:30:00Z' }, { vm: 'db-1', metric: 'Percentage CPU', peak_time: '2026-09-20T01:40:00Z' }] },
+      { type: 'cross_vm_correlation', time_utc: '01:30', peak_start_utc: '2026-09-21T01:30:00Z', peak_end_utc: '2026-09-21T01:40:00Z', metrics: ['Percentage CPU'], vms: ['DB-1.', 'sre-1'], count: 2, severity: 'critical', spike_events: [{ vm: 'DB-1.', metric: 'Percentage CPU', peak_time: '2026-09-21T01:30:00Z' }, { vm: 'sre-1', metric: 'Percentage CPU', peak_time: '2026-09-21T01:40:00Z' }] },
       { type: 'recurring_time', time_utc: '02:00', metrics: ['Percentage CPU'], vms: ['other'] },
     ]);
 
-    expect(groups).toEqual([{ timeUtc: '01:30', metrics: ['Percentage CPU'], vms: ['app-1', 'db-1', 'sre-1'], eventCount: 4, severity: 'critical' }]);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.peakStartUtc)).toEqual(['2026-09-20T01:30:00Z', '2026-09-21T01:30:00Z']);
+    expect(groups.map((group) => group.vms)).toEqual([['app-1', 'db-1'], ['DB-1.', 'sre-1']]);
+  });
+
+  it('does not let an excluded TEST or DB spike bridge two PROD APP spikes', () => {
+    const at = (minute: number) => new Date(Date.UTC(2026, 8, 20, 13, minute)).toISOString();
+    const groups = groupCrossServerCorrelations([{ type: 'cross_vm_correlation', peak_start_utc: at(0), peak_end_utc: at(20), vms: ['prod-app-1', 'test-app-1', 'prod-app-2'], spike_events: [
+      { vm: 'prod-app-1', metric: 'Percentage CPU', peak_time: at(0) },
+      { vm: 'test-app-1', metric: 'Percentage CPU', peak_time: at(10) },
+      { vm: 'prod-app-2', metric: 'Percentage CPU', peak_time: at(20) },
+    ] }]);
+    expect(scopeCrossServerCorrelations(groups, ['prod-app-1', 'prod-app-2'])).toHaveLength(0);
+    expect(scopeCrossServerCorrelations(groups, ['prod-app-1', 'test-app-1', 'prod-app-2'])).toHaveLength(1);
+  });
+
+  it('scopes shared spike counts to the selected environment and server role', () => {
+    const peak = '2026-09-20T13:07:00Z';
+    const onInspect = jest.fn();
+    const groups = groupCrossServerCorrelations([{ type: 'cross_vm_correlation', time_utc: '13:07', peak_start_utc: peak, peak_end_utc: '2026-09-20T13:17:00Z', vms: ['prod-app-1', 'prod-app-2', 'prod-db-1', 'test-app-1'], metrics: ['Percentage CPU'], spike_events: ['prod-app-1', 'prod-app-2', 'prod-db-1', 'test-app-1'].map((vm) => ({ vm, metric: 'Percentage CPU', peak_time: peak })) }]);
+    render(<SharedSpikeWindows deepDive={{
+      vms: { 'prod-app-1': {}, 'prod-app-2': {}, 'prod-db-1': {}, 'test-app-1': {} },
+      spike_attribution: {
+        rows: [{ vm: 'prod-app-1', metric: 'Percentage CPU', peak_time: peak, concurrent_jobs: 1, jobs: [{ job: 'NightlyCalc', start: peak, end: '2026-09-20T13:17:00Z' }] }],
+        summary: { spikes_total: 4, spikes_attributed: 1, attribution_rate: 25, runs_loaded: 1, caveat: 'Clock overlap only' },
+      },
+    }}
+      servers={[
+        { host: 'prod-app-1', environment: 'PROD', type: 'APP' },
+        { host: 'prod-app-2', environment: 'PROD', type: 'APP' },
+        { host: 'prod-db-1', environment: 'PROD', type: 'DB' },
+        { host: 'test-app-1', environment: 'TEST', type: 'APP' },
+      ]} groups={groups} preferredEnvironment="PROD" onInspect={onInspect} />);
+
+    expect(screen.getByText(/3 PROD servers in view/)).toBeInTheDocument();
+    expect(screen.getByText(/3 of 3 PROD servers/)).toBeInTheDocument();
+    expect(screen.getByText(/Ctrl-M clock overlap: 1 distinct job run \(NightlyCalc\)/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'APP' }));
+    expect(screen.getByText(/2 of 2 PROD servers/)).toBeInTheDocument();
+    expect(screen.getByText(/2 Azure spike detections/)).toBeInTheDocument();
+    expect(screen.getByText('prod-app-1').tagName).toBe('STRONG');
+    fireEvent.click(screen.getByRole('button', { name: /Open prod-app-1 utilization/ }));
+    expect(onInspect).toHaveBeenCalledWith('prod-app-1', expect.objectContaining({ peak_time: peak }), expect.objectContaining({ vms: ['prod-app-1', 'prod-app-2'] }));
+    fireEvent.click(screen.getByRole('button', { name: 'TEST' }));
+    expect(screen.getByText(/No shared spike window for these TEST APP servers/)).toBeInTheDocument();
+  });
+
+  it('escapes uploaded Ctrl-M job text before placing it in the chart tooltip', () => {
+    expect(escapeChartText('<img src=x onerror="alert(1)">')).toBe('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
   });
 
   it('defaults the heatmap to the metric with the material findings', () => {

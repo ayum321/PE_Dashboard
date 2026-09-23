@@ -160,7 +160,8 @@ _TS_CACHE_MAX = 64   # hard cap on retained result sets
 
 def _ts_cache_key(session_id: str, vm_ids: List[str], hours_back: int,
                   start_utc: Optional[str], end_utc: Optional[str],
-                  vm_types: Optional[Dict[str, str]] = None) -> str:
+                  vm_types: Optional[Dict[str, str]] = None,
+                  vm_environments: Optional[Dict[str, str]] = None) -> str:
     # SECURITY: the session id is part of the key. Azure credentials are
     # per-session (see _build_credential), so a key built only from request
     # params let a second session read the first session's cached Azure metrics
@@ -170,8 +171,13 @@ def _ts_cache_key(session_id: str, vm_ids: List[str], hours_back: int,
         for resource_id, role in (vm_types or {}).items()
         if resource_id and role
     }
+    canonical_environments = {
+        str(resource_id).strip().lower(): str(env).strip().upper()
+        for resource_id, env in (vm_environments or {}).items()
+        if resource_id and env
+    }
     canonical = json.dumps(
-        {"sid": session_id, "ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc, "roles": canonical_roles},
+        {"sid": session_id, "ids": sorted(vm_ids), "h": hours_back, "s": start_utc, "e": end_utc, "roles": canonical_roles, "envs": canonical_environments},
         sort_keys=True,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -1263,6 +1269,7 @@ class TimeseriesRequest(BaseModel):
     # detector judge DB servers against the DB memory band instead of a fresh
     # name-only guess that misses names like "prbd..." (see fetch_vm_timeseries).
     vm_types: Optional[Dict[str, str]] = None
+    vm_environments: Optional[Dict[str, str]] = None
 
 
 @router.post("/azure/timeseries")
@@ -1275,7 +1282,7 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
     """
     sid = _session_id(request, response)
     cache_key = _ts_cache_key(
-        sid, body.vm_ids, body.hours_back, body.start_utc, body.end_utc, body.vm_types,
+        sid, body.vm_ids, body.hours_back, body.start_utc, body.end_utc, body.vm_types, body.vm_environments,
     )
     cached = _ts_cache_get(cache_key)
     if cached is not None:
@@ -1304,6 +1311,7 @@ def azure_timeseries(body: TimeseriesRequest, request: Request, response: Respon
             start_utc=start_dt,
             end_utc=end_dt,
             vm_types=body.vm_types,
+            vm_environments=body.vm_environments,
         )
     except AzureConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

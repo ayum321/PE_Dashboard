@@ -1,5 +1,5 @@
 from services.resource_calculator import build_resource_payload
-from routers.azure_resource import _snapshot_observation_window
+from routers.azure_resource import _snapshot_observation_window, _ts_cache_key
 
 
 def test_normalized_azure_resource_payload_is_idempotent():
@@ -37,3 +37,10 @@ def test_snapshot_window_exposes_exact_requested_range_and_math_basis():
     assert window["requested_hours"] == 720
     assert window["snapshot_grain_hours"] == 6
     assert "missing buckets are excluded" in window["definitions"]["avg"]
+
+
+def test_timeseries_cache_separates_environment_scopes():
+    args = ("session-1", ["/vm/app-1"], 24, None, None, {"/vm/app-1": "APP"})
+    prod = _ts_cache_key(*args, {"/vm/app-1": "PROD"})
+    test = _ts_cache_key(*args, {"/vm/app-1": "TEST"})
+    assert prod != test

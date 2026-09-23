@@ -1723,7 +1723,8 @@ def _classify_waveform(points: list, metric_name: str, is_db: bool,
     }
 
 
-def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int = 24) -> list:
+def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int = 24,
+                     vm_environments: Optional[Dict[str, str]] = None) -> list:
     """Detect recurring and cross-VM patterns from spike data.
 
     Looks for:
@@ -1801,10 +1802,14 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
     for vm_name, metric_spikes in all_vm_spikes.items():
         for metric, spikes in metric_spikes.items():
             for s in spikes:
+                if s.get("severity") not in {"critical", "critical_sustained", "warning"}:
+                    continue
                 try:
                     t = _dt.fromisoformat(s["peak_time"].replace("Z", "+00:00"))
+                    t = t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
                     all_spike_events.append({
                         "vm": vm_name, "metric": metric,
+                        "environment": (vm_environments or {}).get(vm_name, "UNKNOWN"),
                         "ts": t, "spike": s,
                     })
                 except Exception:
@@ -1830,21 +1835,21 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
                 if j in used:
                     continue
                 delta = (all_spike_events[j]["ts"] - last_ts).total_seconds()
-                if delta <= 900:  # within 15 min of the previous clustered event
+                if delta > 900:
+                    # Events are time-sorted: later events cannot rejoin this chain.
+                    break
+                if all_spike_events[j]["environment"] == ev["environment"]:
                     cluster.append(all_spike_events[j])
                     used.add(j)
                     last_ts = all_spike_events[j]["ts"]
-                else:
-                    # events are time-sorted → every later one is even farther
-                    break
             if len(cluster) >= 2:
-                vms_in_cluster = list({c["vm"] for c in cluster})
+                vms_in_cluster = list(dict.fromkeys(c["vm"] for c in cluster))
                 if len(vms_in_cluster) >= 2:
                     clusters.append(cluster)
 
         for cluster in clusters:
-            vms_hit = list({c["vm"] for c in cluster})
-            metrics_hit = list({c["metric"] for c in cluster})
+            vms_hit = list(dict.fromkeys(c["vm"] for c in cluster))
+            metrics_hit = list(dict.fromkeys(c["metric"] for c in cluster))
             worst = max(cluster, key=lambda c: c["spike"]["z_score"])
             time_str = cluster[0]["ts"].strftime("%H:%M")
             span_minutes = max(
@@ -1868,13 +1873,19 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
             )
             patterns.append({
                 "type": "cross_vm_correlation",
-                "severity": "critical",
-                "title": f"Correlated spikes across {len(vms_hit)} VMs at ~{time_str}",
+                "severity": (
+                    "critical" if any(
+                        event["spike"].get("severity", "").startswith("critical")
+                        for event in cluster
+                    ) else "warning"
+                ),
+                "title": f"Shared spike window across {len(vms_hit)} VMs at ~{time_str}",
                 "description": (
-                    f"{', '.join(vms_hit)} all spiked within a 15-min window around {time_str} UTC. "
+                    f"{', '.join(vms_hit)} had neighboring spike detections no more than 15 minutes apart "
+                    f"over {span_minutes:.1f} minutes from {time_str} UTC. "
                     f"Metrics: {', '.join(metrics_hit)}. "
                     f"Peak {worst['spike']['peak']}% on {worst['vm']} (z={worst['spike']['z_score']}). "
-                    f"Suggests shared infrastructure pressure or coordinated workload."
+                    f"Investigate shared workload or infrastructure; time proximity does not prove cause."
                 ),
                 "vms": vms_hit,
                 "count": len(cluster),
@@ -1882,6 +1893,20 @@ def _detect_patterns(all_vm_spikes: Dict[str, Dict[str, list]], hours_back: int 
                 # Raw fields so the frontend can build a condensed line
                 # without re-parsing "~{time_str}" out of the title string.
                 "time_utc": time_str,
+                "peak_start_utc": cluster[0]["ts"].isoformat(),
+                "peak_end_utc": cluster[-1]["ts"].isoformat(),
+                "spike_events": [
+                    {
+                        "vm": event["vm"],
+                        "metric": event["metric"],
+                        "peak_time": event["spike"].get("peak_time"),
+                        "start": event["spike"].get("start"),
+                        "end": event["spike"].get("end"),
+                        "peak": event["spike"].get("peak"),
+                        "severity": event["spike"].get("severity"),
+                    }
+                    for event in cluster
+                ],
                 "metrics": metrics_hit,
                 "worst_vm": worst["vm"],
                 "worst_peak": worst["spike"]["peak"],
@@ -2055,7 +2080,8 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
                         hours_back: int,
                         start_utc: Optional[datetime] = None,
                         end_utc: Optional[datetime] = None,
-                        vm_types: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                        vm_types: Optional[Dict[str, str]] = None,
+                        vm_environments: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Fetch time-series data + spike detection for a list of VMs.
     
@@ -2118,6 +2144,11 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
         str(resource_id).strip().lower(): str(role).strip().upper()
         for resource_id, role in (vm_types or {}).items()
         if resource_id and role
+    }
+    _vm_environments_by_resource_id = {
+        str(resource_id).strip().lower(): str(env).strip().upper()
+        for resource_id, env in (vm_environments or {}).items()
+        if resource_id and env
     }
     result = {}
     # VMs Azure Monitor returned no telemetry for. Surfaced so the UI can say
@@ -2187,7 +2218,11 @@ def fetch_vm_timeseries(credential, resource_ids: List[str],
 
     # ── Pattern detection across all VMs ──
     all_vm_spikes = {vm: data.get("spikes", {}) for vm, data in result.items()}
-    patterns = _detect_patterns(all_vm_spikes, hours_back)
+    vm_env_by_name = {
+        vm: _vm_environments_by_resource_id.get(str(data.get("resource_id", "")).strip().lower(), "UNKNOWN")
+        for vm, data in result.items()
+    }
+    patterns = _detect_patterns(all_vm_spikes, hours_back, vm_env_by_name)
 
     logger.info("Time-series fetch for %d VMs took %.1fs, %d patterns detected",
                 len(resource_ids), _t.perf_counter() - t0, len(patterns))

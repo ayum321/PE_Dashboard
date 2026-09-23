@@ -209,6 +209,9 @@ interface DeepDivePattern {
   // FastAPI emits a human-readable UTC time-of-day (for example "01:30")
   // for cross-server coincidence groups, not a numeric timestamp.
   time_utc?: string | number;
+  peak_start_utc?: string;
+  peak_end_utc?: string;
+  spike_events?: CrossServerSpikeEvent[];
   hour?: number;
   recurrence_days?: number;
   recurrence_ratio?: number;
@@ -264,6 +267,12 @@ function shortMetric(k: string): string {
   if (k.includes('OS Disk')) return 'OS Disk';
   if (k.includes('Data Disk')) return 'Data Disk';
   return k.replace(' Percentage', '').replace(' Consumed', '');
+}
+
+export function escapeChartText(value: string): string {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character] || character));
 }
 
 type DeepDiveMetricFamily = 'cpu' | 'memory-percent' | 'memory-bytes' | 'os-disk' | 'data-disk' | 'other';
@@ -600,11 +609,25 @@ export function fleetHeatmapCellLabel(value: number | null, metric: HeatmapMetri
 }
 
 export interface CrossServerCorrelationGroup {
+  key: string;
   timeUtc: string;
+  peakStartUtc?: string;
+  peakEndUtc?: string;
   metrics: string[];
   vms: string[];
   eventCount: number;
   severity: string;
+  spikeEvents: CrossServerSpikeEvent[];
+}
+
+export interface CrossServerSpikeEvent {
+  vm: string;
+  metric: string;
+  peak_time?: string;
+  start?: string;
+  end?: string;
+  peak?: number;
+  severity?: string;
 }
 
 function normalizedVmIdentity(vm: string): string {
@@ -616,32 +639,201 @@ function appendUniqueVm(target: string[], candidate: string): void {
   if (identity && !target.some((existing) => normalizedVmIdentity(existing) === identity)) target.push(candidate);
 }
 
-/** Group the API's raw coincidence patterns into an operational review unit. */
+/** Preserve each dated occurrence; equal clock times on different days are not one incident. */
 export function groupCrossServerCorrelations(patterns: DeepDivePattern[]): CrossServerCorrelationGroup[] {
-  const groups = new Map<string, CrossServerCorrelationGroup>();
-  for (const pattern of patterns) {
+  const groups: CrossServerCorrelationGroup[] = [];
+  for (let index = 0; index < patterns.length; index++) {
+    const pattern = patterns[index];
     if (pattern.type !== 'cross_vm_correlation' || !pattern.vms?.length) continue;
     const timeUtc = pattern.time_utc == null ? 'time unavailable' : String(pattern.time_utc);
     const metrics = (pattern.metrics || (pattern.metric ? [pattern.metric] : [])).slice().sort();
-    const key = `${timeUtc}|${metrics.join('|')}`;
-    const existing = groups.get(key);
-    if (existing) {
-      pattern.vms.forEach((vm) => appendUniqueVm(existing.vms, vm));
-      existing.eventCount += pattern.count || pattern.vms.length;
-      if (pattern.severity === 'critical') existing.severity = 'critical';
-      continue;
-    }
     const vms: string[] = [];
     pattern.vms.forEach((vm) => appendUniqueVm(vms, vm));
-    groups.set(key, {
+    const spikeEvents = pattern.spike_events || [];
+    groups.push({
+      key: `${pattern.peak_start_utc || timeUtc}|${pattern.peak_end_utc || ''}|${index}`,
       timeUtc,
+      peakStartUtc: pattern.peak_start_utc,
+      peakEndUtc: pattern.peak_end_utc,
       metrics,
       vms,
-      eventCount: pattern.count || pattern.vms.length,
+      eventCount: spikeEvents.length || pattern.count || pattern.vms.length,
       severity: pattern.severity || 'warning',
+      spikeEvents,
     });
   }
-  return Array.from(groups.values()).sort((a, b) => b.vms.length - a.vms.length || b.eventCount - a.eventCount);
+  return groups.sort((a, b) => b.vms.length - a.vms.length || b.eventCount - a.eventCount);
+}
+
+/** Recluster after environment/role filtering so an excluded VM cannot bridge two unrelated spikes. */
+export function scopeCrossServerCorrelations(groups: CrossServerCorrelationGroup[], eligibleVms: string[]): CrossServerCorrelationGroup[] {
+  const eligible = new Set(eligibleVms.map(normalizedVmIdentity));
+  const scoped: CrossServerCorrelationGroup[] = [];
+  for (const group of groups) {
+    const events = group.spikeEvents
+      .filter((event) => eligible.has(normalizedVmIdentity(event.vm)) && Number.isFinite(new Date(event.peak_time || '').getTime()))
+      .sort((a, b) => new Date(a.peak_time || '').getTime() - new Date(b.peak_time || '').getTime());
+    let chain: CrossServerSpikeEvent[] = [];
+    const addChain = () => {
+      const vms = Array.from(new Set(chain.map((event) => event.vm)));
+      if (vms.length >= 2) {
+        const start = new Date(chain[0].peak_time || '').toISOString();
+        const end = new Date(chain[chain.length - 1].peak_time || '').toISOString();
+        scoped.push({
+          ...group,
+          key: `${group.key}|${start}|${end}|${vms.join('|')}`,
+          peakStartUtc: start,
+          peakEndUtc: end,
+          vms,
+          metrics: Array.from(new Set(chain.map((event) => event.metric))),
+          eventCount: chain.length,
+          severity: chain.some((event) => (event.severity || '').startsWith('critical')) ? 'critical' : 'warning',
+          spikeEvents: chain,
+        });
+      }
+    };
+    for (const event of events) {
+      const last = chain[chain.length - 1];
+      if (last && new Date(event.peak_time || '').getTime() - new Date(last.peak_time || '').getTime() > 15 * 60 * 1000) {
+        addChain();
+        chain = [];
+      }
+      chain.push(event);
+    }
+    if (chain.length) addChain();
+  }
+  return scoped.sort((a, b) => b.vms.length - a.vms.length || b.eventCount - a.eventCount || (a.peakStartUtc || '').localeCompare(b.peakStartUtc || ''));
+}
+
+function correlationEnvironment(value?: string): string {
+  const env = String(value || '').trim().toUpperCase();
+  if (['PROD', 'PRD', 'PRODUCTION'].includes(env)) return 'PROD';
+  if (['TEST', 'TST', 'TESTING', 'QA'].includes(env)) return 'TEST';
+  return env || 'UNKNOWN';
+}
+
+export function SharedSpikeWindows({ deepDive, servers, groups, preferredEnvironment, onInspect }: {
+  deepDive: DeepDiveResponse;
+  servers: ServerRow[];
+  groups: CrossServerCorrelationGroup[];
+  preferredEnvironment: string;
+  onInspect: (vm: string, event: CrossServerSpikeEvent | undefined, group: CrossServerCorrelationGroup) => void;
+}) {
+  const [environment, setEnvironment] = useState('');
+  const [role, setRole] = useState('ALL');
+  const [affectedOnly, setAffectedOnly] = useState(false);
+  const [selectedKey, setSelectedKey] = useState('');
+  const [showAll, setShowAll] = useState(false);
+
+  React.useEffect(() => { setEnvironment(correlationEnvironment(preferredEnvironment)); }, [preferredEnvironment]);
+
+  const vmNames = Object.keys(deepDive.vms || {});
+  const metadata = new Map(vmNames.map((vm) => {
+    const resourceId = deepDive.vms[vm]?.resource_id?.toLowerCase();
+    const match = servers.find((server) =>
+      (resourceId && server.resource_id?.toLowerCase() === resourceId)
+      || normalizedVmIdentity((server.host || server.server || '').split('.')[0]) === normalizedVmIdentity(vm.split('.')[0]));
+    return [vm, {
+      role: String(match?.type || 'UNKNOWN').trim().toUpperCase(),
+      environment: correlationEnvironment(match?.environment || match?.source_env),
+    }] as const;
+  }));
+  const envOrder = ['PROD', 'TEST', 'UAT', 'DEV', 'UNKNOWN'];
+  const environments = Array.from(new Set(vmNames.map((vm) => metadata.get(vm)?.environment || 'UNKNOWN'))).sort((a, b) =>
+    (envOrder.indexOf(a) < 0 ? 99 : envOrder.indexOf(a)) - (envOrder.indexOf(b) < 0 ? 99 : envOrder.indexOf(b)) || a.localeCompare(b));
+  const activeEnvironment = environments.includes(environment)
+    ? environment
+    : environments.includes(correlationEnvironment(preferredEnvironment)) ? correlationEnvironment(preferredEnvironment) : environments[0];
+  const eligible = vmNames.filter((vm) => metadata.get(vm)?.environment === activeEnvironment && (role === 'ALL' || metadata.get(vm)?.role === role));
+  const windows = scopeCrossServerCorrelations(groups, eligible).map((group) => ({ group, vms: group.vms, events: group.spikeEvents }));
+  const selected = windows.find((item) => item.group.key === selectedKey) || windows[0];
+  const visibleServers = selected
+    ? eligible.slice().sort((a, b) => Number(selected.vms.includes(b)) - Number(selected.vms.includes(a)) || a.localeCompare(b))
+        .filter((vm) => !affectedOnly || selected.vms.includes(vm))
+    : eligible;
+  const startMs = new Date(selected?.group.peakStartUtc || '').getTime();
+  const endMs = new Date(selected?.group.peakEndUtc || '').getTime();
+  const spanMs = Math.max(1, endMs - startMs);
+  const attribution = deepDive.spike_attribution;
+  const matchingRows = selected ? (attribution?.rows || []).filter((row) => selected.events.some((event) =>
+    normalizedVmIdentity(event.vm) === normalizedVmIdentity(row.vm)
+    && event.metric === row.metric
+    && new Date(event.peak_time || '').getTime() === new Date(row.peak_time || '').getTime())) : [];
+  const jobs = Array.from(new Map(matchingRows.flatMap((row) => row.jobs || [])
+    .map((job) => [`${job.job}|${job.start || ''}|${job.end || ''}`, job] as const)).values());
+
+  return (
+    <Box style={{ marginTop: 10, borderRadius: 10, border: '1px solid rgba(34,211,238,.35)', background: 'rgba(34,211,238,.04)', padding: 14 }}>
+      <Box display="flex" justifyContent="space-between" alignItems="flex-start" style={{ gap: 12, flexWrap: 'wrap' }}>
+        <Box>
+          <Typography variant="subtitle2" style={{ color: '#22d3ee', fontWeight: 700 }}>Shared Spike Windows</Typography>
+          <Typography variant="caption" color="textSecondary" style={{ display: 'block' }}>Azure Monitor spike detections across servers. Time proximity is an investigation lead, not root-cause proof.</Typography>
+        </Box>
+        <Typography variant="caption" color="textSecondary">{servers.length} selected · {vmNames.length} analyzed · {eligible.length} {activeEnvironment} {role === 'ALL' ? 'servers' : `${role} servers`} in view · {windows.length} shared window{windows.length === 1 ? '' : 's'}</Typography>
+      </Box>
+      <Box display="flex" alignItems="center" style={{ gap: 12, flexWrap: 'wrap', marginTop: 12 }}>
+        <Box display="flex" alignItems="center" style={{ gap: 5, flexWrap: 'wrap' }}>
+          <Typography variant="caption" style={{ color: '#94a3b8', fontWeight: 700 }}>Environment</Typography>
+          {environments.map((item) => <Button key={item} size="small" variant={activeEnvironment === item ? 'contained' : 'outlined'} onClick={() => { setEnvironment(item); setSelectedKey(''); }} aria-pressed={activeEnvironment === item}>{item}</Button>)}
+        </Box>
+        <Box display="flex" alignItems="center" style={{ gap: 5, flexWrap: 'wrap' }}>
+          <Typography variant="caption" style={{ color: '#94a3b8', fontWeight: 700 }}>Server role</Typography>
+          {['ALL', 'APP', 'DB', 'SRE'].map((item) => <Button key={item} size="small" variant={role === item ? 'contained' : 'outlined'} onClick={() => { setRole(item); setSelectedKey(''); }} aria-pressed={role === item}>{item === 'ALL' ? 'All roles' : item}</Button>)}
+        </Box>
+      </Box>
+      {groups.length > 0 && !groups.some((group) => group.peakStartUtc && group.spikeEvents.length) && (
+        <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 10 }}>Reload Time-Series to populate dated spike windows from current Azure evidence.</Typography>
+      )}
+      <Box display="flex" style={{ gap: 14, flexWrap: 'wrap', marginTop: 13 }}>
+        <Box style={{ flex: '0 1 285px', minWidth: 240 }}>
+          <Typography variant="caption" style={{ color: '#94a3b8', fontWeight: 700 }}>WINDOWS · AFFECTED</Typography>
+          {windows.length === 0 && <Typography variant="body2" color="textSecondary" style={{ marginTop: 8 }}>No shared spike window for these {activeEnvironment} {role === 'ALL' ? 'servers' : `${role} servers`}. Individual anomalies may still exist.</Typography>}
+          {windows.slice(0, showAll ? undefined : 5).map(({ group, vms, events }) => (
+            <button key={group.key} type="button" onClick={() => setSelectedKey(group.key)} aria-pressed={selected?.group.key === group.key}
+              style={{ display: 'block', width: '100%', textAlign: 'left', marginTop: 7, padding: '9px 10px', borderRadius: 7, border: `1px solid ${selected?.group.key === group.key ? '#22d3ee' : '#334155'}`, background: selected?.group.key === group.key ? 'rgba(34,211,238,.12)' : 'rgba(15,23,42,.45)', color: '#e2e8f0', cursor: 'pointer' }}>
+              <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontWeight: 700 }}><span>{formatUtc(group.peakStartUtc)}</span><span style={{ color: '#22d3ee', whiteSpace: 'nowrap' }}>{vms.length}/{eligible.length}</span></span>
+              <span style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginTop: 3, color: '#94a3b8', fontSize: 12 }}><span>{Array.from(new Set(events.map((event) => shortMetric(event.metric)))).join(' · ')}</span><span>{events.length} detections</span></span>
+            </button>
+          ))}
+          {windows.length > 5 && <Button size="small" onClick={() => setShowAll(!showAll)}>{showAll ? 'Show fewer windows' : `View all ${windows.length} windows`}</Button>}
+        </Box>
+        <Box style={{ flex: '1 1 540px', minWidth: 0 }}>
+          {selected && <>
+            <Typography variant="subtitle2" style={{ fontWeight: 700 }}>Peak-time window: {formatUtc(selected.group.peakStartUtc)} → {formatUtc(selected.group.peakEndUtc)}</Typography>
+            <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 3 }}>{selected.vms.length} of {eligible.length} {activeEnvironment} servers · {selected.events.length} Azure spike detections · {Array.from(new Set(selected.events.map((event) => shortMetric(event.metric)))).join(' · ')}</Typography>
+            <Box display="flex" alignItems="center" justifyContent="space-between" style={{ gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
+              <Typography variant="caption" style={{ color: '#94a3b8', fontWeight: 700 }}>SERVER ACTIVITY · {activeEnvironment}</Typography>
+              <Box display="flex" style={{ gap: 5 }}><Button size="small" variant={!affectedOnly ? 'contained' : 'outlined'} onClick={() => setAffectedOnly(false)}>All {eligible.length}</Button><Button size="small" variant={affectedOnly ? 'contained' : 'outlined'} onClick={() => setAffectedOnly(true)}>Affected only</Button></Box>
+            </Box>
+            <Box style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto', marginTop: 6 }}>
+              <Box style={{ minWidth: 565 }}>
+                <Box display="grid" style={{ gridTemplateColumns: 'minmax(205px, 240px) repeat(8, minmax(22px, 1fr))', gap: 4, color: '#94a3b8', fontSize: 11, paddingBottom: 4 }}><span>SERVER · ROLE</span><span>Start</span><span style={{ gridColumn: '7 / 10', textAlign: 'right' }}>End</span></Box>
+                {visibleServers.map((vm) => {
+                  const events = selected.events.filter((event) => normalizedVmIdentity(event.vm) === normalizedVmIdentity(vm));
+                  const cells = Array.from({ length: 8 }, (_, index) => events.filter((event) => {
+                    const peakMs = new Date(event.peak_time || '').getTime();
+                    return Number.isFinite(peakMs) && Math.min(7, Math.floor((peakMs - startMs) / spanMs * 8)) === index;
+                  }));
+                  return <Box key={vm} display="grid" alignItems="center" style={{ gridTemplateColumns: 'minmax(205px, 240px) repeat(8, minmax(22px, 1fr))', gap: 4, borderTop: '1px solid rgba(148,163,184,.15)', padding: '5px 0' }}>
+                    <button type="button" onClick={() => onInspect(vm, events[0], { ...selected.group, vms: selected.vms, spikeEvents: selected.events })} style={{ border: 0, background: 'transparent', color: '#e2e8f0', textAlign: 'left', cursor: 'pointer', padding: '2px 4px', whiteSpace: 'normal', wordBreak: 'break-word' }} aria-label={`Open ${vm} utilization at this window`} title={`Open ${vm} utilization at this window`}><strong style={{ fontSize: 13 }}>{vm}</strong><span style={{ color: '#94a3b8', fontSize: 11, marginLeft: 6 }}>{metadata.get(vm)?.role}</span></button>
+                    {cells.map((cellEvents, index) => <span key={index} title={cellEvents.length ? `${cellEvents.length} spike detection(s) on ${vm}; select the server to inspect` : 'No spike detection in this segment; this does not prove healthy telemetry'} aria-label={`${vm}, segment ${index + 1}: ${cellEvents.length} spike detections`} style={{ height: 17, borderRadius: 3, background: cellEvents.some((event) => (event.severity || '').startsWith('critical')) ? '#f43f5e' : cellEvents.length ? '#f59e0b' : 'rgba(71,85,105,.45)' }} />)}
+                  </Box>;
+                })}
+              </Box>
+            </Box>
+            <Typography variant="caption" color="textSecondary" style={{ display: 'block', marginTop: 7 }}>Red: critical detection · amber: warning detection · grey: no detection in this segment (not a healthy-data claim). Select a bold server name to inspect its utilization chart.</Typography>
+            <Typography variant="caption" style={{ display: 'block', marginTop: 11, color: jobs.length ? '#a5b4fc' : '#94a3b8' }}>
+              {attribution?.summary?.runs_loaded
+                ? jobs.length
+                  ? `Ctrl-M clock overlap: ${jobs.length} distinct job run${jobs.length === 1 ? '' : 's'} (${jobs.slice(0, 2).map((job) => job.job).join(', ')}${jobs.length > 2 ? ` +${jobs.length - 2} more` : ''}). Batch timestamps assume the Azure clock; Ctrl-M has no VM identifier.`
+                  : 'Ctrl-M history loaded; no job run matched these spike clocks. Timezone alignment still needs verification.'
+                : 'Ctrl-M job history not loaded for this session. Azure spike evidence remains available.'}
+            </Typography>
+          </>}
+        </Box>
+      </Box>
+    </Box>
+  );
 }
 
 /** Select the metric with the most material evidence for a freshly loaded
@@ -814,7 +1006,6 @@ export function ResourcePanel() {
   const [ddShowMaxOverlay, setDdShowMaxOverlay] = useState(true);
   const [ddShowMinOverlay, setDdShowMinOverlay] = useState(false);
   const [correlatedVms, setCorrelatedVms] = useState<Set<string>>(new Set());
-  const [correlationSort, setCorrelationSort] = useState<'servers' | 'events' | 'time'>('servers');
   const chartRef = useRef<HighchartsReact.RefObject>(null);
   const [inspectedSpike, setInspectedSpike] = useState<DeepDiveSpike | null>(null);
   const [hideHealthyServers, setHideHealthyServers] = useState<boolean>(false);
@@ -875,6 +1066,33 @@ export function ResourcePanel() {
         }, 150);
       }
     }
+  };
+
+  const handleSharedSpikeInspect = (vm: string, event: CrossServerSpikeEvent | undefined, group: CrossServerCorrelationGroup) => {
+    setDeepDiveVm(vm);
+    setActiveScopeTab('all');
+    setCorrelatedVms(new Set(group.vms));
+    setInspectedSpike(event ? {
+      vm,
+      metric: event.metric,
+      peak: event.peak,
+      peak_time: event.peak_time,
+      start: event.start || group.peakStartUtc,
+      end: event.end || group.peakEndUtc,
+      severity: event.severity,
+    } : null);
+    const family = metricFamily(event?.metric || group.metrics[0] || '');
+    if (family === 'cpu') setHeatmapMetric('cpu');
+    else if (family === 'memory-percent') setHeatmapMetric('memory');
+    else if (family === 'os-disk' || family === 'data-disk') setHeatmapMetric('disk');
+    setTimeout(() => {
+      const start = new Date(group.peakStartUtc || '').getTime();
+      const end = new Date(group.peakEndUtc || '').getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && chartRef.current?.chart) {
+        chartRef.current.chart.xAxis[0].setExtremes(start - 15 * 60 * 1000, end + 15 * 60 * 1000);
+        chartRef.current.chart.container?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 180);
   };
 
   // ── Custom absolute time range, ported from toggleDeepDiveCustomPicker()/
@@ -1191,10 +1409,13 @@ export function ResourcePanel() {
       // each VM against the correct memory band instead of re-guessing from
       // the name alone (7a root cause fix).
       const vmTypes: Record<string, string> = {};
+      const vmEnvironments: Record<string, string> = {};
       for (const s of sourceServers) {
         if (s.resource_id && s.type) vmTypes[s.resource_id] = s.type;
+        if (s.resource_id && (s.environment || s.source_env)) vmEnvironments[s.resource_id] = correlationEnvironment(s.environment || s.source_env);
       }
       if (Object.keys(vmTypes).length) payload.vm_types = vmTypes;
+      if (Object.keys(vmEnvironments).length) payload.vm_environments = vmEnvironments;
       if (ddCustomActive && ddCustomStart && ddCustomEnd) {
         payload.start_utc = new Date(ddCustomStart).toISOString();
         payload.end_utc = new Date(ddCustomEnd).toISOString();
@@ -1355,7 +1576,7 @@ export function ResourcePanel() {
                   borderColor: 'rgba(99,102,241,0.35)',
                   borderWidth: 1,
                   label: {
-                    text: `${j.job} (${j.hrs != null ? `${j.hrs}h` : ''})`,
+                    text: `${escapeChartText(j.job)} (${j.hrs != null ? `${j.hrs}h` : ''})`,
                     style: { color: '#a5b4fc', fontSize: '9px', fontWeight: '600' },
                     align: 'left',
                     y: 12,
@@ -1384,7 +1605,7 @@ export function ResourcePanel() {
           let s = `<b>${Highcharts.dateFormat('%b %e, %Y %H:%M UTC', this.x as number)}</b><br/>`;
           if (this.points) {
             for (const p of this.points) {
-              s += `<span style="color:${p.color}">●</span> ${p.series.name}: <b>${p.y?.toFixed(1)}%</b><br/>`;
+              s += `<span style="color:${p.color}">●</span> ${escapeChartText(p.series.name)}: <b>${p.y?.toFixed(1)}%</b><br/>`;
             }
           }
           const attributionRows = deepDive?.spike_attribution?.rows || [];
@@ -1397,7 +1618,7 @@ export function ResourcePanel() {
                   const js = new Date(j.start).getTime();
                   const je = new Date(j.end).getTime();
                   if (curTime >= js && curTime <= je) {
-                    runningJobs.push(`${j.job} (${j.hrs != null ? `${j.hrs}h` : ''})`);
+                    runningJobs.push(`${escapeChartText(j.job)} (${j.hrs != null ? `${j.hrs}h` : ''})`);
                   }
                 }
               }
@@ -1466,11 +1687,6 @@ export function ResourcePanel() {
     () => groupCrossServerCorrelations(deepDive?.patterns || []),
     [deepDive],
   );
-  const sortedCorrelationGroups = useMemo(() => [...correlationGroups].sort((a, b) => {
-    if (correlationSort === 'events') return b.eventCount - a.eventCount || b.vms.length - a.vms.length;
-    if (correlationSort === 'time') return a.timeUtc.localeCompare(b.timeUtc);
-    return b.vms.length - a.vms.length || b.eventCount - a.eventCount;
-  }), [correlationGroups, correlationSort]);
 
   // Every host in this estate shares a long site/tenant prefix (tsbf1414…), so
   // the only distinguishing characters may sit anywhere in the ID — and
@@ -2395,51 +2611,14 @@ export function ResourcePanel() {
                 </Box>
               )}
 
-              {correlationGroups.length > 0 && (
-                <Box style={{ marginTop: 10, borderRadius: 10, border: '1px solid rgba(34,211,238,.35)', background: 'rgba(34,211,238,.05)', padding: 10 }}>
-                  <Box display="flex" alignItems="center" justifyContent="space-between" style={{ gap: 8, flexWrap: 'wrap' }}>
-                    <Box>
-                      <Typography variant="subtitle2" style={{ color: '#22d3ee' }}>Cross-Server Correlation</Typography>
-                      <Typography variant="caption" color="textSecondary" style={{ fontSize: 9 }}>Coincident spikes are evidence for a shared workload or dependency; they are not root-cause proof.</Typography>
-                    </Box>
-                    {correlatedVms.size > 0 && <Button size="small" variant="outlined" onClick={() => setCorrelatedVms(new Set())}>Clear highlight</Button>}
-                  </Box>
-                  <Box className="pe-table-shell" style={{ marginTop: 8, overflowX: 'auto' }}>
-                    <Table size="small" className="pe-table" aria-label="Cross-server correlation evidence">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell><TableSortLabel active={correlationSort === 'time'} onClick={() => setCorrelationSort('time')}>Window (UTC)</TableSortLabel></TableCell>
-                          <TableCell><TableSortLabel active={correlationSort === 'servers'} onClick={() => setCorrelationSort('servers')}>Servers</TableSortLabel></TableCell>
-                          <TableCell>Metrics</TableCell>
-                          <TableCell align="right"><TableSortLabel active={correlationSort === 'events'} onClick={() => setCorrelationSort('events')}>Events</TableSortLabel></TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {sortedCorrelationGroups.map((group, index) => {
-                          const active = group.vms.some((vm) => correlatedVms.has(vm));
-                          return (
-                            <TableRow
-                              key={`${group.timeUtc}-${group.metrics.join('-')}-${index}`}
-                              hover
-                              onClick={() => { setCorrelatedVms(new Set(group.vms)); if (group.vms[0]) setDeepDiveVm(group.vms[0]); }}
-                              style={{ cursor: 'pointer', background: active ? 'rgba(34,211,238,.09)' : undefined }}
-                              title="Highlight related investigation cards and open the first server's evidence."
-                            >
-                              <TableCell style={{ color: '#22d3ee', fontWeight: 700, whiteSpace: 'nowrap' }}>{group.timeUtc === 'time unavailable' ? 'Selected window' : `${group.timeUtc} UTC`}</TableCell>
-                              <TableCell>
-                                <Box display="flex" style={{ gap: 5, flexWrap: 'wrap' }}>
-                                  {group.vms.map((vm, vmIndex) => <span key={`${vm}-${vmIndex}`} style={{ fontSize: 11, padding: '1px 5px', borderRadius: 5, background: 'rgba(34,211,238,.10)', border: '1px solid rgba(34,211,238,.22)' }}>{renderHostId(vm)}</span>)}
-                                </Box>
-                              </TableCell>
-                              <TableCell>{group.metrics.map(shortMetric).join(' · ') || 'Metric unavailable'}</TableCell>
-                              <TableCell align="right">{group.eventCount}</TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </Box>
-                </Box>
+              {Object.keys(deepDive.vms || {}).length >= 2 && (
+                <SharedSpikeWindows
+                  deepDive={deepDive}
+                  servers={servers}
+                  groups={correlationGroups}
+                  preferredEnvironment={envFilter}
+                  onInspect={handleSharedSpikeInspect}
+                />
               )}
 
               {/* Proactive Headroom & Growth Simulator */}
@@ -3181,7 +3360,7 @@ export function ResourcePanel() {
                           <tbody>
                             {fleetHeatmapView.rows.map((row) => (
                               <tr key={row.name}>
-                                <td style={{ position: 'sticky', left: 0, zIndex: 1, background: '#111d36', padding: '3px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{row.name}</td>
+                                <td style={{ position: 'sticky', left: 0, zIndex: 1, background: correlatedVms.has(row.name) ? '#17415a' : '#111d36', padding: '3px 8px', fontFamily: 'monospace', fontWeight: 700, whiteSpace: 'nowrap' }}>{row.name}</td>
                                 {row.values.map((value, index) => {
                                   const state = fleetHeatmapCellLabel(value, heatmapMetric);
                                   const colStart = fleetHeatmapView.columns[index]?.startUtc;
